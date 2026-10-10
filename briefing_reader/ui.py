@@ -175,6 +175,7 @@ from .agenda import (
     extract_deadlines,
     merge_deadlines,
 )
+from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import DEFAULT_ACCOUNT, AgendaConfig, Config
 from .executor import (
@@ -226,6 +227,16 @@ from .google_auth import (
     PROBLEM_TIMEOUT,
     logged_alias,
 )
+from .memory import (
+    MAX_PENDING_SUGGESTIONS,
+    MEMORY_FILE,
+    PROMPT_CAP,
+    SOURCE_SUGGESTED,
+    SOURCE_TOLD,
+    TEXT_CAP,
+    MemoryEntry,
+    MemoryStore,
+)
 from .models import (
     ITEM_ENTRY,
     ITEM_HEADING,
@@ -257,18 +268,28 @@ from .persona import (
     OUTCOME_ERROR,
     OUTCOME_GOOD,
     OUTCOME_WARN,
+    SPOKEN_REFUSALS,
     Greeting,
     announcement,
     approvals_sentence,
     ask_failure_speech,
+    ask_reply_note_speech,
     ask_reply_speech,
     compose_opening,
+    memory_forgotten_speech,
+    memory_forgotten_text,
+    memory_refusal_text,
+    memory_refused_speech,
+    memory_saved_speech,
+    memory_saved_text,
+    memory_suggestion_text,
     next_event_sentence,
     not_sent_text,
     outcome_text,
     outcome_tone,
     pick_ack,
     pick_greeting,
+    quoted_note,
     research_reply_speech,
     salutation,
     spoken_when,
@@ -552,9 +573,9 @@ class _ElidedLabel(QLabel):
             self._render()
 
 
-class _LivePage(QWidget):
-    """The LIVE tab's page: it never needs more height than the JARVIS page (``like``), so the tab
-    row above the panel stays where it is when the tab changes."""
+class _TabPage(QWidget):
+    """A tab's page (LIVE, MEMORY) that never needs more height than the JARVIS page (``like``), so
+    the tab row above the panel stays where it is when the tab changes."""
 
     def __init__(self, like: QWidget) -> None:
         super().__init__()
@@ -562,6 +583,49 @@ class _LivePage(QWidget):
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return QSize(0, self._like.minimumSizeHint().height())
+
+
+_LivePage = _TabPage   # the older name
+
+
+@dataclasses.dataclass
+class _MemoryLink:
+    """What a memory link in the conversation acts on (memory only; never logged)."""
+
+    kind: str                          # "undo_add" | "undo_forget" | "save_suggestion"
+    note: Any = None                   # memory.MemoryEntry as saved (undo_add) or as removed (undo_forget)
+    suggestion: int = 0                # the pending suggestion's id (save_suggestion)
+    entry_id: int = 0                  # the conversation entry that carries the link
+    place: int | None = None           # undo_forget: where the note was among the notes
+
+    def __repr__(self) -> str:
+        return f"_MemoryLink({self.kind})"
+
+
+@dataclasses.dataclass
+class _MemorySuggestion:
+    """A note the planner suggested, pending until Save / Remember this or Dismiss (memory only)."""
+
+    id: int
+    text: str
+    entry_id: int
+    link: int
+
+    def __repr__(self) -> str:
+        return f"_MemorySuggestion({self.id}, {len(self.text)} chars)"
+
+
+def _memory_meta(entry: MemoryEntry) -> str:
+    """"TOLD . OCT 10" / "SUGGESTED . OCT 10 . EDITED" (MEMORY's meta line under a note)."""
+    parts = ["SUGGESTED" if entry.source == SOURCE_SUGGESTED else "TOLD"]
+    try:
+        made = datetime.fromisoformat(entry.created)
+        parts.append(f"{_MONTHS[made.month - 1].upper()} {made.day}")
+    except ValueError:
+        pass
+    if entry.changed:
+        parts.append("EDITED")
+    return f" {DOT} ".join(parts)
 
 
 def _screen_area(point: QPoint) -> QRect:
@@ -845,12 +909,16 @@ STRIP_CAPTION = f"Conversation {DOT} this session"   # the centre panel's strip 
 STRIP_CAPTION_SHORT = "Conversation"                 # ... when the whole caption does not fit
 LIVE_CAPTION = f"Live steps {DOT} this session"      # ... and on the LIVE tab
 LIVE_CAPTION_SHORT = "Live steps"
+MEMORY_CAPTION = f"Memory {DOT} kept on this PC"     # ... and on the MEMORY tab
+MEMORY_CAPTION_SHORT = "Memory"
 LIVE_AWAY_TEXT = "LIVE is in its own window."        # the LIVE page while the pop-out shows the steps
 POP_OUT_TEXT = "Pop out"
 POP_OUT_TIP = "Show LIVE in its own window - put it on a second screen"
 CLEAR_TEXT = "Clear"
 CLEAR_TIP = "Clear what is shown here (nothing else changes; nothing was saved)"
 DOCK_TEXT = "Dock"
+# The strip's caption per tab: (in full, where the whole does not fit).
+_CAPTIONS = {hud.TAB_LIVE: (LIVE_CAPTION, LIVE_CAPTION_SHORT), hud.TAB_MEMORY: (MEMORY_CAPTION, MEMORY_CAPTION_SHORT)}
 DOCK_TIP = "Put LIVE back in the main window"
 SHOW_WINDOW_TEXT = "Show window"
 BRING_BACK_TEXT = "Bring it back here"
@@ -873,9 +941,10 @@ class ReadingView(QWidget):
     (``set_live_popped``); its strip shows ``live_status`` (hud.LiveStatus, the
     summary as its tooltip) where the briefing's LIVE marker sits on the other
     tabs, then Pop out and Clear (Clear only where it fits; no toolbar row, so
-    the log has that height). ``tabChanged(index)`` when the current tab changes (a click,
-    Ctrl+1 / Ctrl+2 / Ctrl+3, ``set_tab``). Right: the NEEDS YOUR OK cards and
-    the ACTIVITY log.
+    the log has that height); MEMORY (``set_memory_available``, the productivity
+    bundle's notes: ``memory_view``, a hud.MemoryPage the app fills). ``tabChanged(index)``
+    when the current tab changes (a click, Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4, ``set_tab``).
+    Right: the NEEDS YOUR OK cards and the ACTIVITY log.
     """
 
     playPause = Signal()
@@ -894,7 +963,7 @@ class ReadingView(QWidget):
     editAction = Signal(str)     # a card's Edit (tools row): the action id
     signInAccount = Signal(str)  # a card's Sign in (tools row): the action id
     connectCalendar = Signal()
-    tabChanged = Signal(int)     # hud.TAB_JARVIS / hud.TAB_BRIEFING / hud.TAB_LIVE became current
+    tabChanged = Signal(int)     # hud.TAB_JARVIS / TAB_BRIEFING / TAB_LIVE / TAB_MEMORY became current
     livePopOut = Signal()        # the LIVE page's Pop out
     liveDock = Signal()          # "Bring it back here" (the pop-out docks)
     liveClear = Signal()         # the LIVE page's Clear
@@ -932,7 +1001,8 @@ class ReadingView(QWidget):
         shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         shortcut.setAutoRepeat(False)   # holding Space must not toggle over and over
         shortcut.activated.connect(lambda: self.playPause.emit())
-        for keys, index in (("Ctrl+1", hud.TAB_JARVIS), ("Ctrl+2", hud.TAB_BRIEFING), ("Ctrl+3", hud.TAB_LIVE)):
+        for keys, index in (("Ctrl+1", hud.TAB_JARVIS), ("Ctrl+2", hud.TAB_BRIEFING), ("Ctrl+3", hud.TAB_LIVE),
+                            ("Ctrl+4", hud.TAB_MEMORY)):
             tab_shortcut = QShortcut(QKeySequence(keys), self)
             tab_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             tab_shortcut.activated.connect(lambda index=index: self.set_tab(index))
@@ -999,7 +1069,7 @@ class ReadingView(QWidget):
         self._command_holder.setVisible(False)
         # The JARVIS / BRIEFING tabs above the centre panel, the conversation (JARVIS) and the
         # strip's caption on the JARVIS page (where the step chips and SECTIONS are hidden).
-        self.tabs = hud.TabStrip(live=True)
+        self.tabs = hud.TabStrip(live=True, memory=True)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.conversation = hud.ConversationLog()
         self.strip_caption = _label(_caps(hud.mono_font(11, 400, 0.12)), hud.TEXT_DIM, name="stripCaption")
@@ -1007,6 +1077,17 @@ class ReadingView(QWidget):
         self.live_status = hud.LiveStatus()
         self.live_status.hide()
         self._make_live_page()
+        self._make_memory_page()
+
+    def _make_memory_page(self) -> None:
+        """The MEMORY tab's page (the productivity bundle's notes; the tab is hidden until
+        ``set_memory_available(True)``)."""
+        self.memory_view = hud.MemoryPage()
+        self.memory_page = _TabPage(self.conversation)
+        page = QVBoxLayout(self.memory_page)
+        page.setContentsMargins(0, 0, 0, 0)
+        page.setSpacing(0)
+        page.addWidget(self.memory_view, 1)
 
     def _make_live_page(self) -> None:
         """The LIVE tab's page: the log, or one line and two links while the pop-out window shows
@@ -1174,6 +1255,7 @@ class ReadingView(QWidget):
         self._pages.addWidget(self.conversation)      # hud.TAB_JARVIS
         self._pages.addWidget(self.briefing_page)     # hud.TAB_BRIEFING
         self._pages.addWidget(self.live_page)         # hud.TAB_LIVE
+        self._pages.addWidget(self.memory_page)       # hud.TAB_MEMORY
         self.transcript_panel.body_layout.addWidget(self._pages, 1)
         # Folder tabs: left-aligned right above the panel, the current one's underline on its edge.
         tab_row = QWidget()
@@ -1261,8 +1343,8 @@ class ReadingView(QWidget):
     # ---- tabs ----------------------------------------------------------------------
 
     def set_tab(self, index: int) -> None:
-        """Make JARVIS (hud.TAB_JARVIS), BRIEFING (hud.TAB_BRIEFING) or LIVE (hud.TAB_LIVE, while it
-        is available) the current tab."""
+        """Make JARVIS (hud.TAB_JARVIS), BRIEFING (hud.TAB_BRIEFING), LIVE (hud.TAB_LIVE) or MEMORY
+        (hud.TAB_MEMORY), each while it is available, the current tab."""
         self.tabs.set_current(index)
 
     def current_tab(self) -> int:
@@ -1288,10 +1370,10 @@ class ReadingView(QWidget):
         self.tabChanged.emit(index)
 
     def _show_tab_page(self, index: int) -> None:
-        """The panel's page for ``index``; on JARVIS and LIVE the strip shows its caption instead of
-        the step chips and SECTIONS (both stay in the strip, hidden); on LIVE the briefing's LIVE
-        marker gives its slot to ``live_status``."""
-        captioned = index in (hud.TAB_JARVIS, hud.TAB_LIVE)
+        """The panel's page for ``index``; on JARVIS, LIVE and MEMORY the strip shows its caption
+        instead of the step chips and SECTIONS (both stay in the strip, hidden); on LIVE the
+        briefing's LIVE marker gives its slot to ``live_status``."""
+        captioned = index in (hud.TAB_JARVIS, hud.TAB_LIVE, hud.TAB_MEMORY)
         page = self._pages.widget(index)
         if page is not None:
             self._pages.setCurrentWidget(page)
@@ -1326,6 +1408,18 @@ class ReadingView(QWidget):
 
     def live_available(self) -> bool:
         return self.tabs.live_visible()
+
+    def set_memory_available(self, available: bool) -> None:
+        """The productivity bundle's memory: the MEMORY tab and its page (hidden: JARVIS when MEMORY
+        was current)."""
+        self.tabs.set_memory_visible(available)
+
+    def memory_available(self) -> bool:
+        return self.tabs.memory_visible()
+
+    def mark_memory_unread(self) -> None:
+        """A note was saved or a suggestion arrived: a dot on MEMORY unless it is the current tab."""
+        self.tabs.set_memory_unread(True)
 
     def set_live_popped(self, popped: bool) -> None:
         """The pop-out window shows the steps (the page says so, with Show window and Bring it back
@@ -1490,14 +1584,16 @@ class ReadingView(QWidget):
         return super().eventFilter(watched, event)
 
     def _fit_caption(self) -> None:
-        """The JARVIS (LIVE) strip's caption in full, or "CONVERSATION" ("LIVE STEPS") alone where it
-        does not fit; on LIVE after the room for the status tag, Pop out and (where it fits) Clear."""
+        """The JARVIS (LIVE, MEMORY) strip's caption in full, or "CONVERSATION" ("LIVE STEPS",
+        "MEMORY") alone where it does not fit; on LIVE after the room for the status tag, Pop out and
+        (where it fits) Clear."""
         strip = self.transcript_panel.strip
         margins = strip.layout().contentsMargins()
         spacing = strip.layout().spacing()
-        on_live = self.tabs.current() == hud.TAB_LIVE
+        current = self.tabs.current()
+        on_live = current == hud.TAB_LIVE
         tag = self.live_status if on_live else self.transcript_panel.live
-        full, short = (LIVE_CAPTION, LIVE_CAPTION_SHORT) if on_live else (STRIP_CAPTION, STRIP_CAPTION_SHORT)
+        full, short = _CAPTIONS.get(current, (STRIP_CAPTION, STRIP_CAPTION_SHORT))
         room = (strip.width() - margins.left() - margins.right() - tag.sizeHint().width() - spacing)
         if on_live:
             # Pop out always; Clear when it fits beside the tag (else it is in the pop-out window). The
@@ -2218,6 +2314,38 @@ VIEW_BRIEFING_TEXT = "View briefing"   # the announcement's link in the conversa
 VIEW_BRIEFING_LINK = "view-briefing"
 ASK_CANCELLED_ENTRY = "Cancelled; nothing was proposed."   # the conversation's entry for a cancelled Ask
 ASK_ACK_KEY = "ask-ack"                  # "One moment, sir." while an Ask plans (dropped when it ends first)
+# Memory (the productivity bundle): the conversation's links and texts (shown only; never logged).
+MEMORY_UNDO_LINK = "mem-undo:"           # + an opaque counter: Undo a note saved or forgotten
+MEMORY_SAVE_LINK = "mem-save:"           # + an opaque counter: Remember this (a suggestion)
+MEMORY_OPEN_LINK = "mem-open"
+MEMORY_UNDO_TEXT = "Undo"
+MEMORY_REMEMBER_TEXT = "Remember this"
+MEMORY_OPEN_TEXT = "Open memory"
+MEMORY_SUGGESTION_SUB = "kept only on this PC"
+MEMORY_CHANGED_TEXT = "Already changed in MEMORY."
+MEMORY_NOT_KEPT_TEXT = "Not kept."
+MEMORY_PUSHED_TEXT = "No longer pending - add it in MEMORY."
+MEMORY_NO_MATCH_TEXT = "I have no note about that, {sir}."
+MEMORY_SEVERAL_TEXT = "Which note, {sir}? I've opened MEMORY with the matches."
+# Who gets the notes (this build: Ask; plans, briefs and drafts join it when they are built).
+MEMORY_GIVEN_TO = "every Ask"
+MEMORY_SENT_WORDS = "Sent with your Asks; never to web research"
+MEMORY_STATUS = ("Kept only on this PC (memory.json). Given to your Claude with {given} - never to web research. "
+                 "{count} " + DOT + " {kb:.1f} of {cap} KB sent.")
+MEMORY_STORED_WORDS = "memory.json (on this PC)"
+MEMORY_DISMISSED_WORDS = ("memory.json keeps a short hash of each word, not the sentence (a common word or a name "
+                          "can be guessed from its hash)")
+MEMORY_TRASH_MS = 10_000                 # a note deleted in MEMORY can be put back this long
+_MEMORY_LINKS_MAX = 200                  # Undo / Remember this links kept (their entries may be gone)
+# Why a note was not saved, in LIVE (the reason word stays in the log).
+_MEMORY_REFUSAL_WORDS = {"empty": "too short", "long": f"longer than {TEXT_CAP} characters",
+                         "secret": "it looks like a password, code or account number",
+                         "digits": "it holds a long number (an account or card number?)",
+                         "full": "your memory is full", "read_only": "memory.json can't be read",
+                         "duplicate": "you already have that note", "gone": "that note is gone"}
+# Why a suggestion the planner's checks passed was still not offered, in LIVE (the word stays in the log).
+_MEMORY_DROP_WORDS = {"read_only": "memory.json can't be read", "duplicate": "you already have that note",
+                      "pending": "the same suggestion is already waiting"}
 # How the conversation shows what Jarvis says after a card was carried out (persona.outcome_tone).
 _RESULT_TONES = {OUTCOME_GOOD: hud.TONE_GOOD, OUTCOME_ERROR: hud.TONE_ERROR, OUTCOME_WARN: hud.TONE_WARN}
 _GREETING_WAIT_MS = 3000          # an opening greeting waits this long for the first fetch answer
@@ -3258,7 +3386,9 @@ class AppController(QObject):
         self._init_timers()
         self._connect_signals()
         self._init_live_view()
+        self._init_memory_state()
         self.ask: Any = self._create_ask(ask_factory)   # ask_ui.AskController, or None while [ask] is off
+        self._create_memory()                           # the productivity bundle's memory (needs Ask)
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
         self.voice: Voice = voice_factory(self) if voice_factory is not None else SilentVoice()
@@ -5894,13 +6024,14 @@ class AppController(QObject):
         reading = self.window.reading
         controller = ask_ui.AskController(self.config, planner, reading.command_bar, context=self._ask_context,
                                           blocked=self._ask_blocked, calendars=self._calendars, live=self.live,
-                                          parent=self)
+                                          route_flags=self._route_flags, memory=self._memory_given, parent=self)
         controller.busyChanged.connect(self._on_ask_busy)
         controller.outcomeReady.connect(self._on_ask_outcome)
         controller.askStarted.connect(self._on_ask_started)
         controller.askCancelled.connect(self._on_ask_cancelled)
         controller.chipChanged.connect(self._set_ask_chip)
         controller.mailSignInRequested.connect(self.sign_in_for_mail)
+        controller.memoryRequested.connect(self._on_memory_route)
         reading.command_bar.cancelRequested.connect(self._on_ask_cancel_clicked)   # after the controller's
         reading.set_ask_available(True)
         self._set_ask_chip(*controller.chip())
@@ -6006,10 +6137,15 @@ class AppController(QObject):
             self._jarvis(AskController._answer(outcome), tone=hud.TONE_WARN if question_only else hud.TONE_DONE,
                          sub=f" {DOT} ".join(sub), link=link)
             if assistant.speak_replies:
-                reply = ask_reply_speech(outcome, assistant.address)
-                if reply.guarded:
-                    logger.info("Ask reply not spoken as written (it claimed something was done)")
-                self._say(KIND_REPLY, reply.text)
+                spoken = ask_reply_note_speech(outcome, assistant.address, notes=self._memory_spoken_guard())
+                if spoken:
+                    logger.info("Ask reply not spoken as written (it repeats a memory note)")
+                else:
+                    reply = ask_reply_speech(outcome, assistant.address)
+                    if reply.guarded:
+                        logger.info("Ask reply not spoken as written (it claimed something was done)")
+                    spoken = reply.text
+                self._say(KIND_REPLY, spoken)
             return
         if outcome.kind in ("empty", "busy"):
             return
@@ -6067,6 +6203,8 @@ class AppController(QObject):
             return
         self._remember_ask_read(outcome)
         self._converse_ask(outcome)
+        if outcome.ok and getattr(outcome, "suggestion", ""):
+            self._offer_memory_suggestion(outcome.suggestion)
         report = getattr(outcome, "research", None) if outcome.ok else None
         if report is not None:
             # Web research: counts only (never the question, the answer, a title or a site).
@@ -6145,6 +6283,531 @@ class AppController(QObject):
             from .ask.planner import DISABLED_MESSAGE
 
             self._flash_note(DISABLED_MESSAGE)
+
+    # ---- Memory (the productivity bundle) -------------------------------------------------------
+
+    def _init_memory_state(self) -> None:
+        """The notes are memory.json's (MemoryStore); everything else here is memory only."""
+        self.memory_store: MemoryStore | None = None
+        self._memory_notes: tuple[tuple[str, ...], int] = ((), 0)   # what the planner gets, how many left out
+        self._memory_asked: tuple[str, ...] = ()                     # the notes the last typed Ask started with
+        self._memory_dismissed: tuple[frozenset[str], ...] = ()
+        self._memory_links: dict[int, _MemoryLink] = {}               # Undo / Remember this, by counter
+        self._memory_link_seq = 0
+        self._memory_suggestions: list[_MemorySuggestion] = []        # pending, oldest first (at most 5)
+        self._memory_suggestion_seq = 0
+        self._memory_trash: dict[str, tuple[MemoryEntry, int]] = {}   # deleted in MEMORY (and where): Undo, 10 s
+        self._memory_filter = ""
+
+    def _create_memory(self) -> None:
+        """MEMORY, "remember that ..." and the notes the planner gets: only while the productivity
+        bundle and its memory are on and Ask exists ([ask] enabled)."""
+        productivity = getattr(self.config, "productivity", None)
+        reading = self.window.reading
+        if self.ask is None or not getattr(productivity, "enabled", False) or not getattr(productivity, "memory",
+                                                                                          False):
+            reading.set_memory_available(False)
+            return
+        self.memory_store = MemoryStore(self.config.data_dir / MEMORY_FILE, max_entries=productivity.max_memory,
+                                        clock=self._now)
+        view = reading.memory_view
+        view.added.connect(self._on_memory_added)
+        view.edited.connect(self._on_memory_edited)
+        view.deleted.connect(self._on_memory_deleted)
+        view.undoDelete.connect(self._on_memory_undo_delete)
+        view.suggestionSaved.connect(self._on_memory_suggestion_saved)
+        view.suggestionDismissed.connect(self._on_memory_suggestion_dismissed)
+        view.filterCleared.connect(self._on_memory_filter_cleared)
+        reading.set_memory_available(True)
+        planner = getattr(self.ask, "planner", None)
+        if planner is not None:
+            planner.memory = self._memory_prompt_notes          # read on the ask thread: a tuple, swapped whole
+            # Asked on the ask thread for each run 1: never while memory.json can't be changed.
+            planner.memory_suggestions = self._memory_suggestions_on if productivity.memory_suggestions else False
+            planner.memory_dismissed = self._memory_dismissed_marks
+        self._render_memory()
+        logger.info("Memory: on (%d note(s)%s)", len(self.memory_store),
+                    "; memory.json can't be read, kept read-only" if self.memory_store.read_only else "")
+
+    def _route_flags(self) -> RouteFlags:
+        """The typed shortcuts on now (this build: memory)."""
+        return RouteFlags(memory=self.memory_store is not None)
+
+    def _memory_prompt_notes(self) -> tuple[str, ...]:
+        """The notes the planner gets (any thread: the GUI thread swaps the whole tuple)."""
+        return self._memory_notes[0]
+
+    def _memory_dismissed_marks(self) -> tuple[frozenset[str], ...]:
+        return self._memory_dismissed
+
+    def _memory_suggestions_on(self) -> bool:
+        """A suggestion could be kept: memory.json can be written (any thread: one attribute read)."""
+        store = self.memory_store
+        return store is not None and not store.read_only
+
+    def _memory_given(self) -> tuple[tuple[str, ...], int] | None:
+        """"Memory given" in a typed Ask's "Your request" step (None while memory is off). Asked as
+        the Ask starts: memory.json is taken again first (the owner may have changed or deleted it by
+        hand), so the planner gets what the file holds now."""
+        if self.memory_store is None:
+            return None
+        self._memory_refresh()
+        self._memory_asked = self._memory_notes[0]
+        return self._memory_notes
+
+    def _memory_spoken_guard(self) -> tuple[str, ...]:
+        """The notes an Ask's spoken answer must not repeat: those the planner started with and those
+        kept now (() while memory is off)."""
+        store = self.memory_store
+        if store is None:
+            return ()
+        return tuple(dict.fromkeys((*self._memory_asked, *(entry.text for entry in store.entries()))))
+
+    def _memory_refresh(self) -> None:
+        """memory.json as it is now (edited or deleted by hand while Jarvis runs): MEMORY and the
+        planner's notes follow it, and LIVE says so."""
+        store = self.memory_store
+        if store is None or not store.refresh():
+            return
+        if store.read_only:   # no notes now, nothing can change; an Undo says so when clicked
+            self._live_memory("memory.json can't be read: no notes are given, nothing will change it", "",
+                              status=_live.STATUS_WARN)
+        else:
+            self._live_memory(f"Took memory.json as changed outside Jarvis ({_plural(len(store), 'note')})", "")
+        self._render_memory()
+
+    def _memory_follow_store(self) -> None:
+        """The entries whose Undo would act on a note that is no longer as it was saved (changed or
+        removed in memory.json by hand) say so and lose their link (R44)."""
+        store = self.memory_store
+        if store is None or store.read_only:   # read-only: an Undo says why when clicked
+            return
+        kept = {entry.id: entry for entry in store.entries()}
+        changed = {link.note.id for link in self._memory_links.values()
+                   if link.kind == "undo_add" and link.note is not None and kept.get(link.note.id) != link.note}
+        for note_id in changed:
+            self._memory_follow(note_id)
+
+    def _address(self) -> str:
+        return self.config.assistant.address
+
+    # ---- typed shortcuts ("remember that ...", "forget that ...", "what do you remember?")
+
+    def _on_memory_route(self, route: Any, text: str) -> None:
+        store = self.memory_store
+        if self.state == STATE_QUITTING or store is None:
+            return
+        self._memory_refresh()   # "forget that ..." matches the notes memory.json holds now
+        if route.kind == ROUTE_MEMORY_SHOW:
+            if self._memory_filter:   # every note, not the matches of an earlier "forget"
+                self._memory_filter = ""
+                self._render_memory()
+            self.window.reading.set_tab(hud.TAB_MEMORY)
+            self._memory_bar("", clear=True)
+            return
+        self._you(text)
+        if route.kind == ROUTE_MEMORY_SAVE:
+            self._memory_save_typed(route.payload)
+        elif route.kind == ROUTE_MEMORY_FORGET:
+            self._memory_forget_typed(route.payload)
+
+    def _memory_bar(self, text: str, tone: str = hud.TONE_DONE, *, clear: bool = False) -> None:
+        """A memory shortcut's answer in the command bar's status line."""
+        ask = self.ask
+        if ask is None:
+            return
+        if text:
+            ask.show_note(text, tone, clear=clear)
+        elif clear and not ask.busy:
+            self.window.reading.command_bar.clear_input()
+
+    def _memory_save_typed(self, note: str) -> None:
+        store = self.memory_store
+        assert store is not None
+        result = store.add(note, source=SOURCE_TOLD)
+        if isinstance(result, str):
+            text = self._memory_refused(result, note)
+            link = (MEMORY_OPEN_TEXT, MEMORY_OPEN_LINK) if result == "full" else ("", "")
+            self._jarvis(text, tone=hud.TONE_WARN, link=link)
+            self._memory_bar(text, hud.TONE_WARN)
+            if result in SPOKEN_REFUSALS and self.config.assistant.speak_replies:
+                self._say(KIND_RESULT, memory_refused_speech(self._address()))
+            return
+        number, link = self._memory_link("undo_add", result)
+        text = memory_saved_text(result.text, self._address())
+        link.entry_id = self._jarvis(text, link=(MEMORY_UNDO_TEXT, f"{MEMORY_UNDO_LINK}{number}"))
+        self._memory_saved(result, SOURCE_TOLD)
+        self._memory_bar(text, clear=True)
+        if self.config.assistant.speak_replies:
+            self._say(KIND_RESULT, memory_saved_speech(self._address()))
+
+    def _memory_forget_typed(self, words: str) -> None:
+        store = self.memory_store
+        assert store is not None
+        address = self._address()
+        if store.read_only:
+            text = self._memory_refused("read_only", "")
+            self._jarvis(text, tone=hud.TONE_WARN)
+            self._memory_bar(text, hud.TONE_WARN)
+            return
+        matches = store.match(words)
+        if not matches:
+            text = with_address(MEMORY_NO_MATCH_TEXT, address)
+            self._jarvis(text, tone=hud.TONE_WARN)
+            self._memory_bar(text, hud.TONE_WARN)
+            return
+        if len(matches) > 1:
+            text = with_address(MEMORY_SEVERAL_TEXT, address)
+            self._jarvis(text)
+            self._memory_filter = " ".join(words.split())
+            self._render_memory()
+            self.window.reading.set_tab(hud.TAB_MEMORY)
+            self._memory_bar(text, clear=True)
+            return
+        place = store.position(matches[0].id)
+        removed = store.delete(matches[0].id)
+        if removed is None:
+            self._render_memory()
+            return
+        self._memory_follow(removed.id)
+        number, link = self._memory_link("undo_forget", removed)
+        link.place = place
+        text = memory_forgotten_text(removed.text, address)
+        link.entry_id = self._jarvis(text, link=(MEMORY_UNDO_TEXT, f"{MEMORY_UNDO_LINK}{number}"))
+        self._memory_removed(removed)
+        self._memory_bar(text, clear=True)
+        if self.config.assistant.speak_replies:
+            self._say(KIND_RESULT, memory_forgotten_speech(address))
+
+    # ---- the conversation's links
+
+    def _memory_link(self, kind: str, note: MemoryEntry | None = None, suggestion: int = 0) -> tuple[int, Any]:
+        self._memory_link_seq += 1
+        link = _MemoryLink(kind, note=note, suggestion=suggestion)
+        self._memory_links[self._memory_link_seq] = link
+        if len(self._memory_links) > _MEMORY_LINKS_MAX:
+            for number in sorted(self._memory_links)[:len(self._memory_links) - _MEMORY_LINKS_MAX]:
+                self._memory_links.pop(number, None)
+        return self._memory_link_seq, link
+
+    def _memory_entry(self, entry_id: int, text: str) -> None:
+        """An entry follows what happened to its note or suggestion; its link and its sub line
+        ("kept only on this PC" under a suggestion) go."""
+        if entry_id:
+            self.window.reading.conversation.update(entry_id, text=text, sub="", link_text="", link_id="")
+
+    def _memory_undo(self, number_text: str) -> None:
+        store = self.memory_store
+        try:
+            number = int(number_text)
+        except ValueError:
+            return
+        link = self._memory_links.pop(number, None)
+        if store is None or link is None or self.state == STATE_QUITTING:
+            return
+        self._memory_refresh()
+        if link.kind == "undo_add":
+            current = store.entry(link.note.id)
+            removed = store.delete(link.note.id) if current == link.note else None
+            if removed is None:
+                self._memory_undo_failed(link)
+                return
+            self._memory_entry(link.entry_id, "Forgotten: " + quoted_note(removed.text))
+            self._memory_follow(removed.id)
+            self._memory_removed(removed)
+        elif link.kind == "undo_forget":
+            if not store.restore(link.note, at=link.place):
+                self._memory_undo_failed(link)
+                return
+            self._memory_entry(link.entry_id, "Restored: " + quoted_note(link.note.text))
+            self._memory_restored(link.note)
+
+    def _memory_undo_failed(self, link: Any) -> None:
+        """An Undo in the conversation did nothing: memory.json can't be changed (the entry keeps its
+        words, loses its link, and a new entry says why), or the note changed in MEMORY meanwhile."""
+        store = self.memory_store
+        if store is not None and store.read_only:
+            if link.entry_id:
+                self.window.reading.conversation.update(link.entry_id, link_text="", link_id="")
+            self._jarvis(self._memory_refused("read_only", ""), tone=hud.TONE_WARN)
+            return
+        logger.info("Memory: undo ignored (already changed)")
+        self._memory_entry(link.entry_id, MEMORY_CHANGED_TEXT)
+
+    def _memory_save_link(self, number_text: str) -> None:
+        """Remember this: the suggestion is saved (only if it is still pending)."""
+        try:
+            number = int(number_text)
+        except ValueError:
+            return
+        link = self._memory_links.get(number)
+        if link is None or link.kind != "save_suggestion" or self.memory_store is None:
+            return
+        suggestion = next((item for item in self._memory_suggestions if item.id == link.suggestion), None)
+        if suggestion is not None:
+            self._memory_save_suggestion(suggestion, from_conversation=True)
+
+    def _memory_follow(self, note_id: str) -> None:
+        """A note changed or went in MEMORY (or by "forget"): the entries whose Undo would act on it
+        say so and lose their link."""
+        for number, link in list(self._memory_links.items()):
+            if link.kind == "undo_add" and link.note is not None and link.note.id == note_id:
+                self._memory_links.pop(number, None)
+                self._memory_entry(link.entry_id, MEMORY_CHANGED_TEXT)
+
+    # ---- suggestions
+
+    def _offer_memory_suggestion(self, text: str) -> None:
+        """A note the planner suggested (already grounded and checked): a JARVIS entry with Remember
+        this and a row under MEMORY > JARVIS SUGGESTS. Never spoken; saved only on a click."""
+        store = self.memory_store
+        if store is None or not text:
+            return
+        self._memory_refresh()   # the notes as memory.json holds them now
+        reason = ("read_only" if store.read_only else
+                  "duplicate" if store.duplicate_of(text) is not None else
+                  "pending" if any(" ".join(item.text.casefold().split()) == " ".join(text.casefold().split())
+                                   for item in self._memory_suggestions) else "")
+        if reason:
+            logger.info("Memory: a suggestion was dropped (%s)", reason)
+            self._live_memory(f"Suggestion not offered: {_MEMORY_DROP_WORDS[reason]}", text,
+                              status=_live.STATUS_WARN)
+            return
+        self._memory_suggestion_seq += 1
+        number, link = self._memory_link("save_suggestion", suggestion=self._memory_suggestion_seq)
+        entry_id = self._jarvis(memory_suggestion_text(text, self._address()), sub=MEMORY_SUGGESTION_SUB,
+                                link=(MEMORY_REMEMBER_TEXT, f"{MEMORY_SAVE_LINK}{number}"))
+        link.entry_id = entry_id
+        self._memory_suggestions.append(_MemorySuggestion(self._memory_suggestion_seq, text, entry_id, number))
+        while len(self._memory_suggestions) > MAX_PENDING_SUGGESTIONS:
+            old = self._memory_suggestions.pop(0)
+            self._memory_links.pop(old.link, None)
+            self._memory_entry(old.entry_id, MEMORY_PUSHED_TEXT)
+        logger.info("Memory: a suggestion was offered")
+        self._render_memory()
+        self.window.reading.mark_memory_unread()
+
+    def _memory_save_suggestion(self, suggestion: Any, *, from_conversation: bool) -> None:
+        store = self.memory_store
+        assert store is not None
+        result = store.add(suggestion.text, source=SOURCE_SUGGESTED)
+        if isinstance(result, str):
+            text = self._memory_refused(result, suggestion.text)
+            if from_conversation:
+                self._jarvis(text, tone=hud.TONE_WARN,
+                             link=(MEMORY_OPEN_TEXT, MEMORY_OPEN_LINK) if result == "full" else ("", ""))
+            else:
+                self.window.reading.memory_view.set_refusal(text)
+            return
+        self._memory_suggestions = [item for item in self._memory_suggestions if item.id != suggestion.id]
+        old = self._memory_links.pop(suggestion.link, None)
+        text = "Remembered: " + quoted_note(result.text)
+        if from_conversation:
+            number, link = self._memory_link("undo_add", result)
+            link.entry_id = suggestion.entry_id
+            self.window.reading.conversation.update(suggestion.entry_id, text=text, sub="",
+                                                    link_text=MEMORY_UNDO_TEXT,
+                                                    link_id=f"{MEMORY_UNDO_LINK}{number}")
+        elif old is not None or suggestion.entry_id:
+            self._memory_entry(suggestion.entry_id, text)
+        logger.info("Memory: suggestion saved")
+        self._memory_saved(result, SOURCE_SUGGESTED)
+
+    # ---- MEMORY's own clicks
+
+    def _on_memory_added(self, text: str) -> None:
+        store = self.memory_store
+        if store is None:
+            return
+        view = self.window.reading.memory_view
+        result = store.add(text, source=SOURCE_TOLD)
+        if isinstance(result, str):
+            view.set_refusal(self._memory_refused(result, text))
+            return
+        view.set_refusal("")
+        view.clear_input()
+        self._memory_filter = ""   # the new note is in sight
+        self._memory_saved(result, SOURCE_TOLD)
+
+    def _on_memory_edited(self, entry_id: str, text: str) -> None:
+        store = self.memory_store
+        if store is None:
+            return
+        view = self.window.reading.memory_view
+        before = store.entry(entry_id)
+        result = store.edit(entry_id, text)
+        if isinstance(result, str):
+            words = self._memory_refused(result, text, besides=entry_id)
+            if result == "gone":   # no row to say it under any more
+                view.stop_editing()
+                self._render_memory()
+                view.set_refusal(words)
+            elif result == "read_only":   # MEMORY now shows the banner and closed the edit
+                view.set_refusal(words)
+            else:   # under the note being edited, in view (the Add field may be far above)
+                view.set_refusal(words, entry_id)
+            return
+        view.set_refusal("")
+        view.stop_editing()
+        if result != before:
+            logger.info("Memory: changed a note")
+            self._activity(hud.TAG_DONE, "Memory: 1 note changed")
+            self._live_memory("Changed a note", result.text)
+            self._memory_follow(entry_id)
+        self._render_memory()
+
+    def _on_memory_deleted(self, entry_id: str) -> None:
+        store = self.memory_store
+        if store is None:
+            return
+        place = store.position(entry_id) or 0
+        removed = store.delete(entry_id)
+        if removed is None:
+            self._render_memory()
+            return
+        self._memory_trash[removed.id] = (removed, place)
+        QTimer.singleShot(MEMORY_TRASH_MS, self, lambda: self._memory_drop_trash(removed.id))
+        self._memory_follow(removed.id)
+        self._memory_removed(removed)
+
+    def _memory_drop_trash(self, entry_id: str) -> None:
+        if not shiboken6.isValid(self) or self.state == STATE_QUITTING:
+            return
+        if self._memory_trash.pop(entry_id, None) is not None and self.memory_store is not None:
+            self._render_memory()
+
+    def _on_memory_undo_delete(self, entry_id: str) -> None:
+        store = self.memory_store
+        trashed = self._memory_trash.pop(entry_id, None)
+        if store is None or trashed is None:
+            return
+        entry, place = trashed
+        if not store.restore(entry, at=place):
+            reason = ("read_only" if store.read_only else
+                      "duplicate" if store.duplicate_of(entry.text) is not None else "full")
+            words = self._memory_refused(reason, entry.text)
+            self._memory_trash[entry_id] = trashed   # "Deleted. Undo" stays (its 10 s run on) and says why
+            self._render_memory()
+            self.window.reading.memory_view.set_refusal(words, entry_id)
+            return
+        self.window.reading.memory_view.set_refusal("")
+        self._memory_restored(entry)
+
+    def _on_memory_suggestion_saved(self, suggestion_id: int) -> None:
+        suggestion = next((item for item in self._memory_suggestions if item.id == suggestion_id), None)
+        if suggestion is not None and self.memory_store is not None:
+            self._memory_save_suggestion(suggestion, from_conversation=False)
+
+    def _on_memory_suggestion_dismissed(self, suggestion_id: int) -> None:
+        store = self.memory_store
+        suggestion = next((item for item in self._memory_suggestions if item.id == suggestion_id), None)
+        if store is None or suggestion is None:
+            return
+        self._memory_suggestions = [item for item in self._memory_suggestions if item.id != suggestion_id]
+        self._memory_links.pop(suggestion.link, None)
+        store.dismiss(suggestion.text)   # a hash of each word, never the sentence
+        self._memory_entry(suggestion.entry_id, MEMORY_NOT_KEPT_TEXT)
+        logger.info("Memory: suggestion dismissed")
+        self._live_memory("Dismissed a suggestion", "", stored=MEMORY_DISMISSED_WORDS)
+        self._render_memory()
+
+    def _on_memory_filter_cleared(self) -> None:
+        self._memory_filter = ""
+        self._render_memory()
+
+    # ---- what every change does
+
+    def _memory_saved(self, entry: MemoryEntry, source: str) -> None:
+        store = self.memory_store
+        assert store is not None
+        count = len(store)
+        logger.info("Memory: saved a note (%s; %d in all)", source, count)
+        if source == SOURCE_SUGGESTED:
+            self._activity(hud.TAG_DONE, "Memory: suggestion saved")
+            self._live_memory("Kept a suggestion", entry.text)
+        else:
+            self._activity(hud.TAG_DONE, f"Memory: 1 note saved ({count} in all)")
+            self._live_memory("Saved a note (on this PC)", entry.text)
+        self._render_memory()
+        self.window.reading.mark_memory_unread()
+
+    def _memory_removed(self, entry: MemoryEntry) -> None:
+        store = self.memory_store
+        assert store is not None
+        count = len(store)
+        logger.info("Memory: removed a note (%d in all)", count)
+        self._activity(hud.TAG_DONE, f"Memory: 1 note removed ({count} in all)")
+        self._live_memory("Removed a note", entry.text)
+        self._render_memory()
+
+    def _memory_restored(self, entry: MemoryEntry) -> None:
+        store = self.memory_store
+        assert store is not None
+        logger.info("Memory: restored a note (%d in all)", len(store))
+        self._live_memory("Restored a note", entry.text)
+        self._render_memory()
+
+    def _memory_refused(self, reason: str, note: str, *, besides: str = "") -> str:
+        """The words of a refusal (9.3), logged with its reason word only; LIVE says why. ``besides``:
+        the note being edited, never the kept note a duplicate quotes."""
+        store = self.memory_store
+        kept = store.duplicate_of(note, besides=besides) if store is not None and reason == "duplicate" else None
+        logger.info("Memory: refused a note (%s)", reason)
+        if (reason == "read_only" and store is not None
+                and store.read_only != self.window.reading.memory_view.read_only()):
+            self._render_memory()   # memory.json became unreadable meanwhile: MEMORY shows the banner now
+        shown = "" if reason in ("secret", "digits") else note   # never a password-like note, even in LIVE
+        self._live_memory(f"Not saved: {_MEMORY_REFUSAL_WORDS.get(reason, reason)}", shown,
+                          status=_live.STATUS_BLOCKED)
+        return memory_refusal_text(reason, self._address(), kept=kept.text if kept is not None else "", cap=TEXT_CAP,
+                                   max_notes=store.max_entries if store is not None else 100)
+
+    @_live.quiet()
+    def _live_memory(self, title: str, note: str, *, status: str = _live.STATUS_OK, stored: str = "") -> None:
+        """A step of LIVE's rolling MEMORY task (with [live] text = false the note as its size)."""
+        if not self.live.enabled:
+            return
+        task = self.live.task(_live.TASK_MEMORY, _live.MEMORY_TITLE, compact=True, key=_live.MEMORY_KEY)
+        fields: list[tuple[str, str]] = []
+        if note:
+            fields.append(("Note", note if self.live.keep_text else f"{len(note)} characters - not kept "
+                                                                    "([live] text = false)"))
+        fields += [("Stored in", stored or MEMORY_STORED_WORDS), ("Given to", MEMORY_SENT_WORDS)]
+        store = self.memory_store
+        summary = f"{_plural(len(store), 'note')} kept" if store is not None else ""
+        task.step(_live.MEMORY_SAVE, title, status=status, fields=fields, summary=summary)
+
+    def _render_memory(self) -> None:
+        """MEMORY shows the store as it is now; the planner's notes and the dismissed hashes are
+        taken again (swapped whole: the ask thread reads them)."""
+        store = self.memory_store
+        if store is None:
+            return
+        self._memory_follow_store()
+        entries = store.entries()
+        sent, left_out = store.prompt_notes()
+        self._memory_notes = (sent, left_out)
+        self._memory_dismissed = store.dismissed()
+        shown = set(entry.id for entry in store.match(self._memory_filter)) if self._memory_filter else None
+        sent_ids = {entry.id for entry in entries[:len(sent)]}
+        rows = [(entry, False) for entry in entries if shown is None or entry.id in shown]
+        for entry, place in sorted(self._memory_trash.values(), key=lambda item: item[1]):
+            rows.insert(min(place, len(rows)), (entry, True))   # "Deleted. Undo" where the note was
+        view = self.window.reading.memory_view
+        view.set_filter(self._memory_filter)
+        view.set_read_only(store.read_only)
+        view.set_rows([hud.MemoryRowInfo(entry.id, entry.text, _memory_meta(entry), sent=entry.id in sent_ids
+                                         or deleted, deleted=deleted) for entry, deleted in rows])
+        view.set_suggestions([hud.SuggestionRowInfo(item.id, item.text) for item in self._memory_suggestions])
+        count = _plural(len(entries), "note") if entries else "No notes"
+        view.set_status(MEMORY_STATUS.format(given=MEMORY_GIVEN_TO, count=count,
+                                             kb=sum(len(text) for text in sent) / 1000, cap=PROMPT_CAP // 1000))
+        if store.read_only:
+            view.set_banner(hud.MEMORY_READ_ONLY_TEXT)
+        elif not store.saved:
+            view.set_banner(hud.MEMORY_NOT_SAVED_TEXT)
+        else:
+            view.set_banner("")
 
     # ---- the conversation and Jarvis's voice ----------------------------------------------
 
@@ -6278,6 +6941,12 @@ class AppController(QObject):
             self.window.reading.set_tab(hud.TAB_BRIEFING)
         elif link_id.startswith("live:"):
             self._reveal_live(link_id)
+        elif link_id.startswith(MEMORY_UNDO_LINK):
+            self._memory_undo(link_id[len(MEMORY_UNDO_LINK):])
+        elif link_id.startswith(MEMORY_SAVE_LINK):
+            self._memory_save_link(link_id[len(MEMORY_SAVE_LINK):])
+        elif link_id == MEMORY_OPEN_LINK and self.memory_store is not None:
+            self.window.reading.set_tab(hud.TAB_MEMORY)
 
     # ---- the LIVE view -----------------------------------------------------------------------
 
@@ -6574,10 +7243,14 @@ class AppController(QObject):
     def _on_tab_changed(self, index: int) -> None:
         if index == hud.TAB_LIVE:
             self._live_unread = False
+        elif index == hud.TAB_MEMORY:
+            self._memory_refresh()   # MEMORY shows what memory.json holds now
         self._sync_live_dot()
         self._mark_viewed_if_seen()
 
-    def _on_window_active(self, _active: bool) -> None:
+    def _on_window_active(self, active: bool) -> None:
+        if active:
+            self._memory_refresh()   # memory.json may have been edited or deleted meanwhile
         self._mark_viewed_if_seen()
 
     def _show_briefing_tab(self) -> None:

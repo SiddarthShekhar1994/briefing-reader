@@ -73,6 +73,12 @@ your own scheduled routine (see
   only tools are web search and web fetch, and which gets your words and
   today's date, time and time zone, nothing else. You get a short answer with
   numbered sources, each an Open card. See [Web research](#web-research).
+- **Memory.** Tell Jarvis "remember that Ana is my project lead" (or add it in
+  the **MEMORY** tab) and he keeps that note on this PC, in `memory.json`, and
+  gives your notes to your Claude Code with every Ask, never to web research.
+  He may offer to remember a fact himself; it is kept only when you click
+  **Remember this**. Part of the productivity bundle (`[productivity]`), off
+  until you turn it on. See [Memory (the MEMORY tab)](#memory-the-memory-tab).
 - **Always at hand.** **Ctrl+Alt+J** opens Jarvis from anywhere, and so does a
   Start menu shortcut. Minimize him to his taskbar button; while a scheduled
   run waits for the briefing, only his tray icon shows. See
@@ -114,6 +120,13 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
   pictures open the pages it read once more, in a hidden private window on
   this PC ([Pictures in LIVE](#pictures-in-live); `[live] page_snapshots =
   false` turns that off).
+- **Memory is kept only on this PC (`memory.json`) and holds only your notes
+  or the suggestions you kept; your notes go to your Claude Code with every
+  Ask, never to web research.** Passwords, codes and account numbers are
+  refused; a suggestion you dismiss leaves a short hash of each word, not the
+  sentence (a common word or a name could still be guessed from its hash). A
+  note is never an instruction: it adds no recipient, action or search, and an
+  address taken from a note is a NEW RECIPIENT until you tick it.
 - **A locked-down planner.** Claude Code runs with no tools, no MCP servers,
   no settings files and no saved session, in an empty folder of its own and an
   environment without API keys or Jarvis's secrets; right before every run
@@ -259,7 +272,8 @@ not of this list.
 
 ## Roadmap
 
-Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live).
+Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
+**Memory** - see [Memory (the MEMORY tab)](#memory-the-memory-tab).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (proposals, your click, every step visible in LIVE):
@@ -272,8 +286,6 @@ keep the same rules (proposals, your click, every step visible in LIVE):
   thread with them, what is still open.
 - **Follow-up nudges**: threads that wait on your answer, or on an answer you
   are owed.
-- **Memory**: what you ask Jarvis to remember, kept on your PC, where you can
-  see and change it.
 - **Radar**: internships, hackathons, deadlines and subscriptions (renewals,
   trials that end) worth your attention.
 - **Push-to-talk voice**: hold a key and say your request.
@@ -847,9 +859,9 @@ greeting was more than 2 minutes ago. Without sound (muted, `[assistant]
 speak = false`, no voice available) the same words are shown in the JARVIS
 tab; `[assistant] greet = false` turns the greeting off.
 
-**JARVIS, BRIEFING and LIVE.** The middle panel has three tabs right above it
-(click them, press **Ctrl+1** / **Ctrl+2** / **Ctrl+3**, or Left / Right on a
-focused tab):
+**JARVIS, BRIEFING and LIVE.** The middle panel has three tabs right above it,
+four with MEMORY (click them, press **Ctrl+1** / **Ctrl+2** / **Ctrl+3** /
+**Ctrl+4**, or Left / Right on a focused tab):
 
 - **JARVIS** is this session's conversation: the greeting, "Your AM briefing is
   ready to view." with a **View briefing** link, your Ask requests and Jarvis's
@@ -865,6 +877,9 @@ focused tab):
   (STATUS still shows the time; a "May be stale" warning always shows).
 - **LIVE** shows every step Jarvis takes, as it happens (see
   [LIVE: watch Jarvis work](#live-watch-jarvis-work)).
+- **MEMORY** (**Ctrl+4**, only while the productivity bundle and its memory
+  are on) holds the notes Jarvis keeps on this PC (see
+  [Memory (the MEMORY tab)](#memory-the-memory-tab)).
 
 **NEW.** A briefing nobody has looked at yet is NEW: an amber **NEW** badge on
 the BRIEFING tab, "Your AM briefing is ready to view" under the orb while
@@ -1026,6 +1041,15 @@ voice when the online one cannot be reached), politely and to the point:
   confirmation he has not started yet when you approve the next card is left
   out (it is in the JARVIS tab), so nothing he says after that click can be
   taken for the new card's result.
+- **Memory** (see [Memory (the MEMORY tab)](#memory-the-memory-tab)): "Noted,
+  sir." after "remember that ...", "Forgotten, sir." after "forget that ..."
+  removed a note, and "I'd rather not keep that, sir." for a note that looks
+  like a password, code or account number. Never a note by itself, and never a
+  suggestion. An Ask's spoken answer that repeats a note (its words, even in
+  another order) gives way to "Here's what I found, sir." or the count of
+  proposals; a reworded answer can still carry what a note says, so mute him
+  or set `[assistant] speak_replies = false` to keep every answer on screen
+  only.
 
 Everything he says is also written in the JARVIS tab. While he speaks the orb
 reads SPEAKING and the large line next to it shows his words. He never talks
@@ -1094,6 +1118,15 @@ card, newest at the bottom:
 - **A briefing fetch** from Notion, and one compact **Background reads** row
   (the agenda, the cards' event checks, sign-ins, Claude Code checks; `[live]
   background = false` leaves it out).
+- **Memory** (with the productivity bundle's memory on): one compact
+  **MEMORY** row with a step for each note saved, changed, removed or
+  restored, a suggestion kept, dismissed or not offered (and why), a note not
+  saved and why (the note itself, or its size with `[live] text = false`; never
+  a refused password-like note), and `memory.json` taken again after you
+  changed or deleted it by hand. An Ask's "Your request" says how many notes it
+  gave the planner ("Memory given: 3 notes, 412 characters"), its planner run
+  whether it may suggest a note, and its check whether a suggested note passed
+  the checks or was dropped and why.
 
 The panel's strip shows what Jarvis is doing (IDLE, WORKING 0:12, SENDING IN 7
 S), then **Pop out** and **Clear** (in a narrow window Clear is in the pop-out
@@ -1208,6 +1241,69 @@ That first picture also starts Jarvis's network gate: a small proxy on this PC
 (127.0.0.1, a free port) that the hidden window must use. It too stays until
 Jarvis closes; any program on this PC that finds it reaches through it only
 what the window may: public https servers, under the same rules.
+
+### Memory (the MEMORY tab)
+
+Part of the productivity bundle: off in the public `config.toml`, on for this
+PC with the line `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (it also needs
+[Ask Jarvis](#ask-jarvis-optional) on); `[productivity] memory = false` keeps
+the rest of the bundle without it. Memory is a short list of facts and
+preferences you want Jarvis to keep in mind ("Ana is my project lead", "I
+prefer deep work before noon"), kept only on this PC in
+`%LOCALAPPDATA%\briefing-reader\memory.json`.
+
+- **Tell him.** Type `remember that Ana is my project lead` in the command bar
+  (also `remember Ana is my project lead`, `remember: ...` or
+  `jarvis, remember ...`). It is saved at once, without a Claude run: "Noted,
+  sir: "Ana is my project lead."" with an **Undo** link, and he says "Noted,
+  sir." `remember to call Ana` and questions (`remember when we met?`) stay
+  ordinary Asks.
+- **While Jarvis is busy** with another request the command bar is read-only,
+  so type the note into MEMORY's **Add a note...** field instead: it always
+  works.
+- **Forget.** `forget that ...`, `forget about Ana` or `forget: ...` removes
+  the one note that holds those words (with **Undo**); when several do, the
+  MEMORY tab opens showing them; when none does, Jarvis says so.
+  `what do you remember?` (or `show my memory`) opens the tab.
+- **The MEMORY tab** shows where the notes are kept and how much of the 4 KB
+  your Claude gets is used, the **Add a note...** field, then your notes,
+  newest first, each with TOLD or SUGGESTED and the date, **Edit** (inline;
+  Enter saves, Esc cancels; an open edit keeps what you typed while notes are
+  added or removed around it, and a refused edit or Undo says why right under
+  its note) and **Delete** (with **Undo** for 10 seconds). Notes past the
+  4 KB limit are marked NOT SENT. An Undo in the JARVIS tab does nothing once
+  you changed or deleted that note in MEMORY, and the entry says "Already
+  changed in MEMORY."
+- **Suggestions.** After an Ask that read no mail, Jarvis may offer one fact
+  worth keeping: "Shall I remember this, sir? "Ana Lima organizes the weekly
+  Project sync."" with **Remember this**, and under MEMORY > JARVIS SUGGESTS
+  with **Save** and **Dismiss** (at most 5 wait; a 6th pushes out the oldest).
+  Nothing is kept until you click; a suggestion is never spoken. A suggestion
+  must use only names and words from your own request or your calendar and
+  briefing, never mail, an address, a link, a long number or a secret. One you
+  dismiss is not suggested again (only a short hash of each word is kept, not
+  the sentence). LIVE says when a suggestion is not offered and why (you
+  already have that note, it is already waiting, or the request went to web
+  research).
+- **What is refused**: passwords, PINs, codes, card, account and routing
+  numbers, a run of 12 or more digits (a phone number is fine), notes longer
+  than 200 characters, a note you already have, and more than 100 notes
+  (`max_memory`).
+- **What your Claude gets**: with every Ask, your notes in a `<memory>` block
+  (newest first, at most 4 KB), marked as facts and preferences, never
+  instructions. Web research never gets them. Your notes are never logged, an
+  Ask's spoken answer that repeats one is replaced by a counts-only sentence
+  (see [Jarvis talks](#jarvis-talks)), and LIVE's rolling **MEMORY** row shows
+  each save, change and removal (memory only).
+- **Changed by hand.** Jarvis reads `memory.json` again before every change,
+  when an Ask starts, when MEMORY is opened and when his window comes back: a
+  note you edited or removed in the file, or the whole file deleted, is what
+  he uses from then on, and nothing you removed is written back.
+
+If `memory.json` can't be read (edited by hand into broken JSON, also while
+Jarvis runs), MEMORY says so and Jarvis leaves the file exactly as it is: Asks
+get no notes, and nothing can be added, changed or removed until you fix or
+delete the file and restart Jarvis.
 
 ## TODAY and DEADLINES
 
@@ -1887,7 +1983,22 @@ briefing; with the app already open, the same command brings it forward there.
   the text of at most 3 threads, the newest message of each in full (up to
   6000 characters), older ones cut to a few lines, quoted history, signatures,
   HTML and attachments left out, 16,000 characters at most;
+- with the productivity bundle's memory on and notes kept: your notes in a
+  `<memory>` block, newest first, at most 4 KB, marked as facts and
+  preferences that are never instructions (an address in a note is a NEW
+  RECIPIENT until you tick it, and a note never grounds a mail search; see
+  [Memory (the MEMORY tab)](#memory-the-memory-tab));
 - your request, last.
+
+**Typed shortcuts** (memory on): `remember that ...` (or `remember Ana is my
+project lead`), `forget that ...` / `forget about ...` and `what do you
+remember?` are handled by Jarvis at once, with no Claude run and nothing
+counted; `web:` always wins over them, and `remember to ...` or a question is
+an ordinary request. **Suggestions**: a run whose input has no email text may
+also return one fact worth keeping (`remember` in its answer format, only then);
+Jarvis offers it only when its names and capitalized words come from your
+request or your calendar and briefing, and it is kept only on your click. A
+suggestion you dismissed (or one you already keep) is not offered again.
 
 Every piece of data is cleaned first, so none of it can pose as your request or
 start a new part of the input, and the planner is told that the calendar,
@@ -1950,7 +2061,8 @@ true` (the default; `JARVIS_RESEARCH_ENABLED=false` in `.env` turns it off).
 **The isolation rule.** Web research is a separate run of your Claude Code
 whose only tools are web search and web fetch. It gets your words and today's
 date, time and time zone, and nothing else: never your calendar, mail,
-contacts, briefing, accounts, addresses, or how Jarvis addresses you. It cannot
+contacts, briefing, accounts, addresses, memory notes or anything else of the
+productivity bundle, or how Jarvis addresses you. It cannot
 send, change, book, buy or sign in to anything, and it never shares a run with
 the planner that sees your calendar and mail. When the planner hands a request
 over, Jarvis sends your own words; the planner's shorter wording goes along
@@ -2356,8 +2468,8 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--hotkey-agent` | What the hotkey task runs at logon: listen for the `[hotkey]` combination until logoff. |
 | `--ask` | [Ask Jarvis](#ask-jarvis-optional) in the app: like `--open`, the assistant screen with the command bar ready to type, without playing the briefing or counting it as heard (Play does both). With the app already open, it comes forward there. Needs `[ask] enabled = true`; otherwise the screen says Ask is off. |
 | `--ask-check` | [Ask Jarvis](#ask-jarvis-optional): print whether Ask is ready (Claude Code found, its version and flags, a claude.ai plan sign-in, the work folder, mail reading per account, usage), then whether [web research](#web-research) is ready (`Web research ready: yes`; it never changes `Ready:` or the exit code). Runs only `claude --version`, `--help` and `auth status`: no Claude request. Exit code 0 when ready. |
-| `--ask-text TEXT` | Ask Jarvis once from the command line, without a window: prints what the planner said, the proposals and how Claude Code started. One request on your Claude plan (two when it reads mail or hands the request to web research). Starting the text with `web:` runs web research only (one run; nothing is read from your accounts). With `--from-file`, the briefing comes from that fixture. |
-| `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text as character counts) and the command line, and stop. With `web:`: the exact text the web research would get and its command line. No Claude request, nothing counted. |
+| `--ask-text TEXT` | Ask Jarvis once from the command line, without a window: prints what the planner said, the proposals and how Claude Code started. One request on your Claude plan (two when it reads mail or hands the request to web research). Starting the text with `web:` runs web research only (one run; nothing is read from your accounts). With `--from-file`, the briefing comes from that fixture. With the productivity bundle's memory on, the planner gets your notes as in the app, read from `memory.json` without ever changing it; `remember that ...`, `forget that ...` and `what do you remember?` are the app's (MEMORY tab): the command line says so, saves nothing and exits with code 2. |
+| `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text and memory notes as character counts) and the command line, and stop. With `web:`: the exact text the web research would get and its command line. No Claude request, nothing counted. |
 | `--slots am=10:12,pm=23:42` | The scheduled times (24-hour), which tell the app which briefing an answer belongs to. The tasks pass them; without it (or for a run it leaves out) `[schedule]` in `config.toml` applies. A value that cannot be read is logged and ignored. |
 | `--open` | Open Jarvis: the assistant screen in front, on its JARVIS tab, with a greeting (and "Your AM briefing is ready to view." when one is waiting); the briefing waits in its BRIEFING tab and nothing is read until you press Play. The same as starting without options. A running app comes forward. What the Start menu shortcut and the hotkey use. |
 | `--now` | Older name of `--open`, kept so existing shortcuts keep working; it no longer starts reading. |
@@ -2390,10 +2502,12 @@ There is no default page; when the id is missing or cannot be read, the app
 shows "Notion page ID missing." and fetches nothing. Optional:
 `JARVIS_CLAUDE_EXE`, the `claude.exe` [Ask Jarvis](#ask-jarvis-optional) runs when
 it is not found by itself (the path holds your Windows user name, so it never
-goes into `config.toml`); `JARVIS_ASK_ENABLED` and `JARVIS_RESEARCH_ENABLED`
-(`true` or `false`) turn Ask and [web research](#web-research) on or off for this
-PC, whatever `[ask] enabled` and `[research] enabled` say. Variables already set
-in the environment win over `.env`.
+goes into `config.toml`); `JARVIS_ASK_ENABLED`, `JARVIS_RESEARCH_ENABLED` and
+`JARVIS_PRODUCTIVITY_ENABLED` (`true` or `false`) turn Ask, [web
+research](#web-research) and the productivity bundle ([Memory](#memory-the-memory-tab))
+on or off for this PC, whatever `[ask] enabled`, `[research] enabled` and
+`[productivity] enabled` say. Variables already set in the environment win over
+`.env`.
 
 **`google_client_secret.json`** (next to this README, optional): the Google OAuth
 client for calendar actions (setup step 8).
@@ -2473,6 +2587,11 @@ log. Changes apply the next time the app starts.
 | `[live] text` | `true` | Show the texts Jarvis read and sent in LIVE (email threads, the planner's input and reply, the outgoing message). `false`: only their sizes (also of the message text in the planner's proposal lines); subjects, names, addresses, event titles and Jarvis's answer still show. `false` also takes no page pictures and leaves the email texts out of the pictures (their headers still show). |
 | `[live] pictures` | `true` | Email and calendar pictures in LIVE ([Pictures in LIVE](#pictures-in-live)): an email Jarvis read or will send drawn as an email, a calendar change drawn on its day (before and after), an Ask's calendar as a 7-day strip. Drawn by Jarvis on this PC from the text he already has: no email HTML, no images from the web. `false`: none. |
 | `[live] page_snapshots` | `true` | Page pictures of web research: each public https page a research read is opened again on this PC in a private window (no sign-ins, nothing saved) and its first screen shown in LIVE. That is an ordinary page visit from this PC: the site sees your IP address. `false`: no page is opened; the research works the same. |
+| `[productivity] enabled` | `false` | The productivity bundle (this version: [Memory](#memory-the-memory-tab)); it also needs `[ask] enabled = true`. Turn it on for this PC with `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (it overrides this key both ways). |
+| `[productivity] memory` | `true` | The MEMORY tab, `remember that ...` / `forget that ...` and the notes given to the planner. |
+| `[productivity] memory_suggestions` | `true` | Jarvis may suggest a note after an Ask that read no mail; it is kept only when you click. |
+| `[productivity] max_memory` | `100` | Notes kept (10-200); more are refused ("Your memory is full"). |
+| `[productivity]` other keys | see `config.toml` | `plan_offer`, `plan_offer_until`, `day_start`, `day_end`, `plan_max_blocks`, `plan_min_free_minutes`, the `prep_...` keys, `minimized_check`, `followups`, `scan_...`, `waiting_after_hours`, `owed_after_days`, `followups_shown`, `quiet_from`, `quiet_until`, `max_runs_per_day` and `reserve_ask_runs` are read and checked (a bad value falls back with a warning) but not used yet: they belong to plan my day, meeting prep and follow-ups, which later versions add. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -2624,6 +2743,16 @@ unavailable (timeout)", "Page snapshots: engine stopped", and a failure to set
 them up with its error type); never an address, a site, a title or anything of
 the page, and a page's own console messages are dropped. The web engine's own
 error lines are switched off too, so a console start shows none of them.
+Memory logs only kinds, counts and reason words: "Memory: saved a note (told;
+13 in all)", "Memory: removed a note (12 in all)", "Memory: restored a note
+(13 in all)", "Memory: changed a note", "Memory: refused a note (secret)"
+(empty, long, secret, digits, full, read_only or duplicate), "Memory: undo
+ignored (already changed)", "Memory: a suggestion was offered", "Memory: a
+suggestion was dropped (ungrounded)", "Memory: suggestion saved", "Memory:
+suggestion dismissed", "Memory: could not read memory.json (json); kept
+read-only" and "Memory: could not save memory.json (...); kept for this run
+only"; an Ask's context line adds "memory 3" (how many notes it gave). Never a
+note, a suggestion or a hash.
 
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
@@ -2638,6 +2767,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), and when and how a classic prompt was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
 | `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open. Never any text. Safe to delete. |
+| `memory.json` | The productivity bundle's memory ([Memory](#memory-the-memory-tab)): **the only file with your own text** - your notes, typed or suggestions you kept, each with an id, TOLD or SUGGESTED and when it was made or changed; and, for suggestions you dismissed, a short hash of each word (not the sentence; a common word or a name could be guessed from its hash). Written only by the app (the command line reads it without changing it). Delete it (also while Jarvis runs: the next Ask, MEMORY and any change take the file as it is), or delete the notes in MEMORY, to forget everything. If it can't be read, Jarvis never overwrites it (MEMORY says so). |
 
 Generated audio goes to `%TEMP%\briefing-reader\session-<process id>` (Jarvis's own
 sentences to its `say` folder) and is deleted when the app closes. If a section is still being generated at that
@@ -2678,7 +2808,8 @@ The app talks to these services, all free:
 - only with [Ask Jarvis](#ask-jarvis-optional) on: your own Claude Code, signed
   in to your claude.ai plan. Each request sends Anthropic what is listed under
   "What Claude Code gets" there: event titles, guests' names and addresses,
-  today's briefing and, for a request about an email, that email's text. This
+  today's briefing, for a request about an email that email's text, and, with
+  the productivity bundle's memory on, your memory notes. This
   is the same kind of data your briefing routine already sends Claude. It runs
   on your plan's usage, never on an API key (Claude Code gets only the Windows
   basics of Jarvis's environment, never an `ANTHROPIC_*` or `CLAUDE*` variable
@@ -2798,6 +2929,14 @@ that the web engine looks up no name itself (with "localhost" names only) and
 that inherited settings that would undo the private window are refused before
 the engine starts.
 
+The memory tests (`test_memory.py`, `test_routes.py`, `test_memory_app.py`,
+and memory cases in the Ask, config, LIVE, persona and tab tests) keep
+`memory.json` in temporary folders, use invented notes only and check that a
+note never reaches a log, ACTIVITY, the spoken words or web research, that
+an unreadable `memory.json` is left byte for byte as it was, and that a note
+removed from the file by hand (or the whole file deleted) is never sent or
+written back.
+
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
 and release it within seconds; they never start the app. The catch-up tests run
@@ -2805,6 +2944,18 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 
 ## Troubleshooting
 
+- **MEMORY says "memory.json can't be read"**: the file was changed by hand (or
+  by another program) into something Jarvis can't read, so he leaves it exactly
+  as it is and changes nothing: no note can be added, changed or removed, and
+  Asks get no notes. Fix the JSON or delete
+  `%LOCALAPPDATA%\briefing-reader\memory.json` (that forgets every note), then
+  restart Jarvis. "Not saved to disk - kept for this session only" means a
+  write failed (a full disk, a locked file): the change works until Jarvis
+  closes and the next change tries again.
+- **"remember that ..." started an Ask** (or no MEMORY tab): the productivity
+  bundle is off. Put `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (with Ask on)
+  and restart Jarvis. While another request runs, the command bar takes no
+  typing: use MEMORY's **Add a note...** field.
 - **Ask: "Claude Code not found"**: install it (Ask's setup step 1), or put
   `JARVIS_CLAUDE_EXE=<path to claude.exe>` in `.env`. A `claude.cmd` from npm is
   not used (only a `claude.exe`). `--ask-check` shows which one Jarvis found.
@@ -3141,6 +3292,7 @@ briefing_reader/__main__.py   command line, single-instance lock, hand-off out o
 briefing_reader/activation.py "come forward" messages between launches (Qt local socket), Qt log forwarding
 briefing_reader/runstate.py   scheduled slots, briefing keys, which briefings were answered, announced or viewed (runstate.json), the catch-up window
 briefing_reader/prefs.py      Jarvis's small preferences (assistant.json): mute, the last greetings' ids
+briefing_reader/memory.py     the productivity bundle's memory (memory.json; no Qt): notes, refusals, duplicates, dismissed suggestions as hashes, the suggestion and note-leak checks
 briefing_reader/persona.py    what Jarvis says on his own: the greetings, "ready to view", the one safe fact, Ask's spoken answer, "Done, sir - ..." after a result, speech scrubbing (no Qt)
 briefing_reader/speech.py     Jarvis's voice: utterance kinds, the Voice interface, the silent default, the queue rules and the "tts-say" worker (no Qt)
 briefing_reader/voice_ui.py   Jarvis's voice in the app: his own player and the voice the controller speaks through (pauses and resumes the briefing, mute, countdown hold)
@@ -3160,8 +3312,9 @@ briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (c
                               input (context), email text and searches (mail), cards with provenance checks (validate),
                               the caps (usage), one request end to end (planner), --ask-check / --ask-text (commands),
                               web research: its run and isolation (research), its answer's check (research_validate)
-                              and its LIVE steps (research_live); ask/assets: the planner's and the research's
-                              instructions, answer formats and settings
+                              and its LIVE steps (research_live), the typed shortcuts such as "remember that ..."
+                              (routes); ask/assets: the planner's and the research's instructions, answer formats
+                              and settings
 briefing_reader/live.py       the LIVE view's event stream (no Qt): every step Jarvis takes, in memory only, bounded
 briefing_reader/pictures.py   LIVE's pictures as data (no Qt): an email, what a card sends, a calendar change on its day, the week, a page
 briefing_reader/snapshots.py  page pictures' rules (no Qt): which pages may be opened, what the hidden window may load, the per-research cap
@@ -3170,11 +3323,11 @@ briefing_reader/snapshot_gate.py  the hidden window's network gate (no Qt): ever
 briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlight timing, background worker
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
 briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log, its pictures and the picture viewer
-briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
+briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE / MEMORY tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
 briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread (web: requests too)
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures)
-config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant and LIVE settings
+config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant, LIVE and productivity settings
 .env.example                  template for .env (NOTION_TOKEN, BRIEFING_PAGE_ID; the optional JARVIS_ keys)
 requirements.txt              Python dependencies
 install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey scheduled tasks

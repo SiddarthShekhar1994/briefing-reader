@@ -493,6 +493,45 @@ class WebRequestTests(Engine):
         self.assertEqual(check_init(no_mode).permission_mode, "")
 
 
+class RememberTests(Engine):
+    """A suggested note ("remember"): read only from a run that was offered it in its schema."""
+
+    PLAN = {"say": "Noted the change.", "question": "", "lines": [],
+            "remember": ["Ana Lima organizes\nthe weekly sync"]}
+
+    def run_remember(self, plan: dict, *, allow_remember: bool) -> st.RunResult:
+        self.runner = FakeRunner(plan_stream(plan), clock=self.clock)
+        return run_planner(self.runner, ARGV, "p", env={}, cwd=Path("."), timeout_s=90, allow_search=False,
+                           allow_remember=allow_remember, clock=self.clock, now=lambda: NOW)
+
+    def test_read_only_when_allowed(self) -> None:
+        allowed = self.run_remember(self.PLAN, allow_remember=True)
+        self.assertEqual(allowed.plan.remember, ("Ana Lima organizes the weekly sync",))
+        self.assertEqual(self.run_remember(self.PLAN, allow_remember=False).plan.remember, ())   # ignored
+        self.assertEqual(self.run_with(plan_stream(self.PLAN)).plan.remember, ())               # the default
+        for empty in ([], [""], ["  \n "], None):
+            with self.subTest(empty=empty):
+                self.assertEqual(self.run_remember(dict(self.PLAN, remember=empty), allow_remember=True).plan.remember,
+                                 ())
+
+    def test_bad_shapes_are_garbled(self) -> None:
+        for bad in ("a note", ["one", "two"], [3], ["n" * 161], {"note": "x"}):
+            with self.subTest(bad=str(bad)[:30]):
+                plan = dict(self.PLAN, remember=bad)
+                self.assertEqual(self.run_remember(plan, allow_remember=True).failure.kind, GARBLED)
+                self.assertIsNone(self.run_remember(plan, allow_remember=False).failure)
+        self.assertEqual(self.run_remember(dict(self.PLAN, remember=["n" * 160]), allow_remember=True).plan.remember,
+                         ("n" * 160,))
+
+    def test_the_fallback_reads_it_too(self) -> None:
+        import json as _json
+
+        text = _json.dumps(self.PLAN)
+        self.assertEqual(st._fallback_plan(text, allow_search=False, allow_remember=True).remember,
+                         ("Ana Lima organizes the weekly sync",))
+        self.assertEqual(st._fallback_plan(text, allow_search=False).remember, ())
+
+
 class MessagesTests(unittest.TestCase):
     def test_every_kind_has_plain_words(self) -> None:
         for kind in st.FAILURE_KINDS:

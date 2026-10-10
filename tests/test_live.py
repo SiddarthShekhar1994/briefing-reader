@@ -713,5 +713,26 @@ class PrivacyTests(unittest.TestCase):
         return "\n".join(parts)
 
 
+class MemoryTaskTests(unittest.TestCase):
+    """The productivity bundle's rolling MEMORY task and its memory.save steps."""
+
+    def test_memory_task_and_step_kinds_are_known(self) -> None:
+        self.assertIn(live.TASK_MEMORY, live.TASK_KINDS)
+        self.assertIn(live.MEMORY_SAVE, live.STEP_KINDS)
+        self.assertEqual(live.TASK_TAGS[live.TASK_MEMORY], "MEMORY")
+        self.assertNotIn(live.TASK_MEMORY, live.ATTENTION_KINDS)     # never opens LIVE by itself
+        stream, _clock = make()
+        memory = stream.task(live.TASK_MEMORY, live.MEMORY_TITLE, key=live.MEMORY_KEY)
+        again = stream.task(live.TASK_MEMORY, live.MEMORY_TITLE, key=live.MEMORY_KEY)
+        self.assertEqual(memory.id, again.id)
+        memory.step(live.MEMORY_SAVE, "Saved a note (on this PC)", status=STATUS_OK,
+                    fields=[("Note", "Ana is my project lead"), ("Stored in", "memory.json (on this PC)")])
+        view = stream.snapshot()[0]
+        self.assertEqual((view.kind, view.tag, view.title, view.compact, view.pinned),
+                         (live.TASK_MEMORY, "MEMORY", "Memory (this PC)", True, True))
+        self.assertEqual([step.kind for step in view.steps], [live.MEMORY_SAVE])
+        self.assertEqual(stream.running(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

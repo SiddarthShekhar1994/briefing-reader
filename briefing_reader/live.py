@@ -87,14 +87,17 @@ TASK_ACTION = "action"
 TASK_BRIEFING = "briefing"
 TASK_BACKGROUND = "background"
 TASK_WEB = "web"                  # a web research started with "web:" (ask.research)
-TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB)
+TASK_MEMORY = "memory"            # the owner's notes kept on this PC (the productivity bundle's memory)
+TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB, TASK_MEMORY)
 TASK_TAGS = {TASK_ASK: "ASK", TASK_ACTION: "ACTION", TASK_BRIEFING: "BRIEFING", TASK_BACKGROUND: "BACKGROUND",
-             TASK_WEB: "WEB"}
+             TASK_WEB: "WEB", TASK_MEMORY: "MEMORY"}
 # Tasks that open the LIVE view by themselves ([live] auto_open) and set the tab's dot.
 ATTENTION_KINDS = frozenset({TASK_ASK, TASK_ACTION, TASK_WEB})
-COMPACT_KINDS = frozenset({TASK_BRIEFING, TASK_BACKGROUND})
+COMPACT_KINDS = frozenset({TASK_BRIEFING, TASK_BACKGROUND, TASK_MEMORY})
 BACKGROUND_KEY = "background"
 BACKGROUND_TITLE = "Background reads"
+MEMORY_KEY = "memory"             # the rolling MEMORY task (one per session while it is not finished)
+MEMORY_TITLE = "Memory (this PC)"
 
 ASK_REQUEST = "ask.request"
 ASK_CHECKS = "ask.checks"
@@ -120,10 +123,11 @@ WEB_FETCH = "web.fetch"           # one page read of a research run (its URL, HT
 RESEARCH_INPUT = "research.input"         # what the web research gets (the isolation check)
 RESEARCH_RUN = "research.run"             # the web research run (Claude Code with web tools only)
 RESEARCH_VALIDATE = "research.validate"   # the research answer checked: sources and suggestions
+MEMORY_SAVE = "memory.save"               # a note saved, changed, removed or restored (or not saved, and why)
 STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, PLANNER_RUN, ASK_VALIDATE,
               ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_COUNTDOWN, ACTION_SIGNIN, ACTION_CHECKS,
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
-              WEB_FETCH, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE)
+              WEB_FETCH, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE, MEMORY_SAVE)
 
 # Internal link ids a Field may carry besides a Jarvis-made Google result link ("tab:jarvis").
 INTERNAL_LINK_RE = re.compile(r"(?:tab:[a-z]{1,16}|live:\d{1,12})")

@@ -14,6 +14,7 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from briefing_reader import live, pictures
 from briefing_reader.actions import MOVE, REPLY, SOURCE_ASK, parse_action_line
@@ -921,8 +922,8 @@ class ResearchTests(PlannerTestCase):
         self.assertEqual(fields["Question (exact)"], ROUTED_COMMAND)
         self.assertEqual(fields["Search hint (exact)"], "museum opening hours saturday")
         self.assertEqual(fields["Today"], "Wed Oct 7 2026 9:30 AM, America/Los_Angeles")
-        self.assertEqual(fields["Not given"], "your calendar, mail, contacts, briefing, accounts, addresses and how "
-                                              "Jarvis addresses you")
+        self.assertEqual(fields["Not given"], "your memory notes, follow-ups, calendar, mail, contacts, briefing, "
+                                              "accounts, addresses and how Jarvis addresses you")
         self.assertIn("none of it goes to the research", fields["Read from your accounts"])
         run = self.step(live.RESEARCH_RUN)
         self.assertEqual(run.status, live.STATUS_OK)
@@ -1884,6 +1885,230 @@ class CommandsTests(PlannerTestCase):
             self.assertEqual(commands.run(Args(), self.config, io.StringIO()), 0)
         self.assertIsNone(dry.call_args.kwargs["briefing"])
         self.assertEqual(commands.STAGE_WORDS["research"], "Searching the web (uses your Claude plan)...")
+
+
+MEMO = "Zq7memo I prefer deep work before noon"
+SUGGESTED = "Ana Lima organizes the Project sync"
+
+
+class MemoryPlannerTests(PlannerTestCase):
+    """The productivity bundle's memory in an Ask: the <memory> block in every planner run, never in
+    web research (ISO-1 extended), and a suggested note only from run 1 without mail."""
+
+    def task(self) -> live.LiveTask:
+        self.stream = live.LiveStream()
+        return self.stream.task(live.TASK_ASK, "request")
+
+    def step(self, kind: str) -> live.StepView:
+        return next(step for step in self.stream.snapshot()[0].steps if step.kind == kind)
+
+    def remembering(self, plan: dict, *, suggestions: bool = True, notes: tuple[str, ...] = (MEMO,)) -> AskPlanner:
+        ask = self.make(plan_stream(plan))
+        ask.memory = lambda: notes
+        ask.memory_suggestions = suggestions
+        return ask
+
+    def test_notes_reach_run_1_and_run_2(self) -> None:
+        from briefing_reader.ask.context import MEMORY_NOTE
+
+        self.reader.found = ["thr0000777"]
+        ask = self.make(plan_stream(MailTests.SEARCH),
+                        plan_stream({"say": "I've drafted a reply.", "lines": [MailTests.REPLY_FROM_MAIL]}))
+        ask.memory = lambda: (MEMO,)
+        outcome = ask.plan("reply to Ana's budget email saying it's confirmed")
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual(outcome.runs, 2)
+        for number in (0, 1):
+            with self.subTest(run=number):
+                self.assertIn(f"<memory>\n{MEMORY_NOTE}\n- {MEMO}\n</memory>\n<command>\n", self.stdin(number))
+                self.assertNotIn("remember", self.schema(number)["properties"])   # suggestions off
+        self.assertEqual(outcome.suggestion, "")
+
+    def test_without_notes_the_stdin_is_as_before(self) -> None:
+        run = {"say": SAY, "lines": [MOVE_LINE]}
+        ask = self.make(plan_stream(run), plan_stream(run))
+        self.assertTrue(ask.plan(COMMAND).ok)
+        before = self.stdin(0)
+        ask.memory = lambda: ()
+        self.assertTrue(ask.plan(COMMAND).ok)
+        self.assertEqual(self.stdin(1), before)
+        self.assertNotIn("<memory>", before)
+
+    def test_a_broken_memory_source_gives_no_block(self) -> None:
+        ask = self.make(plan_stream({"say": SAY, "lines": [MOVE_LINE]}))
+
+        def broken() -> tuple[str, ...]:
+            raise RuntimeError("zq7memo broken")
+
+        ask.memory = broken
+        with self.assertLogs("briefing_reader", level="WARNING") as logs:
+            self.assertTrue(ask.plan(COMMAND).ok)
+        self.assertNotIn("<memory>", self.stdin())
+        self.assertIn("Ask: the memory notes could not be read (RuntimeError)", "\n".join(logs.output))
+        self.assertNotIn("zq7memo", "\n".join(logs.output))
+
+    def test_a_suggestion_from_run_1_without_mail(self) -> None:
+        ask = self.remembering({"say": "Ana runs it.", "lines": [], "remember": [SUGGESTED]})
+        outcome = ask.plan("who organizes the Project sync? Ana Lima, I think", live=self.task())
+        self.assertTrue(outcome.ok, outcome)
+        self.assertIn("remember", self.schema()["properties"])
+        self.assertEqual(outcome.suggestion, SUGGESTED)
+        self.assertNotIn(SUGGESTED, repr(outcome))
+        run = self.step(live.PLANNER_RUN)
+        self.assertIn(("May suggest a note", planner.REMEMBER_WORDS), [(f.label, f.value) for f in run.fields])
+        self.assertIn(f"Suggests a note: {SUGGESTED}", [item.text for item in run.items])
+        checked = self.step(live.ASK_VALIDATE)
+        self.assertIn((f"Note to remember: {SUGGESTED}", planner.SUGGESTION_KEPT),
+                      [(item.text, item.note) for item in checked.items])
+
+    def test_no_suggestion_when_run_1_has_mail_and_never_from_run_2(self) -> None:
+        self.reader.threads["18c0ffee00000001"] = budget_thread()
+        briefing = BriefingContext(pending=(parse_action_line(BRIEFING_REPLY),))
+        ask = self.remembering({"say": "ok", "lines": [], "remember": [SUGGESTED]})
+        outcome = ask.plan("reply to Ana's email about the budget review", briefing=briefing)
+        self.assertIn("<mail>", self.stdin())
+        self.assertNotIn("remember", self.schema()["properties"])
+        self.assertEqual(outcome.suggestion, "")                   # "remember" ignored: not offered
+        self.reader.found = ["thr0000777"]
+        ask = self.make(plan_stream(dict(MailTests.SEARCH, remember=[SUGGESTED])),
+                        plan_stream({"say": "I've drafted a reply.", "lines": [MailTests.REPLY_FROM_MAIL],
+                                     "remember": ["Ana Lima wants the budget by Friday"]}))
+        ask.memory, ask.memory_suggestions = (lambda: ()), True
+        outcome = ask.plan("reply to Ana's budget email saying it's confirmed (Ana Lima, Project sync)")
+        self.assertEqual(outcome.runs, 2)
+        self.assertIn("remember", self.schema(0)["properties"])    # run 1 had no mail ...
+        self.assertNotIn("remember", self.schema(1)["properties"])  # ... run 2 never may
+        self.assertEqual(outcome.suggestion, SUGGESTED)            # run 1's own, checked against run 1
+
+    def test_dropped_suggestions_say_why(self) -> None:
+        from briefing_reader.memory import fingerprint
+
+        cases = (({"remember": ["Ana Lima reports to Zed Quorn"]}, (), "ungrounded"),
+                 ({"remember": ["Ana Lima organizes it, see https://example.org"]}, (), "url"),
+                 ({"remember": [SUGGESTED]}, (fingerprint(SUGGESTED),), "dismissed"))
+        for extra, dismissed, reason in cases:
+            with self.subTest(reason=reason):
+                ask = self.remembering(dict({"say": "ok", "lines": []}, **extra))
+                ask.memory_dismissed = lambda marks=dismissed: marks
+                with self.assertLogs("briefing_reader", level="INFO") as logs:
+                    outcome = ask.plan("who organizes the Project sync? Ana Lima", live=self.task())
+                self.assertEqual(outcome.suggestion, "")
+                self.assertIn(f"Memory: a suggestion was dropped ({reason})", "\n".join(logs.output))
+                item = next(item for item in self.step(live.ASK_VALIDATE).items if item.text == "Note to remember")
+                self.assertEqual((item.status_text, item.note), ("DROPPED", f"not offered ({reason})"))
+
+    def test_a_suggestion_of_a_run_handed_to_web_research_says_it_was_not_offered(self) -> None:
+        ask = self.make(plan_stream(dict(WEB_PLAN, remember=[SUGGESTED])), stream("research_success"))
+        ask.memory, ask.memory_suggestions = (lambda: (MEMO,)), True
+        with self.assertLogs("briefing_reader", level="INFO") as logs:
+            outcome = ask.plan(ROUTED_COMMAND + " (Ana Lima, Project sync)", live=self.task())
+        self.assertTrue(outcome.ok, outcome)
+        self.assertIsNotNone(outcome.research)
+        self.assertEqual(outcome.suggestion, "")
+        self.assertIn("Memory: a suggestion was dropped (research)", "\n".join(logs.output))
+        run = self.step(live.PLANNER_RUN)
+        item = next(item for item in run.items if item.text == "Note to remember")
+        self.assertEqual((item.status_text, item.note), ("DROPPED", "not offered (handed to web research)"))
+
+    def test_suggestions_asked_for_each_run(self) -> None:
+        on = [False]
+        ask = self.remembering({"say": "Ana runs it.", "lines": [], "remember": [SUGGESTED]})
+        ask.memory_suggestions = lambda: on[0]                      # the app: off while memory.json is read-only
+        self.assertFalse(ask._suggestions_on())
+        outcome = ask.plan("who organizes the Project sync? Ana Lima, I think")
+        self.assertNotIn("remember", self.schema()["properties"])
+        self.assertEqual(outcome.suggestion, "")
+        on[0] = True
+        self.assertTrue(ask._suggestions_on())
+
+        def broken() -> bool:
+            raise RuntimeError("zq7memo")
+
+        ask.memory_suggestions = broken
+        self.assertFalse(ask._suggestions_on())
+
+    def test_logs_hold_no_note_or_suggestion(self) -> None:
+        ask = self.remembering({"say": "ok", "lines": [MOVE_LINE], "remember": ["Zq7memo Ana Lima leads the sync"]})
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+            outcome = ask.plan(COMMAND + " (Ana Lima)")
+        text = "\n".join(logs.output)
+        self.assertTrue(outcome.ok)
+        self.assertNotIn("zq7memo", text.casefold())
+        self.assertNotIn("deep work", text)
+        self.assertRegex(text, r"Ask: context of \d+ characters \(events \d+, threads \d+, addresses \d+, memory 1;")
+
+    def test_iso_1_memory_never_reaches_web_research(self) -> None:
+        for command, runs in ((FORCED_COMMAND, (stream("research_success"),)),
+                              (ROUTED_COMMAND, (plan_stream(WEB_PLAN), stream("research_success")))):
+            with self.subTest(command=command):
+                ask = self.make(*runs)
+                ask.memory = lambda: (MEMO, "Zq7memo2 Ana Lima is my lead (ana.zq7@example.org)")
+                ask.memory_suggestions = True
+                outcome = ask.plan(command, live=self.task())
+                self.assertTrue(outcome.ok, outcome)
+                research = self.runner.started[-1]
+                for marker in ("zq7memo", "deep work", "ana.zq7", "<memory>", "remember"):
+                    self.assertNotIn(marker, research.stdin.casefold())
+                    self.assertNotIn(marker, " ".join(research.argv).casefold())
+                    self.assertNotIn(marker, " ".join(f"{k}={v}" for k, v in research.env.items()).casefold())
+                question = FORCED_QUESTION if command == FORCED_COMMAND else command
+                self.assertTrue(research.stdin.startswith(research_golden(question)[:60]))
+                given = next(step for step in self.stream.snapshot()[0].steps if step.kind == live.RESEARCH_INPUT)
+                self.assertIn("memory notes, follow-ups", {f.label: f.value for f in given.fields}["Not given"])
+                if command == ROUTED_COMMAND:
+                    self.assertIn("<memory>", self.stdin(0))      # the planner did get them
+
+    def test_the_dry_run_and_the_command_line(self) -> None:
+        from briefing_reader.memory import MEMORY_FILE, SOURCE_TOLD, MemoryStore
+
+        self.write_config(CONFIG + "\n[productivity]\nenabled = true\n")
+        store = MemoryStore(self.config.data_dir / MEMORY_FILE)
+        store.add(MEMO, source=SOURCE_TOLD)
+        raw = (self.config.data_dir / MEMORY_FILE).read_bytes()
+        notes = commands.cli_memory(self.config)
+        self.assertIsNotNone(notes)
+        assert notes is not None
+        self.assertEqual(notes(), (MEMO,))
+        self.make()
+        environ = dict(self.environ, JARVIS_CLAUDE_EXE=str(self.exe.path))
+        out = io.StringIO()
+        self.assertEqual(commands.ask_dry_run(COMMAND, self.config, out, briefing=None, environ=environ,
+                                              runner=self.runner, sources=self.sources), 0)
+        text = out.getvalue()
+        self.assertIn(f"- [note: {len(MEMO)} characters]\n</memory>\n<command>", text)
+        self.assertNotIn("Zq7memo", text)
+        self.assertNotIn("remember", text.split("Command line", 1)[1])   # the command line never suggests
+        self.assertEqual((self.config.data_dir / MEMORY_FILE).read_bytes(), raw)   # read-only
+        never = AssertionError("no Ask, dry run or briefing for a memory shortcut")
+        for typed, words in (("remember that the lab opens at 9", "nothing was saved."),
+                             ("forget about the lab", "nothing was changed."), ("show my memory", "(MEMORY tab).")):
+            with self.subTest(typed=typed), \
+                    mock.patch.object(commands, "ask_once", side_effect=never), \
+                    mock.patch.object(commands, "ask_dry_run", side_effect=never), \
+                    mock.patch.object(commands, "cli_briefing", side_effect=never):
+                args = type("Args", (), {"ask_check": False, "ask_text": typed, "ask_dry_run": False,
+                                         "from_file": None})()
+                out = io.StringIO()
+                self.assertEqual(commands.run(args, self.config, out), 2)
+                self.assertTrue(out.getvalue().startswith("Notes are kept in the app (MEMORY tab)"))
+                self.assertTrue(out.getvalue().strip().endswith(words))
+        self.assertEqual(MemoryStore(self.config.data_dir / MEMORY_FILE).entries()[0].text, MEMO)
+        self.write_config(CONFIG)                                    # the bundle off: no notes, no shortcut
+        self.assertIsNone(commands.cli_memory(self.config))
+
+    def test_the_command_line_takes_a_too_deep_memory_file_as_unreadable(self) -> None:
+        from briefing_reader.memory import MEMORY_FILE
+
+        self.write_config(CONFIG + "\n[productivity]\nenabled = true\n")
+        path = self.config.data_dir / MEMORY_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = b'{"version": 1, "entries": ' + b"[" * 100_000 + b"]" * 100_000 + b"}"
+        path.write_bytes(raw)
+        with self.assertLogs("briefing_reader.memory", level="WARNING"):
+            notes = commands.cli_memory(self.config)                 # never a crash: no notes
+        assert notes is not None
+        self.assertEqual(notes(), ())
+        self.assertEqual(path.read_bytes(), raw)
 
 
 if __name__ == "__main__":

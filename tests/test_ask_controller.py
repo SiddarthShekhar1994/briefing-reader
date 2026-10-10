@@ -399,6 +399,86 @@ class AskControllerTests(unittest.TestCase):
         self.assertFalse(c.ask.busy)
 
 
+MEMORY_ON = "\n[productivity]\nenabled = true\n"
+
+
+class MemoryRouteControllerTests(unittest.TestCase):
+    """The productivity bundle's typed memory shortcuts: handled at once by the app (no planner run,
+    no caps, no askStarted, no job), only while the bar is idle; "web:" always wins."""
+
+    def make(self, *runs, **kwargs) -> AppHarness:
+        app = AppHarness(self, runs=runs, config_extra=MEMORY_ON, **kwargs)
+        app.reading()
+        app.c.ask.start()
+        self.assertTrue(wait_for(lambda: app.c.ask.ready is not None), "readiness checked")
+        return app
+
+    def test_memory_routes_run_nothing(self) -> None:
+        app = self.make()
+        c = app.c
+        started: list[int] = []
+        routes: list[str] = []
+        c.ask.askStarted.connect(lambda seq, _text: started.append(seq))
+        c.ask.memoryRequested.connect(lambda found, _text: routes.append(found.kind))
+        caps_before = c.ask.caps
+        for text in ("remember that the lab opens at 9", "forget about the lab", "what do you remember?"):
+            submit(c, text)
+        self.assertEqual(routes, ["memory_save", "memory_forget", "memory_show"])
+        self.assertEqual(started, [])
+        self.assertFalse(app.factory.runner.started)              # no planner run
+        self.assertFalse(c.ask.busy)
+        self.assertIs(c.ask.caps, caps_before)                     # nothing counted or checked
+        self.assertEqual(app.factory.planner.usage.counts(NOW), (0, 0))
+        self.assertEqual(c.window.reading.command_bar.text(), "")
+
+    def test_web_wins_and_remember_to_stays_an_ask(self) -> None:
+        app = self.make(stream("research_success"), plan())
+        c = app.c
+        routes: list[str] = []
+        kinds: list[str] = []
+        c.ask.memoryRequested.connect(lambda found, _text: routes.append(found.kind))
+        c.ask.askStarted.connect(lambda _seq, _text: kinds.append(c.ask.running_kind))
+        submit(c, "web: remember that x")
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        submit(c, "remember to call Ana")
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        self.assertEqual(kinds, [live.TASK_WEB, live.TASK_ASK])
+        self.assertEqual(routes, [])
+
+    def test_while_a_request_runs_the_bar_reaches_no_route(self) -> None:
+        gate = threading.Event()
+        app = self.make(GatedProcess(plan(), gate))
+        c = app.c
+        bar = c.window.reading.command_bar
+        routes: list[str] = []
+        c.ask.memoryRequested.connect(lambda found, _text: routes.append(found.kind))
+        submit(c)
+        self.assertTrue(c.ask.busy and bar.is_running())
+        self.assertTrue(bar.input.isReadOnly())
+        submitted: list[str] = []
+        bar.submitted.connect(submitted.append)
+        bar.input.setText("remember that the lab opens at 9")      # as if typed: read-only refuses keys
+        bar.input.returnPressed.emit()                             # Enter is dropped while running
+        settle()
+        self.assertEqual((submitted, routes), ([], []))
+        self.assertEqual(len(c.memory_store.entries()), 0)
+        gate.set()
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        self.assertEqual(len(app.factory.runner.started), 1)
+
+    def test_bundle_off_is_a_normal_ask(self) -> None:
+        app = AskControllerTests.make(self, plan())                # no [productivity]
+        c = app.c
+        self.assertIsNone(c.memory_store)
+        self.assertFalse(c.window.reading.memory_available())
+        kinds: list[str] = []
+        c.ask.askStarted.connect(lambda _seq, _text: kinds.append(c.ask.running_kind))
+        submit(c, "remember that the lab opens at 9")
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        self.assertEqual(kinds, [live.TASK_ASK])
+        self.assertEqual(len(app.factory.runner.started), 1)
+
+
 class DefaultPlannerTests(unittest.TestCase):
 
     def test_the_apps_planner_reads_mail_on_the_shared_accounts_and_runs_nothing(self) -> None:

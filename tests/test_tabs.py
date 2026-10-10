@@ -235,6 +235,84 @@ class LiveTabStripTests(unittest.TestCase):
         self.assertFalse(strip.is_compact())
 
 
+class MemoryTabStripTests(unittest.TestCase):
+    """The productivity bundle's MEMORY tab: the 4th, hidden until set_memory_visible(True)."""
+
+    def strip(self, width: int = 500, *, visible: bool = True) -> hud.TabStrip:
+        strip = hud.TabStrip(live=True, memory=True)
+        self.addCleanup(strip.deleteLater)
+        strip.set_memory_visible(visible)
+        strip.resize(width, hud.TabStrip.HEIGHT)
+        strip.show()
+        settle()
+        return strip
+
+    def test_four_tabs_in_order(self) -> None:
+        strip = self.strip()
+        self.assertTrue(strip.has_memory())
+        self.assertEqual([strip.tab(index).text() for index in hud.TABS], ["Jarvis", "Briefing", "Live", "Memory"])
+        memory = strip.tab(hud.TAB_MEMORY)
+        self.assertEqual((memory.accessibleName(), memory.toolTip()), ("Memory notes", hud.MEMORY_TAB_TIP))
+        strip.tab(hud.TAB_JARVIS).setFocus(Qt.FocusReason.TabFocusReason)
+        for _ in range(4):
+            QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Right)
+        self.assertEqual(strip.current(), hud.TAB_MEMORY)
+        QTest.mouseClick(strip.tab(hud.TAB_BRIEFING), Qt.MouseButton.LeftButton)
+        QTest.mouseClick(memory, Qt.MouseButton.LeftButton)
+        self.assertEqual(strip.current(), hud.TAB_MEMORY)
+
+    def test_hidden_by_default_skipped_and_never_current(self) -> None:
+        strip = self.strip(visible=False)
+        self.assertFalse(strip.memory_visible())
+        self.assertFalse(strip.tab(hud.TAB_MEMORY).isVisible())
+        strip.set_current(hud.TAB_MEMORY)
+        self.assertEqual(strip.current(), hud.TAB_JARVIS)
+        strip.set_current(hud.TAB_LIVE)
+        strip.step(1)
+        self.assertEqual(strip.current(), hud.TAB_LIVE)          # Right skips the hidden tab
+        strip.set_memory_visible(True)
+        strip.step(1)
+        self.assertEqual(strip.current(), hud.TAB_MEMORY)
+        strip.set_memory_visible(False)                          # hidden while current: JARVIS instead
+        self.assertEqual(strip.current(), hud.TAB_JARVIS)
+        plain = hud.TabStrip(live=True)                          # no memory: nothing to show or set
+        self.addCleanup(plain.deleteLater)
+        plain.set_memory_visible(True)
+        plain.set_memory_unread(True)
+        self.assertFalse(plain.has_memory() or plain.memory_visible() or plain.memory_unread())
+
+    def test_unread_dot_while_another_tab_is_current(self) -> None:
+        strip = self.strip()
+        strip.set_memory_unread(True)
+        self.assertTrue(strip.memory_unread())
+        self.assertIn("new entries", strip.tab(hud.TAB_MEMORY).accessibleName())
+        strip.set_current(hud.TAB_MEMORY)
+        self.assertFalse(strip.memory_unread())                  # cleared when MEMORY becomes current
+        strip.set_memory_unread(True)
+        self.assertFalse(strip.memory_unread())                  # none while current
+
+    def test_compact_then_tight_when_four_do_not_fit(self) -> None:
+        strip = self.strip(500)
+        natural, compact = strip.natural_width(), strip.compact_width()
+        self.assertLess(compact, natural)
+        for width, expected in ((natural, (False, False)), (natural - 1, (True, False)), (compact, (True, False)),
+                                (compact - 1, (True, True))):
+            with self.subTest(width=width):
+                strip.resize(width, hud.TabStrip.HEIGHT)
+                settle()
+                self.assertEqual((strip.is_compact(), strip.is_tight()), expected)
+        strip.set_badge(True)
+        strip.set_unread(True)
+        strip.set_activity(hud.ACTIVITY_UNREAD)
+        strip.set_current(hud.TAB_BRIEFING)
+        strip.set_memory_unread(True)
+        settle()
+        right = max(strip.tab(index).geometry().right() for index in hud.TABS)
+        self.assertLessEqual(right, strip.width())               # every badge shown and still whole
+        strip.set_memory_visible(False)                          # three tabs: no longer tight
+        self.assertFalse(strip.is_tight())
+
+
 class ConversationLogTests(unittest.TestCase):
     def log(self, width: int = 320, height: int = 240) -> hud.ConversationLog:
         log = hud.ConversationLog()
@@ -675,6 +753,60 @@ class ReadingViewTabTests(unittest.TestCase):
         QTest.keyClick(window, Qt.Key.Key_3, Qt.KeyboardModifier.ControlModifier)
         settle()
         self.assertEqual(seen[-1], hud.TAB_LIVE)
+
+    def test_ctrl_4_and_the_memory_page(self) -> None:
+        window = self.window(False)
+        reading = window.reading
+        self.assertFalse(reading.memory_available())             # the bundle off: no MEMORY
+        keys = sorted(shortcut.key().toString() for shortcut in reading.findChildren(ui.QShortcut))
+        self.assertIn("Ctrl+4", keys)
+        window.activateWindow()
+        settle()
+        QTest.keyClick(window, Qt.Key.Key_4, Qt.KeyboardModifier.ControlModifier)
+        settle()
+        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+        reading.set_memory_available(True)
+        QTest.keyClick(window, Qt.Key.Key_4, Qt.KeyboardModifier.ControlModifier)
+        settle(4)
+        self.assertEqual(reading.current_tab(), hud.TAB_MEMORY)
+        self.assertTrue(reading.memory_view.isVisible())
+        self.assertFalse(reading.conversation.isVisible())
+        self.assertTrue(reading.strip_caption.isVisible())
+        self.assertIn(reading.strip_caption.text(), (ui.MEMORY_CAPTION, ui.MEMORY_CAPTION_SHORT))
+        self.assertFalse(reading.sections_button.isVisible())
+        self.assertIsInstance(reading.memory_page, ui._TabPage)
+        self.assertIs(ui._LivePage, ui._TabPage)
+        window.resize(ui.READING_SIZE)
+        settle(6)
+        self.assertEqual(reading.strip_caption.text(), ui.MEMORY_CAPTION)
+        reading.set_memory_available(False)
+        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+
+    def test_four_tabs_whole_and_the_row_put_at_every_size(self) -> None:
+        window = self.window(False)
+        reading = window.reading
+        reading.set_memory_available(True)
+        reading.set_header("AM briefing", "Updated today at 10:04 AM")
+        reading.conversation.add(hud.ROLE_JARVIS, "Good afternoon, sir.", when=WHEN)
+        window.setMinimumSize(700, 500)
+        for size in ((830, 560), (900, 600), (1120, 700)):
+            with self.subTest(size=size):
+                window.resize(*size)
+                settle(8)
+                tops = set()
+                for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_LIVE, hud.TAB_MEMORY, hud.TAB_JARVIS):
+                    reading.set_tab(index)
+                    settle(6)
+                    tops.add(reading.tabs.mapTo(reading, QPoint(0, 0)).y())
+                    self.assertEqual(reading.tabs.height(), hud.TabStrip.HEIGHT)
+                self.assertEqual(len(tops), 1, tops)
+                panel_right = reading.transcript_panel.mapTo(reading, QPoint(reading.transcript_panel.width(), 0)).x()
+                for index in hud.TABS:
+                    tab = reading.tabs.tab(index)
+                    self.assertTrue(tab.isVisible())
+                    self.assertGreaterEqual(tab.width(), tab.sizeHint().width())
+                    self.assertLessEqual(tab.mapTo(reading, QPoint(tab.width(), 0)).x(), panel_right)
+        window.hide()
 
     def test_speech_line_falls_back_to_ready_to_view_while_new(self) -> None:
         window = self.window(False)

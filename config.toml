@@ -269,3 +269,40 @@ pictures = true
 # shown. That is an ordinary page visit from this PC: the site sees your IP
 # address. false: no page is opened; the research works the same.
 page_snapshots = true
+
+[productivity]
+# Plan my day, meeting prep, follow-ups and memory. Needs [ask] enabled (and, for mail,
+# [ask] read_mail plus "gmail_read" on the account). Offers never act: nothing is read from
+# your mail and no Claude request runs until you click. Off here; turn it on for this PC with
+# JARVIS_PRODUCTIVITY_ENABLED=true in .env.
+enabled = false
+memory = true                 # the MEMORY tab, "remember that ...", notes given to the planner
+memory_suggestions = true     # Jarvis may suggest a note; kept only when you click
+max_memory = 100              # notes kept (10..200)
+plan_offer = true             # "Shall I plan your day, sir?" after the AM briefing
+plan_offer_until = "13:30"    # no plan offer after this time
+day_start = "08:00"           # plan blocks only between these times
+day_end = "22:00"
+plan_max_blocks = 5           # 1..8
+plan_min_free_minutes = 60    # 30..240: an offer, and a plan for today, need this much free time
+prep_offers = true            # offer a brief before a meeting with guests
+prep_lead_minutes = 15        # 5..60
+prep_offers_per_day = 8       # 0..20
+prep_max_offer_guests = 8     # offers only for meetings with 1..N other guests (1..50; typed prep: any)
+prep_max_guests = 5           # guests whose latest thread is searched (1..10)
+prep_lookback_days = 14       # 3..14: a prep search looks back this many days (never past the 14-day window)
+prep_other_accounts = false   # also search your other accounts for a guest with no thread on the meeting's
+prep_skip_words = ["focus", "lunch", "commute", "gym", "break", "hold", "ooo", "out of office"]
+prep_speak_minimized = true   # say a prep offer (time only) while Jarvis is minimized
+minimized_check = true        # while minimized: one read of that hour of your calendar before a prep offer
+followups = true              # list follow-ups from the last days' mail headers (never the text)
+scan_days = 14                # 3..14
+scan_every_minutes = 30       # 15..240, only while the reading screen is visible
+scan_max_threads = 150        # per account and scan (20..300)
+waiting_after_hours = 20      # 1..72
+owed_after_days = 3           # 1..13
+followups_shown = 6           # rows per kind before "+N more" (1..20)
+quiet_from = "22:00"          # no spoken offers from ...
+quiet_until = "08:00"         # ... until (offers still appear as text)
+max_runs_per_day = 20         # plans, briefs and drafts (each is also an Ask run), 1..60
+reserve_ask_runs = 3          # Ask runs kept free each hour for your own requests, 0..10

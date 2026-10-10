@@ -87,7 +87,8 @@ UNDO_SECONDS_RANGE = (3, 60)
 
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
-                 "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live")
+                 "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
+                 "productivity")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -327,6 +328,60 @@ class LiveConfig:
     page_snapshots: bool = True    # pictures of the pages a web research read: the only part that uses the network
 
 
+# The productivity bundle ([productivity]): plan my day, meeting prep, follow-ups and memory. Off in
+# the public config.toml; JARVIS_PRODUCTIVITY_ENABLED (e.g. in the gitignored .env) turns it on per PC.
+PRODUCTIVITY_RANGES = {"max_memory": (10, 200), "plan_max_blocks": (1, 8), "plan_min_free_minutes": (30, 240),
+                       "prep_lead_minutes": (5, 60), "prep_offers_per_day": (0, 20), "prep_max_offer_guests": (1, 50),
+                       "prep_max_guests": (1, 10), "prep_lookback_days": (3, 14), "scan_days": (3, 14),
+                       "scan_every_minutes": (15, 240), "scan_max_threads": (20, 300), "waiting_after_hours": (1, 72),
+                       "owed_after_days": (1, 13), "followups_shown": (1, 20), "max_runs_per_day": (1, 60),
+                       "reserve_ask_runs": (0, 10)}
+PRODUCTIVITY_TIMES = ("plan_offer_until", "day_start", "day_end", "quiet_from", "quiet_until")
+DEFAULT_PREP_SKIP_WORDS = ("focus", "lunch", "commute", "gym", "break", "hold", "ooo", "out of office")
+
+
+@dataclass(frozen=True)
+class ProductivityConfig:
+    """``[productivity]``: off by default; inert unless [ask] is on too. Bad values become the
+    default with a warning. Times are 24-hour "HH:MM"."""
+
+    enabled: bool = False
+    memory: bool = True                # the MEMORY tab, "remember that ...", notes given to the planner
+    memory_suggestions: bool = True    # Jarvis may suggest a note; kept only when you click
+    max_memory: int = 100              # notes kept (10..200)
+    plan_offer: bool = True            # "Shall I plan your day, sir?" after the AM briefing
+    plan_offer_until: str = "13:30"    # no plan offer after this time
+    day_start: str = "08:00"           # plan blocks only between these times
+    day_end: str = "22:00"
+    plan_max_blocks: int = 5           # 1..8
+    plan_min_free_minutes: int = 60    # 30..240
+    prep_offers: bool = True           # offer a brief before a meeting with guests
+    prep_lead_minutes: int = 15        # 5..60
+    prep_offers_per_day: int = 8       # 0..20
+    prep_max_offer_guests: int = 8     # 1..50
+    prep_max_guests: int = 5           # 1..10
+    prep_lookback_days: int = 14       # 3..14, never past scan_days
+    prep_other_accounts: bool = False
+    prep_skip_words: tuple[str, ...] = DEFAULT_PREP_SKIP_WORDS   # casefolded
+    prep_speak_minimized: bool = True
+    minimized_check: bool = True
+    followups: bool = True
+    scan_days: int = 14                # 3..14
+    scan_every_minutes: int = 30       # 15..240
+    scan_max_threads: int = 150        # 20..300
+    waiting_after_hours: int = 20      # 1..72
+    owed_after_days: int = 3           # 1..13
+    followups_shown: int = 6           # 1..20
+    quiet_from: str = "22:00"
+    quiet_until: str = "08:00"
+    max_runs_per_day: int = 20         # 1..60
+    reserve_ask_runs: int = 3          # 0..10
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.prep_skip_words, tuple):
+            object.__setattr__(self, "prep_skip_words", tuple(self.prep_skip_words))
+
+
 @dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
@@ -354,6 +409,7 @@ class Config:
     assistant: AssistantConfig = field(default_factory=AssistantConfig)
     live: LiveConfig = field(default_factory=LiveConfig)
     research: ResearchConfig = field(default_factory=ResearchConfig)
+    productivity: ProductivityConfig = field(default_factory=ProductivityConfig)
 
     @property
     def notion_url(self) -> str:
@@ -476,6 +532,7 @@ def load_config(project_root: Path | None = None, *,
         assistant=_parse_assistant(doc),
         live=_parse_live(doc),
         research=_parse_research(doc, environ),
+        productivity=_parse_productivity(doc, environ),
     )
 
 
@@ -968,6 +1025,43 @@ def _parse_research(doc: Mapping[str, Any], environ: Mapping[str, str] | None = 
         model=r.string("model", d.model, pattern=_MODEL_RE),
         **numbers,
     )
+
+
+PRODUCTIVITY_ENABLED_ENV = "JARVIS_PRODUCTIVITY_ENABLED"
+_MIN_DAY_MINUTES = 60   # day_end must be more than this after day_start
+
+
+def _minutes(text: str) -> int:
+    hours, _, minutes = text.partition(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def _parse_productivity(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> ProductivityConfig:
+    """``[productivity]`` from config.toml; ``JARVIS_PRODUCTIVITY_ENABLED`` (e.g. in the gitignored
+    ``.env``) overrides ``enabled`` both ways, like JARVIS_ASK_ENABLED."""
+    d = ProductivityConfig()
+    r = _TableReader(doc, "productivity", _field_names(ProductivityConfig))
+    numbers = {key: r.integer(key, getattr(d, key), low, high) for key, (low, high) in PRODUCTIVITY_RANGES.items()}
+    times = {key: r.time_of_day(key, getattr(d, key)) for key in PRODUCTIVITY_TIMES}
+    flags = {key: r.boolean(key, getattr(d, key))
+             for key in ("memory", "memory_suggestions", "plan_offer", "prep_offers", "prep_other_accounts",
+                         "prep_speak_minimized", "minimized_check", "followups")}
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, PRODUCTIVITY_ENABLED_ENV,
+                                "productivity.enabled")
+    skip: list[str] = []
+    for word in r.names("prep_skip_words", d.prep_skip_words):
+        folded = " ".join(word.casefold().split())
+        if folded and folded not in skip:
+            skip.append(folded)
+    if _minutes(times["day_end"]) <= _minutes(times["day_start"]) + _MIN_DAY_MINUTES:
+        logger.warning("config.toml: productivity.day_end (%s) must be more than an hour after day_start (%s); "
+                       "using %s-%s", times["day_end"], times["day_start"], d.day_start, d.day_end)
+        times["day_start"], times["day_end"] = d.day_start, d.day_end
+    if numbers["prep_lookback_days"] > numbers["scan_days"]:
+        logger.warning("config.toml: productivity.prep_lookback_days = %d is more than scan_days; using %d",
+                       numbers["prep_lookback_days"], numbers["scan_days"])
+        numbers["prep_lookback_days"] = numbers["scan_days"]
+    return ProductivityConfig(enabled=enabled, prep_skip_words=tuple(skip), **flags, **times, **numbers)
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

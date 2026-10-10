@@ -68,6 +68,8 @@ LINE_CAP = 12000
 QUERY_CAP = 200
 WHY_CAP = 200
 WEB_QUESTION_CAP = 200
+REMEMBER_CAP = 160                 # one suggested note (cli.REMEMBER_PROPERTY)
+REMEMBER_ITEMS = 1
 ACCOUNT_CAP = 24
 KIND_PREFIXES = ("Calendar:", "Email:", "Reply:", "RSVP:", "Move:", "Cancel:", "Todo:", "Open:", "Slack:",
                  "Share:")
@@ -149,6 +151,7 @@ class Plan:
     search: MailSearch | None = None
     via_fallback: bool = False   # read from the result text (StructuredOutput was not available)
     web: WebRequest | None = None   # web_research (only when the run was allowed to ask for it)
+    remember: tuple[str, ...] = ()  # a suggested note (only when the run was allowed to suggest one)
 
 
 @dataclass(frozen=True)
@@ -355,9 +358,20 @@ def _web_request(wanted: Any) -> WebRequest | None:
     return WebRequest(question, _one_line(why)) if question else None
 
 
-def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallback: bool = False) -> Plan | None:
+def _remember(wanted: Any) -> tuple[str, ...] | None:
+    """A ``remember`` value as the schema allows it (a list of at most one string of at most 160
+    characters; empty ones dropped); None when it does not fit (the whole answer is then garbled)."""
+    if not isinstance(wanted, list) or len(wanted) > REMEMBER_ITEMS:
+        return None
+    if not all(isinstance(item, str) and len(item) <= REMEMBER_CAP for item in wanted):
+        return None
+    return tuple(text for text in (_one_line(item) for item in wanted) if text)
+
+
+def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallback: bool = False,
+               allow_remember: bool = False) -> Plan | None:
     """structured_output (or the fallback's JSON) shape-checked locally; None when it does not fit.
-    ``gmail_search`` / ``web_research`` are read only when allowed (ignored otherwise)."""
+    ``gmail_search`` / ``web_research`` / ``remember`` are read only when allowed (ignored otherwise)."""
     if not isinstance(data, dict):
         return None
     say, question, lines = data.get("say", ""), data.get("question", ""), data.get("lines")
@@ -384,11 +398,18 @@ def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallba
         web = _web_request(data.get("web_research"))
         if web is _NOT_A_REQUEST:
             return None
+    remember: tuple[str, ...] = ()
+    if allow_remember and data.get("remember") is not None:
+        found = _remember(data.get("remember"))
+        if found is None:
+            return None
+        remember = found
     kept = tuple(line.strip() for line in lines if line.strip())
-    return Plan(say, question, kept, search, fallback, web)
+    return Plan(say, question, kept, search, fallback, web, remember)
 
 
-def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False) -> Plan | None:
+def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False,
+                   allow_remember: bool = False) -> Plan | None:
     """Only when init showed no StructuredOutput: the result text as JSON (code fences dropped),
     else its lines that start with a known kind."""
     text = text or ""
@@ -397,8 +418,8 @@ def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False) ->
         data = json.loads(fenced.group(1) if fenced else text)
     except ValueError:
         data = None
-    plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, fallback=True) \
-        if data is not None else None
+    plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, fallback=True,
+                      allow_remember=allow_remember) if data is not None else None
     if plan is not None:
         return plan
     found = [line.strip() for line in text.splitlines() if line.strip().startswith(KIND_PREFIXES)]
@@ -456,8 +477,10 @@ def result_failure(event: Mapping[str, Any], init: InitSummary | None, *,
 
 
 def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_search: bool, allow_web: bool = False,
-                now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> Plan | AskFailure:
-    """The result event -> Plan or AskFailure. A plan needs a checked init first."""
+                now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+                allow_remember: bool = False) -> Plan | AskFailure:
+    """The result event -> Plan or AskFailure. A plan needs a checked init first. ``remember`` is
+    read only with ``allow_remember`` (a run that was offered it in its schema)."""
     found = result_failure(event, init, now=now)
     if found is not None:
         return found
@@ -465,11 +488,11 @@ def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_sea
     text = event.get("result") if isinstance(event.get("result"), str) else ""
     data = event.get("structured_output")
     if data is not None:
-        plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web)
+        plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember)
         return plan if plan is not None else failure(GARBLED, "shape")
     if init.structured_tool:
         return failure(GARBLED, "no_structured_output")
-    plan = _fallback_plan(text, allow_search=allow_search, allow_web=allow_web)
+    plan = _fallback_plan(text, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember)
     return plan if plan is not None else failure(GARBLED, "fallback")
 
 
@@ -513,12 +536,14 @@ def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mappin
                 clock: Callable[[], float] = time.monotonic, init_timeout_s: float = INIT_TIMEOUT_S,
                 poll_s: float = POLL_S,
                 now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
-                progress: Progress | None = None, capture: bool = False, allow_web: bool = False) -> RunResult:
+                progress: Progress | None = None, capture: bool = False, allow_web: bool = False,
+                allow_remember: bool = False) -> RunResult:
     """One planner run (run_cli with check_init, check_event and read_result). ``allow_search`` /
-    ``allow_web``: the run may ask to read mail / for web research."""
+    ``allow_web`` / ``allow_remember``: the run may ask to read mail / for web research / suggest a
+    note to remember."""
     return run_cli(runner, argv, prompt, env=env, cwd=cwd, timeout_s=timeout_s,
                    read=lambda event, init: read_result(event, init, allow_search=allow_search, allow_web=allow_web,
-                                                        now=now),
+                                                        now=now, allow_remember=allow_remember),
                    cancel=cancel, clock=clock, init_timeout_s=init_timeout_s, poll_s=poll_s, now=now,
                    progress=progress, capture=capture)
 

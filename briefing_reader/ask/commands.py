@@ -15,6 +15,11 @@
                                      --ask-dry-run the exact text the research would get and its
                                      command line
 
+With the productivity bundle's memory on ([productivity] enabled and memory), --ask-text gives the
+planner the owner's notes like the app does, from memory.json opened read-only (the dry run shows
+them as sizes); "remember that ..." (and "forget that ...", "show my memory") is the app's: the
+command line prints so and exits 2, nothing saved or changed.
+
 These print to the console only. The log gets what the app logs anyway (kinds, counts, durations):
 never the request, the context, the planner's text or anything from the web.
 """
@@ -36,6 +41,7 @@ from .context import BriefingContext
 from .planner import AskPlanner, ClaudeEngine, GoogleSources, Readiness, ResearchEngine, briefing_from_page
 from .research import forced_question
 from .research_validate import steps_words
+from .routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags, route
 from .usage import KIND_RESEARCH, USAGE_FILE, UsageLog
 
 logger = logging.getLogger(__name__)
@@ -44,6 +50,34 @@ ACTIONS_FILE = "actions.json"   # as ui.ACTIONS_FILE (ui imports Qt; this module
 STAGE_WORDS = {"context": "Reading your calendar...", "planning": "Planning (uses your Claude plan)...",
                "mail": "Reading your mail...", "planning_again": "Planning with your mail (uses your Claude plan)...",
                "research": "Searching the web (uses your Claude plan)..."}
+MEMORY_ROUTE_WORDS = {ROUTE_MEMORY_SAVE: "Notes are kept in the app (MEMORY tab); nothing was saved.",
+                      ROUTE_MEMORY_FORGET: "Notes are kept in the app (MEMORY tab); nothing was changed.",
+                      ROUTE_MEMORY_SHOW: "Notes are kept in the app (MEMORY tab)."}
+MEMORY_ROUTE_EXIT = 2
+
+
+def memory_on(config: Config) -> bool:
+    """The productivity bundle's memory is on ([productivity] enabled and memory, with [ask] on)."""
+    productivity = getattr(config, "productivity", None)
+    return bool(config.ask.enabled and getattr(productivity, "enabled", False)
+                and getattr(productivity, "memory", False))
+
+
+def cli_memory(config: Config) -> Callable[[], tuple[str, ...]] | None:
+    """The owner's notes for a command-line Ask: memory.json opened read-only (never written), or
+    None while memory is off."""
+    if not memory_on(config):
+        return None
+    from ..memory import MEMORY_FILE, MemoryStore
+
+    store = MemoryStore(config.data_dir / MEMORY_FILE, read_only=True,
+                        max_entries=config.productivity.max_memory)
+    return lambda: store.prompt_notes()[0]
+
+
+def _with_memory(planner: AskPlanner, config: Config) -> AskPlanner:
+    planner.memory = cli_memory(config)   # never memory_suggestions: nothing could be saved here
+    return planner
 
 
 def google_sources(config: Config) -> GoogleSources:
@@ -175,7 +209,8 @@ def ask_dry_run(text: str, config: Config, out: TextIO, *, briefing: BriefingCon
     planner = AskPlanner(config, engine, sources if sources is not None else google_sources(config))
     question = forced_question(text)
     if question is not None:
-        return _research_dry_run(planner, question, out)
+        return _research_dry_run(planner, question, out)   # web research never gets the notes
+    _with_memory(planner, config)
     dry = planner.dry_run(text, briefing=briefing)
     out.write("Ask Jarvis dry run (no Claude request was made; nothing was counted)\n")
     out.write("---- stdin (email text shown as counts) ----\n")
@@ -235,6 +270,8 @@ def ask_once(text: str, config: Config, out: TextIO, *, briefing: BriefingContex
     environ = os.environ if environ is None else environ
     engine = ClaudeEngine(config.ask, config.data_dir, runner=runner, environ=environ)
     planner = AskPlanner(config, engine, sources if sources is not None else google_sources(config), clock=now)
+    if forced_question(text) is None:
+        _with_memory(planner, config)   # web research never gets the notes (nor any other context)
     page_ids = [action.id for action in (briefing.pending if briefing else ())]
     outcome = planner.plan(text, briefing=briefing, page_ids=page_ids,
                            on_stage=lambda stage: out.write(STAGE_WORDS.get(stage, stage) + "\n"))
@@ -288,6 +325,11 @@ def run(args: Any, config: Config, out: TextIO | None) -> int:
             pass
     if args.ask_check:
         return ask_check(config, stream)
+    if forced_question(args.ask_text or "") is None:
+        found = route(args.ask_text or "", RouteFlags(memory=memory_on(config)))
+        if found.kind in MEMORY_ROUTE_WORDS:   # the app's MEMORY tab keeps notes: no Ask, nothing saved
+            stream.write(MEMORY_ROUTE_WORDS[found.kind] + "\n")
+            return MEMORY_ROUTE_EXIT
     now = datetime.now().astimezone()
     if forced_question(args.ask_text or "") is not None:   # web research: nothing is read, not even the briefing
         briefing = None

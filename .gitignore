@@ -31,6 +31,9 @@ token.json
 /runstate.json
 /accounts.json
 /recipients.json
+/memory.json
+/followups.json
+/prep_series.json
 *.log
 *.log.*
 *.bak

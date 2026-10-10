@@ -20,6 +20,9 @@
         askCancelled(int)            the Ask ``seq`` was cancelled: nothing was proposed
         chipChanged(str, str)        the header's ``claude`` chip: planner.CHIP_* and its tooltip
         mailSignInRequested(str)     the bar's link: sign this account in again so Ask may read its mail
+        memoryRequested(object, str) a typed memory shortcut (ask.routes: "remember that ...", "forget
+                                     that ...", "what do you remember?") and the words as typed: the app
+                                     handles it at once - no planner run, no caps, no askStarted
 
 The planner only proposes: its cards reach the app through ``outcomeReady`` and then go through the
 same click, undo countdown and executor.run_action path as the briefing's. ``live`` (the app's
@@ -30,6 +33,13 @@ gives the briefing as Ask may see it and the briefing cards' ids; ``blocked()`` 
 now (a Google sign-in is open). Nothing here logs the request, the planner's text, the context or an
 address: counts, kinds and durations only. One Ask at a time; a run that is cancelled or ends after
 shutdown proposes nothing.
+
+Typed routes (the productivity bundle, ``route_flags``): after the stop and empty checks and when the
+text does not start with "web:", ask.routes.route() decides; a memory route is handed to the app
+(``memoryRequested``) before the busy and blocked checks. The bar emits only while idle (it is
+read-only while a request runs), so in practice a memory route arrives when nothing runs; MEMORY's
+own Add field saves a note meanwhile. ``memory()`` (the notes the planner would get and how many
+were left out) adds "Memory given" to each Ask's "Your request" step.
 
 Web research: a request that starts with "web:" (or "research:") is a WEB task (live.TASK_WEB;
 ``running_kind``) whose "Your request" says nothing is read from the accounts; the command still
@@ -61,6 +71,7 @@ from .ask import planner as ask_planner
 from .ask.context import COMMAND_CAP
 from .ask.research import forced_question
 from .ask.research_validate import NO_ANSWER, cards_words, source_card_ids
+from .ask.routes import MEMORY_ROUTES, NO_ROUTE, RouteFlags, route
 from .ask.stream import CANCELLED, LIMIT, RESEARCH_CAP
 from .config import Config
 from .google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SIGNED_OUT, logged_alias
@@ -249,6 +260,7 @@ class AskController(QObject):
     askCancelled = Signal(int)
     chipChanged = Signal(str, str)
     mailSignInRequested = Signal(str)
+    memoryRequested = Signal(object, str)
 
     def __init__(self, config: Config, planner: Any, bar: hud.CommandBar, *,
                  context: Callable[[], tuple[Any, Sequence[str]]],
@@ -256,12 +268,16 @@ class AskController(QObject):
                  calendars: Mapping[str, Any] | None = None,
                  monotonic: Callable[[], float] = time.monotonic,
                  live: LiveStream | None = None,
+                 route_flags: Callable[[], RouteFlags] | None = None,
+                 memory: Callable[[], tuple[Sequence[str], int]] | None = None,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self.planner = planner
         self.bar = bar
         self.live = live
+        self._route_flags = route_flags or RouteFlags
+        self._memory = memory                 # (the notes the planner gets, how many left out); None: off
         self.last_task_id = 0                  # the LIVE view task of the last finished Ask (0: none)
         self._context = context
         self._blocked = blocked
@@ -349,6 +365,12 @@ class AskController(QObject):
         text = " ".join((text or "").split())
         if self._stop.is_set():
             return
+        if text and forced_question(text) is None:   # "web:" always wins over a shortcut
+            found = self._route(text)
+            if found.kind in MEMORY_ROUTES:
+                logger.info("Ask: a typed %s shortcut (no planner run)", found.kind)
+                self.memoryRequested.emit(found, text)
+                return
         if self._running is not None:
             self._status(BUSY_TEXT if self._running.cancel_requested else
                          "Jarvis is already planning; wait or Cancel it", hud.TONE_WARN)
@@ -366,7 +388,8 @@ class AskController(QObject):
         briefing, page_ids = self._context()
         self._seq += 1
         kind = TASK_WEB if forced_question(text) is not None else TASK_ASK
-        task = _request_task(self.live, text, briefing, kind=kind)
+        task = _request_task(self.live, text, briefing, kind=kind,
+                             memory=self._memory_given() if kind == TASK_ASK else None)
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind)
         self._running = running
         logger.info("Ask %d started", running.seq)
@@ -379,6 +402,31 @@ class AskController(QObject):
         self._tick.start()
         # busyChanged(True) waits for the first stage: an Ask the planner refuses (Claude Code
         # missing or signed out, a limit) never pauses the briefing.
+
+    def _route(self, text: str) -> Any:
+        try:
+            return route(text, self._route_flags())
+        except Exception as exc:  # noqa: BLE001 - a shortcut that can't be read is a normal Ask
+            logger.warning("Ask: a typed shortcut could not be read (%s)", type(exc).__name__)
+            return NO_ROUTE
+
+    def _memory_given(self) -> tuple[Sequence[str], int] | None:
+        """(the notes the planner gets, how many were left out) for "Your request"; None while off."""
+        if self._memory is None:
+            return None
+        try:
+            return self._memory()
+        except Exception:  # noqa: BLE001 - only what the LIVE step shows
+            return None
+
+    def show_note(self, text: str, tone: str = hud.TONE_DONE, *, clear: bool = False) -> None:
+        """A memory shortcut's answer in the status line (``clear``: the typed words are done with).
+        Never while a request runs (the bar belongs to it then)."""
+        if self._running is not None or self._stop.is_set():
+            return
+        self._status(text, tone)
+        if clear:
+            self.bar.clear_input()
 
     def cancel(self) -> None:
         running = self._running
@@ -653,10 +701,22 @@ def _briefing_words(briefing: Any) -> str:
     return "today's briefing: " + ", ".join(parts)
 
 
+def memory_words(notes: Sequence[str], left_out: int) -> str:
+    """"3 notes, 412 characters (1 not sent: over the 4 KB limit)", or "none", for "Memory given"."""
+    if not notes and not left_out:
+        return "none"
+    text = f"{_plural(len(notes), 'note')}, {sum(len(note) for note in notes):,} characters"
+    if left_out:
+        text += f" ({left_out} not sent: over the 4 KB limit)"
+    return text
+
+
 @quiet(NO_TASK)
-def _request_task(live: LiveStream | None, text: str, briefing: Any, *, kind: str = TASK_ASK) -> LiveTask:
+def _request_task(live: LiveStream | None, text: str, briefing: Any, *, kind: str = TASK_ASK,
+                  memory: tuple[Sequence[str], int] | None = None) -> LiveTask:
     """A new Ask's LIVE view task and its "Your request" step (NO_TASK without the LIVE view).
-    ``kind`` TASK_WEB: a "web:" request (web research only: nothing is read from the accounts)."""
+    ``kind`` TASK_WEB: a "web:" request (web research only: nothing is read from the accounts).
+    ``memory``: (the notes the planner gets, how many left out) while memory is on."""
     if live is None:
         return NO_TASK
     task = live.task(kind, text)
@@ -666,6 +726,8 @@ def _request_task(live: LiveStream | None, text: str, briefing: Any, *, kind: st
         fields = [("You typed", text), ("Mode", WEB_MODE_TEXT), ("Briefing given", WEB_BRIEFING_TEXT)]
     else:
         fields = [("You typed", text), ("Briefing given", _briefing_words(briefing))]
+        if memory is not None:
+            fields.append(("Memory given", memory_words(*memory)))
     step = task.step(ASK_REQUEST, "Your request", fields=fields)
     if len(text) > COMMAND_CAP:
         step.note(f"Jarvis uses the first {COMMAND_CAP} characters")

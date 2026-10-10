@@ -6792,6 +6792,9 @@ class ActivityLog(QScrollArea):
 TAB_JARVIS = 0
 TAB_BRIEFING = 1
 TAB_LIVE = 2
+TAB_MEMORY = 3                  # the productivity bundle's MEMORY tab (needs the LIVE tab's slot before it)
+TABS = (TAB_JARVIS, TAB_BRIEFING, TAB_LIVE, TAB_MEMORY)
+MEMORY_TAB_TIP = "Memory - notes kept on this PC"
 NEW_BADGE_TEXT = "NEW"
 _TAB_TEXT = "#8592a0"           # a tab that is not current (the step chips' "todo" text)
 ACTIVITY_UNREAD = "unread"      # the LIVE tab's dot: steps arrived while LIVE was not current
@@ -6825,12 +6828,14 @@ class TabButton(QAbstractButton):
     HEIGHT = 28
     _PAD = 12
     _PAD_COMPACT = 8
+    _PAD_TIGHT = 5          # four tabs that do not fit even compact (the 900 px window with MEMORY)
     _GAP = 7
+    _GAP_TIGHT = 5
     _DOT = 6
     _PILL_PAD = 5
     _PILL_HEIGHT = 15
 
-    def __init__(self, text: str, name: str, parent: QWidget | None = None) -> None:
+    def __init__(self, text: str, name: str, parent: QWidget | None = None, *, tip: str = "") -> None:
         super().__init__(parent)
         self.setText(text)
         self.setCheckable(True)
@@ -6842,11 +6847,13 @@ class TabButton(QAbstractButton):
         self._font = mono_font(11, 400, 0.08)
         self._badge_font = mono_font(9, 700, 0.06)
         self._name = name
+        self._tip = tip                 # the tooltip while no badge has one of its own
         self._new = False
         self._unread = False
         self._activity = ""
         self._badge_kinds: frozenset[str] = frozenset()   # the badges this tab can show (natural_width)
         self._compact = False
+        self._tight = False
         self._focus_visible = False
         self._update_accessible()
 
@@ -6891,11 +6898,17 @@ class TabButton(QAbstractButton):
     def is_unread(self) -> bool:
         return self._unread
 
-    def set_compact(self, compact: bool) -> None:
-        if bool(compact) != self._compact:
+    def set_compact(self, compact: bool, *, tight: bool = False) -> None:
+        """Narrower padding (and the NEW pill as a dot); ``tight`` narrower still (compact only)."""
+        tight = bool(tight) and bool(compact)
+        if bool(compact) != self._compact or tight != self._tight:
             self._compact = bool(compact)
+            self._tight = tight
             self.updateGeometry()
             self.update()
+
+    def is_tight(self) -> bool:
+        return self._tight
 
     def _update_accessible(self) -> None:
         name = self._name
@@ -6910,20 +6923,25 @@ class TabButton(QAbstractButton):
         elif self._unread:
             self.setToolTip("Jarvis added something here")
         else:
-            self.setToolTip(_ACTIVITY_TIPS.get(self._activity, ""))
+            self.setToolTip(_ACTIVITY_TIPS.get(self._activity, "") or getattr(self, "_tip", ""))
 
     # ---- geometry -------------------------------------------------------------
 
     def _pad(self) -> int:
+        if self._tight:
+            return self._PAD_TIGHT
         return self._PAD_COMPACT if self._compact else self._PAD
+
+    def _gap(self) -> int:
+        return self._GAP_TIGHT if self._tight else self._GAP
 
     def _badge_width(self) -> float:
         if self._new and not self._compact:
             return self._GAP + 2 * self._PILL_PAD + _text_advance(self._badge_font, NEW_BADGE_TEXT)
         if self._new:
-            return self._GAP + 8
+            return self._gap() + 8
         if self._unread or self._activity:
-            return self._GAP + self._DOT
+            return self._gap() + self._DOT
         return 0.0
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
@@ -6942,12 +6960,21 @@ class TabButton(QAbstractButton):
             badges.append(self._GAP + self._DOT)
         return math.ceil(2 * self._PAD + _text_advance(self._font, self.text().upper()) + max(badges))
 
+    def compact_width(self) -> int:
+        """The tab's width when compact (not tight), with the widest badge it can carry."""
+        badges = [0.0]
+        if BADGE_NEW in self._badge_kinds:
+            badges.append(self._GAP + 8)
+        if self._badge_kinds & {BADGE_UNREAD, BADGE_ACTIVITY}:
+            badges.append(self._GAP + self._DOT)
+        return math.ceil(2 * self._PAD_COMPACT + _text_advance(self._font, self.text().upper()) + max(badges))
+
     def badge_rect(self) -> QRectF:
         """Where the NEW pill / dot, the unread dot or the activity dot is painted (empty when
         there is none)."""
         if not (self._new or self._unread or self._activity):
             return QRectF()
-        x = self._pad() + _text_advance(self._font, self.text().upper()) + self._GAP
+        x = self._pad() + _text_advance(self._font, self.text().upper()) + self._gap()
         cy = (self.height() - 2) / 2
         if self._new and not self._compact:
             width = 2 * self._PILL_PAD + _text_advance(self._badge_font, NEW_BADGE_TEXT)
@@ -7037,7 +7064,10 @@ class TabStrip(QWidget):
     BRIEFING carries the NEW badge (``set_badge``), JARVIS the unread dot (``set_unread``; cleared
     when JARVIS becomes current). ``live=True`` adds the LIVE tab (``TAB_LIVE``, "Live steps"):
     ``set_live_visible`` shows or hides it (hidden, it is never current and Left / Right skip
-    it), ``set_activity`` its dot (cleared when LIVE becomes current). Below
+    it), ``set_activity`` its dot (cleared when LIVE becomes current). ``memory=True`` (with
+    ``live``) adds the MEMORY tab (``TAB_MEMORY``, "Memory notes"), hidden until
+    ``set_memory_visible(True)`` (the productivity bundle's memory), with its own unread dot
+    (``set_memory_unread``; cleared when MEMORY becomes current). Below
     ``max(COMPACT_BELOW, natural_width())`` px of width the tabs get narrower padding and the NEW
     pill becomes a dot (``set_compact`` sets it by hand); the natural width counts every badge,
     so a dot that appears never flips it.
@@ -7047,7 +7077,7 @@ class TabStrip(QWidget):
     HEIGHT = TabButton.HEIGHT
     COMPACT_BELOW = 220
 
-    def __init__(self, parent: QWidget | None = None, *, live: bool = False) -> None:
+    def __init__(self, parent: QWidget | None = None, *, live: bool = False, memory: bool = False) -> None:
         super().__init__(parent)
         self._tabs = [TabButton("Jarvis", "Jarvis conversation", self),
                       TabButton("Briefing", "Briefing transcript", self)]
@@ -7056,6 +7086,10 @@ class TabStrip(QWidget):
         if live:
             self._tabs.append(TabButton("Live", "Live steps", self))
             self._tabs[TAB_LIVE].set_badge_kinds((BADGE_ACTIVITY,))
+            if memory:
+                self._tabs.append(TabButton("Memory", "Memory notes", self, tip=MEMORY_TAB_TIP))
+                self._tabs[TAB_MEMORY].set_badge_kinds((BADGE_UNREAD,))
+                self._tabs[TAB_MEMORY].setVisible(False)   # shown by set_memory_visible(True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -7066,6 +7100,7 @@ class TabStrip(QWidget):
         self._current = TAB_JARVIS
         self._tabs[TAB_JARVIS].setChecked(True)
         self._compact = False
+        self._tight = False
         self._auto_compact = True
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(self.HEIGHT)
@@ -7076,6 +7111,9 @@ class TabStrip(QWidget):
     def has_live(self) -> bool:
         return len(self._tabs) > TAB_LIVE
 
+    def has_memory(self) -> bool:
+        return len(self._tabs) > TAB_MEMORY
+
     def current(self) -> int:
         return self._current
 
@@ -7083,7 +7121,7 @@ class TabStrip(QWidget):
         return 0 <= index < len(self._tabs) and not self._tabs[index].isHidden()
 
     def set_current(self, index: int) -> None:
-        if index not in (TAB_JARVIS, TAB_BRIEFING, TAB_LIVE) or not self._available(index):
+        if index not in TABS or not self._available(index):
             return
         self._tabs[index].setChecked(True)   # auto-exclusive: the other one unchecks
         if index == self._current:
@@ -7093,6 +7131,8 @@ class TabStrip(QWidget):
             self.set_unread(False)
         elif index == TAB_LIVE:
             self.set_activity("")
+        elif index == TAB_MEMORY:
+            self.set_memory_unread(False)
         self.currentChanged.emit(index)
 
     def step(self, delta: int, *, focus: bool = False) -> None:
@@ -7119,6 +7159,31 @@ class TabStrip(QWidget):
     def live_visible(self) -> bool:
         return self.has_live() and not self._tabs[TAB_LIVE].isHidden()
 
+    def set_memory_visible(self, visible: bool) -> None:
+        """Show or hide the MEMORY tab (the productivity bundle's memory); hidden while current,
+        JARVIS becomes current."""
+        if not self.has_memory():
+            return
+        tab = self._tabs[TAB_MEMORY]
+        tab.setVisible(bool(visible))
+        if not visible:
+            tab.set_unread(False)
+            if self._current == TAB_MEMORY:
+                self.set_current(TAB_JARVIS)
+        self._fit_compact()
+
+    def memory_visible(self) -> bool:
+        return self.has_memory() and not self._tabs[TAB_MEMORY].isHidden()
+
+    def set_memory_unread(self, unread: bool) -> None:
+        """The MEMORY tab's dot (a note saved or a suggestion arrived elsewhere); none while current."""
+        if self.has_memory():
+            self._tabs[TAB_MEMORY].set_unread(bool(unread) and self._current != TAB_MEMORY
+                                              and self.memory_visible())
+
+    def memory_unread(self) -> bool:
+        return self.has_memory() and self._tabs[TAB_MEMORY].is_unread()
+
     def set_activity(self, state: str) -> None:
         """The LIVE tab's dot (ACTIVITY_UNREAD / ACTIVITY_WORKING / ""); none while LIVE is current."""
         if self.has_live():
@@ -7130,6 +7195,10 @@ class TabStrip(QWidget):
     def natural_width(self) -> int:
         """The shown tabs' widths when not compact, each with its widest badge."""
         return sum(tab.natural_width() for tab in self._tabs if not tab.isHidden())
+
+    def compact_width(self) -> int:
+        """The shown tabs' widths when compact, each with its widest badge (narrower: tight)."""
+        return sum(tab.compact_width() for tab in self._tabs if not tab.isHidden())
 
     def set_badge(self, new: bool) -> None:
         self._tabs[TAB_BRIEFING].set_new(new)
@@ -7151,15 +7220,21 @@ class TabStrip(QWidget):
     def is_compact(self) -> bool:
         return self._compact
 
-    def _apply_compact(self, compact: bool) -> None:
+    def is_tight(self) -> bool:
+        """Compact and narrower still: the shown tabs do not fit even compact (four tabs, MEMORY)."""
+        return self._compact and self._tight
+
+    def _apply_compact(self, compact: bool, tight: bool = False) -> None:
         self._compact = bool(compact)
+        self._tight = bool(tight) and self._compact
         for tab in self._tabs:
-            tab.set_compact(self._compact)
+            tab.set_compact(self._compact, tight=self._tight)
 
     def _fit_compact(self, width: int | None = None) -> None:
         if self._auto_compact:
             width = self.width() if width is None else width
-            self._apply_compact(width < max(self.COMPACT_BELOW, self.natural_width()))
+            compact = width < max(self.COMPACT_BELOW, self.natural_width())
+            self._apply_compact(compact, compact and width < self.compact_width())
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -7391,6 +7466,591 @@ _ENTRY_TOP_GAP = 6     # a long entry followed from its top keeps this much room
 
 
 # --------------------------------------------------------------------------
+# MEMORY: the owner's notes kept on this PC (the productivity bundle)
+# --------------------------------------------------------------------------
+
+MEMORY_ADD_PLACEHOLDER = "Add a note..."
+MEMORY_ADD_TEXT = "Add"
+MEMORY_EDIT_TEXT = "Edit"
+MEMORY_DELETE_TEXT = "Delete"
+MEMORY_UNDO_TEXT = "Undo"
+MEMORY_SAVE_TEXT = "Save"
+MEMORY_DISMISS_TEXT = "Dismiss"
+MEMORY_SHOW_ALL_TEXT = "Show all"
+MEMORY_DELETED_TEXT = "Deleted."
+MEMORY_NOT_SENT_TEXT = "NOT SENT"
+MEMORY_NOT_SENT_TIP = "Past the 4 KB your Claude gets with each request: not sent until newer notes go"
+MEMORY_SUGGESTS_TITLE = "Jarvis suggests"
+MEMORY_NOTES_TITLE = "Your notes"
+MEMORY_EMPTY_TEXT = 'No notes yet. Add one above, or type "remember that ..." in the bar.'
+MEMORY_FILTER_TEXT = 'Showing notes with "{words}"'
+MEMORY_READ_ONLY_TEXT = ("memory.json can't be read, so Jarvis won't change it. Fix or delete the file, then "
+                         "restart Jarvis.")
+MEMORY_NOT_SAVED_TEXT = "Not saved to disk - kept for this session only."
+_MEMORY_EDIT_STYLE = ("QLineEdit {{ color: {text}; background: #030a10; border: 1px solid {border}; padding: 4px 6px;"
+                      " selection-background-color: {selection}; selection-color: {bright}; }}"
+                      " QLineEdit:focus {{ border: 1px solid {focus}; }}"
+                      " QLineEdit:disabled {{ color: {dim}; }}")
+
+
+@dataclass(frozen=True)
+class MemoryRowInfo:
+    """One note as MEMORY lists it (the controller's words; the page never reads memory.json)."""
+
+    id: str
+    text: str
+    meta: str                    # "TOLD . OCT 10" (+ " . EDITED")
+    sent: bool = True            # False: past the 4 KB prompt cap (NOT SENT)
+    deleted: bool = False        # the "Deleted. Undo" placeholder for 10 s after Delete
+
+    def __repr__(self) -> str:   # never the note
+        return f"MemoryRowInfo({self.id}, {len(self.text)} chars, deleted={self.deleted})"
+
+
+@dataclass(frozen=True)
+class SuggestionRowInfo:
+    """A note Jarvis suggested (pending: kept only on Save)."""
+
+    id: int
+    text: str
+
+    def __repr__(self) -> str:
+        return f"SuggestionRowInfo({self.id}, {len(self.text)} chars)"
+
+
+def _memory_edit_style() -> str:
+    return _MEMORY_EDIT_STYLE.format(text=TEXT_BODY, border=_qss_color(rgba(ACCENT, 0.35)),
+                                     selection=_qss_color(rgba(ACCENT, 0.32)), bright=TEXT_BRIGHT, focus=ACCENT,
+                                     dim=TEXT_DIM)
+
+
+def _holds_focus(widget: QWidget) -> bool:
+    """The keyboard focus is on ``widget`` or inside it."""
+    focused = QApplication.focusWidget()
+    return focused is not None and (focused is widget or widget.isAncestorOf(focused))
+
+
+def _memory_line_edit(placeholder: str = "") -> QLineEdit:
+    edit = QLineEdit()
+    edit.setFont(body_font(13))
+    edit.setPlaceholderText(placeholder)
+    edit.setMaxLength(400)   # longer than any note: a long one is refused with its own words
+    edit.setStyleSheet(_memory_edit_style())
+    return edit
+
+
+class _PlainWrapLabel(QLabel):
+    """A word-wrapped plain-text label that may also break inside a long word (an address), with
+    no memory of earlier texts (a reused row takes the height of its new text)."""
+
+    def __init__(self, text: str, font: QFont, color: str | QColor) -> None:
+        super().__init__()
+        self._plain = ""
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        self.setFont(font)
+        set_label_color(self, color)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - mirrors QLabel
+        self._plain = text or ""
+        self.setAccessibleName(self._plain)
+        super().setText(_with_soft_breaks(self._plain))
+        self.updateGeometry()
+
+    def text(self) -> str:  # noqa: D102 - mirrors QLabel
+        return self._plain
+
+
+class _MemoryEdit(QLineEdit):
+    """A row's inline edit field: Enter saves (``submitted``), Esc cancels (``cancelled``)."""
+
+    submitted = Signal()
+    cancelled = Signal()
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() == Qt.Key.Key_Escape and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            event.accept()
+            self.cancelled.emit()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            event.accept()
+            self.submitted.emit()
+            return
+        super().keyPressEvent(event)
+
+
+class _MemoryRow(QWidget):
+    """One note: its text (wrapped, selectable), then a meta line with Edit and Delete; while
+    editing, a field (Enter saves, Esc cancels); after Delete, "Deleted." with Undo. Why an Edit or
+    an Undo was not kept shows under the row (``set_refusal``). When a control the keyboard is on
+    goes away (Enter or Esc in the field, Delete, Undo), the row's control that takes its place gets
+    the focus, never a control of another note. Each button's accessible name says which note."""
+
+    editRequested = Signal(str)
+    editSubmitted = Signal(str, str)
+    editCancelled = Signal(str)
+    deleteRequested = Signal(str)
+    undoRequested = Signal(str)
+
+    def __init__(self, info: MemoryRowInfo) -> None:
+        super().__init__()
+        self._info = info
+        self._editing = False
+        self._read_only = False
+        self._refusal = ""
+        self.text_label = _PlainWrapLabel(info.text, body_font(13), TEXT_BODY)
+        self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.edit_field = _MemoryEdit()
+        self.edit_field.setFont(body_font(13))
+        self.edit_field.setMaxLength(400)
+        self.edit_field.setStyleSheet(_memory_edit_style())
+        self.edit_field.setAccessibleName("Change the note")
+        self.edit_field.hide()
+        self.edit_field.submitted.connect(lambda: self.editSubmitted.emit(self._info.id, self.edit_field.text()))
+        self.edit_field.cancelled.connect(lambda: self.editCancelled.emit(self._info.id))
+        self.meta_label = make_label(info.meta, mono_font(10, 400, 0.08), TEXT_DIM)
+        self.not_sent_label = make_label(MEMORY_NOT_SENT_TEXT, mono_font(10, 500, 0.08), AMBER)
+        self.not_sent_label.setToolTip(MEMORY_NOT_SENT_TIP)
+        self.edit_button = HudButton(MEMORY_EDIT_TEXT, LINK, compact=True)
+        self.delete_button = HudButton(MEMORY_DELETE_TEXT, LINK, compact=True)
+        self.undo_button = HudButton(MEMORY_UNDO_TEXT, LINK, compact=True)
+        self.edit_button.clicked.connect(lambda: self.editRequested.emit(self._info.id))
+        self.delete_button.clicked.connect(lambda: self.deleteRequested.emit(self._info.id))
+        self.undo_button.clicked.connect(lambda: self.undoRequested.emit(self._info.id))
+        self.refusal_label = make_label("", body_font(12), AMBER, wrap=True, name="memoryRowRefusal")
+        self.refusal_label.hide()
+        meta = QWidget()
+        flow = FlowLayout(meta, 10, 2)
+        for widget in (self.meta_label, self.not_sent_label, self.edit_button, self.delete_button, self.undo_button):
+            flow.addWidget(widget)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(self.text_label)
+        layout.addWidget(self.edit_field)
+        layout.addWidget(meta)
+        layout.addWidget(self.refusal_label)
+        self._apply()
+
+    def info(self) -> MemoryRowInfo:
+        return self._info
+
+    def set_info(self, info: MemoryRowInfo) -> None:
+        if info.id != self._info.id:
+            self._editing = False
+        if info.id != self._info.id or info.deleted != self._info.deleted:
+            self._refusal = ""
+        self._info = info
+        self._apply()
+
+    def editing(self) -> bool:
+        return self._editing
+
+    def set_editing(self, editing: bool, *, focus: bool = True) -> None:
+        """Open the field with the note's text, all selected (``focus``: and the keyboard on it), or
+        close it. Opening a field that is open keeps what the owner typed."""
+        editing = bool(editing) and not self._info.deleted and not self._read_only
+        if editing != self._editing:
+            if editing:
+                self.edit_field.setText(self._info.text)
+            self._editing = editing
+            self._refusal = ""
+            self._apply()
+        if editing and focus:
+            self.edit_field.setFocus(Qt.FocusReason.OtherFocusReason)
+            self.edit_field.selectAll()
+
+    def set_read_only(self, read_only: bool) -> None:
+        self._read_only = bool(read_only)
+        if self._read_only:
+            self._editing = False
+        self._apply()
+
+    def set_refusal(self, text: str) -> None:
+        """Why this note's Edit or Undo was not kept ("" hides it; it goes when the edit closes)."""
+        self._refusal = text or ""
+        self._apply()
+
+    def refusal(self) -> str:
+        return self._refusal
+
+    def _apply(self) -> None:
+        info = self._info
+        deleted = info.deleted
+        self.text_label.setText(MEMORY_DELETED_TEXT if deleted else info.text)
+        set_label_color(self.text_label, TEXT_DIM if deleted else TEXT_BODY)
+        self.meta_label.setText(info.meta)
+        self.meta_label.setVisible(not deleted)
+        self.not_sent_label.setVisible(not deleted and not info.sent)
+        self.refusal_label.setText(self._refusal)
+        self.refusal_label.setVisible(bool(self._refusal))
+        controls = {self.edit_field: self._editing,
+                    self.edit_button: not deleted and not self._editing and not self._read_only,
+                    self.delete_button: not deleted and not self._editing and not self._read_only,
+                    self.undo_button: deleted and not self._read_only}
+        held = next((widget for widget in controls if widget.hasFocus()), None)
+        # The new controls first: hiding the one the keyboard is on hands the focus to the next
+        # control in the chain, which must not be another note's.
+        for widget, visible in controls.items():
+            if visible:
+                widget.setVisible(True)
+        self.text_label.setVisible(not self._editing)
+        for widget, visible in controls.items():
+            if not visible:
+                widget.setVisible(False)
+        if held is not None and not controls[held]:
+            target = next((widget for widget in (self.edit_button, self.undo_button, self.delete_button)
+                           if controls[widget]), None)
+            if target is not None:
+                target.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.edit_button.setAccessibleName(f"{MEMORY_EDIT_TEXT} note: {info.text}")
+        self.delete_button.setAccessibleName(f"{MEMORY_DELETE_TEXT} note: {info.text}")
+        self.undo_button.setAccessibleName(f"{MEMORY_UNDO_TEXT} delete")
+        self.setAccessibleName(MEMORY_DELETED_TEXT if deleted else f"Note: {info.text}")
+
+
+class _SuggestionRow(QWidget):
+    """A suggested note with Save and Dismiss."""
+
+    saveRequested = Signal(int)
+    dismissRequested = Signal(int)
+
+    def __init__(self, info: SuggestionRowInfo) -> None:
+        super().__init__()
+        self._info = info
+        self.text_label = _PlainWrapLabel(info.text, body_font(13), TEXT_SOFT)
+        self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.save_button = HudButton(MEMORY_SAVE_TEXT, LINK, compact=True)
+        self.dismiss_button = HudButton(MEMORY_DISMISS_TEXT, LINK, compact=True)
+        self.save_button.clicked.connect(lambda: self.saveRequested.emit(self._info.id))
+        self.dismiss_button.clicked.connect(lambda: self.dismissRequested.emit(self._info.id))
+        links = QWidget()
+        flow = FlowLayout(links, 10, 2)
+        flow.addWidget(self.save_button)
+        flow.addWidget(self.dismiss_button)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(self.text_label)
+        layout.addWidget(links)
+        self._name()
+
+    def info(self) -> SuggestionRowInfo:
+        return self._info
+
+    def set_info(self, info: SuggestionRowInfo) -> None:
+        self._info = info
+        self.text_label.setText(info.text)
+        self._name()
+
+    def _name(self) -> None:
+        """Accessible names that say which suggestion a button acts on."""
+        text = self._info.text
+        self.setAccessibleName(f"Suggested note: {text}")
+        self.save_button.setAccessibleName(f"{MEMORY_SAVE_TEXT} suggested note: {text}")
+        self.dismiss_button.setAccessibleName(f"{MEMORY_DISMISS_TEXT} suggested note: {text}")
+
+
+class MemoryPage(QScrollArea):
+    """The MEMORY tab: the owner's notes, kept only on this PC (memory.json).
+
+    A status line (where the notes are kept, who gets them, how many and how much of the 4 KB
+    the planner gets), a banner while memory.json can't be read (nothing can change then) or a
+    write failed, the "Add a note..." field (Enter or Add; ``added(text)``; a refusal shows under
+    it, ``set_refusal``), JARVIS SUGGESTS (``set_suggestions``: Save / Dismiss), then the notes
+    newest first (``set_rows``: text, TOLD / SUGGESTED and the date, NOT SENT past the 4 KB, Edit
+    inline - Enter saves, Esc cancels - and Delete, after which the row reads "Deleted." with Undo
+    while the controller keeps it). ``set_filter(words)`` shows 'Showing notes with "Ana"' and
+    Show all (``filterCleared``). A plain view: the controller holds the notes and decides; the
+    page never reads or writes a file. Each note keeps its row widget across refreshes (an open
+    edit keeps its draft and focus); Tab goes through the page in the order it shows; a refused
+    Edit or Undo says why under its note. The Add field stays usable while an Ask runs (the
+    command bar is read-only then)."""
+
+    added = Signal(str)
+    edited = Signal(str, str)
+    deleted = Signal(str)
+    undoDelete = Signal(str)
+    suggestionSaved = Signal(int)
+    suggestionDismissed = Signal(int)
+    filterCleared = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        content = _transparent_scroll(self)
+        self._layout = QVBoxLayout(content)
+        self._layout.setContentsMargins(_CONVERSATION_MARGIN, 10, _CONVERSATION_MARGIN, 10)
+        self._layout.setSpacing(8)
+        self.status_label = make_label("", mono_font(10, 400, 0.02), TEXT_SUB, wrap=True, name="memoryStatus")
+        self.banner_label = make_label("", body_font(12), AMBER, wrap=True, name="memoryBanner")
+        self.banner_label.hide()
+        self.input = _memory_line_edit(MEMORY_ADD_PLACEHOLDER)
+        self.input.setAccessibleName("Add a note to Jarvis's memory")
+        self.input.returnPressed.connect(self._submit)
+        self.add_button = HudButton(MEMORY_ADD_TEXT, SECONDARY, compact=True)
+        self.add_button.clicked.connect(self._submit)
+        add_row = QHBoxLayout()
+        add_row.setContentsMargins(0, 0, 0, 0)
+        add_row.setSpacing(8)
+        add_row.addWidget(self.input, 1)
+        add_row.addWidget(self.add_button, 0)
+        self.refusal_label = make_label("", body_font(12), AMBER, wrap=True, name="memoryRefusal")
+        self.refusal_label.hide()
+        self.filter_label = make_label("", body_font(12), TEXT_SOFT, wrap=True, name="memoryFilter")
+        self.show_all_button = HudButton(MEMORY_SHOW_ALL_TEXT, LINK, compact=True)
+        self.show_all_button.clicked.connect(self._clear_filter)
+        self._filter_box = QWidget()
+        filter_layout = QVBoxLayout(self._filter_box)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(0)
+        filter_layout.addWidget(self.filter_label)
+        show_all_row = QHBoxLayout()
+        show_all_row.setContentsMargins(0, 0, 0, 0)
+        show_all_row.addWidget(self.show_all_button)
+        show_all_row.addStretch(1)
+        filter_layout.addLayout(show_all_row)
+        self._filter_box.hide()
+        self.suggests_title = make_label(MEMORY_SUGGESTS_TITLE.upper(), mono_font(10, 500, 0.14), ACCENT)
+        self._suggestion_box = QWidget()
+        self._suggestion_layout = QVBoxLayout(self._suggestion_box)
+        self._suggestion_layout.setContentsMargins(0, 0, 0, 4)
+        self._suggestion_layout.setSpacing(10)
+        self.notes_title = make_label(MEMORY_NOTES_TITLE.upper(), mono_font(10, 500, 0.14), TEXT_MUTED)
+        self._notes_box = QWidget()
+        self._notes_layout = QVBoxLayout(self._notes_box)
+        self._notes_layout.setContentsMargins(0, 0, 0, 0)
+        self._notes_layout.setSpacing(12)
+        self.empty_label = make_label(MEMORY_EMPTY_TEXT, body_font(13), TEXT_DIM, wrap=True, name="memoryEmpty")
+        # The notes get the room of the short panel: the banner (when there is one) and the Add field
+        # first, the status line (where the notes are kept, who gets them) last.
+        self._layout.addWidget(self.banner_label)
+        self._layout.addLayout(add_row)
+        for widget in (self.refusal_label, self._filter_box, self.suggests_title, self._suggestion_box,
+                       self.notes_title, self._notes_box, self.empty_label, self.status_label):
+            self._layout.addWidget(widget)
+        self._layout.addStretch(1)
+        self._rows: list[_MemoryRow] = []
+        self._suggestions: list[_SuggestionRow] = []
+        self._read_only = False
+        self._filter = ""
+        self._editing = ""
+        self.set_suggestions(())
+        self.set_rows(())
+
+    # ---- what the controller shows ----------------------------------------------------------------
+
+    def set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+
+    def status(self) -> str:
+        return self.status_label.text()
+
+    def set_banner(self, text: str) -> None:
+        """The read-only banner or the write warning ("" hides it); a new one is scrolled into view."""
+        new = bool(text) and (text != self.banner_label.text() or self.banner_label.isHidden())
+        self.banner_label.setText(text)
+        self.banner_label.setVisible(bool(text))
+        if new:
+            self.verticalScrollBar().setValue(0)
+
+    def banner(self) -> str:
+        return self.banner_label.text() if not self.banner_label.isHidden() else ""
+
+    def set_read_only(self, read_only: bool) -> None:
+        """memory.json can't be read: Add, Edit and Delete are off."""
+        self._read_only = bool(read_only)
+        self.input.setEnabled(not self._read_only)
+        self.add_button.setEnabled(not self._read_only)
+        for row in self._rows:
+            row.set_read_only(self._read_only)
+        for suggestion in self._suggestions:
+            suggestion.save_button.setEnabled(not self._read_only)
+        self.empty_label.setVisible(not self._rows and not self._filter and not self._read_only)
+        if self._read_only:
+            self._editing = ""
+
+    def read_only(self) -> bool:
+        return self._read_only
+
+    def set_refusal(self, text: str, entry_id: str = "") -> None:
+        """Why the last Add or Save was not kept, under the Add field ("" hides it); with
+        ``entry_id``, why that note's Edit or Undo was not kept, under the note (scrolled into view)."""
+        row = next((row for row in self._rows if row.info().id == entry_id), None) if entry_id else None
+        if row is not None:
+            row.set_refusal(text)
+            if text:
+                self.reveal(row.refusal_label)
+            return
+        self.refusal_label.setText(text)
+        self.refusal_label.setVisible(bool(text))
+
+    def refusal(self, entry_id: str = "") -> str:
+        """The refusal under the Add field (or under the note ``entry_id``); "" when none shows."""
+        if entry_id:
+            row = next((row for row in self._rows if row.info().id == entry_id), None)
+            return row.refusal() if row is not None else ""
+        return self.refusal_label.text() if not self.refusal_label.isHidden() else ""
+
+    def clear_input(self) -> None:
+        self.input.clear()
+
+    def set_filter(self, words: str) -> None:
+        """'Showing notes with "<words>"' and Show all ("" hides it); the controller passes the
+        matching rows."""
+        self._filter = " ".join(str(words or "").split())
+        self.filter_label.setText(MEMORY_FILTER_TEXT.format(words=self._filter) if self._filter else "")
+        self._filter_box.setVisible(bool(self._filter))
+
+    def filter_words(self) -> str:
+        return self._filter
+
+    def set_rows(self, rows: Sequence[MemoryRowInfo]) -> None:
+        """The notes, newest first. Each note keeps its own row widget whatever moves around it (a
+        note added above, a Deleted placeholder that goes), so an edit in progress keeps what the
+        owner typed, its cursor and its focus. When the row the keyboard is on goes, the row now
+        in its place takes the focus (never a field outside MEMORY's rows)."""
+        rows = tuple(rows)
+        focused = next((index for index, row in enumerate(self._rows) if _holds_focus(row)), None)
+        old: dict[str, _MemoryRow] = {}
+        for row in self._rows:
+            old.setdefault(row.info().id, row)
+        kept: list[_MemoryRow] = []
+        for info in rows:
+            row = old.pop(info.id, None)
+            if row is None:
+                row = self._make_row(info)
+            elif row.info() != info:
+                row.set_info(info)
+            kept.append(row)
+        for index, row in enumerate(kept):   # in order (a moved widget stays shown: no focus change)
+            if self._notes_layout.indexOf(row) != index:
+                self._notes_layout.removeWidget(row)
+                self._notes_layout.insertWidget(index, row)
+        lost_focus = focused is not None and self._rows[focused] not in kept
+        for row in old.values():
+            self._notes_layout.removeWidget(row)
+            row.hide()
+            row.deleteLater()
+        self._rows = kept
+        for row in self._rows:
+            row.set_read_only(self._read_only)
+            if row.info().id == self._editing and not row.editing():
+                row.set_editing(True, focus=False)
+            elif row.info().id != self._editing and row.editing():
+                row.set_editing(False)
+        if self._editing and not any(row.info().id == self._editing for row in self._rows):
+            self._editing = ""
+        if lost_focus and self._rows:
+            assert focused is not None
+            row = self._rows[min(focused, len(self._rows) - 1)]
+            target = next((button for button in (row.edit_button, row.undo_button) if not button.isHidden()), None)
+            if target is not None:
+                target.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._notes_box.setVisible(bool(rows))
+        self.notes_title.setVisible(bool(rows))
+        self.empty_label.setVisible(not rows and not self._filter and not self._read_only)
+        self._chain_tab_order()
+
+    def rows(self) -> list[_MemoryRow]:
+        return list(self._rows)
+
+    def row_infos(self) -> list[MemoryRowInfo]:
+        return [row.info() for row in self._rows]
+
+    def set_suggestions(self, rows: Sequence[SuggestionRowInfo]) -> None:
+        rows = tuple(rows)
+        _reuse_rows(self._suggestions, self._suggestion_layout, rows, self._make_suggestion)
+        self.suggests_title.setVisible(bool(rows))
+        self._suggestion_box.setVisible(bool(rows))
+        self._chain_tab_order()
+
+    def _chain_tab_order(self) -> None:
+        """Tab goes through MEMORY in the order it shows: Add, Show all, each suggestion's Save and
+        Dismiss, then each note's field and links (rows made later would otherwise come last in
+        the window's focus chain, after everything built after the page)."""
+        chain: list[QWidget] = [self.input, self.add_button, self.show_all_button]
+        for suggestion in self._suggestions:
+            chain += [suggestion.save_button, suggestion.dismiss_button]
+        for row in self._rows:
+            chain += [row.edit_field, row.edit_button, row.delete_button, row.undo_button]
+        for first, second in zip(chain, chain[1:]):
+            QWidget.setTabOrder(first, second)
+
+    def suggestion_rows(self) -> list[_SuggestionRow]:
+        return list(self._suggestions)
+
+    def edit_row(self, entry_id: str) -> None:
+        """Open a note's inline edit field (Edit), scrolled into view."""
+        if self._read_only:
+            return
+        self._editing = entry_id
+        for row in self._rows:
+            row.set_editing(row.info().id == entry_id)
+            if row.info().id == entry_id:
+                self.reveal(row.edit_field)
+
+    def reveal(self, widget: QWidget) -> None:
+        """Scroll ``widget`` (a row or its field) into view once the layout has placed it."""
+        def scroll() -> None:
+            if not (shiboken6.isValid(self) and shiboken6.isValid(widget) and widget.isVisibleTo(self)):
+                return
+            # Place the rows (and the field inside its row) now: a field just shown has no place yet.
+            for holder in (self.widget(), widget.parentWidget()):
+                layout = holder.layout() if holder is not None else None
+                if layout is not None:
+                    layout.activate()
+            # A field's own row (a QLineEdit would only bring its text cursor into view).
+            parent = widget.parentWidget()
+            target = parent if isinstance(parent, (_MemoryRow, _SuggestionRow)) else widget
+            self.ensureWidgetVisible(target, 0, 8)
+
+        scroll()
+        QTimer.singleShot(0, scroll)
+
+    def editing(self) -> str:
+        return self._editing
+
+    def stop_editing(self) -> None:
+        self._editing = ""
+        for row in self._rows:
+            row.set_editing(False)
+
+    # ---- the owner's clicks ---------------------------------------------------------------------
+
+    def deleted_row(self) -> _MemoryRow | None:
+        return next((row for row in self._rows if row.info().deleted), None)
+
+    def _make_row(self, info: MemoryRowInfo) -> _MemoryRow:
+        row = _MemoryRow(info)
+        row.set_read_only(self._read_only)
+        row.editRequested.connect(self.edit_row)
+        row.editSubmitted.connect(self.edited)
+        row.editCancelled.connect(lambda _entry_id: self.stop_editing())
+        row.deleteRequested.connect(self.deleted)
+        row.undoRequested.connect(self.undoDelete)
+        return row
+
+    def _make_suggestion(self, info: SuggestionRowInfo) -> _SuggestionRow:
+        row = _SuggestionRow(info)
+        row.save_button.setEnabled(not self._read_only)
+        row.saveRequested.connect(self.suggestionSaved)
+        row.dismissRequested.connect(self.suggestionDismissed)
+        return row
+
+    def _submit(self) -> None:
+        text = " ".join(self.input.text().split())
+        if text and not self._read_only:
+            self.added.emit(text)
+
+    def _clear_filter(self) -> None:
+        self.set_filter("")
+        self.filterCleared.emit()
+
+
+# --------------------------------------------------------------------------
 # LIVE view: every step Jarvis takes, as it happens (live.py's stream)
 # --------------------------------------------------------------------------
 
@@ -7402,7 +8062,7 @@ LIVE_NOT_KEPT_TEXT = "{chars} characters - not kept ([live] text = false)"
 LIVE_CUT_TEXT = "[{cut} more characters not shown]"
 LIVE_TAG_COLORS = {
     live_events.TASK_ASK: PINK, live_events.TASK_ACTION: AMBER, live_events.TASK_BRIEFING: TEXT_MUTED,
-    live_events.TASK_BACKGROUND: TEXT_DIM, live_events.TASK_WEB: ACCENT,
+    live_events.TASK_BACKGROUND: TEXT_DIM, live_events.TASK_WEB: ACCENT, live_events.TASK_MEMORY: GREEN,
 }
 _LIVE_BORDERS = {
     live_events.STATUS_RUNNING: rgba(ACCENT, 0.45), live_events.STATUS_OK: rgba(ACCENT, 0.18),

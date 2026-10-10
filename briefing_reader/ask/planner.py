@@ -36,6 +36,12 @@ quoted data (both runs count against the caps). Every line becomes a card throug
 validate.to_cards. Thread text lives only in this call's memory: it is never logged, saved or
 returned; with [live] text on, the LIVE view shows it on screen (memory only, this session).
 
+Memory (the productivity bundle): ``AskPlanner.memory`` gives the owner's notes (memory.json) to
+every planner context as a <memory> block (never to web research: the research paths never build
+a context). With ``memory_suggestions`` a planner run 1 whose stdin has no <mail> may suggest one
+note ("remember"); memory.check_suggestion keeps it only when grounded in that run's own context
+and not dismissed before (AskOutcome.suggestion; saved only on the owner's click in the app).
+
 The UI calls plan() on its Ask worker thread (it blocks: Google reads and up to two CLI runs);
 ``on_stage`` reports STAGE_* as it goes, and setting ``cancel`` ends a running CLI within a second.
 """
@@ -247,10 +253,12 @@ class ClaudeEngine:
                              hardened, auth, missing)
         return Readiness(True, "", "", exe, probe.version, probe.hardening, hardened, auth, missing)
 
-    def argv(self, ready: Readiness, *, allow_search: bool, allow_web: bool = False) -> list[str]:
+    def argv(self, ready: Readiness, *, allow_search: bool, allow_web: bool = False,
+             allow_remember: bool = False) -> list[str]:
         assert ready.exe is not None
         return cli.build_argv(ready.exe.path, model=self.ask.model, max_turns=self.ask.max_turns,
-                              schema=cli.schema_text(allow_search=allow_search, allow_web=allow_web),
+                              schema=cli.schema_text(allow_search=allow_search, allow_web=allow_web,
+                                                     allow_remember=allow_remember),
                               hardened=ready.hardened)
 
     def preflight(self) -> tuple[Readiness, AskFailure | None]:
@@ -278,10 +286,11 @@ class ClaudeEngine:
 
     def run(self, prompt: str, *, allow_search: bool, cancel: threading.Event | None = None,
             progress: Callable[[str, Any], None] | None = None, capture: bool = False,
-            allow_web: bool = False) -> RunResult:
+            allow_web: bool = False, allow_remember: bool = False) -> RunResult:
         """One planner run with ``prompt`` on stdin, after preflight(). ``progress`` / ``capture``:
         stream.run_planner's (the LIVE view; neither changes the run). ``allow_web``: the run may
-        hand the request to web research (planner run 1 only)."""
+        hand the request to web research (planner run 1 only); ``allow_remember``: it may suggest
+        one note to remember (planner run 1 without mail, with [productivity] memory_suggestions)."""
         from .stream import failure
 
         ready, refused = self.preflight()
@@ -290,10 +299,11 @@ class ClaudeEngine:
         if cancel is not None and cancel.is_set():
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
-        result = run_planner(self.runner, self.argv(ready, allow_search=allow_search, allow_web=allow_web), prompt,
-                             env=env, cwd=self.work_folder,
+        argv = self.argv(ready, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember)
+        result = run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
                              timeout_s=float(self.ask.timeout_seconds), allow_search=allow_search, cancel=cancel,
-                             clock=self._clock, progress=progress, capture=capture, allow_web=allow_web)
+                             clock=self._clock, progress=progress, capture=capture, allow_web=allow_web,
+                             allow_remember=allow_remember)
         init = result.init
         logger.info("Ask: planner run %s in %.1f s (%d turn(s), %d in / %d out / %d cached tokens; tools %s, "
                     "structured output %s, exit %s)", result.outcome, result.stats.duration_ms / 1000,
@@ -617,6 +627,9 @@ class AskOutcome:
     # What this Ask read from the calendars (pictures.CalendarRead: the LIVE day pictures draw the
     # other events of a day from it; memory only, never logged, never in summary()).
     calendar_read: Any = field(default=None, repr=False, compare=False)
+    # A note the planner suggested keeping (memory.check_suggestion passed; shown with "Remember this",
+    # saved only on the owner's click; never logged, never spoken).
+    suggestion: str = field(default="", repr=False)
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
@@ -649,6 +662,17 @@ class AskPlanner:
     # The app's snapshot_engine.PageSnapshotter ([live] page_snapshots; None: no page pictures). It is
     # only handed the pages a research run read, for the LIVE view; nothing goes back to a run.
     page_snapshots: Any = None
+    # The owner's notes (the productivity bundle's memory.json, newest first, at most 4 KB) as the
+    # app holds them right now; called on the ask thread for every planner context (never for web
+    # research). None: no <memory> block. The command line sets a read-only store's notes.
+    memory: Callable[[], Sequence[str]] | None = None
+    # [productivity] memory_suggestions: planner run 1 without mail may suggest one note (the app
+    # sets it, as a callable asked for each run: off while memory.json can't be changed; the
+    # command line never does).
+    memory_suggestions: bool | Callable[[], bool] = False
+    # The token hashes of the suggestions the owner dismissed (memory.MemoryStore.dismissed): a
+    # suggestion that matches one is dropped.
+    memory_dismissed: Callable[[], Sequence[frozenset[str]]] | None = None
 
     def __init__(self, config: Config, engine: ClaudeEngine, sources: Sources, *, usage: UsageLog | None = None,
                  clock: Callable[[], datetime] | None = None, monotonic: Callable[[], float] = time.monotonic,
@@ -709,8 +733,20 @@ class AskPlanner:
                 if thread is not None:
                     threads.append(thread)
         ctx = AskContext(now=now, time_zone=self.sources.time_zone(), command=command, accounts=tuple(updated),
-                         events=events, briefing=briefing, mail=tuple(trim_threads(threads)), owner=self._owner())
+                         events=events, briefing=briefing, mail=tuple(trim_threads(threads)), owner=self._owner(),
+                         memory=self._memory_notes())
         return ctx, notes
+
+    def _memory_notes(self) -> tuple[str, ...]:
+        """The owner's notes for this context (() without memory, or when they can't be had)."""
+        source = self.memory
+        if source is None:
+            return ()
+        try:
+            return tuple(note for note in source() if isinstance(note, str) and note)
+        except Exception as exc:  # noqa: BLE001 - the Ask goes on without notes
+            logger.warning("Ask: the memory notes could not be read (%s)", type(exc).__name__)
+            return ()
 
     def _owner(self) -> str:
         """[assistant] address: the word Jarvis's answers address the owner with ("" for none)."""
@@ -748,14 +784,15 @@ class AskPlanner:
     # ---- runs ---------------------------------------------------------------------------------
 
     def _run(self, prompt: str, *, allow_search: bool, cancel: threading.Event | None, live: LiveTask = NO_TASK,
-             number: int = 1, search_words: str = "", allow_web: bool = False, web_words: str = "") -> RunResult:
-        step = _run_step(live, self.config.ask.model, prompt, number, search_words, web_words)
+             number: int = 1, search_words: str = "", allow_web: bool = False, web_words: str = "",
+             allow_remember: bool = False) -> RunResult:
+        step = _run_step(live, self.config.ask.model, prompt, number, search_words, web_words, allow_remember)
         ready, refused = self.engine.preflight()   # a run refused before it starts is not counted
         if refused is not None:
             step.rename_block(STDIN_PENDING, STDIN_NOT_SENT)
             step.done(STATUS_BLOCKED, status_text="SKIPPED", summary=f"Not started: {refused.message}")
             return RunResult(failure=refused, started=False)
-        _run_ready(step, self.engine, ready, allow_search, allow_web)
+        _run_ready(step, self.engine, ready, allow_search, allow_web, allow_remember)
         run = self.usage.start()
         result: RunResult | None = None
         try:
@@ -764,6 +801,8 @@ class AskPlanner:
                 extra = {"progress": _run_progress(step), "capture": True}
             if allow_web:             # only when allowed: an engine without the keyword keeps working
                 extra["allow_web"] = True
+            if allow_remember:        # the same
+                extra["allow_remember"] = True
             result = self.engine.run(prompt, allow_search=allow_search, cancel=cancel, **extra)
             if result.limit is not None and result.limit.overage:
                 self._pause_for_overage(result.limit.resets_at)
@@ -895,8 +934,10 @@ class AskPlanner:
         why_not = "" if allow_search else ("no - the Ask limit leaves one run" if searchable
                                            else "no - no account's mail can be read")
         allow_web, web_words = self._web_allowed()
+        # Only a run whose stdin has no <mail> may suggest a note (never run 2).
+        allow_remember = self._suggestions_on() and not ctx.mail
         first = self._run(prompt, allow_search=allow_search, cancel=cancel, live=live, number=1, search_words=why_not,
-                          allow_web=allow_web, web_words=web_words)
+                          allow_web=allow_web, web_words=web_words, allow_remember=allow_remember)
         del prompt
         if first.failure is not None or first.plan is None:
             failure = first.failure
@@ -904,12 +945,18 @@ class AskPlanner:
                               runs=1 if first.started else 0, init=first.init,
                               stats=(first.stats,) if first.started else (), mail=report(ctx.mail))
         plan, final_index, runs, stats = first.plan, index, 1, [first.stats]
+        suggested = self._suggestion(first.plan.remember, index) if allow_remember else ("", "")
         mail_threads = list(ctx.mail)
         search_text = search_account = mail_needed = ""
         if plan.web is not None and allow_web:
             if plan.search is not None and allow_search:   # mail first, as asked; the web another time
                 live.step(ASK_CHECKS, "Web research", status=STATUS_WARN, status_text="SKIPPED", summary=BOTH_MESSAGE)
             else:
+                if suggested[0]:   # the answer will be the research's: a note run 1 suggested is not offered
+                    logger.info("Memory: a suggestion was dropped (research)")
+                if suggested[0] or suggested[1]:
+                    _suggestion_item(live.find(PLANNER_RUN), ("", suggested[1] or SUGGESTION_HANDED_OVER),
+                                     live.keep_text)
                 return self._research_routed(command, plan, first, ctx, now, notes, page_ids, cancel, on_stage, live)
         if plan.search is not None and allow_search:
             search = plan.search
@@ -953,8 +1000,43 @@ class AskPlanner:
                     plan = second.plan
         outcome = self._finish(plan, final_index, now=now, page_ids=page_ids, notes=notes, runs=runs,
                                stats=tuple(stats), init=first.init, mail=report(mail_threads), search=search_text,
-                               search_account=search_account, live=live)
+                               search_account=search_account, live=live, suggested=suggested)
         return replace(outcome, mail_needed=mail_needed)
+
+    def _suggestions_on(self) -> bool:
+        """The app keeps notes and lets the planner suggest one ([productivity] memory_suggestions;
+        a callable: asked now, e.g. never while memory.json can't be changed)."""
+        if self.memory is None:
+            return False
+        on = self.memory_suggestions
+        if callable(on):
+            try:
+                return bool(on())
+            except Exception:  # noqa: BLE001 - unknown: no suggestion
+                return False
+        return bool(on)
+
+    def _suggestion(self, remember: Sequence[str], index: ContextIndex) -> tuple[str, str]:
+        """(the planner's suggested note when memory.check_suggestion keeps it, else ""; the reason
+        word it was dropped, else ""): grounded in run 1's own context, never dismissed before."""
+        from ..memory import check_suggestion, clean_note
+
+        if not remember:
+            return "", ""
+        text = clean_note(remember[0])
+        dismissed: Sequence[frozenset[str]] = ()
+        source = getattr(self, "memory_dismissed", None)
+        if callable(source):
+            try:
+                dismissed = tuple(source())
+            except Exception:  # noqa: BLE001 - checked without them
+                dismissed = ()
+        titles = [facts.title for facts in index.events.values()]
+        reason = check_suggestion(text, index=index, command=index.command, titles=titles, dismissed=dismissed)
+        if reason:
+            logger.info("Memory: a suggestion was dropped (%s)", reason)
+            return "", reason
+        return text, ""
 
     # ---- web research -------------------------------------------------------------------------
 
@@ -1182,10 +1264,10 @@ class AskPlanner:
 
     def _finish(self, plan: Plan, index: ContextIndex, *, now: datetime, page_ids: Sequence[str], notes: list[str],
                 runs: int, stats: tuple[RunStats, ...], init: InitSummary | None, mail: MailReport, search: str,
-                search_account: str, live: LiveTask = NO_TASK) -> AskOutcome:
+                search_account: str, live: LiveTask = NO_TASK, suggested: tuple[str, str] = ("", "")) -> AskOutcome:
         cards: Cards = to_cards(plan.lines, index, now=now, link_hosts=self.config.actions.link_hosts,
                                 page_ids=page_ids, max_cards=self.config.ask.max_cards)
-        _validated(live, cards, index, self.config.ask.max_cards, self._hour24())
+        _validated(live, cards, index, self.config.ask.max_cards, self._hour24(), suggested)
         message_parts = list(notes)
         if cards.dropped:
             message_parts.append(f"{cards.dropped} more proposal(s) were left out")
@@ -1193,7 +1275,8 @@ class AskPlanner:
             message_parts.append("(read from the planner's plain text)")
         return AskOutcome(True, "ok", "; ".join(message_parts), say=plan.say, question=plan.question,
                           cards=cards.cards, dropped=cards.dropped, refused=cards.refused, runs=runs, init=init,
-                          stats=stats, mail=mail, search=search, search_account=search_account)
+                          stats=stats, mail=mail, search=search, search_account=search_account,
+                          suggestion=suggested[0])
 
     # ---- dry run ------------------------------------------------------------------------------
 
@@ -1249,6 +1332,11 @@ OVERAGE_WORDS = "Claude Code said this would use extra usage, so Ask stopped it"
 STDIN_PENDING = "Text for Claude Code (stdin) - not sent yet"
 STDIN_SENT = "Exact text sent to Claude Code (stdin)"
 STDIN_NOT_SENT = "Text not sent to Claude Code (stdin) - it did not start"
+REMEMBER_WORDS = "yes - one note, shown to you and kept only if you click Remember this"
+SUGGESTION_KEPT = ("passed the checks; offered unless you already have it (MEMORY says) - kept only if you click "
+                   "Remember this")
+SUGGESTION_DROPPED = "not offered ({reason})"
+SUGGESTION_HANDED_OVER = "handed to web research"
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _KIND_WORDS = {"rsvp": "RSVP", "todo": "Todo"}
@@ -1436,7 +1524,7 @@ def _threads_given(shown: Mapping[tuple[str, str], LiveStep], mail: Sequence[Mai
 
 @_quiet(NO_STEP)
 def _run_step(live: LiveTask, model: str, prompt: str, number: int, search_words: str,
-              web_words: str = "") -> LiveStep:
+              web_words: str = "", allow_remember: bool = False) -> LiveStep:
     if not live.enabled:
         return NO_STEP
     title = "Planner run 1" if number == 1 else f"Planner run {number} (with your mail)"
@@ -1444,6 +1532,8 @@ def _run_step(live: LiveTask, model: str, prompt: str, number: int, search_words
                                              ("May ask to search mail", search_words or "yes")]
     if web_words:
         fields.append(("May ask for web research", web_words))
+    if allow_remember:
+        fields.append(("May suggest a note", REMEMBER_WORDS))
     fields.append(("Input", f"{len(prompt):,} characters"))
     step = live.step(PLANNER_RUN, title, fields=fields)
     step.block(STDIN_PENDING, prompt, untrusted=True)
@@ -1451,7 +1541,8 @@ def _run_step(live: LiveTask, model: str, prompt: str, number: int, search_words
 
 
 @_quiet()
-def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool, allow_web: bool = False) -> None:
+def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool, allow_web: bool = False,
+               allow_remember: bool = False) -> None:
     if step is NO_STEP:
         return
     hardened = "hardened (--safe-mode --restricted)" if ready.hardened else "not hardened"
@@ -1459,8 +1550,11 @@ def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool
     method = ready.auth.method if ready.auth is not None else ""
     step.note(f"Sign-in checked again: {'claude.ai plan' if method == 'claude.ai' else method or 'ok'} "
               "(no model request)")
+    extra = {"allow_web": True} if allow_web else {}
+    if allow_remember:
+        extra["allow_remember"] = True
     try:
-        argv = engine.argv(ready, allow_search=allow_search, **({"allow_web": True} if allow_web else {}))
+        argv = engine.argv(ready, allow_search=allow_search, **extra)
     except Exception:  # noqa: BLE001 - only what the view shows
         return
     step.field("Command line", command_line_text(argv), mono=True)
@@ -1514,6 +1608,9 @@ def _run_result(step: LiveStep, result: RunResult, *, keep_text: bool = True) ->
             step.item(f"Wants a mail search: {search.account} - {search.query} - {search.why}")
         if plan.web is not None:
             step.item(f"Wants web research: {plan.web.question} - {plan.web.why}")
+        for note in plan.remember:
+            step.item(f"Suggests a note: {note}" if keep_text else
+                      f"Suggests a note [{_count_words(len(note), 'character')} - not kept ([live] text = false)]")
         for line in plan.lines:
             step.item(line_text(line, keep_text), mono=True)
     failure = result.failure
@@ -1626,7 +1723,21 @@ def card_text(card: ProposedAction, hour24: bool = False) -> str:
 
 
 @_quiet()
-def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int, hour24: bool = False) -> None:
+def _suggestion_item(step: LiveStep, suggested: tuple[str, str], keep_text: bool) -> None:
+    """The planner's suggested note in "Checking the proposals": kept (offered to the owner, saved
+    only on his click) or dropped with its reason word."""
+    text, reason = suggested
+    if text:
+        shown = text if keep_text else f"[{_count_words(len(text), 'character')}]"
+        step.item(f"Note to remember: {shown}", status=STATUS_OK, note=SUGGESTION_KEPT)
+    elif reason:
+        step.item("Note to remember", status=STATUS_WARN, status_text="DROPPED",
+                  note=SUGGESTION_DROPPED.format(reason=reason))
+
+
+@_quiet()
+def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int, hour24: bool = False,
+               suggested: tuple[str, str] = ("", "")) -> None:
     if not live.enabled:
         return
     keep_text = live.keep_text
@@ -1656,6 +1767,7 @@ def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int
         else:
             step.item(line_text(entry.line, keep_text), status=STATUS_WARN, status_text="DROPPED",
                       note=f"more than {max_cards} proposals")
+    _suggestion_item(step, suggested, keep_text)
     made = sum(1 for card in cards.cards if not card.error)
     if not cards.report:
         step.done(STATUS_OK, summary="no proposals")

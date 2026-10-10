@@ -682,16 +682,27 @@ def forget_probes() -> None:
         _probe_cache.clear()
 
 
-def schema_text(*, allow_search: bool, allow_web: bool = False, path: Path = SCHEMA_FILE) -> str:
+# Added in code (schema.json stays as it is) to a run that may suggest a note: [productivity]
+# memory_suggestions on and no <mail> in its stdin (an Ask's run 1 without mail; never run 2).
+REMEMBER_PROPERTY = {"type": "array", "maxItems": 1, "items": {"type": "string", "maxLength": 160},
+                     "description": "At most one short fact worth keeping in the owner's memory (see REMEMBER); "
+                                    "usually empty."}
+
+
+def schema_text(*, allow_search: bool, allow_web: bool = False, allow_remember: bool = False,
+                path: Path = SCHEMA_FILE) -> str:
     """The --json-schema value: schema.json compact; without ``allow_search`` the gmail_search
     property is removed (the second planner run may not ask to read mail again), without
     ``allow_web`` the web_research property (only the first run may hand a request to web
-    research, and only when [research] allows it)."""
+    research, and only when [research] allows it); ``allow_remember`` adds REMEMBER_PROPERTY as
+    "remember" (without it the text is exactly as before)."""
     data = json.loads(path.read_text(encoding="utf-8"))
     if not allow_search:
         data.get("properties", {}).pop("gmail_search", None)
     if not allow_web:
         data.get("properties", {}).pop("web_research", None)
+    if allow_remember:
+        data.setdefault("properties", {})["remember"] = dict(REMEMBER_PROPERTY)
     return compact_json(data)
 
 

@@ -594,6 +594,21 @@ class AskSpeechTests(unittest.TestCase):
         self.assertNotIn("https", text)
         self.assertTrue(text.endswith("."))
 
+    def test_an_answer_that_repeats_a_memory_note_gives_counts_only(self) -> None:
+        notes = ("Ana is my project lead", "Gym on Tuesdays")
+        said = persona.ask_reply_note_speech
+        self.assertEqual(said(Outcome("Ana is your project lead, sir."), notes=notes), "Here's what I found, sir.")
+        self.assertEqual(said(Outcome("Right, sir.", "Shall I tell Ana, your project lead?"), notes=notes),
+                         "I have a question for you, sir; it's on screen.")
+        self.assertEqual(said(Outcome("Your gym is on Tuesdays, so Friday it is.", cards=(Card(), Card())),
+                              notes=notes), "Two proposals are waiting for your OK, sir.")
+        self.assertEqual(said(Outcome("Ana is your project lead."), "", notes=notes), "Here's what I found.")
+        self.assertEqual(said(Outcome("Your Friday is free.", cards=(Card(),)), notes=notes), "")   # as before
+        self.assertEqual(said(Outcome("Ana is your project lead.")), "")                          # no notes given
+        self.assertEqual(said(Outcome(cards=(Card(),)), notes=notes), "")
+        for text in (persona.NOTE_QUESTION, persona.NOTE_FOUND):
+            self.assertFalse(persona.claims_done(text))
+
     def test_failures(self) -> None:
         self.assertEqual(persona.ask_failure_speech("timeout"), "Sorry, sir - that took too long. Nothing was proposed.")
         self.assertEqual(persona.ask_failure_speech("not_signed_in"),
@@ -734,6 +749,43 @@ class ResearchSpeechTests(unittest.TestCase):
                          "Sorry, sir - that needed more searching than I allow. Nothing was proposed.")
         self.assertEqual(persona.ask_failure_speech("research_off", "boss"), "Boss, web research is turned off.")
         self.assertEqual(persona.ask_failure_speech("research_off", ""), "Web research is turned off.")
+
+
+class MemorySpeechTests(unittest.TestCase):
+    """What Jarvis says and shows about notes (memory): times and counts only, never the note."""
+
+    def test_spoken_sentences(self) -> None:
+        cases = ((persona.memory_saved_speech, "Noted, sir.", "Noted."),
+                 (persona.memory_forgotten_speech, "Forgotten, sir.", "Forgotten."),
+                 (persona.memory_refused_speech, "I'd rather not keep that, sir.", "I'd rather not keep that."))
+        for builder, with_sir, plain in cases:
+            with self.subTest(builder=builder.__name__):
+                self.assertEqual(builder("sir"), with_sir)
+                self.assertEqual(builder(""), plain)
+                self.assertFalse(persona.claims_done(with_sir))
+                self.assertTrue(with_sir.isascii())
+
+    def test_entry_texts(self) -> None:
+        self.assertEqual(persona.memory_saved_text("Ana is my project lead"), 'Noted, sir: "Ana is my project lead."')
+        self.assertEqual(persona.memory_saved_text("Is Ana the lead?", ""), 'Noted: "Is Ana the lead?"')
+        self.assertEqual(persona.memory_forgotten_text("Gym on Tuesdays."), 'Forgotten, sir: "Gym on Tuesdays."')
+        self.assertEqual(persona.memory_suggestion_text("Ana Lima organizes the weekly Project sync"),
+                         'Shall I remember this, sir? "Ana Lima organizes the weekly Project sync."')
+        texts = {reason: persona.memory_refusal_text(reason, "sir", kept="Ana is my lead", cap=200, max_notes=100)
+                 for reason in ("empty", "secret", "digits", "long", "full", "read_only", "duplicate")}
+        self.assertEqual(texts["secret"], "I'd rather not keep passwords, codes or account numbers, sir; nothing "
+                                          "was saved.")
+        self.assertEqual(texts["empty"], texts["secret"])
+        self.assertEqual(texts["digits"], texts["secret"])
+        self.assertEqual(texts["long"], "That's longer than I keep (200 characters), sir; nothing was saved.")
+        self.assertEqual(texts["full"], "Your memory is full (100 notes), sir - delete some under MEMORY first.")
+        self.assertEqual(texts["read_only"], "memory.json can't be read, so I won't change it, sir.")
+        self.assertEqual(texts["duplicate"], 'I already have that, sir: "Ana is my lead"')
+        self.assertEqual(persona.memory_refusal_text("full", "", max_notes=50),
+                         "Your memory is full (50 notes) - delete some under MEMORY first.")
+        self.assertEqual(persona.SPOKEN_REFUSALS, ("empty", "secret", "digits"))
+        for text in texts.values():
+            self.assertFalse(persona.claims_done(text))
 
 
 if __name__ == "__main__":

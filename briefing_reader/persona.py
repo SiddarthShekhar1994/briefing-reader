@@ -29,12 +29,18 @@ This module only builds sentences; it never speaks, logs or stores them.
 * ``ask_reply_speech`` / ``ask_failure_speech`` / ``ACKS``: Ask's spoken answer
   (the planner's say and question only, guarded by ``claims_done``; the question
   is always kept, and after mail was read the say is kept short and never quotes
-  it), its failures and the short "One moment, sir." while it plans.
+  it; ``ask_reply_note_speech``: one that repeats a memory note gives way to a
+  counts-only sentence), its failures and the short "One moment, sir." while it
+  plans.
 * ``research_reply_speech``: web research's spoken answer (the answer without its
   [n] marks, guarded by ``claims_done(first_person_only=True)``, then that the
   sources are on screen and how many suggestions wait for the OK).
 * ``scrub_for_speech``: addresses, links and long ids out, at most 400
   characters cut at a sentence; every spoken text goes through it.
+* Memory (the productivity bundle): ``memory_saved_speech`` ("Noted, sir."),
+  ``memory_forgotten_speech`` and ``memory_refused_speech`` are all that is
+  said aloud (never a note); ``memory_saved_text``, ``memory_refusal_text``,
+  ``memory_suggestion_text`` and ``quoted_note`` build the JARVIS entries.
 
 Qt-free; standard library only; ASCII.
 """
@@ -604,12 +610,35 @@ def _read_mail(outcome: Any) -> bool:
         return True   # unknown: treated as read (shorter is safer)
 
 
+NOTE_QUESTION = "I have a question for you, {sir}; it's on screen."
+NOTE_FOUND = "Here's what I found, {sir}."
+
+
+def ask_reply_note_speech(outcome: Any, address: str = "sir", *, notes: Sequence[str] = ()) -> str:
+    """"" unless the planner's ``say`` or ``question`` repeats one of ``notes`` (the memory notes it
+    was given; ``memory.note_spoken``: a whole note, 5 of its words in a row or most of its words in
+    any order). Then neither is said, only "Two proposals are waiting for your OK, sir.", "I have a
+    question for you, sir; it's on screen." or "Here's what I found, sir.", so a note never goes to
+    the online read-aloud service as Jarvis's answer (the JARVIS tab shows the whole answer)."""
+    say, question = _flat_field(outcome, "say"), _flat_field(outcome, "question")
+    if not notes or not (say or question):
+        return ""
+    from .memory import note_spoken
+
+    if not note_spoken(f"{say} {question}", notes):
+        return ""
+    count = sum(1 for card in (getattr(outcome, "cards", ()) or ()) if not getattr(card, "error", ""))
+    return scrub_for_speech(approvals_sentence(count, address) if count else
+                            with_address(NOTE_QUESTION if question else NOTE_FOUND, address))
+
+
 def ask_reply_speech(outcome: Any, address: str = "sir") -> ReplySpeech:
     """What Jarvis says when an Ask answered: the planner's ``say`` and ``question`` (never Jarvis's
     note, the mail search or a card's text). With neither: "Two proposals are waiting for your OK,
     sir." (or that nothing could be proposed). If the say claims something was already done
     (``claims_done``), "I've lined up two proposals for your OK, sir." is said instead (``guarded``);
-    a question that does is not said.
+    a question that does is not said. (While memory notes were given, ``ask_reply_note_speech``
+    comes first.)
 
     The question is always said whole (it is what the owner has to answer): the say gets what is
     left of the 400 characters, cut after a sentence. After mail was read the say is cut to
@@ -706,3 +735,72 @@ def ask_failure_speech(kind: str, address: str = "sir") -> str:
     if kind in _SILENT_FAILURES:
         return ""
     return with_address(_FAILURE_SPEECH.get(kind, _OTHER_FAILURE), address)
+
+
+# --------------------------------------------------------------------------
+# Memory (the productivity bundle): entries in the JARVIS tab and the few words said aloud
+# --------------------------------------------------------------------------
+
+MEMORY_SAVED_SPEECH = "Noted, {sir}."
+MEMORY_FORGOTTEN_SPEECH = "Forgotten, {sir}."
+MEMORY_REFUSED_SPEECH = "I'd rather not keep that, {sir}."
+# Spoken refusals: the ones whose entry says "I'd rather not keep ..." (a long, duplicate, full or
+# read-only note is only shown).
+SPOKEN_REFUSALS = ("empty", "secret", "digits")
+_REFUSED_SECRET = "I'd rather not keep passwords, codes or account numbers, {sir}; nothing was saved."
+_MEMORY_REFUSALS = {
+    "empty": _REFUSED_SECRET,
+    "secret": _REFUSED_SECRET,
+    "digits": _REFUSED_SECRET,
+    "long": "That's longer than I keep ({cap} characters), {sir}; nothing was saved.",
+    "full": "Your memory is full ({max_notes} notes), {sir} - delete some under MEMORY first.",
+    "read_only": "memory.json can't be read, so I won't change it, {sir}.",
+    "duplicate": "I already have that, {sir}: \"{kept}\"",
+    "gone": "That note is no longer in MEMORY, {sir}.",
+}
+
+
+def memory_saved_speech(address: str = "sir") -> str:
+    """"Noted, sir." after a note was saved (never the note)."""
+    return with_address(MEMORY_SAVED_SPEECH, address)
+
+
+def memory_forgotten_speech(address: str = "sir") -> str:
+    """"Forgotten, sir." after "forget that ..." removed one note (never the note)."""
+    return with_address(MEMORY_FORGOTTEN_SPEECH, address)
+
+
+def memory_refused_speech(address: str = "sir") -> str:
+    """"I'd rather not keep that, sir." for a note that looks like a secret (never the note)."""
+    return with_address(MEMORY_REFUSED_SPEECH, address)
+
+
+def quoted_note(note: str) -> str:
+    """A note in quotes as an entry shows it, ending its sentence: "Ana is my project lead." (a note
+    that already ends with . ! or ? keeps its own mark). Shown only; never spoken or logged."""
+    text = " ".join(str(note or "").split())
+    return f"\"{text}\"" if text.endswith((".", "!", "?")) else f"\"{text}.\""
+
+
+def memory_saved_text(note: str, address: str = "sir") -> str:
+    """The JARVIS entry after "remember that ...": 'Noted, sir: "Ana is my project lead."'."""
+    return with_address("Noted, {sir}:", address) + " " + quoted_note(note)
+
+
+def memory_forgotten_text(note: str, address: str = "sir") -> str:
+    """The JARVIS entry after "forget that ..." removed one note."""
+    return with_address("Forgotten, {sir}:", address) + " " + quoted_note(note)
+
+
+def memory_refusal_text(reason: str, address: str = "sir", *, kept: str = "", cap: int = 200,
+                        max_notes: int = 100) -> str:
+    """Why a note was not kept (memory.REFUSE_*): shown under MEMORY's Add field or as a JARVIS entry."""
+    template = _MEMORY_REFUSALS.get(reason, _REFUSED_SECRET)
+    text = with_address(template, address)
+    return text.replace("{cap}", str(cap)).replace("{max_notes}", str(max_notes)).replace(
+        "{kept}", " ".join(str(kept or "").split()))
+
+
+def memory_suggestion_text(text: str, address: str = "sir") -> str:
+    """'Shall I remember this, sir? "Ana Lima organizes the weekly Project sync."' (never spoken)."""
+    return with_address("Shall I remember this, {sir}?", address) + " " + quoted_note(text)

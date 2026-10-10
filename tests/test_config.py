@@ -40,6 +40,7 @@ from briefing_reader.config import (
     HotkeyConfig,
     LiveConfig,
     PollingConfig,
+    ProductivityConfig,
     PromptConfig,
     RedactingFilter,
     ResearchConfig,
@@ -370,6 +371,7 @@ class ConfigFileTests(ProjectTestCase):
             "assistant": {f.name for f in dataclasses.fields(AssistantConfig)},
             "live": {f.name for f in dataclasses.fields(LiveConfig)},
             "research": {f.name for f in dataclasses.fields(ResearchConfig)},
+            "productivity": {f.name for f in dataclasses.fields(ProductivityConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():
@@ -420,6 +422,13 @@ class ConfigFileTests(ProjectTestCase):
         research_part = raw.decode("ascii").split("[research]", 1)[1].split("[assistant]", 1)[0]
         self.assertNotIn("@", research_part)
         self.assertIn("never your calendar, mail, contacts", research_part)
+        # The productivity bundle ships off, with every default (switched on per PC from .env).
+        self.assertEqual(cfg.productivity, ProductivityConfig())
+        self.assertFalse(cfg.productivity.enabled)
+        self.assertEqual((cfg.productivity.prep_lookback_days, cfg.productivity.minimized_check), (14, True))
+        productivity_part = raw.decode("ascii").split("[productivity]", 1)[1]
+        self.assertNotIn("@", productivity_part)
+        self.assertIn("JARVIS_PRODUCTIVITY_ENABLED=true", productivity_part)
 
     def test_client_secret_is_gitignored(self) -> None:
         lines = (config.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
@@ -1543,6 +1552,90 @@ class AskEnabledEnvTests(ProjectTestCase):
         self.write_config("[ask]\nenabled = false\n")
         cfg = self.load_warning("JARVIS_ASK_ENABLED", JARVIS_ASK_ENABLED="maybe")
         self.assertFalse(cfg.ask.enabled)
+
+
+class ProductivityConfigTests(ProjectTestCase):
+    """[productivity]: the bundle, off by default; JARVIS_PRODUCTIVITY_ENABLED overrides enabled."""
+
+    def test_defaults(self) -> None:
+        cfg = self.load_quietly()
+        self.assertEqual(cfg.productivity, ProductivityConfig())
+        d = cfg.productivity
+        self.assertFalse(d.enabled)
+        self.assertEqual((d.memory, d.memory_suggestions, d.max_memory, d.plan_offer, d.plan_offer_until),
+                         (True, True, 100, True, "13:30"))
+        self.assertEqual((d.day_start, d.day_end, d.plan_max_blocks, d.plan_min_free_minutes),
+                         ("08:00", "22:00", 5, 60))
+        self.assertEqual((d.prep_offers, d.prep_lead_minutes, d.prep_offers_per_day, d.prep_max_offer_guests,
+                          d.prep_max_guests, d.prep_lookback_days, d.prep_other_accounts),
+                         (True, 15, 8, 8, 5, 14, False))
+        self.assertEqual(d.prep_skip_words, ("focus", "lunch", "commute", "gym", "break", "hold", "ooo",
+                                             "out of office"))
+        self.assertEqual((d.prep_speak_minimized, d.minimized_check, d.followups, d.scan_days, d.scan_every_minutes,
+                          d.scan_max_threads), (True, True, True, 14, 30, 150))
+        self.assertEqual((d.waiting_after_hours, d.owed_after_days, d.followups_shown, d.quiet_from, d.quiet_until,
+                          d.max_runs_per_day, d.reserve_ask_runs), (20, 3, 6, "22:00", "08:00", 20, 3))
+        self.assertEqual(set(config.PRODUCTIVITY_RANGES) | set(config.PRODUCTIVITY_TIMES) | {
+            "enabled", "memory", "memory_suggestions", "plan_offer", "prep_offers", "prep_other_accounts",
+            "prep_skip_words", "prep_speak_minimized", "minimized_check", "followups"},
+            {f.name for f in dataclasses.fields(ProductivityConfig)})
+
+    def test_values_are_read(self) -> None:
+        self.write_config("[productivity]\nenabled = true\nmemory = false\nmax_memory = 50\n"
+                          'plan_offer_until = "12:15"\nday_start = "7:30"\nday_end = "20:00"\n'
+                          'prep_skip_words = ["Focus", "standup", "STANDUP", " Out  of office "]\n'
+                          "prep_lookback_days = 7\nscan_days = 10\nreserve_ask_runs = 0\n")
+        d = self.load_quietly().productivity
+        self.assertTrue(d.enabled)
+        self.assertFalse(d.memory)
+        self.assertEqual((d.max_memory, d.plan_offer_until, d.day_start, d.day_end), (50, "12:15", "07:30", "20:00"))
+        self.assertEqual(d.prep_skip_words, ("focus", "standup", "out of office"))
+        self.assertEqual((d.prep_lookback_days, d.scan_days, d.reserve_ask_runs), (7, 10, 0))
+
+    def test_ranges_and_bad_values_fall_back(self) -> None:
+        self.write_config("[productivity]\nmax_memory = 5\nplan_max_blocks = 99\nprep_lead_minutes = -3\n"
+                          'memory = "yes"\nquiet_from = "late"\nfollowups_shown = 0\nscan_max_threads = 1000\n'
+                          "surprise = 1\n")
+        d = self.load_warning("productivity.max_memory", "productivity.plan_max_blocks", "productivity.memory",
+                              "productivity.quiet_from", "productivity.surprise").productivity
+        self.assertEqual((d.max_memory, d.plan_max_blocks, d.prep_lead_minutes, d.memory, d.quiet_from),
+                         (10, 8, 15, True, "22:00"))
+        self.assertEqual((d.followups_shown, d.scan_max_threads), (1, 300))
+
+    def test_a_day_of_an_hour_or_less_falls_back(self) -> None:
+        for start, end in (("09:00", "10:00"), ("18:00", "08:00"), ("12:00", "12:00")):
+            with self.subTest(start=start, end=end):
+                self.write_config(f'[productivity]\nday_start = "{start}"\nday_end = "{end}"\n')
+                d = self.load_warning("productivity.day_end").productivity
+                self.assertEqual((d.day_start, d.day_end), ("08:00", "22:00"))
+        self.write_config('[productivity]\nday_start = "09:00"\nday_end = "10:01"\n')
+        self.assertEqual(self.load_quietly().productivity.day_end, "10:01")
+
+    def test_prep_lookback_never_past_the_scan_window(self) -> None:
+        self.write_config("[productivity]\nprep_lookback_days = 14\nscan_days = 5\n")
+        d = self.load_warning("productivity.prep_lookback_days").productivity
+        self.assertEqual((d.prep_lookback_days, d.scan_days), (5, 5))
+        self.write_config("[productivity]\nprep_lookback_days = 30\n")
+        self.assertEqual(self.load_warning("productivity.prep_lookback_days").productivity.prep_lookback_days, 14)
+
+    def test_env_override_both_ways(self) -> None:
+        self.write_config("[productivity]\nenabled = false\n")
+        for value in ("true", "1", "yes", "on", " TRUE "):
+            with self.subTest(value=value):
+                self.assertTrue(self.load_quietly(JARVIS_PRODUCTIVITY_ENABLED=value).productivity.enabled)
+        self.write_config("[productivity]\nenabled = true\n")
+        for value in ("false", "0", "no", "off"):
+            with self.subTest(value=value):
+                self.assertFalse(self.load_quietly(JARVIS_PRODUCTIVITY_ENABLED=value).productivity.enabled)
+        self.assertTrue(self.load_quietly(JARVIS_PRODUCTIVITY_ENABLED="").productivity.enabled)
+        self.assertTrue(self.load_warning("JARVIS_PRODUCTIVITY_ENABLED",
+                                          JARVIS_PRODUCTIVITY_ENABLED="maybe").productivity.enabled)
+        self.assertEqual(config.PRODUCTIVITY_ENABLED_ENV, "JARVIS_PRODUCTIVITY_ENABLED")
+
+    def test_the_new_files_are_gitignored(self) -> None:
+        lines = [line.strip() for line in (config.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()]
+        for name in ("/memory.json", "/followups.json", "/prep_series.json"):
+            self.assertIn(name, lines)
 
 
 if __name__ == "__main__":
