@@ -1,14 +1,19 @@
 """The LIVE view's steps of a web research: what the research gets (research.input), the run
-(research.run) with one web.search / web.fetch step per tool call as it happens, and the check of
-its answer (research.validate).
+(research.run) with one web.search / web.fetch step per tool call as it happens, the check of its
+answer (research.validate) and a web.source step for each cited page no page read pictured.
 
 Memory only, on screen only. Every helper is quiet (live.quiet): whatever goes wrong in one, the
 research goes on exactly as without the LIVE view. Web text (search results, what a page read
 returned, the raw answer) is shown only in untrusted blocks and in plain-text items and fields;
-URLs are never links ([live] text = false keeps sizes only). With page snapshots on ([live]
-page_snapshots), a page the run read gets a picture on its web.fetch step (WebSteps(snapshots=);
-snapshot_engine.PageSnapshotter decides and takes it on this PC): the research run itself never
-sees any of it.
+URLs are never links ([live] text = false keeps sizes only). Pictures: each web search is drawn as
+a compact results page from what it returned (pictures.search_picture; [live] pictures; nothing is
+opened for it). With page snapshots on ([live] page_snapshots), a page the run read gets a picture
+on its web.fetch step, and each source the answer cites (shown after the check; never a left-out
+one) that no page read pictured gets its own web.source step with the page's picture, within the
+same cap (reads first, then the sources in citation order); WebSteps(snapshots=) hands them to
+snapshot_engine.PageSnapshotter, which decides and takes them on this PC, one at a time. A source
+whose address Jarvis could not check (no search listed it, no page read loaded it) is never
+opened for a picture: its step says why. The research run itself never sees any of it.
 """
 
 from __future__ import annotations
@@ -20,6 +25,8 @@ from typing import Any
 from ..actions import ProposedAction, link_host
 from ..live import (
     NO_STEP,
+    PICTURE_LINK,
+    PICTURE_READY,
     RESEARCH_INPUT,
     RESEARCH_RUN,
     RESEARCH_VALIDATE,
@@ -31,6 +38,7 @@ from ..live import (
     STATUS_WARN,
     WEB_FETCH,
     WEB_SEARCH,
+    WEB_SOURCE,
     Field,
     LiveStep,
     LiveTask,
@@ -38,11 +46,13 @@ from ..live import (
     elapsed_text,
     quiet,
 )
+from ..pictures import KIND_SEARCH, page_unavailable, search_picture
 from .research import (
     FETCH,
     FOUND_OWNER,
     FOUND_SEARCH,
     RESULT_DENIED,
+    RESULT_EMPTY,
     RESULT_ERROR,
     RESULT_OK,
     RESULT_REDIRECT,
@@ -56,7 +66,7 @@ from .research import (
     WebResult,
     normalize_url,
 )
-from .research_validate import ResearchReport, cards_words, reads_words, steps_words
+from .research_validate import UNCHECKED_WARNING, ResearchReport, WebSource, cards_words, reads_words, steps_words
 
 INPUT_TITLE = "What the web research gets"
 RUN_TITLE = "Web research run"
@@ -75,6 +85,7 @@ RUN_BY_SEARCH = "Claude Code's WebSearch (Anthropic's search service)"
 RUN_BY_SERVER = "Claude's own web search (on Anthropic's side)"
 RAW_ANSWER = "Research answer (raw)"
 SEARCH_BLOCK = "What WebSearch returned to Claude"
+RESULTS_BLOCK = "The results as text"     # a search drawn as a results page: its list, closed, instead of items
 FETCH_BLOCK = "What WebFetch returned to Claude (its summary of the page)"
 EXCERPT_BLOCK = "Excerpt of what WebFetch returned"
 STOPPED_WORDS = "the run was stopped"
@@ -82,6 +93,17 @@ UNREAD_WORDS = "results came back as text Jarvis could not list"
 DENIED_WORDS = "Claude Code refused it (its permission rules)"
 RULES_WORDS = ("https pages the research saw, on any site but local or private ones; Todo, one-off Calendar and Open "
                "suggestions only")
+# True whether its picture is taken, fails or is refused (past the cap, cancelled ...): the picture
+# says which (NOTE_OPENING / NOTE_OPENED: opened on this PC to show you; else why not).
+SOURCE_SUMMARY = "cited in the answer - not read by the research; its picture below"
+SOURCE_NOT_READ = "no - the answer cites it from what the search listed"
+PICTURE_HERE = "picture: see the {where} step"   # true whether or not that step's picture is taken
+# A cited source Jarvis could not check (no search listed it, no page read loaded it: UNCHECKED_WARNING)
+# is never opened for a picture: it stays an Open card, opened on the owner's click. Its step says why.
+SOURCE_UNCHECKED_SUMMARY = "cited in the answer - not opened: Jarvis could not check its address"
+UNCHECKED_NO_PICTURE = ("Jarvis opens no address he could not check (no search listed it, no page read loaded "
+                        "it); its Open card opens it in your browser, on your click")
+PICTURE_NONE = "no picture (its address could not be checked): see the {where} step"
 EXCERPT_CHARS = 300
 EXCERPT_LINES = 8
 MAX_HITS_SHOWN = 50
@@ -202,13 +224,22 @@ def run_skipped(step: LiveStep, message: str) -> None:
 
 class WebSteps:
     """The web.search / web.fetch steps of one run, created and closed from its progress (each a
-    sibling after research.run, in arrival order, keyed "web:<tool id>").
+    sibling after research.run, in arrival order, keyed "web:<tool id>"), and after the answer's
+    check a web.source step for each cited page no page read pictured (cited()).
+
+    A search that came back is drawn on its web.search step as a compact results page (the exact
+    query, each result's title and address: pictures.search_picture, from what it returned; no
+    page is opened for it); its results are then listed once more only as text in a closed block,
+    not one item each (without the picture, or with [live] text = false, they stay items).
 
     ``snapshots`` (snapshot_engine.PageSnapshotter, or None): a page the run READ (WebFetch came
-    back OK) is pictured on its web.fetch step - the snapshotter decides whether it may be (public
-    https only, never a search results page, at most 4 per run) and shows "Opening..." at once;
-    searches never are. finished() says the run asks for no more pictures. LIVE side only: nothing
-    of this reaches the research run (its input, tools, command line and folder are unchanged)."""
+    back OK) is pictured on its web.fetch step, and each source the answer cites that no page read
+    pictured on its own web.source step - the snapshotter decides whether it may be (public https
+    only, never a search results page, at most 4 per run: the reads come first, then the sources
+    in citation order; one at a time) and shows "Opening..." at once. A source Jarvis could not
+    check (no search listed it, no page read loaded it) is never handed to it.
+    finished() says the run asks for no more pictures. LIVE side only: nothing of this reaches the
+    research run (its input, tools, command line and folder are unchanged)."""
 
     def __init__(self, live: LiveTask, limits: ResearchLimits, snapshots: Any = None) -> None:
         self.live = live
@@ -217,6 +248,8 @@ class WebSteps:
         self.steps: dict[str, LiveStep] = {}
         self.calls: dict[str, WebCall] = {}
         self.titles: dict[str, str] = {}      # normalized page -> the first search hit's title
+        # normalized page (asked and final URL) -> the web.fetch step whose picture was asked for, its title
+        self.pictured: dict[str, tuple[LiveStep, str]] = {}
 
     @quiet()
     def call(self, call: WebCall) -> None:
@@ -261,14 +294,15 @@ class WebSteps:
             return
         took = elapsed_text(result.took_ms / 1000) if result.took_ms is not None else ""
         if result.kind == SEARCH:
-            self._search(step, result, took)
+            self._search(step, result, took, self.calls.get(result.tool_id))
         else:
             self._fetch(step, result, took, self.calls.get(result.tool_id))
 
-    def _search(self, step: LiveStep, result: WebResult, took: str) -> None:
+    def _search(self, step: LiveStep, result: WebResult, took: str, call: WebCall | None = None) -> None:
         if result.status in (RESULT_DENIED, RESULT_ERROR):
             self._failed(step, result, "WebSearch")
             return
+        drawn = call is not None and bool(self._search_picture(step, call, result))
         listed = f"{_count(len(result.hits), 'page')} listed"
         if result.groups > 1:
             listed += f" from {result.groups} searches"
@@ -278,8 +312,14 @@ class WebSteps:
         for title, url in result.hits:
             if title:
                 self.titles.setdefault(normalize_url(url), title)
-        for title, url in result.hits[:MAX_HITS_SHOWN]:
-            step.item(f"{title or '(no title)'} - {url}", status=STATUS_OK)
+        lines = [f"{title or '(no title)'} - {url}" for title, url in result.hits[:MAX_HITS_SHOWN]]
+        if drawn and lines and self.live.keep_text:
+            # The picture lists them: the same lines once more only as text, closed (to copy or for
+            # a screen reader), so the page reads after it stay close.
+            step.block(RESULTS_BLOCK, "\n".join(lines), untrusted=True)
+        else:
+            for line in lines:
+                step.item(line, status=STATUS_OK)
         if result.text:
             step.block(SEARCH_BLOCK, result.text, untrusted=True)
         if result.status == RESULT_OK:
@@ -322,17 +362,92 @@ class WebSteps:
             self._failed(step, result, "WebFetch")
         elif result.status == RESULT_OK:
             if call is not None:
-                self._picture(step, call.url)
+                self._picture(step, call.url, (result.final_url,), f"Page read {call.number}")
             size = f" - {result.size:,} bytes" if result.size is not None else ""
             step.done(STATUS_OK, summary=f"{result.code if result.code is not None else 'read'}{size}")
         else:
             step.done(STATUS_WARN, summary="Jarvis could not read what came back")
 
+    @quiet(False)
+    def _search_picture(self, step: LiveStep, call: WebCall, result: WebResult) -> bool:
+        """A search that came back, drawn as a compact results page ([live] pictures decides);
+        True when the step now shows it (READY: kept, not refused or dropped)."""
+        if step is NO_STEP or result.status not in (RESULT_OK, RESULT_EMPTY, RESULT_UNREAD):
+            return False
+        step.picture(search_picture(call.query, result.hits, only=call.allowed_domains,
+                                    never=call.blocked_domains, unread=result.status == RESULT_UNREAD))
+        view = step.view()
+        shown = view.picture if view is not None else None
+        return shown is not None and shown.kind == KIND_SEARCH and shown.state == PICTURE_READY
+
     @quiet()
-    def _picture(self, step: LiveStep, url: str) -> None:
-        """A page the run read: its picture (the snapshotter refuses what may not be opened)."""
+    def _picture(self, step: LiveStep, url: str, also: Sequence[str] = (), title: str = "") -> None:
+        """A page the run read: its picture (the snapshotter refuses what may not be opened). The
+        page (and where it ended, ``also``) is remembered, so a source citing it points here."""
         if self.snapshots is not None and step is not NO_STEP:
+            for page in (url, *also):
+                if page:
+                    self.pictured.setdefault(normalize_url(page), (step, title))
             self.snapshots.request(step, url, task_id=self.live.id)
+
+    def pictures_sources(self) -> bool:
+        """Whether cited() gives the sources pictures: a snapshotter, the LIVE view, [live] text, and
+        page reads allowed ([research] max_fetches = 0: no page is opened for this research at all,
+        as the app's per-research picture cap says too)."""
+        return (self.snapshots is not None and self.live.enabled and self.live.keep_text
+                and self.limits.max_fetches > 0)
+
+    def read_picture(self, url: str) -> tuple[LiveStep, str] | None:
+        """The web.fetch step already pictured for that page, and its title ("Page read 1")."""
+        return self.pictured.get(normalize_url(url))
+
+    @quiet()
+    def cited(self, report: ResearchReport, check: LiveStep = NO_STEP) -> None:
+        """After the answer's check: each source it shows (never a left-out one), in citation order,
+        gets a picture - the page read's when the run read that page, else its own web.source step
+        ("Source [1]: example.org") with the page's picture, asked of the snapshotter after the
+        reads (the same cap per research). ``check`` (the research.validate step) gets a link to
+        each picture ("Picture [1]"). A source Jarvis could not check (checked=False: no search
+        listed it, no page read loaded it) is never opened: its step says why it has no picture
+        (UNCHECKED_NO_PICTURE), and the check gets no link for it."""
+        if not self.pictures_sources():
+            return
+        for source in report.sources:
+            read = self.read_picture(source.url)
+            if read is not None:
+                target, title = read
+            elif source.checked:
+                target, title = self._source_step(source), f"Source [{source.number}]"
+            else:
+                self._source_step(source)
+                continue
+            view = target.view() if target is not NO_STEP else None
+            if view is not None and check is not NO_STEP:
+                check.field(f"Picture [{source.number}]", f"{title}: {source.domain}",
+                            link=f"{PICTURE_LINK}{view.id}")
+
+    def _source_step(self, source: WebSource) -> LiveStep:
+        """The web.source step of a cited page no page read pictured: its picture asked of the
+        snapshotter when a search listed its address, else none (never opened) and why."""
+        fields: list[Field | tuple[str, str]] = [
+            ("Cited as", f"[{source.number}] {source.title}"), Field("URL", source.url, mono=True),
+            ("Domain", source.domain),
+            ("Read by the research", SOURCE_NOT_READ) if source.checked else ("Check", UNCHECKED_WARNING)]
+        step = self.live.step(WEB_SOURCE, f"Source [{source.number}]: {source.domain}", fields=fields,
+                              key=f"source:{source.number}")
+        if step is NO_STEP:
+            return step
+        if source.checked:
+            step.done(STATUS_OK, summary=SOURCE_SUMMARY)
+            self._request(step, source.url)
+        else:
+            step.done(STATUS_OK, summary=SOURCE_UNCHECKED_SUMMARY)
+            step.picture(page_unavailable(source.url, UNCHECKED_NO_PICTURE))   # nothing is opened
+        return step
+
+    @quiet()
+    def _request(self, step: LiveStep, url: str) -> None:
+        self.snapshots.request(step, url, task_id=self.live.id)
 
     @quiet()
     def finished(self) -> None:
@@ -438,10 +553,13 @@ def run_result(step: LiveStep, result: Any, *, keep_text: bool = True) -> None:
 
 @quiet()
 def validated(live: LiveTask, cards: Sequence[ProposedAction], report: ResearchReport, answer: ResearchAnswer,
-              web: WebLog, hour24: bool = False) -> None:
+              web: WebLog, hour24: bool = False, web_steps: WebSteps | None = None) -> None:
     """The check of the answer: each source (accepted, unchecked or left out with its reason), each
     suggestion (a card or dropped with its reason); the web.fetch steps get the title the answer
-    gives their page when no search listed it."""
+    gives their page when no search listed it. With ``web_steps`` (page pictures on), each source
+    shown then gets its picture (WebSteps.cited: the page read's, or a web.source step of its own)
+    and the check points to it: the source's line names the step, a "Picture [n]" link shows it.
+    An unchecked source gets none: its line says so and names its step (which says why)."""
     if not live.enabled:
         return
     from . import planner as _planner
@@ -455,11 +573,11 @@ def validated(live: LiveTask, cards: Sequence[ProposedAction], report: ResearchR
         source = accepted.get(number)
         if source is not None:
             text = f"[{number}] {source.domain} - {source.title}"
+            where = _picture_words(web_steps, source)
             if source.checked:
-                step.item(text, status=STATUS_OK, note=source.url)
+                step.item(text, status=STATUS_OK, note=source.url + where)
             else:
-                from .research_validate import UNCHECKED_WARNING
-                step.item(text, status=STATUS_WARN, note=f"{UNCHECKED_WARNING} - {source.url}")
+                step.item(text, status=STATUS_WARN, note=f"{UNCHECKED_WARNING} - {source.url}{where}")
         else:
             shown = " ".join(str(title or "").split()) or "(no title)"
             step.item(f"[{number}] {shown} - {url}", status=STATUS_BLOCKED, status_text="LEFT OUT",
@@ -498,6 +616,21 @@ def validated(live: LiveTask, cards: Sequence[ProposedAction], report: ResearchR
     if report.dropped:
         summary += f", {_count(len(report.dropped), 'suggestion')} left out"
     step.done(STATUS_WARN if problems else STATUS_OK, summary=summary)
+    if web_steps is not None:
+        web_steps.cited(report, step)
+
+
+def _picture_words(web_steps: WebSteps | None, source: WebSource) -> str:
+    """" - picture: see the Page read 1 step" / " - picture: see the Source [2] step"; for a source
+    Jarvis could not check (never opened) " - no picture (...): see the Source [2] step" ("" when
+    the sources get no pictures)."""
+    if web_steps is None or not web_steps.pictures_sources():
+        return ""
+    read = web_steps.read_picture(source.url)
+    if read is None and not source.checked:
+        return " - " + PICTURE_NONE.format(where=f"Source [{source.number}]")
+    where = read[1] if read is not None and read[1] else f"Source [{source.number}]"
+    return " - " + PICTURE_HERE.format(where=where)
 
 
 def _titles(live: LiveTask, report: ResearchReport, web: WebLog) -> None:

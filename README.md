@@ -111,9 +111,10 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
   fetch: it never sees your calendar, mail, contacts, briefing or addresses,
   and what it finds never goes back to the planner. Its pages open in your
   browser only on your click, and only public https addresses. LIVE's page
-  pictures open the pages it read once more, in a hidden private window on
-  this PC ([Pictures in LIVE](#pictures-in-live); `[live] page_snapshots =
-  false` turns that off).
+  pictures open, in a hidden private window on this PC, each page it read
+  (once more) and each source a search listed that it cites without reading
+  it (a visit from your PC made only for the picture) ([Pictures in
+  LIVE](#pictures-in-live); `[live] page_snapshots = false` turns that off).
 - **A locked-down planner.** Claude Code runs with no tools, no MCP servers,
   no settings files and no saved session, in an empty folder of its own and an
   environment without API keys or Jarvis's secrets; right before every run
@@ -171,7 +172,7 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
  read threads       (LIVE's page
  for Ask            pictures: the app
                     opens the pages it
-                    read once more)
+                    read or cites)
 ```
 
 - **The routine** runs in the cloud on your schedule, reads your mail and
@@ -182,9 +183,11 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
 - **The desktop app** (this repository) reads that page through a read-only
   Notion integration, speaks with edge-tts (or the Windows voices) played by
   QtMultimedia, and draws the HUD with PySide6 (Qt). For LIVE's page pictures
-  it also opens the public pages a web research read once more, itself, in a
-  hidden private window (Qt's web engine; [Pictures in
-  LIVE](#pictures-in-live); `[live] page_snapshots = false` turns it off).
+  it also opens, itself, in a hidden private window (Qt's web engine), the
+  public pages a web research read (once more) and the sources a search
+  listed that it cites without reading them (a visit made only for the
+  picture) ([Pictures in LIVE](#pictures-in-live); `[live] page_snapshots =
+  false` turns it off).
 - **Google** is called directly, with your own free OAuth client and no
   service in between: Google Calendar for TODAY, the cards' check lines, the
   changes you approve and, for Ask, the events it plans from (by default
@@ -1154,19 +1157,35 @@ glance what Jarvis read or is about to change:
   only when Jarvis had already read that day (today's agenda, the Ask's
   calendar read): he never reads your calendar just for a picture.
 - **A 7-day strip** of the calendar an Ask read.
-- **A picture of each page a web research read.**
+- **Each web search of a web research, drawn as its results page**: the exact
+  query in a search box, then each result's title and its address, site first
+  (and its snippet, when the search gave one), "+N more" past the first 10.
+  The step keeps the full list as text too, in a closed block.
+- **A picture of each page a web research read or cites.** A page the
+  research read shows on its page read step. A source its answer cites that
+  it did not read gets a step of its own ("Source [1]: example.edu") with the
+  page's picture; the "Checking the answer" step names, and links to, the
+  picture of each source it shows. A source whose address Jarvis could not
+  check (no search listed it and no page read loaded it) is never opened for
+  a picture: its step says why, and its Open card opens it on your click.
 
-Email and calendar pictures are drawn by Jarvis on this PC from the text he
-already has: no email HTML, no images or fonts from the web, and nothing in a
-picture can be clicked; hidden characters show as `<U+...>`, as in the text.
+Email, calendar and search pictures are drawn by Jarvis on this PC from the
+text he already has: no email HTML, no images or fonts from the web, no page
+opened for them, and nothing in a picture can be clicked; hidden characters
+show as `<U+...>`, as in the text.
 
 Page pictures are the one part of LIVE that uses the network. Only pages the
-research read, and only public https pages: never a link from your email, the
-briefing or a card, never a search results page; at most 4 per research, one
-at a time, at most 15 seconds each. Jarvis opens the page again on this PC in
-a private window you never see: none of your browsers' sign-ins or cookies,
-nothing saved, no pop-ups, downloads, camera, microphone, location,
-notifications, clipboard or Windows Hello, sound off. Every connection of
+research read and the sources its checked answer shows that a search listed
+(never one it left out, never an address Jarvis could not check), and only
+public https pages: never a link from your email or the briefing, never a
+card's link other than the research's own sources (planner Ask cards
+included), never a search results page; at most 4 per research (the pages it
+read first, then its sources in the order it cites them), one at a time, at
+most 15 seconds each. Jarvis opens the page on this PC (once
+more, for a page the research read) in a private window you never see: none
+of your browsers' sign-ins or cookies, nothing saved, no pop-ups, downloads,
+camera, microphone, location, notifications, clipboard or Windows Hello,
+sound off. Every connection of
 that window goes through a small gate inside Jarvis that lets it reach only
 public IPv4 addresses on the https port, checked on the address a name
 actually leads to (never an IPv6 address: one may be this PC's own or a
@@ -1177,14 +1196,16 @@ public name that leads there. A page cannot make this PC look up a local name
 (localhost, `.local`, a name without a dot ...); the gate looks up public names
 only, through this PC's usual DNS, as any visit does. **A page picture
 is an ordinary visit to that page from this PC: the site sees your IP
-address** (as when you open it in your browser, but without your cookies). A
-page may show a cookie banner or a bot check instead of its content; the
-picture then shows that. When settings in this PC's environment would undo
-any of this (the web engine's sandbox off, remote debugging, certificate
-errors ignored, a TLS key log such as `SSLKEYLOGFILE`, a trace or log file,
-automatic Windows sign-in to sites, a web engine flags value in double quotes
-or cut by a bare `--`, or any web engine flag Jarvis does not know), no page is
-opened: the step says "Picture unavailable"
+address** (as when you open it in your browser, but without your cookies).
+For a source the answer cites but the research did not read, that visit is
+the only one from your PC: the site sees your IP address only because of the
+picture. A page may show a cookie banner or a bot check instead of its
+content; the picture then shows that. When settings in this PC's environment
+would undo any of this (the web engine's sandbox off, remote debugging,
+certificate errors ignored, a TLS key log such as `SSLKEYLOGFILE`, a trace or
+log file, automatic Windows sign-in to sites, a web engine flags value in
+double quotes or cut by a bare `--`, or any web engine flag Jarvis does not
+know), no page is opened: the step says "Picture unavailable"
 ([Troubleshooting](#troubleshooting) says which settings).
 
 Click a picture, or press Enter on it, to see it larger inside Jarvis (Esc
@@ -1194,11 +1215,12 @@ oldest finished ones are dropped first ("Picture not kept").
 
 To turn them off, in `config.toml`:
 
-- `[live] pictures = false`: no email or calendar pictures.
+- `[live] pictures = false`: no email, calendar or search pictures.
 - `[live] page_snapshots = false`: no page is opened for a picture at all; the
   research works the same.
 - `[live] text = false` also stops page pictures and leaves the email texts
-  out of the pictures (their headers still show).
+  and search snippets out of the pictures (their headers and result titles
+  still show).
 
 The first page picture of a session starts a web engine inside Jarvis: the
 window may pause for a second or a few. The engine then stays loaded (about
@@ -1963,6 +1985,12 @@ zone is the one Jarvis already knows from your calendar, or this PC's, never a
 new request to Google. What the research finds never goes back to the planner:
 its cards are never part of a later request's input.
 
+**How it researches.** Claude searches first. When the search results alone do
+not settle the question (a date, a price, who is eligible, whether something is
+available, a deadline), it reads the most relevant result page or two before it
+answers, within the page reads `[research] max_fetches` allows, and cites the
+pages it read.
+
 **What you get.** Jarvis says a short answer, and the JARVIS tab shows it with
 numbered sources ("[1] Visit - Example Museum (example.org)"). Each source is
 an Open card under ASK labelled with its site ("ASK · WEB · EXAMPLE.ORG"; a
@@ -1983,7 +2011,8 @@ it writes (an email, a reply, a move) is left out, and the LIVE tab says why.
 **Watching it.** The LIVE tab shows every step as it happens: the exact text
 Claude Code got, each web search with its exact query and results, each page
 read with its address, HTTP status, size and what came back, how long each
-took, and how Jarvis checked the answer; and a picture of each page it read
+took, and how Jarvis checked the answer; each search drawn as its results
+page, and a picture of each page it read or cites
 ([Pictures in LIVE](#pictures-in-live)).
 
 **Limits.** At most 4 searches and 4 page reads per request (`[research]
@@ -2009,9 +2038,12 @@ an immediate stop if Claude Code says it would use extra usage.
 - To each website Claude reads: an ordinary request from your PC, so the site
   sees your IP address as with any visit. Claude Code may first check the site
   with Anthropic.
-- With page pictures on (`[live] page_snapshots`, the default): to each public
-  https page the research read, one more ordinary visit from your PC, in a
-  private window without your cookies, for its picture in LIVE.
+- With page pictures on (`[live] page_snapshots`, the default), in a private
+  window without your cookies, for its picture in LIVE (at most 4 per
+  research): to each public https page the research read, one more ordinary
+  visit from your PC; to each source its checked answer cites that a search
+  listed but the research did not read, a visit from your PC made only for
+  its picture (that site sees your IP address only because of it).
 - Never: your calendar, mail, contacts, briefing, accounts or addresses, or
   anything from Jarvis's `.env`.
 
@@ -2471,8 +2503,8 @@ log. Changes apply the next time the app starts.
 | `[live] auto_open` | `"tab"` | When Jarvis starts on an Ask or an approved card: `"tab"` brings up the LIVE tab (not while the briefing plays, not when the window is hidden or minimized), `"window"` shows the LIVE pop-out window without taking the focus, `"off"` never switches. `true` / `false` mean `"tab"` / `"off"`. |
 | `[live] background` | `true` | Also show the reads Jarvis does on his own (agenda, event checks, sign-ins, Claude Code checks) in one compact LIVE row. |
 | `[live] text` | `true` | Show the texts Jarvis read and sent in LIVE (email threads, the planner's input and reply, the outgoing message). `false`: only their sizes (also of the message text in the planner's proposal lines); subjects, names, addresses, event titles and Jarvis's answer still show. `false` also takes no page pictures and leaves the email texts out of the pictures (their headers still show). |
-| `[live] pictures` | `true` | Email and calendar pictures in LIVE ([Pictures in LIVE](#pictures-in-live)): an email Jarvis read or will send drawn as an email, a calendar change drawn on its day (before and after), an Ask's calendar as a 7-day strip. Drawn by Jarvis on this PC from the text he already has: no email HTML, no images from the web. `false`: none. |
-| `[live] page_snapshots` | `true` | Page pictures of web research: each public https page a research read is opened again on this PC in a private window (no sign-ins, nothing saved) and its first screen shown in LIVE. That is an ordinary page visit from this PC: the site sees your IP address. `false`: no page is opened; the research works the same. |
+| `[live] pictures` | `true` | Email, calendar and search pictures in LIVE ([Pictures in LIVE](#pictures-in-live)), drawn by Jarvis on this PC from the text he already has: no email HTML, no images from the web, no page opened for them. `false`: none. |
+| `[live] page_snapshots` | `true` | Page pictures ([Pictures in LIVE](#pictures-in-live)): each public https page a web research read or a checked source its answer cites, opened on this PC in a private window (no sign-ins, nothing saved). The site sees your IP address (for a source not read: only for the picture). `false`: no page is opened. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -2692,17 +2724,19 @@ The app talks to these services, all free:
 
 **Page pictures.** They are the one part of LIVE that uses the network: for the
 picture of each public https page a web research read, Jarvis visits that page
-once more from this PC, in a private window without your cookies or sign-ins
-(the site sees your IP address, as with any visit; its ads and analytics run
-as on any visit, and nothing of it is kept). That window reaches only public
-IPv4 addresses on the https port, checked where each name actually leads,
-never this PC or your local network, through Jarvis's network gate: a proxy
-on 127.0.0.1 that stays open from the first page picture until Jarvis closes
-(any program on this PC could use it too, to reach public https servers
-only). Email and calendar pictures are drawn from what
-Jarvis already has and send nothing. `[live] page_snapshots = false` (or
-`[live] text = false`) stops the page visits; see [Pictures in
-LIVE](#pictures-in-live).
+once more from this PC; for each source its answer cites that a search
+listed but it did not read, Jarvis visits that page from this PC only for
+the picture (without it, that site would not see your IP address). Both in
+a private window without your cookies or sign-ins (the site sees your IP
+address, as with any visit; its ads and analytics run as on any visit, and
+nothing of it is kept). That window reaches only public IPv4 addresses on the
+https port, checked where each name actually leads, never this PC or your
+local network, through Jarvis's network gate: a proxy on 127.0.0.1 that stays
+open from the first page picture until Jarvis closes (any program on this PC
+could use it too, to reach public https servers only). Email, calendar and
+search pictures are drawn from what Jarvis already has and send nothing.
+`[live] page_snapshots = false` (or `[live] text = false`) stops the page
+visits; see [Pictures in LIVE](#pictures-in-live).
 
 **Reading your calendar.** Once Google Calendar is connected on this PC, every
 time the reading screen opens the app reads your calendar events from the start
@@ -2739,10 +2773,11 @@ The LIVE tab shows on your screen what Jarvis read and sent - email text, the
 exact input he gave the planner, the message he will send and, for web
 research, the queries, the pages' addresses and what came back, and the
 pictures of all of these - and keeps none of it: nothing is saved or logged,
-nothing it shows is sent anywhere (a page picture is one more visit to that
-page from this PC, see **Page pictures** above), and it is gone when he
-closes. `[live] text = false` shows only the sizes of those texts (subjects,
-names and addresses still show) and takes no page pictures.
+nothing it shows is sent anywhere (a page picture is a visit to that page
+from this PC: one more for a page the research read, the only one for a
+cited source it did not read; see **Page pictures** above), and it is gone
+when he closes. `[live] text = false` shows only the sizes of those texts
+(subjects, names and addresses still show) and takes no page pictures.
 
 ## Fonts
 

@@ -631,6 +631,98 @@ class PagePictureTests(unittest.TestCase):
         self.assertIn("redirected to www.example.net", ready.alt)
 
 
+class SearchPictureTests(unittest.TestCase):
+    """A web search drawn as a compact results page: built only from what the search returned."""
+
+    HITS = tuple((f"Result {n} - Example University", f"https://www{n}.example.edu/admissions?term={n}")
+                 for n in range(1, 13))
+
+    def test_the_query_and_the_results_in_order(self) -> None:
+        picture = pictures.search_picture("Example University spring deadline", self.HITS[:3])
+        self.assertEqual((picture.kind, picture.state, picture.caption, picture.note),
+                         (pictures.KIND_SEARCH, live.PICTURE_READY, pictures.CAPTION_SEARCH, pictures.NOTE_SEARCH))
+        self.assertIn(pictures.KIND_SEARCH, pictures.MODEL_KINDS)          # [live] pictures decides
+        search = picture.search
+        self.assertEqual(search.query, "Example University spring deadline")
+        self.assertEqual([(hit.title, hit.url, hit.host, hit.snippet) for hit in search.hits],
+                         [(f"Result {n} - Example University", f"https://www{n}.example.edu/admissions?term={n}",
+                           f"www{n}.example.edu", "") for n in (1, 2, 3)])
+        self.assertEqual((search.more, search.unread, search.only, search.never), (0, False, "", ""))
+        self.assertEqual(picture.alt, "Web search for Example University spring deadline: 3 results: "
+                                      "www1.example.edu, www2.example.edu, www3.example.edu")
+
+    def test_at_most_ten_drawn_and_the_rest_counted(self) -> None:
+        search = pictures.search_picture("deadline", self.HITS, only=("example.edu", "example.org"),
+                                         never=("example.com",)).search
+        self.assertEqual((len(search.hits), search.more), (pictures.SEARCH_HITS_SHOWN, 2))
+        self.assertEqual((search.only, search.never), ("example.edu, example.org", "example.com"))
+
+    def test_each_address_as_its_site_and_the_rest(self) -> None:
+        # A results page shows whose site it is first: the host (no "https://", never a user name),
+        # then the rest of the address; the address as listed stays the url.
+        hits = [("A", "https://Admissions.Example.edu/spring/apply?term=2027#dates"),
+                ("B", "https://www.example.org/"), ("C", "https://www.example.org"),
+                ("D", "http://old.example.org/a"), ("E", "https://www.example.org:8443/x"),
+                ("F", "https://someone@pass.example.edu/login"), ("G", "mailto:ana@example.org"),
+                ("H", "https://[::1/broken")]
+        search = pictures.search_picture("deadline", hits).search
+        self.assertEqual([(hit.site, hit.path) for hit in search.hits],
+                         [("admissions.example.edu", "/spring/apply?term=2027#dates"),
+                          ("www.example.org", ""), ("www.example.org", ""),
+                          ("http://old.example.org", "/a"), ("www.example.org:8443", "/x"),
+                          ("pass.example.edu", "/login"), ("", ""), ("", "")])
+        self.assertEqual(search.hits[0].url, "https://Admissions.Example.edu/spring/apply?term=2027#dates")
+        rlo = chr(0x202E)
+        odd = pictures.search_picture("deadline", [("A", f"https://a.example.org/p{rlo}q")]).search.hits[0]
+        self.assertEqual(odd.path, "/p<U+202E>q")                         # cleaned like every string
+
+    def test_snippets_only_when_the_search_gave_one(self) -> None:
+        search = pictures.search_picture("deadline", [("A", "https://a.example.org/", "Apply by March 1."),
+                                                      ("B", "https://b.example.org/")]).search
+        self.assertEqual([hit.snippet for hit in search.hits], ["Apply by March 1.", ""])
+
+    def test_nothing_listed_unread_and_no_query(self) -> None:
+        empty = pictures.search_picture("deadline", [])
+        self.assertEqual((empty.search.hits, empty.search.unread), ((), False))
+        self.assertIn("no pages listed", empty.alt)
+        unread = pictures.search_picture("deadline", [], unread=True)
+        self.assertTrue(unread.search.unread)
+        self.assertIn("results Jarvis could not list", unread.alt)
+        self.assertFalse(pictures.search_picture("deadline", self.HITS[:1], unread=True).search.unread)
+        self.assertIsNone(pictures.search_picture("", self.HITS))
+        self.assertIsNone(pictures.search_picture(None, self.HITS))
+        odd = pictures.search_picture("deadline", [None, ("only a title",), (3, "https://c.example.org/"), ("D", "")])
+        self.assertEqual([(hit.title, hit.host) for hit in odd.search.hits], [("(no title)", "c.example.org")])
+
+    def test_every_string_is_cleaned_and_capped(self) -> None:
+        rlo = chr(0x202E)   # RIGHT-TO-LEFT OVERRIDE (kept out of the source as a character)
+        picture = pictures.search_picture(f"dead{rlo}line\nnext", [(f"Ti{rlo}tle " + "x" * 400,
+                                                                       "https://a.example.org/" + "p" * 400,
+                                                                       f"snip{rlo}pet")])
+        search = picture.search
+        self.assertEqual(search.query, f"dead<U+202E>line{live.LINE_BREAK}next")
+        hit = search.hits[0]
+        self.assertTrue(hit.title.startswith("Ti<U+202E>tle "))
+        self.assertLessEqual(len(hit.title), pictures.SEARCH_TITLE_CAP)
+        self.assertLessEqual(len(hit.url), pictures.SEARCH_URL_CAP)
+        self.assertEqual(hit.snippet, "snip<U+202E>pet")
+        self.assertNotIn(rlo, picture.alt)
+        self.assertLessEqual(len(pictures.search_picture("q" * 900, []).search.query), pictures.QUERY_CAP)
+
+    def test_cost_without_text_and_repr(self) -> None:
+        picture = pictures.search_picture(MARK, [(MARK, f"https://{MARK}.example.org/", MARK * 3)])
+        bare = picture.without_text()
+        self.assertEqual((bare.search.hits[0].title, bare.search.hits[0].snippet), (MARK, ""))
+        self.assertEqual(bare.search.query, MARK)
+        self.assertLess(bare.cost, picture.cost)
+        self.assertGreater(picture.cost, 2 * (4 * len(MARK)))
+        for item in (picture, picture.search, *picture.search.hits):
+            self.assertNotIn(MARK.casefold(), repr(item).casefold(), type(item).__name__)
+        dropped = picture.dropped(live.PICTURE_MEMORY)
+        self.assertEqual((dropped.state, dropped.search), (live.PICTURE_DROPPED, None))
+        self.assertEqual(pictures.stamp(picture, live.STATUS_OK, ""), ("", ""))
+
+
 class StampTests(unittest.TestCase):
     def setUp(self) -> None:
         view = MailView("me@example.edu", "ana@example.edu", "", "Hi", "", "", "", "Hello")

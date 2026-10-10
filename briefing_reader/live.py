@@ -17,7 +17,8 @@ pop-out window (ui.py; hud.LiveLog renders it).
     LiveTask.find / update / finish / note
     LiveStep.field / item / note / block / rename_block / update / done
     LiveStep.picture(picture)         a picture of the step (pictures.Picture: an email, a calendar
-                                      change, a page); one per step, a new one replaces the old
+                                      change, a web search, a page); one per step, a new one replaces
+                                      the old
     NO_TASK, NO_STEP                  handles whose every method does nothing
     Payload                           what an approved card will send or change (executor.preview),
                                       with its picture
@@ -38,12 +39,13 @@ Rules (spec "LIVE view" sections 2 and 7):
   anything; repr() / str() of every object here names ids, kinds and statuses only.
 - Bounded: LiveLimits caps the tasks, steps, items, notes, fields, block sizes and the total
   characters; RUNNING tasks are never dropped.
-- Pictures (pictures.py: an email drawn by Jarvis, a calendar change on its day, a page snapshot)
-  are memory only too: never written to a file and never logged. Their bytes are counted apart
-  from the characters (LiveLimits picture caps: one picture, one task, all); past the total the
-  oldest finished tasks' pictures are dropped first ("Picture not kept"); a RUNNING task keeps
-  its pictures. [live] pictures = false refuses the drawn ones; [live] text = false keeps no
-  email text in a picture and no page picture. Clear and close drop them with their tasks.
+- Pictures (pictures.py: an email drawn by Jarvis, a calendar change on its day, a web search as
+  a results page, a page snapshot) are memory only too: never written to a file and never logged.
+  Their bytes are counted apart from the characters (LiveLimits picture caps: one picture, one
+  task, all); past the total the oldest finished tasks' pictures are dropped first ("Picture not
+  kept"); a RUNNING task keeps its pictures. [live] pictures = false refuses the drawn ones;
+  [live] text = false keeps no email text or search snippet in a picture and no page picture.
+  Clear and close drop them with their tasks.
 
 Qt-free (standard library, config.redact, text_prep.format_time, actions.link_allowed).
 """
@@ -117,16 +119,19 @@ ACCOUNT_SIGNIN = "account.signin"
 CLAUDE_CHECK = "claude.check"
 WEB_SEARCH = "web.search"         # one web search of a research run (its exact query and results)
 WEB_FETCH = "web.fetch"           # one page read of a research run (its URL, HTTP status, excerpt)
+WEB_SOURCE = "web.source"         # a page the research's answer cites but did not read: its picture
 RESEARCH_INPUT = "research.input"         # what the web research gets (the isolation check)
 RESEARCH_RUN = "research.run"             # the web research run (Claude Code with web tools only)
 RESEARCH_VALIDATE = "research.validate"   # the research answer checked: sources and suggestions
 STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, PLANNER_RUN, ASK_VALIDATE,
               ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_COUNTDOWN, ACTION_SIGNIN, ACTION_CHECKS,
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
-              WEB_FETCH, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE)
+              WEB_FETCH, WEB_SOURCE, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE)
 
-# Internal link ids a Field may carry besides a Jarvis-made Google result link ("tab:jarvis").
-INTERNAL_LINK_RE = re.compile(r"(?:tab:[a-z]{1,16}|live:\d{1,12})")
+# Internal link ids a Field may carry besides a Jarvis-made Google result link: "tab:jarvis" (a tab),
+# "live:3" (a task), "picture:12" (step 12's picture shown larger; the step itself while it has none).
+INTERNAL_LINK_RE = re.compile(r"(?:tab:[a-z]{1,16}|live:\d{1,12}|picture:\d{1,12})")
+PICTURE_LINK = "picture:"
 
 # --------------------------------------------------------------------------
 # Caps and bounds
@@ -1433,11 +1438,12 @@ class LiveStep:
     @_safe()
     def picture(self, picture: Any) -> None:
         """A picture of this step (a pictures.Picture), shown first in its details; a new one replaces
-        the old. Nothing for NO_STEP, anything but a Picture, an email or calendar picture while
-        [live] pictures is off, a page picture while [live] text is off, or a step whose task
-        finished (except a late picture of the same kind for a step that waits for one: a page
-        snapshot). With [live] text = false an email picture keeps its headers only. Past the
-        memory caps it is kept as "Picture not kept: <why>"."""
+        the old. Nothing for NO_STEP, anything but a Picture, a picture Jarvis draws (an email, a
+        calendar, a web search) while [live] pictures is off, a page picture while [live] text is
+        off, or a step whose task finished (except a late picture of the same kind for a step that
+        waits for one: a page snapshot). With [live] text = false an email picture keeps its
+        headers only, a search picture no snippet. Past the memory caps it is kept as "Picture not
+        kept: <why>"."""
         stream, step = self._stream, self._step
         if stream is None or step is None or picture is None:
             return

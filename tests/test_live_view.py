@@ -687,9 +687,16 @@ class ResearchStepRenderTests(LogCase):
         settle(4)
         search = steps[live.WEB_SEARCH].details
         self.assertEqual(search.fields.value_widget("Query (exact)").plain_text(), self.QUERY)
-        (hit,) = search.items.items()
-        self.assertEqual(hit.text, '<a href="https://evil.example.com">Click</a> <U+202E>evil <b>title</b> - '
-                                   "https://www.example.org/visit")
+        self.assertEqual(search.items.items(), ())   # drawn as a results page: its list only as text, closed
+        listed = search.blocks[research_live_results_block()]
+        self.assertFalse(listed.is_open())
+        listed.toggle.click()
+        settle()
+        self.assertEqual(listed.text_edit.toPlainText(),
+                         '<a href="https://evil.example.com">Click</a> <U+202E>evil <b>title</b> - '
+                         "https://www.example.org/visit")
+        self.assertTrue(listed.text_edit.isReadOnly())
+        self.assertEqual(listed.caption.text(), hud.LIVE_UNTRUSTED_TEXT)
         fetch = steps[live.WEB_FETCH].details
         self.assertEqual(fetch.fields.value_widget("URL (asked)").plain_text(), "https://www.example.org/visit")
         self.assertEqual(fetch.fields.value_widget("HTTP").plain_text(), "200 OK")
@@ -731,6 +738,12 @@ def research_live_blocks() -> tuple[str, str]:
     from briefing_reader.ask import research_live
 
     return research_live.SEARCH_BLOCK, research_live.FETCH_BLOCK
+
+
+def research_live_results_block() -> str:
+    from briefing_reader.ask import research_live
+
+    return research_live.RESULTS_BLOCK
 
 
 # --------------------------------------------------------------------------

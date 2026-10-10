@@ -1060,9 +1060,13 @@ class LiveConfigTests(ProjectTestCase):
         live_part = raw.decode("ascii").split("[live]", 1)[1].split("\n[", 1)[0]
         self.assertIn("\npictures = true\n", live_part)
         self.assertIn("\npage_snapshots = true\n", live_part)
-        self.assertIn("no email HTML, no images from the web", live_part)
-        self.assertIn("the site sees your IP\n# address", live_part)
-        self.assertIn("false: no page is opened", live_part)
+        words = " ".join(live_part.replace("\n# ", " ").split())   # the comments as one text
+        self.assertIn("no email HTML, no images from the web, no page opened for them", words)
+        self.assertIn("each web search of a research drawn as its results page", words)
+        self.assertIn("each page a research read, and each page its answer cites that a search listed, is opened "
+                      "(again, for a page it read)", words)
+        self.assertIn("the site sees your IP address, also a cited site the research never read", words)
+        self.assertIn("false: no page is opened", words)
 
 
 # --------------------------------------------------------------------------

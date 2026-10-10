@@ -14,11 +14,13 @@ import json
 import logging
 import threading
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from briefing_reader import live, pictures, snapshots
+from briefing_reader.actions import link_host
 from briefing_reader.ask import research as rs
 from briefing_reader.ask import research_live
 from briefing_reader.ask import stream as st
@@ -37,6 +39,7 @@ from briefing_reader.ask.research import (
     read_research_result,
     run_research,
 )
+from briefing_reader.ask.research_validate import ResearchReport, WebSource, validate
 from tests.ask_fakes import (
     HOURS_URL,
     NOW,
@@ -826,7 +829,7 @@ class WebStepsPictureTests(unittest.TestCase):
         for tool_id in ("toolu_f2", "toolu_f3", "toolu_f4", "toolu_f5", "toolu_f6", "toolu_f7"):
             self.assertIsNone(self.view(tool_id).picture, tool_id)
         search = self.task.find(live.WEB_SEARCH, key="web:toolu_s1").view()
-        self.assertIsNone(search.picture)
+        self.assertEqual(search.picture.kind, pictures.KIND_SEARCH)   # drawn from its results; never opened
         web.finished()
         self.assertEqual(self.snapper.calls[-1], ("end_run", self.task.id))
 
@@ -867,6 +870,299 @@ class WebStepsPictureTests(unittest.TestCase):
         web = self.web(self.snapper, disabled)
         self.fetch(web, "toolu_f1", self.PAGE)
         self.assertEqual(self.snapper.calls, [])
+
+
+class BudgetSnapshots(RecordingSnapshots):
+    """RecordingSnapshots with the real per-research budget (snapshots.RunBudget): past ``cap`` or a
+    page already asked for, the picture is unavailable, as the real snapshotter shows it."""
+
+    def __init__(self, cap: int = snapshots.MAX_PER_RUN) -> None:
+        super().__init__()
+        self.cap = cap
+        self.budget = snapshots.RunBudget()
+
+    def request(self, step: live.LiveStep, url: str, *, task_id: int) -> None:
+        view = step.view()
+        self.calls.append(("request", view.kind if view is not None else "", url, task_id))
+        reason = snapshots.snapshot_url_problem(url) or self.budget.admit(task_id, url, self.cap)
+        step.picture(pictures.page_unavailable(url, reason) if reason else pictures.page_pending(url))
+
+
+def report_of(*sources: tuple[int, str, str, bool]) -> ResearchReport:
+    """A checked answer's report with these shown sources: (number, title, url, checked)."""
+    return ResearchReport(answer="It opens at 10 AM [1].", sources=tuple(
+        WebSource(number, title, url, link_host(url), checked, f"card{number}")
+        for number, title, url, checked in sources))
+
+
+class WebStepsSearchPictureTests(unittest.TestCase):
+    """A web search that came back is drawn on its web.search step as a compact results page
+    (pictures.search_picture): the exact query, the results in order, the sites it was kept to; a
+    search with no results or results Jarvis could not list says so; a failed or refused search
+    gets none. [live] pictures decides; nothing is ever opened for it (no snapshotter call)."""
+
+    def setUp(self) -> None:
+        self.stream = live.LiveStream()
+        self.task = self.stream.task(live.TASK_WEB, "web research")
+        self.snapper = RecordingSnapshots()
+        self.web = research_live.WebSteps(self.task, ResearchLimits(), snapshots=self.snapper)
+
+    def search(self, tool_id: str, status: str, hits: tuple = (), *, number: int = 1, **call: Any) -> live.StepView:
+        self.web.call(rs.WebCall(tool_id, SEARCH, number, query="Example Museum opening hours", **call))
+        self.web.result(rs.WebResult(tool_id, SEARCH, status, hits=hits, text="Links: []" if hits else "",
+                                     message="refused" if status in (rs.RESULT_DENIED, rs.RESULT_ERROR) else ""))
+        return self.task.find(live.WEB_SEARCH, key=f"web:{tool_id}").view()
+
+    def test_a_search_is_drawn_from_what_it_returned(self) -> None:
+        hits = tuple((f"Result {n}", f"https://www{n}.example.org/page") for n in range(1, 13))
+        view = self.search("toolu_s1", rs.RESULT_OK, hits, allowed_domains=("example.org",))
+        picture = view.picture
+        self.assertEqual((picture.kind, picture.state, picture.caption),
+                         (pictures.KIND_SEARCH, live.PICTURE_READY, pictures.CAPTION_SEARCH))
+        search = picture.search
+        self.assertEqual(search.query, "Example Museum opening hours")
+        self.assertEqual([(hit.title, hit.url, hit.host) for hit in search.hits[:2]],
+                         [("Result 1", "https://www1.example.org/page", "www1.example.org"),
+                          ("Result 2", "https://www2.example.org/page", "www2.example.org")])
+        self.assertEqual((len(search.hits), search.more, search.only), (pictures.SEARCH_HITS_SHOWN, 2, "example.org"))
+        self.assertTrue(view.open_hint)                                   # a step with a picture starts open
+        self.assertEqual(self.snapper.calls, [])                           # nothing is opened for it
+        # The picture lists the results: not once more as items, only as text in a closed block
+        # (to copy or for a screen reader), before what WebSearch returned.
+        self.assertEqual(view.items, ())
+        self.assertEqual([block.label for block in view.blocks],
+                         [research_live.RESULTS_BLOCK, research_live.SEARCH_BLOCK])
+        listed = view.blocks[0]
+        self.assertEqual(listed.text.splitlines(), [f"{title} - {url}" for title, url in hits])
+        self.assertEqual((listed.start_open, listed.untrusted), (False, True))
+        self.assertEqual({field.label: field.value for field in view.fields}["Results"], "12 pages listed")
+
+    def test_nothing_found_unread_failed_and_refused(self) -> None:
+        empty = self.search("toolu_s1", rs.RESULT_EMPTY).picture
+        self.assertEqual((empty.search.hits, empty.search.unread), ((), False))
+        unread = self.search("toolu_s2", rs.RESULT_UNREAD, number=2).picture
+        self.assertTrue(unread.search.unread)
+        for number, status in ((3, rs.RESULT_ERROR), (4, rs.RESULT_DENIED)):
+            with self.subTest(status=status):
+                self.assertIsNone(self.search(f"toolu_s{number}", status, number=number).picture)
+        self.web.call(rs.WebCall("toolu_s5", SEARCH, 5, query="museum", over=True))   # stopped by Jarvis
+        self.assertIsNone(self.task.find(live.WEB_SEARCH, key="web:toolu_s5").view().picture)
+
+    def test_pictures_off_draws_none_and_text_off_keeps_no_snippet(self) -> None:
+        off = live.LiveStream(pictures=False).task(live.TASK_WEB, "web research")
+        web = research_live.WebSteps(off, ResearchLimits())
+        web.call(rs.WebCall("toolu_s1", SEARCH, 1, query="museum"))
+        web.result(rs.WebResult("toolu_s1", SEARCH, rs.RESULT_OK, hits=(("Visit", VISIT_URL),)))
+        view = off.find(live.WEB_SEARCH, key="web:toolu_s1").view()
+        self.assertIsNone(view.picture)
+        self.assertEqual(view.status, live.STATUS_OK)
+        self.assertEqual([item.text for item in view.items], [f"Visit - {VISIT_URL}"])   # no picture: items
+        self.assertEqual(view.blocks, ())
+        no_text = live.LiveStream(keep_text=False).task(live.TASK_WEB, "web research")
+        web = research_live.WebSteps(no_text, ResearchLimits())
+        web.call(rs.WebCall("toolu_s1", SEARCH, 1, query="museum"))
+        web.result(rs.WebResult("toolu_s1", SEARCH, rs.RESULT_OK, hits=(("Visit", VISIT_URL),)))
+        view = no_text.find(live.WEB_SEARCH, key="web:toolu_s1").view()
+        self.assertEqual(view.picture.kind, pictures.KIND_SEARCH)
+        self.assertEqual([item.text for item in view.items], [f"Visit - {VISIT_URL}"])   # a block keeps no text
+        texts_off = live.LiveStream(keep_text=False).task(live.TASK_WEB, "web research")
+        texts_off.step(live.WEB_SEARCH, "Web search 1").picture(
+            pictures.search_picture("museum", [("Visit", VISIT_URL, "Open daily from 10 AM.")]))
+        kept = texts_off.find(live.WEB_SEARCH).view().picture
+        self.assertEqual((kept.search.hits[0].title, kept.search.hits[0].snippet), ("Visit", ""))
+
+    def test_a_broken_picture_never_changes_the_step(self) -> None:
+        # A picture that fails to draw leaves the step exactly as with pictures off (its results
+        # as items); a drawn one only moves them into the closed block.
+        def views(broken: bool, drawn: bool = True) -> tuple:
+            stream = live.LiveStream(pictures=drawn)
+            task = stream.task(live.TASK_WEB, "web research")
+            web = research_live.WebSteps(task, ResearchLimits())
+            web.call(rs.WebCall("toolu_s1", SEARCH, 1, query="museum"))
+            if broken:
+                with unittest.mock.patch.object(research_live, "search_picture", side_effect=RuntimeError("x")):
+                    web.result(rs.WebResult("toolu_s1", SEARCH, rs.RESULT_OK, hits=(("Visit", VISIT_URL),)))
+            else:
+                web.result(rs.WebResult("toolu_s1", SEARCH, rs.RESULT_OK, hits=(("Visit", VISIT_URL),)))
+            return tuple((step.kind, step.status, step.summary, step.fields, step.items, step.blocks, step.picture)
+                         for step in stream.snapshot()[0].steps)
+
+        self.assertEqual(views(True), views(False, drawn=False))
+        ((_kind, status, summary, fields, items, blocks, picture),) = views(False)
+        (broken,) = views(True)
+        self.assertEqual((status, summary, fields), broken[1:4])
+        self.assertEqual((items, len(blocks), picture.kind), ((), 1, pictures.KIND_SEARCH))
+
+
+class CitedSourcePictureTests(unittest.TestCase):
+    """WebSteps.cited: after the answer's check, each source it SHOWS (never a left-out one) gets a
+    picture - the page read's when the run read that page (no second picture), else a web.source
+    step of its own ("Source [2]: example.net") with the page's picture, asked after the reads and in
+    citation order within the same cap per research; the check (research.validate) names each
+    picture's step and links to it ("picture:<step id>"). Nothing without a snapshotter, the LIVE
+    view or [live] text."""
+
+    def setUp(self) -> None:
+        self.stream = live.LiveStream()
+        self.task = self.stream.task(live.TASK_WEB, "web research")
+
+    def read(self, web: research_live.WebSteps, tool_id: str, url: str, number: int,
+             final_url: str = "") -> None:
+        web.call(rs.WebCall(tool_id, FETCH, number, url=url, found_by=rs.FOUND_SEARCH))
+        web.result(rs.WebResult(tool_id, FETCH, rs.RESULT_OK, text="Open 10 AM.", code=200, code_text="OK",
+                                size=10, took_ms=5, final_url=final_url or url))
+
+    def steps(self, kind: str) -> list[live.StepView]:
+        return [step for step in self.stream.snapshot()[0].steps if step.kind == kind]
+
+    def test_reads_first_then_the_sources_in_citation_order_within_the_cap(self) -> None:
+        snapper = BudgetSnapshots()
+        web = research_live.WebSteps(self.task, ResearchLimits(), snapshots=snapper)
+        self.read(web, "toolu_f1", VISIT_URL, 1)
+        self.read(web, "toolu_f2", "https://www.example.org/old", 2, final_url="https://www.example.org/new")
+        check = self.task.step(live.RESEARCH_VALIDATE, research_live.VALIDATE_TITLE)
+        report = report_of((1, "Hours", HOURS_URL, True), (2, "Visit", VISIT_URL, True),
+                           (3, "New", "https://www.example.org/new", True),       # where read 2 ended
+                           (4, "Tickets", "https://www.example.com/tickets", False),   # Jarvis could not check it
+                           (5, "Shop", "https://shop.example.com/", True),
+                           (6, "Cafe", "https://cafe.example.com/", True))
+        web.cited(report, check)
+        self.assertEqual([call[1:3] for call in snapper.calls],
+                         [(live.WEB_FETCH, VISIT_URL), (live.WEB_FETCH, "https://www.example.org/old"),
+                          (live.WEB_SOURCE, HOURS_URL), (live.WEB_SOURCE, "https://shop.example.com/"),
+                          (live.WEB_SOURCE, "https://cafe.example.com/")])   # never the unchecked one
+        sources = self.steps(live.WEB_SOURCE)
+        self.assertEqual([step.title for step in sources],
+                         ["Source [1]: museum.example.net", "Source [4]: www.example.com",
+                          "Source [5]: shop.example.com", "Source [6]: cafe.example.com"])
+        self.assertEqual([step.picture.state for step in sources],
+                         [live.PICTURE_PENDING, live.PICTURE_UNAVAILABLE, live.PICTURE_PENDING,
+                          live.PICTURE_UNAVAILABLE])                                # the 6th: past 4
+        self.assertEqual(sources[3].picture.note, pictures.UNAVAILABLE_PREFIX + snapshots.R_OVER_CAP)
+        self.assertTrue(all(step.status == live.STATUS_OK and step.open_hint for step in sources))
+        fields = {field.label: field.value for field in sources[1].fields}
+        self.assertEqual(fields["Check"], research_live.UNCHECKED_WARNING)           # unchecked: said so ...
+        self.assertEqual(sources[1].picture.note, pictures.UNAVAILABLE_PREFIX + research_live.UNCHECKED_NO_PICTURE)
+        self.assertEqual(sources[1].summary, research_live.SOURCE_UNCHECKED_SUMMARY)   # ... and never opened
+        fields = {field.label: field.value for field in sources[0].fields}
+        self.assertEqual((fields["Cited as"], fields["URL"], fields["Read by the research"]),
+                         ("[1] Hours", HOURS_URL, research_live.SOURCE_NOT_READ))
+        self.assertEqual([sources[0].summary, sources[2].summary, sources[3].summary],
+                         [research_live.SOURCE_SUMMARY] * 3)   # the refused 6th too: no visit claimed,
+        self.assertNotIn("this PC", research_live.SOURCE_SUMMARY)   # its picture says whether one is made
+        self.assertEqual(sources[0].picture.note, pictures.NOTE_OPENING)
+        fetches = self.steps(live.WEB_FETCH)
+        links = {field.label: (field.value, field.link) for field in check.view().fields}
+        self.assertEqual(links, {
+            "Picture [1]": ("Source [1]: museum.example.net", f"picture:{sources[0].id}"),
+            "Picture [2]": ("Page read 1: www.example.org", f"picture:{fetches[0].id}"),
+            "Picture [3]": ("Page read 2: www.example.org", f"picture:{fetches[1].id}"),
+            "Picture [5]": ("Source [5]: shop.example.com", f"picture:{sources[2].id}"),
+            "Picture [6]": ("Source [6]: cafe.example.com", f"picture:{sources[3].id}")})   # no link for [4]
+        self.assertTrue(all(live.result_link(link) == link for _value, link in links.values()))
+        web.cited(report, check)                                       # again: the same steps (keyed)
+        self.assertEqual(len(self.steps(live.WEB_SOURCE)), 4)
+
+    def test_the_check_names_each_pictures_step(self) -> None:
+        snapper = BudgetSnapshots()
+        web = research_live.WebSteps(self.task, ResearchLimits(), snapshots=snapper)
+        self.read(web, "toolu_f1", VISIT_URL, 1)
+        answer = ResearchAnswer("Open [1] [2] [3].", sources=(("Visit", VISIT_URL), ("Hours", HOURS_URL),
+                                                              ("Local", "https://192.168.1.1/")))
+        web_log = rs.WebLog(searches=1, fetches=1, reads=1, hits=2,
+                            seen=frozenset({normalize_url(VISIT_URL), normalize_url(HOURS_URL)}))
+        cards, report = validate(answer, web_log, now=NOW, max_sources=5, max_cards=8, page_ids=(), question="q",
+                                 hint="", forced=True)
+        research_live.validated(self.task, cards, report, answer, web_log, web_steps=web)
+        (check,) = self.steps(live.RESEARCH_VALIDATE)
+        self.assertEqual([item.note for item in check.items[:2]],
+                         [f"{VISIT_URL} - picture: see the Page read 1 step",
+                          f"{HOURS_URL} - picture: see the Source [2] step"])
+        self.assertEqual(check.items[2].status_text, "LEFT OUT")
+        self.assertNotIn("its picture", check.items[2].note)                         # never a left-out one
+        self.assertEqual([call[2] for call in snapper.calls], [VISIT_URL, HOURS_URL])
+        self.assertEqual(self.stream.snapshot()[0].steps[-1].kind, live.WEB_SOURCE)  # after the check
+
+    def test_an_unchecked_source_is_never_opened_and_the_check_says_why(self) -> None:
+        # A search came back as text Jarvis could not list (checkable=False): a source no search
+        # listed and no page read loaded is shown with UNCHECKED_WARNING, as an Open card only. It
+        # gets no picture (nothing is opened for it, no cap used); the checked one after it does.
+        snapper = BudgetSnapshots()
+        web = research_live.WebSteps(self.task, ResearchLimits(), snapshots=snapper)
+        tickets = "https://www.example.com/tickets"
+        answer = ResearchAnswer("Open [1] [2].", sources=(("Tickets", tickets), ("Hours", HOURS_URL)))
+        web_log = rs.WebLog(searches=1, fetches=0, reads=0, hits=1, seen=frozenset({normalize_url(HOURS_URL)}),
+                            checkable=False)
+        cards, report = validate(answer, web_log, now=NOW, max_sources=5, max_cards=8, page_ids=(), question="q",
+                                 hint="", forced=True)
+        self.assertEqual([source.checked for source in report.sources], [False, True])
+        research_live.validated(self.task, cards, report, answer, web_log, web_steps=web)
+        self.assertEqual([call[1:3] for call in snapper.calls], [(live.WEB_SOURCE, HOURS_URL)])
+        unchecked, checked = self.steps(live.WEB_SOURCE)
+        self.assertEqual((unchecked.title, unchecked.picture.state, unchecked.picture.note),
+                         ("Source [1]: www.example.com", live.PICTURE_UNAVAILABLE,
+                          pictures.UNAVAILABLE_PREFIX + research_live.UNCHECKED_NO_PICTURE))
+        self.assertTrue(unchecked.open_hint)                                  # its step shows why
+        self.assertEqual(checked.picture.state, live.PICTURE_PENDING)
+        (check,) = self.steps(live.RESEARCH_VALIDATE)
+        self.assertEqual([item.note for item in check.items[:2]],
+                         [f"{research_live.UNCHECKED_WARNING} - {tickets} - no picture (its address could not "
+                          "be checked): see the Source [1] step",
+                          f"{HOURS_URL} - picture: see the Source [2] step"])
+        self.assertEqual(check.items[0].status, live.STATUS_WARN)
+        links = {field.label: field.link for field in check.fields if field.link}
+        self.assertEqual(links, {"Picture [2]": f"picture:{checked.id}"})     # no link to a picture never taken
+
+    def test_a_lower_cap_refuses_with_its_own_number_and_the_check_stays_true(self) -> None:
+        snapper = BudgetSnapshots(cap=2)          # min(4, [research] max_fetches = 2)
+        web = research_live.WebSteps(self.task, ResearchLimits(max_fetches=2), snapshots=snapper)
+        self.read(web, "toolu_f1", VISIT_URL, 1)
+        answer = ResearchAnswer("Open [1] [2] [3].", sources=(
+            ("Visit", VISIT_URL), ("Hours", HOURS_URL), ("Shop", "https://shop.example.com/")))
+        web_log = rs.WebLog(searches=1, fetches=1, reads=1, hits=3, seen=frozenset(
+            {normalize_url(VISIT_URL), normalize_url(HOURS_URL), normalize_url("https://shop.example.com/")}))
+        cards, report = validate(answer, web_log, now=NOW, max_sources=5, max_cards=8, page_ids=(), question="q",
+                                 hint="", forced=True)
+        research_live.validated(self.task, cards, report, answer, web_log, web_steps=web)
+        sources = self.steps(live.WEB_SOURCE)
+        self.assertEqual([step.picture.state for step in sources], [live.PICTURE_PENDING, live.PICTURE_UNAVAILABLE])
+        self.assertEqual(sources[1].picture.note, pictures.UNAVAILABLE_PREFIX + "at most 2 page pictures per research")
+        (check,) = self.steps(live.RESEARCH_VALIDATE)
+        self.assertEqual(check.items[2].note, "https://shop.example.com/ - picture: see the Source [3] step")
+        links = {field.label: field.link for field in check.fields if field.link}
+        self.assertEqual(links["Picture [3]"], f"picture:{sources[1].id}")   # its step says why there is none
+
+    def test_nothing_without_a_snapshotter_the_live_view_or_text(self) -> None:
+        report = report_of((1, "Hours", HOURS_URL, True))
+        search_only = ResearchLimits(max_fetches=0)    # [research] max_fetches = 0: no page opened at all
+        for name, task, snapper, limits in (
+                ("no snapshotter", self.task, None, ResearchLimits()),
+                ("text off", live.LiveStream(keep_text=False).task(live.TASK_WEB, "web"), BudgetSnapshots(),
+                 ResearchLimits()),
+                ("LIVE off", live.LiveStream(enabled=False).task(live.TASK_WEB, "web"), BudgetSnapshots(),
+                 ResearchLimits()),
+                ("search only", live.LiveStream().task(live.TASK_WEB, "web"), BudgetSnapshots(), search_only)):
+            with self.subTest(name):
+                web = research_live.WebSteps(task, limits, snapshots=snapper)
+                check = task.step(live.RESEARCH_VALIDATE, research_live.VALIDATE_TITLE)
+                web.cited(report, check)
+                self.assertFalse(web.pictures_sources())
+                if snapper is not None:
+                    self.assertEqual(snapper.calls, [])
+                view = task.find(live.WEB_SOURCE).view()
+                self.assertIsNone(view)
+                checked = check.view()
+                self.assertFalse(checked is not None and any(field.link for field in checked.fields))
+
+    def test_a_broken_snapshotter_changes_nothing_else(self) -> None:
+        broken = RecordingSnapshots(fail=True)
+        web = research_live.WebSteps(self.task, ResearchLimits(), snapshots=broken)
+        check = self.task.step(live.RESEARCH_VALIDATE, research_live.VALIDATE_TITLE)
+        web.cited(report_of((1, "Hours", HOURS_URL, True), (2, "Shop", "https://shop.example.com/", True)), check)
+        self.assertEqual([call[0] for call in broken.calls], ["request", "request"])   # one failure stops nothing
+        self.assertEqual(len(self.steps(live.WEB_SOURCE)), 2)
+        web.finished()
+        self.assertEqual(broken.calls[-1][0], "end_run")
 
 
 if __name__ == "__main__":

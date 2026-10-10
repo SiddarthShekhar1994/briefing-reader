@@ -246,7 +246,8 @@ class RequestTests(SnapshotterCase):
         snapper.request(first, PAGE, task_id=self.task.id)
         snapper.request(second, "https://www.example.org/b", task_id=self.task.id)
         self.assertEqual(self.state(first), live.PICTURE_PENDING)
-        self.assertEqual(self.picture(second).note, pictures.UNAVAILABLE_PREFIX + snapshots.R_OVER_CAP)
+        self.assertEqual(self.picture(second).note,
+                         pictures.UNAVAILABLE_PREFIX + "at most 1 page picture per research")   # its own cap
         self.assertEqual(self.make(max_per_run=99)._max_per_run, snapshots.MAX_PER_RUN)
 
     def test_text_off_refuses_every_page(self) -> None:

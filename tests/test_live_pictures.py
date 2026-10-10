@@ -73,8 +73,24 @@ class PictureTests(unittest.TestCase):
         step = stream.task(live.TASK_WEB, "Web").step(live.WEB_FETCH, "Read a page")
         step.picture(outgoing())
         self.assertIsNone(step_view(stream, step).picture)
+        search = stream.task(live.TASK_WEB, "Web").step(live.WEB_SEARCH, "Web search 1")
+        search.picture(pictures.search_picture("museum hours", [("Visit", URL)]))   # drawn by Jarvis too
+        self.assertIsNone(step_view(stream, search).picture)
         step.picture(page())
         self.assertEqual(step_view(stream, step).picture.kind, pictures.KIND_PAGE)
+
+    def test_a_search_picture_is_kept_and_text_off_drops_only_its_snippets(self) -> None:
+        for keep_text, snippet in ((True, "Open daily."), (False, "")):
+            with self.subTest(keep_text=keep_text):
+                stream = make(keep_text=keep_text)
+                step = stream.task(live.TASK_WEB, "Web").step(live.WEB_SEARCH, "Web search 1")
+                step.picture(pictures.search_picture("museum hours", [("Visit", URL, "Open daily.")]))
+                shown = step_view(stream, step).picture
+                hit = shown.search.hits[0]
+                self.assertEqual((shown.kind, shown.search.query, hit.title, hit.snippet),
+                                 (pictures.KIND_SEARCH, "museum hours", "Visit", snippet))
+                self.assertTrue(step_view(stream, step).open_hint)
+                self.assertEqual(stream.picture_bytes(), shown.cost)
 
     def test_text_off_strips_mail_bodies_and_refuses_page_pictures(self) -> None:
         stream = make(keep_text=False)

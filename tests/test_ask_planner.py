@@ -34,7 +34,10 @@ from tests.ask_fakes import (
     gmail_message,
     gmail_thread,
     plan_stream,
+    research_answer,
+    research_stream,
     stream,
+    success_events,
 )
 
 TOMORROW_2PM = NOW.replace(hour=14, minute=0) + timedelta(days=1)
@@ -948,7 +951,10 @@ class ResearchTests(PlannerTestCase):
         self.assertEqual(self.fields(search)["Query (exact)"], "Example Museum opening hours Saturday")
         self.assertEqual(self.fields(search)["Search"], "1 of at most 4")
         self.assertEqual(self.fields(search)["Results"], "3 pages listed")
-        self.assertEqual([item.text for item in search.items][0], "Visit - Example Museum - https://www.example.org/visit")
+        self.assertEqual(search.picture.kind, pictures.KIND_SEARCH)   # the results drawn as a results page ...
+        self.assertEqual(search.items, ())                             # ... and listed once more only as text
+        listed = next(block for block in search.blocks if block.label == research_live.RESULTS_BLOCK)
+        self.assertEqual(listed.text.splitlines()[0], "Visit - Example Museum - https://www.example.org/visit")
         self.assertTrue(all(block.untrusted for block in search.blocks))
         fetch = self.step(live.WEB_FETCH)
         fetch_fields = self.fields(fetch)
@@ -1135,7 +1141,10 @@ class ResearchTests(PlannerTestCase):
         self.assertEqual(self.usage.counts(NOW, kind="plan"), (0, 0))
         self.assertEqual([step.kind for step in self.steps()], [live.ASK_CHECKS] + RESEARCH_KINDS)
         self.assertIsNone(outcome.calendar_read)                  # nothing read: nothing for the day pictures
-        self.assertTrue(all(step.picture is None for step in self.steps()))   # no mail or calendar picture
+        # No mail or calendar picture: only the search, drawn from what it returned.
+        self.assertEqual({step.picture.kind for step in self.steps() if step.picture is not None},
+                         {pictures.KIND_SEARCH})
+        self.assertEqual(self.step(live.WEB_SEARCH).picture.kind, pictures.KIND_SEARCH)
         checks = self.step(live.ASK_CHECKS)
         self.assertEqual((checks.title, checks.status), ("Ready to research?", live.STATUS_OK))
         fields = self.fields(checks)
@@ -1441,9 +1450,11 @@ class Snapshots:
 
 class PageSnapshotTests(PlannerTestCase):
     """Page pictures of a web research (AskPlanner.page_snapshots, LIVE only): the pages a run READ
-    go to the snapshotter with the run's LIVE task id, then end_run - also when the run was stopped,
-    failed or never started. The research run is told nothing of it (its argv, stdin, environment
-    and folder are the same with or without); without the LIVE view nothing is asked."""
+    go to the snapshotter with the run's LIVE task id, then (after the answer's check) each source
+    it shows that no page read pictured, on a web.source step of its own, then end_run - also when
+    the run was stopped, failed or never started. The research run is told nothing of it (its argv,
+    stdin, environment and folder are the same with or without); without the LIVE view nothing is
+    asked."""
 
     def task(self, kind: str = live.TASK_WEB) -> live.LiveTask:
         self.stream = live.LiveStream()
@@ -1451,6 +1462,10 @@ class PageSnapshotTests(PlannerTestCase):
 
     def steps(self, kind: str) -> list[live.StepView]:
         return [step for step in self.stream.snapshot()[0].steps if step.kind == kind]
+
+    @staticmethod
+    def fields(step: live.StepView) -> dict[str, str]:
+        return {field.label: field.value for field in step.fields}
 
     def planned(self, *runs: Any, command: str = FORCED_COMMAND, snapper: Snapshots | None = None,
                 kind: str = live.TASK_WEB, **kwargs: Any) -> tuple[planner.AskOutcome, live.LiveTask, Snapshots]:
@@ -1460,33 +1475,106 @@ class PageSnapshotTests(PlannerTestCase):
         task = self.task(kind)
         return ask.plan(command, live=task, **kwargs), task, snapper
 
-    def test_a_forced_research_pictures_the_page_it_read(self) -> None:
+    def test_a_forced_research_pictures_the_page_it_read_and_the_source_it_cites(self) -> None:
         outcome, task, snapper = self.planned(stream("research_success"))
         self.assertTrue(outcome.ok, outcome)
+        # The read first (as it happened); then, after the check, the cited source no read pictured
+        # ([1] is the page read: it gets no second picture); then the run's pictures end.
         self.assertEqual(snapper.calls, [("request", live.WEB_FETCH, "https://www.example.org/visit", task.id),
+                                         ("request", live.WEB_SOURCE, "https://museum.example.net/hours", task.id),
                                          ("end_run", task.id)])
         (fetch,) = self.steps(live.WEB_FETCH)
         self.assertEqual((fetch.status, fetch.picture.state), (live.STATUS_OK, live.PICTURE_PENDING))
-        self.assertIsNone(self.steps(live.WEB_SEARCH)[0].picture)                  # a search never is
+        (source,) = self.steps(live.WEB_SOURCE)
+        self.assertEqual((source.title, source.status, source.summary),
+                         ("Source [2]: museum.example.net", live.STATUS_OK, research_live.SOURCE_SUMMARY))
+        self.assertEqual((source.picture.kind, source.picture.state), (pictures.KIND_PAGE, live.PICTURE_PENDING))
+        self.assertTrue(source.open_hint)
+        self.assertEqual(self.fields(source)["URL"], "https://museum.example.net/hours")
+        self.assertEqual(self.fields(source)["Cited as"], "[2] Hours and tickets")
+        kinds = [step.kind for step in self.stream.snapshot()[0].steps]
+        self.assertEqual(kinds[-2:], [live.RESEARCH_VALIDATE, live.WEB_SOURCE])     # after the check
+        search = self.steps(live.WEB_SEARCH)[0].picture                            # drawn, never opened
+        self.assertEqual((search.kind, search.state), (pictures.KIND_SEARCH, live.PICTURE_READY))
         self.assertTrue(all(step.picture is None for step in self.stream.snapshot()[0].steps
-                            if step.kind != live.WEB_FETCH))
+                            if step.kind not in (live.WEB_FETCH, live.WEB_SOURCE, live.WEB_SEARCH)))
+        # The check points at each source's picture: its line names the step, a link shows it.
+        (check,) = self.steps(live.RESEARCH_VALIDATE)
+        notes = [item.note for item in check.items]
+        self.assertTrue(notes[0].endswith(" - picture: see the Page read 1 step"), notes[0])
+        self.assertTrue(notes[1].endswith(" - picture: see the Source [2] step"), notes[1])
+        links = {item.label: (item.value, item.link) for item in check.fields if item.link}
+        self.assertEqual(links, {"Picture [1]": ("Page read 1: www.example.org", f"picture:{fetch.id}"),
+                                 "Picture [2]": ("Source [2]: museum.example.net", f"picture:{source.id}")})
 
     def test_a_routed_research_uses_the_asks_task(self) -> None:
         outcome, task, snapper = self.planned(plan_stream(WEB_PLAN), stream("research_success"),
                                               command=ROUTED_COMMAND, kind=live.TASK_ASK)
         self.assertTrue(outcome.ok, outcome)
-        self.assertEqual([call[0] for call in snapper.calls], ["request", "end_run"])
+        self.assertEqual([call[:2] for call in snapper.calls], [("request", live.WEB_FETCH),
+                                                                 ("request", live.WEB_SOURCE), ("end_run", task.id)])
         self.assertEqual({call[-1] for call in snapper.calls}, {task.id})
 
     def test_redirected_failed_and_denied_reads_are_not_pictured(self) -> None:
-        cases = {"research_redirect": ["https://www.example.net/new"],   # the 301 is not; the page it led to is
-                 "research_fetch_error": [], "research_denied": [], "research_unread": []}
-        for name, pages in cases.items():
+        # (pages read and pictured, sources shown that get a picture of their own)
+        cases = {"research_redirect": (["https://www.example.net/new"], []),   # the page the 301 led to
+                 "research_fetch_error": ([], ["https://www.example.org/visit"]),
+                 "research_denied": ([], ["https://www.example.org/visit"]),
+                 # The search came back as text Jarvis could not list: its sources are shown unchecked
+                 # (Open cards only) and never opened for a picture; their steps say why.
+                 "research_unread": ([], [])}
+        for name, (reads, sources) in cases.items():
             with self.subTest(name=name):
                 self.setUp()
-                _outcome, task, snapper = self.planned(stream(name))
-                self.assertEqual([call[2] for call in snapper.calls if call[0] == "request"], pages)
+                outcome, task, snapper = self.planned(stream(name))
+                self.assertEqual([call[2] for call in snapper.calls if call[:2] == ("request", live.WEB_FETCH)],
+                                 reads)
+                self.assertEqual([call[2] for call in snapper.calls if call[:2] == ("request", live.WEB_SOURCE)],
+                                 sources)
+                shown = [source.url for source in outcome.research.sources] if outcome.research else []
+                self.assertTrue(set(sources) <= set(shown))                       # never a left-out one
                 self.assertEqual(snapper.calls[-1], ("end_run", task.id))
+                if name == "research_unread":
+                    self.assertEqual([(source.url, source.checked) for source in outcome.research.sources],
+                                     [("https://www.example.org/visit", False),
+                                      ("https://www.example.org/tickets", False)])
+                    self.assertEqual([(step.title, step.picture.note) for step in self.steps(live.WEB_SOURCE)],
+                                     [(f"Source [{n}]: www.example.org",
+                                       pictures.UNAVAILABLE_PREFIX + research_live.UNCHECKED_NO_PICTURE)
+                                      for n in (1, 2)])
+
+    def test_a_left_out_source_is_never_pictured(self) -> None:
+        answer = research_answer("It opens at 10 AM [1] [2] [3].", [
+            {"title": "Visit", "url": "https://www.example.org/visit"},
+            {"title": "Local", "url": "https://192.168.1.1/hours"},                 # not public: left out
+            {"title": "Unseen", "url": "https://www.example.com/never-listed"}])    # not seen: left out
+        outcome, task, snapper = self.planned(research_stream(*success_events()[:4], answer))
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual([number for number, _reason in outcome.research.left_out], [2, 3])
+        self.assertEqual([call[:3] for call in snapper.calls],
+                         [("request", live.WEB_FETCH, "https://www.example.org/visit"), ("end_run", task.id)])
+        self.assertEqual(self.steps(live.WEB_SOURCE), [])
+
+    def test_no_source_steps_without_text_or_a_snapshotter(self) -> None:
+        # [live] text = false: a page picture could not be kept, so no source gets a step for one.
+        texts_off = live.LiveStream(keep_text=False)
+        ask = self.make(stream("research_success"))
+        snapper = Snapshots()
+        ask.page_snapshots = snapper
+        task = texts_off.task(live.TASK_WEB, "request")
+        self.assertTrue(ask.plan(FORCED_COMMAND, live=task).ok)
+        steps = texts_off.snapshot()[0].steps
+        self.assertEqual([step for step in steps if step.kind == live.WEB_SOURCE], [])
+        self.assertEqual([call[0] for call in snapper.calls], ["request", "end_run"])   # the read (it refuses)
+        # No snapshotter ([live] page_snapshots = false): no source step, no pointer to a picture.
+        self.setUp()
+        ask = self.make(stream("research_success"))
+        task = self.task()
+        self.assertTrue(ask.plan(FORCED_COMMAND, live=task).ok)
+        self.assertEqual(self.steps(live.WEB_SOURCE), [])
+        (check,) = self.steps(live.RESEARCH_VALIDATE)
+        self.assertFalse(any(item.link for item in check.fields))
+        self.assertFalse(any("its picture" in item.note for item in check.items))
 
     def test_the_run_ends_its_pictures_however_it_ends(self) -> None:
         # Stopped by Jarvis at a local page read (never pictured), timed out, cancelled.
@@ -1530,8 +1618,10 @@ class PageSnapshotTests(PlannerTestCase):
             def same(text: str) -> str:
                 return str(text).replace(root, "<root>")
 
+            # The run's own steps (the source pictures and the check's pointers to them are LIVE's).
             views = tuple((step.kind, step.status, step.summary, step.fields, step.blocks)
-                          for step in self.stream.snapshot()[0].steps)
+                          for step in self.stream.snapshot()[0].steps
+                          if step.kind not in (live.WEB_SOURCE, live.RESEARCH_VALIDATE))
             lines = [same(line) for line in logs.output if "Live view:" not in line]
             return (outcome, [same(arg) for arg in started.argv], started.stdin,
                     {key: same(value) for key, value in started.env.items()}, same(started.cwd), views, lines)
@@ -1540,7 +1630,8 @@ class PageSnapshotTests(PlannerTestCase):
         for snapper in (Snapshots(), Snapshots(fail=True)):
             with self.subTest(fail=snapper.fail):
                 self.assertEqual(run(snapper), without)
-                self.assertEqual([call[0] for call in snapper.calls], ["request", "end_run"])
+                self.assertEqual([call[0] for call in snapper.calls], ["request", "request", "end_run"])
+                self.assertEqual(len(self.steps(live.WEB_SOURCE)), 1)   # a broken snapshotter: the step shows
 
     def test_no_live_view_no_pictures(self) -> None:
         snapper = Snapshots()
