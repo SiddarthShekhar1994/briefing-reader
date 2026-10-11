@@ -200,6 +200,7 @@ class FakeCalendar:
         self.guests = dict(guests or {})
         self.calls: list[tuple] = []
         self.threads: set[str] = set()
+        self.footers: list[str] = []
         self.on_sign_in = None
         self.lock = threading.Lock()
 
@@ -254,8 +255,9 @@ class FakeCalendar:
         self._note("move", event_id)
         return ChangeResult(event_id=event_id, link="", already=False)
 
-    def create_event(self, action, interactive: bool = True) -> EventResult:
+    def create_event(self, action, interactive: bool = True, **kwargs: Any) -> EventResult:
         self._note("create", action.title)
+        self.footers.append(kwargs.get("footer", ""))   # "" = the default footer (the keyword is left out)
         return EventResult(event_id="evt-new", link="https://www.google.com/calendar/event?eid=new", existed=False)
 
 

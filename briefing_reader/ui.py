@@ -63,7 +63,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +175,8 @@ from .agenda import (
     extract_deadlines,
     merge_deadlines,
 )
+from .ask.dayplan import hours_text
+from .ask.modes import MODE_PLAN, MODE_TITLES, ModeInputs, block_line, todo_facts
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import DEFAULT_ACCOUNT, AgendaConfig, Config
@@ -211,6 +213,7 @@ from .gcal import (
     CalendarNotSignedIn,
     CalendarSetupError,
     GoogleCalendar,
+    wall_in_zone,
 )
 from .google_auth import (
     GMAIL_FEATURE,
@@ -289,6 +292,11 @@ from .persona import (
     outcome_tone,
     pick_ack,
     pick_greeting,
+    plan_answer_text,
+    plan_no_run_speech,
+    plan_no_run_words,
+    plan_question_speech,
+    plan_result_speech,
     quoted_note,
     research_reply_speech,
     salutation,
@@ -2388,6 +2396,11 @@ _CARD_FOR_STATUS = {STATUS_CREATED: hud.CARD_ADDED, STATUS_EXISTS: hud.CARD_EXIS
 _COUNTDOWN_TICK_MS = 200
 _GROUP_TITLES = {SOURCE_ASK: "Ask", SOURCE_BRIEFING: "Briefing"}   # the NEEDS YOUR OK group headers
 _ASK_CARDS_MAX = 16                    # Ask cards kept (this run, memory only); the oldest go first
+# A planner mode's cards (the productivity bundle) say which mode proposed them ("Plan - block").
+_MODE_TITLES = MODE_TITLES
+PLAN_BLOCK_PASSED_NOTE = "This block's time has passed - plan again"
+PLANNED_NOTE = "Planned {hours} {day} (day plan)"   # on a Todo card a created plan block serves (R28)
+_PLAN_FOCUS_GUARD_S = 1.0              # a key press this soon after Jarvis moved the focus never approves (R1)
 ALREADY_LISTED_TEXT = ALREADY_LISTED   # an Ask card the briefing also proposes (information only)
 ASK_PLANNING_LABEL = "PLANNING"        # the reading orb's label while an Ask plans
 ASK_SIGN_IN_FIRST = "Finish the Google sign-in in your browser first, then ask again"
@@ -3464,6 +3477,14 @@ class AppController(QObject):
         self._reviewed: dict[str, str] = {}
         self._connect_mail = False                 # the queued / running sign-in is a Reply / Email's Send
         self._read_slot: str | None = None         # the scheduled slot this reading settled
+        # The day plan (the productivity bundle; memory only): Todo card id -> the day a created plan
+        # block serves it (R28) and that card's note; the plan card the focus just moved to and until
+        # when a key press on it is ignored (R1); the plan run whose own auto-open made LIVE current
+        # (its answer brings JARVIS back unless the owner changed tabs meanwhile, R33).
+        self._planned_todos: dict[str, date] = {}
+        self._planned_notes: dict[str, str] = {}
+        self._plan_focus_guard: tuple[str, float] = ("", -math.inf)
+        self._mode_auto_opened = 0
 
     @property
     def _calendar_jobs(self) -> dict[str, str]:
@@ -3485,6 +3506,7 @@ class AppController(QObject):
         self._agenda_seq = 0
         self._agenda_requested_at = -math.inf     # time.monotonic() of the last read
         self._page_deadlines: list[Deadline] = []  # the page's "Deadlines" section
+        self._merged_deadlines: list[Deadline] = []   # DEADLINES as last shown (page + calendar; a plan's d rows)
 
     def _init_talk_state(self, prefs: AssistantPrefs | None, locked: Callable[[], bool] | None) -> None:
         """NEW / announced / viewed, the greeting and the conversation (memory only)."""
@@ -4229,11 +4251,22 @@ class AppController(QObject):
                 merged.append(action)
         return merged + briefing
 
-    def _take_ask_cards(self, cards: Sequence[ProposedAction]) -> None:
+    def _take_ask_cards(self, cards: Sequence[ProposedAction], replace_mode: str = "", window: Any = None) -> None:
         """An Ask's cards, above the earlier Ask cards. A card counting down, queued or on its way
         keeps its content (the same id from the new answer is left out); at most _ASK_CARDS_MAX
-        stay, the oldest that is not on its way going first."""
+        stay, the oldest that is not on its way going first. ``replace_mode`` "plan" with the new
+        plan's ``window`` (dayplan.PlanWindow): the earlier plan cards that are still undecided,
+        unedited, not counting down or on their way, on that day and overlapping its hours go (R39);
+        every other earlier plan card stays ("plan my morning" then "plan my afternoon" keeps both)."""
         old = self._source_lists[SOURCE_ASK]
+        if replace_mode == MODE_PLAN and window is not None:
+            gone = [action for action in old if self._replaceable_plan_card(action, window)]
+            if gone:
+                kept = sum(1 for action in old if action.mode == MODE_PLAN) - len(gone)
+                logger.info("Plan: replaced %d earlier plan card(s), kept %d", len(gone), kept)
+                self._live_replaced(len(gone), kept, window)
+                gone_ids = {action.id for action in gone}
+                old = [action for action in old if action.id not in gone_ids]
         old_ids = {action.id for action in old}
         fresh = [card for card in cards if not (card.id in self._jobs and card.id in old_ids)]
         fresh_ids = {card.id for card in fresh}
@@ -4244,6 +4277,26 @@ class AppController(QObject):
                 break
             merged.remove(victim)
         self._set_source(SOURCE_ASK, merged)
+
+    def _replaceable_plan_card(self, action: ProposedAction, window: Any) -> bool:
+        """An earlier plan card a new plan of ``window`` replaces (R39): undecided, unedited, not in a
+        countdown or job, on the window's day and overlapping its hours."""
+        if action.mode != MODE_PLAN or action.start is None or action.end is None:
+            return False
+        if action.id in self._jobs or self._store.is_decided(action.id) or self._is_edited(action):
+            return False
+        if self._countdown is not None and self._countdown.action.id == action.id:
+            return False
+        start, end = action.start.replace(tzinfo=None), action.end.replace(tzinfo=None)
+        return start.date() == window.day and start < window.end and window.start < end
+
+    @_live.quiet()
+    def _live_replaced(self, gone: int, kept: int, window: Any) -> None:
+        """The plan's "Answer and cards" step says which earlier plan cards it replaced."""
+        ask = self.ask
+        task = getattr(ask, "finishing_task", _live.NO_TASK) if ask is not None else _live.NO_TASK
+        step = task.find(_live.ASK_CARDS)
+        step.note(f"Replaced {_plural(gone, 'earlier plan card')} of {window.label}; kept {_plural(kept, 'other')}")
 
     def _action(self, action_id: str) -> ProposedAction | None:
         """The proposal as the page has it."""
@@ -4315,7 +4368,7 @@ class AppController(QObject):
             view = card_view(action, today)
             label = view.kind_label + (EDITED_MARK if self._is_edited(page_action) else "")
             if page_action.source == SOURCE_ASK:
-                label = f"{_GROUP_TITLES[SOURCE_ASK]} {DOT} {label}"
+                label = f"{_MODE_TITLES.get(page_action.mode) or _GROUP_TITLES[SOURCE_ASK]} {DOT} {label}"
             reading.add_action_card(action.id, label, view.title, _card_detail(action, view, today),
                                     view.decidable, **_card_options(action, view))
             self._show_card_state(action.id)   # also sets the note (warnings) while it waits
@@ -4387,9 +4440,11 @@ class AppController(QObject):
             card.set_note(f" {DOT} ".join(part for part in (reason, card_view(action, self._now().date()).note)
                                           if part))
         elif card.note() != CALENDAR_SETUP_NOTE:
-            # A Calendar event or a Todo's block: the question about its account, if any, first.
+            # A Calendar event or a Todo's block: the question about its account, if any, first; a
+            # to-do a created plan block serves says so (R28).
             hint = self._hints.get(action_id, "")
-            note = f" {DOT} ".join(part for part in (hint, card_view(action, self._now().date()).note) if part)
+            note = f" {DOT} ".join(part for part in (hint, self._planned_notes.get(action_id, ""),
+                                                     card_view(action, self._now().date()).note) if part)
             if note or card.note().startswith(_ACCOUNT_NOTE_PREFIXES):
                 card.set_note(note)
 
@@ -4704,6 +4759,97 @@ class AppController(QObject):
         if not self._decision_click_too_soon() and not self._locked_out(action_id):
             logger.info(_LOCKED_MESSAGE)
 
+    # ---- the day plan's cards (the productivity bundle) -----------------------------------------
+
+    def _plan_zone(self) -> str:
+        """The personal calendar's time zone as Jarvis already has it (never a Google call on this
+        thread), else "" (this PC's)."""
+        calendar = self._calendars.get(DEFAULT_ACCOUNT)
+        cached = getattr(calendar, "cached_timezone", None) if calendar is not None else None
+        try:
+            zone = cached() if callable(cached) else None
+        except Exception:  # noqa: BLE001 - this PC's zone instead
+            zone = None
+        return zone if isinstance(zone, str) else ""
+
+    def _plan_now_wall(self) -> datetime:
+        """Now as a wall time in the personal calendar's zone (the frame of a plan block's times)."""
+        now = self._now()
+        zone = self._plan_zone()
+        if zone:
+            return wall_in_zone(now, zone)
+        return now.replace(tzinfo=None)   # the app's clock is this PC's: its own wall time
+
+    def _plan_block_passed(self, action: ProposedAction) -> bool:
+        """A plan block whose start is now or earlier (it would be added in the past)."""
+        return action.start is not None and action.start.replace(tzinfo=None) <= self._plan_now_wall()
+
+    def _plan_key_too_soon(self, action_id: str) -> bool:
+        """A key press (Space / Enter) on the plan card Jarvis moved the focus to less than a second
+        ago: ignored, so a key meant for something else never approves it (R1 / R25)."""
+        guarded, until = self._plan_focus_guard
+        if guarded != action_id or time.monotonic() >= until:
+            return False
+        card = self.window.reading.action_card(action_id)
+        if card is None or not card.approve_button.by_key():
+            return False
+        logger.info("Approve %s: ignored a key press right after the focus moved", action_id)
+        return True
+
+    def _plan_focus_next(self, finished_id: str) -> None:
+        """After a plan block's result: the keyboard focus moves to the next undecided plan card's Add
+        block, but only from the finished card itself or the NEEDS YOUR OK list (or nowhere), in the
+        active window with no dialog open; never out of a text field, a dialog or the command bar
+        (R1). A key press on it within a second is then ignored."""
+        reading = self.window.reading
+        if not self.window.isActiveWindow() or QApplication.activeModalWidget() is not None:
+            return
+        if self._dialog is not None or self._account_dialog is not None:
+            return
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return
+        if focus is not None and not reading.approvals.isAncestorOf(focus):
+            return
+        # The owner was using the keyboard (the focus, or the finished card's own button, showed its
+        # ring): the moved focus shows its ring too, so he sees which card the next key decides. A
+        # mouse never gives these buttons the focus, so a mouse user's never had one.
+        finished = reading.action_card(finished_id)
+        keyed = bool(getattr(focus, "_focus_visible", False)) or bool(
+            finished is not None and getattr(finished.approve_button, "_focus_visible", False))
+        ids = [action.id for action in self._actions]
+        start = ids.index(finished_id) + 1 if finished_id in ids else 0
+        for action in self._actions[start:] + self._actions[:start]:
+            if (action.mode != MODE_PLAN or action.id == finished_id or not action.actionable
+                    or action.id in self._jobs or self._store.is_decided(action.id)):
+                continue
+            card = reading.action_card(action.id)
+            if card is None or not card.approve_button.isVisible() or not card.approve_button.isEnabled():
+                continue
+            reading.approvals.ensureWidgetVisible(card)
+            card.approve_button.setFocus(Qt.FocusReason.OtherFocusReason)
+            if keyed:
+                card.approve_button.show_focus_ring()
+            self._plan_focus_guard = (action.id, time.monotonic() + _PLAN_FOCUS_GUARD_S)
+            return
+
+    def _note_served_todo(self, block: ProposedAction) -> None:
+        """A created plan block's Todo card gets "Planned 10:30-12:00 today (day plan)" (a note, not a
+        decision: its own Add block still works) and the next plan leaves that to-do out (R28)."""
+        todo_id = block.serves
+        if not todo_id or block.start is None or block.end is None:
+            return
+        day = block.start.date()
+        today = self._plan_now_wall().date()
+        words = ("today" if day == today else "tomorrow" if day == today + timedelta(days=1)
+                 else f"on {_WEEKDAYS[day.weekday()]} {_MONTHS[day.month - 1]} {day.day}")
+        hours = hours_text(block.start.replace(tzinfo=None), block.end.replace(tzinfo=None),
+                           self.config.display.hour24)
+        self._planned_todos[todo_id] = day
+        self._planned_notes[todo_id] = PLANNED_NOTE.format(hours=hours, day=words)
+        logger.info("Plan: a served to-do was noted")
+        self._show_card_state(todo_id)
+
     def approve_action(self, action_id: str) -> None:
         """The card's right-hand button.
 
@@ -4717,7 +4863,13 @@ class AppController(QObject):
         or to read a long message, and otherwise starts the countdown. Done
         (cards Jarvis does not carry out, or whose event Jarvis may not change,
         or a message it can't send) records that you handled it.
+
+        A day plan's Add block is refused when the block's start has passed (no countdown), and a
+        key press on a plan card within a second of Jarvis moving the focus there never approves
+        it (R1 / R25).
         """
+        if self._plan_key_too_soon(action_id):
+            return
         if self._decision_click_too_soon() or self._locked_out(action_id):
             return
         action = self._current(action_id)
@@ -4727,6 +4879,10 @@ class AppController(QObject):
             return
         if not action.actionable:
             self._mark_done(action)
+            return
+        if action.mode == MODE_PLAN and self._plan_block_passed(action):
+            logger.info("Approve %s: a plan block whose time has passed; nothing added", action_id)
+            self._hint(action_id, PLAN_BLOCK_PASSED_NOTE)
             return
         if action.changes_event:
             status = (self._store.get(action_id) or {}).get("status", "")
@@ -4913,7 +5069,9 @@ class AppController(QObject):
         today = self._now().date()
         view = card_view(action, today)
         kind = {RSVP: "RSVP"}.get(action.kind, action.kind.upper())
-        fields: list[Any] = [("Card", f"{action.source.upper()} {kind}"), ("Account", account_of(action)),
+        card_words = (f"{_MODE_TITLES[action.mode].upper()} {kind_label(action).upper()}" if action.mode in _MODE_TITLES
+                      else f"{action.source.upper()} {kind}")
+        fields: list[Any] = [("Card", card_words), ("Account", account_of(action)),
                              ("Card says", " - ".join(part for part in (view.title, _card_detail(action, view, today))
                                                       if part))]
         check = self._checks.get(action.id)
@@ -5380,8 +5538,13 @@ class AppController(QObject):
             self._countdown_result(action, result, error, status)
         else:   # the worker saved a countdown's result itself (writes_running)
             self._calendar_result(action_id, action, result, error, status, saved=writes_running)
+        plan_block = action is not None and action.mode == MODE_PLAN
+        if plan_block and result is not None and error is None and status in (STATUS_CREATED, STATUS_EXISTS):
+            self._note_served_todo(action)
         self._show_card_state(action_id)
         self._sync_card_locks()
+        if plan_block:
+            self._plan_focus_next(action_id)
         if self._calendar_worker is not None:
             self._calendar_worker.check_sign_in()   # a revoked sign-in turns the chip amber again
         self._refresh_actions_ui()
@@ -5896,6 +6059,7 @@ class AppController(QObject):
         from_calendar = deadlines_from_events(self._agenda_events or (), now, agenda.deadline_days,
                                               agenda.deadline_keywords)
         items = merge_deadlines(self._page_deadlines, from_calendar, now, agenda.deadline_days)
+        self._merged_deadlines = list(items)   # a day plan's deadline rows (_mode_inputs)
         panel.set_deadlines(_deadline_rows(items, now), f"No deadlines in the {_next_days(agenda.deadline_days)}")
         panel.set_deadlines_meta(_plural(agenda.deadline_days, "day"))   # the horizon: "14 DAYS"
 
@@ -6024,7 +6188,8 @@ class AppController(QObject):
         reading = self.window.reading
         controller = ask_ui.AskController(self.config, planner, reading.command_bar, context=self._ask_context,
                                           blocked=self._ask_blocked, calendars=self._calendars, live=self.live,
-                                          route_flags=self._route_flags, memory=self._memory_given, parent=self)
+                                          route_flags=self._route_flags, memory=self._memory_given,
+                                          mode_inputs=self._mode_inputs, parent=self)
         controller.busyChanged.connect(self._on_ask_busy)
         controller.outcomeReady.connect(self._on_ask_outcome)
         controller.askStarted.connect(self._on_ask_started)
@@ -6097,8 +6262,14 @@ class AppController(QObject):
         self._you(text)
         self._ask_task_id = self.ask.task_id if self.ask is not None else 0
         kind = (self.ask.running_kind if self.ask is not None else "") or _live.TASK_ASK
+        self._mode_auto_opened = 0
+        was_live = self.window.reading.current_tab() == hud.TAB_LIVE
         if not self._live_auto_open(kind, self._ask_task_id):
             self.window.reading.set_tab(hud.TAB_JARVIS)
+        elif kind == _live.TASK_PLAN and not was_live:
+            # LIVE came up only through this run: its answer brings JARVIS back, unless the owner
+            # changes tabs meanwhile (_on_tab_changed forgets it; R33). The owner's own LIVE stays.
+            self._mode_auto_opened = self._ask_task_id
 
     def _on_ask_cancel_clicked(self) -> None:
         """Cancel on the bar: the running Ask's page pictures stop at once (the run itself stops
@@ -6202,6 +6373,9 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return
         self._remember_ask_read(outcome)
+        if getattr(outcome, "mode", "") == MODE_PLAN:
+            self._on_plan_outcome(outcome)
+            return
         self._converse_ask(outcome)
         if outcome.ok and getattr(outcome, "suggestion", ""):
             self._offer_memory_suggestion(outcome.suggestion)
@@ -6233,6 +6407,106 @@ class AppController(QObject):
         elif outcome.kind not in ("empty", "busy"):
             self._activity(hud.TAG_STOP, "Ask: nothing was proposed", _short(outcome.message or outcome.kind))
         self._refresh_actions_ui()
+
+    # ---- the day plan (the productivity bundle) ----------------------------------------------
+
+    def _plan_on(self) -> bool:
+        """"plan my day" is a shortcut: the bundle is on (and Ask, since the bar exists)."""
+        productivity = getattr(self.config, "productivity", None)
+        return self.ask is not None and bool(getattr(productivity, "enabled", False))
+
+    def _mode_inputs(self) -> ModeInputs:
+        """What a planner mode run is handed (GUI thread, memory only): the pending Todo cards of both
+        sources (with the day a created plan block serves each, R28; the run leaves those out for that
+        day), DEADLINES as shown, [agenda] evening_from_hour. No Google call here."""
+        pending = [action for action in self._pending_actions() if action.kind == TODO]
+        from .ask.planner import deadline_lines
+
+        return ModeInputs(todos=todo_facts(pending, planned=self._planned_todos),
+                          deadlines=tuple(deadline_lines(self._merged_deadlines)),
+                          evening_from_hour=int(self.config.agenda.evening_from_hour))
+
+    def _on_plan_outcome(self, outcome: Any) -> None:
+        """A finished day plan: the entry (the blocks, the planner's say, or why there was no run),
+        what Jarvis says (counts and times only), the blocks under ASK replacing only the earlier
+        plan cards of the same hours (R39), one ACTIVITY row of counts."""
+        self._converse_plan(outcome)
+        if outcome.ok and getattr(outcome, "suggestion", ""):
+            self._offer_memory_suggestion(outcome.suggestion)
+        if outcome.ok and outcome.note_kind:
+            self._activity(hud.TAG_ASK, f"Plan: no run ({plan_no_run_words(outcome.note_kind)})", "no planner run")
+        elif outcome.ok:
+            valid = sum(1 for card in outcome.cards if not card.error)
+            # Only a plan with a block to approve replaces the earlier blocks of its hours: a question
+            # back, or every block refused, keeps them (R39).
+            self._take_ask_cards(list(outcome.cards), replace_mode=MODE_PLAN if valid else "",
+                                 window=outcome.window if valid else None)
+            if valid:
+                message = f"Plan: {_plural(valid, 'block')} proposed"
+            else:
+                message = "Plan: a question back" if outcome.question else "Plan: no block proposed"
+            if outcome.refused:
+                message += f" ({outcome.refused} refused)"
+            sub = [f"{outcome.duration_ms / 1000:.1f} s", _plural(outcome.runs, "planner run")]
+            self._activity(hud.TAG_ASK, message, f" {DOT} ".join(sub))
+            logger.info("Plan: %d card(s) shown under ASK (%d refused)", len(outcome.cards), outcome.refused)
+        elif outcome.kind not in ("empty", "busy"):
+            self._activity(hud.TAG_STOP, "Plan: nothing was proposed", _short(outcome.message or outcome.kind))
+        self._refresh_actions_ui()
+
+    def _converse_plan(self, outcome: Any) -> None:
+        assistant = self.config.assistant
+        if not outcome.ok:
+            self._converse_ask(outcome)   # the same failure entry and words as an Ask's
+            self._plan_gives_way()
+            return
+        address = assistant.address
+        window = outcome.window
+        label = getattr(window, "label", "today")
+        task_id = self._ask_task_id
+        if outcome.note_kind:
+            self._jarvis(outcome.message, tone=hud.TONE_WARN, sub="no planner run")
+            self._plan_gives_way()
+            spoken = plan_no_run_speech(outcome.note_kind, address, label) if assistant.speak_replies else ""
+            if spoken:
+                self._say(KIND_REPLY, spoken)
+            else:
+                self._voice_call("cancel_key", ASK_ACK_KEY)
+            return
+        hour24 = self.config.display.hour24
+        valid = [card for card in outcome.cards if not card.error]
+        text = plan_answer_text([block_line(card, hour24) for card in valid], outcome.say, outcome.question,
+                                address, label=label, late=bool(getattr(window, "switched", False)),
+                                refused=outcome.refused)
+        note = (outcome.message or "").strip()
+        if note:
+            note = note[:1].upper() + note[1:]
+            text += "\n" + (note if note.endswith((".", "!", "?", ")")) else note + ".")
+        sub = [_plural(len(valid), "block") if valid else "no block", _plural(outcome.runs, "planner run"),
+               f"{outcome.duration_ms / 1000:.1f} s"]
+        link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
+        self._jarvis(text, tone=hud.TONE_DONE if valid else hud.TONE_WARN, sub=f" {DOT} ".join(sub), link=link)
+        self._plan_gives_way()
+        if not assistant.speak_replies:
+            return
+        if valid:
+            first = min(card.start for card in valid if card.start is not None)
+            spoken = plan_result_speech(len(valid), first, label, address)
+        elif outcome.question:
+            spoken = plan_question_speech(address)
+        else:
+            spoken = plan_result_speech(0, None, label, address)
+        self._say(KIND_REPLY, spoken)   # built here from counts and times: never a title or the planner's say
+
+    def _plan_gives_way(self) -> None:
+        """LIVE became current only through this plan run's own auto-open and the owner has not changed
+        tabs since: JARVIS comes back with the answer in view (R33)."""
+        reading = self.window.reading
+        if self._mode_auto_opened and self._mode_auto_opened == self._ask_task_id \
+                and reading.current_tab() == hud.TAB_LIVE:
+            reading.set_tab(hud.TAB_JARVIS)
+            reading.conversation.scroll_to_newest()
+        self._mode_auto_opened = 0
 
     def _refresh_ask(self) -> None:
         """A Google sign-in changed: which accounts' mail Ask may read (never Claude Code's checks)."""
@@ -6330,8 +6604,8 @@ class AppController(QObject):
                     "; memory.json can't be read, kept read-only" if self.memory_store.read_only else "")
 
     def _route_flags(self) -> RouteFlags:
-        """The typed shortcuts on now (this build: memory)."""
-        return RouteFlags(memory=self.memory_store is not None)
+        """The typed shortcuts on now: memory ("remember that ..."), the day plan ("plan my day")."""
+        return RouteFlags(memory=self.memory_store is not None, plan=self._plan_on())
 
     def _memory_prompt_notes(self) -> tuple[str, ...]:
         """The notes the planner gets (any thread: the GUI thread swaps the whole tuple)."""
@@ -6895,10 +7169,14 @@ class AppController(QObject):
             return
         assistant = self.config.assistant
         answer = action.field("answer") if action.kind == RSVP else ""
-        text = outcome_text(action.kind, status, action.title, when=self._spoken_when(action), answer=answer,
-                            address=assistant.address)
+        when = self._spoken_when(action)
+        text = outcome_text(action.kind, status, action.title, when=when, answer=answer, address=assistant.address)
         self._jarvis(text, tone=_RESULT_TONES.get(outcome_tone(status), hud.TONE_DONE))
-        spoken = assistant.speak_results and self._say(KIND_RESULT, text, key=_RESULT_KEY)
+        # A planner mode's card (a plan block; later a prep or nudge reply) is said without its title or
+        # subject (R27): the entry keeps it on screen only.
+        said = (outcome_text(action.kind, status, "", when=when, answer=answer, address=assistant.address)
+                if action.mode else text)
+        spoken = assistant.speak_results and self._say(KIND_RESULT, said, key=_RESULT_KEY)
         logger.info("Told the result of action %s (%s, %s)", action.id, outcome_tone(status),
                     "spoken" if spoken else "text only")
 
@@ -6910,7 +7188,8 @@ class AppController(QObject):
         text = not_sent_text(action.kind, action.title, assistant.address)
         self._jarvis(text, tone=hud.TONE_WARN)
         if assistant.speak_results:
-            self._say(KIND_RESULT, text, key=_RESULT_KEY)
+            said = not_sent_text(action.kind, "", assistant.address) if action.mode else text   # R27
+            self._say(KIND_RESULT, said, key=_RESULT_KEY)
 
     def _spoken_when(self, action: ProposedAction) -> str:
         """When an approved card's event is, said aloud: a Calendar event's start, a Todo's block, a
@@ -7241,6 +7520,8 @@ class AppController(QObject):
         return self.window.isActiveWindow()
 
     def _on_tab_changed(self, index: int) -> None:
+        if index != hud.TAB_LIVE:
+            self._mode_auto_opened = 0   # the owner (or an answer) changed tabs: a plan's give-way is spent
         if index == hud.TAB_LIVE:
             self._live_unread = False
         elif index == hud.TAB_MEMORY:

@@ -98,6 +98,9 @@ LAST_RESORT_TIMEZONE = "UTC"
 SETUP_HINT = "Set up Google Calendar: README step 8"
 SIGN_IN_SUCCESS_MESSAGE = "Jarvis is connected to Google Calendar. You can close this tab."
 EVENT_FOOTER = "Added by Jarvis from your Daily Briefing."
+# The footer of an event by the card's mode (actions.ProposedAction.mode): a day plan's blocks say so.
+PLAN_EVENT_FOOTER = "Added by Jarvis from your day plan."
+EVENT_FOOTERS = {"": EVENT_FOOTER, "plan": PLAN_EVENT_FOOTER}
 DEFAULT_EVENT_MINUTES = 60
 NO_TITLE = "(No title)"
 NOT_SIGNED_IN_MESSAGE = "Not signed in to Google Calendar"
@@ -108,8 +111,10 @@ RESPONSES = {"yes": "accepted", "no": "declined", "maybe": "tentative"}
 HTTP_TIMEOUT_S = 30        # per request; a mutation that times out is an unknown outcome
 
 # What list_event_briefs asks Google for (Ask Jarvis): never description, location, hangoutLink,
-# conferenceData or attachments.
-BRIEF_FIELDS = ("items(id,status,summary,start,end,recurringEventId,organizer(email,displayName,self),"
+# conferenceData or attachments. transparency ("show as free") and eventType (a working location)
+# tell the day plan which events leave their time free.
+BRIEF_FIELDS = ("items(id,status,summary,start,end,recurringEventId,transparency,eventType,"
+                "organizer(email,displayName,self),"
                 "attendees(email,displayName,responseStatus,self,resource,organizer)),nextPageToken")
 _READ_RETRIES = 2          # reads are safe to retry; insert, patch and delete are not retried
 _MAX_LIST_PAGES = 5
@@ -282,6 +287,10 @@ class EventBrief:
     the location, a meeting link or attachments. Timed events have aware ``start`` / ``end`` in
     the calendar's time zone; all-day events have ``all_day_start`` and an inclusive
     ``all_day_end``. ``recurring``: one occurrence of a repeating event (its own instance id).
+    ``transparent``: marked "show as free" (transparency "transparent"); ``event_type``: Google's
+    eventType as a plain word ("workingLocation", "outOfOffice", "focusTime"; "" for a default
+    event); ``self_response``: the owner's own answer (the attendee entry with self: true, which is
+    never one of the guests; "accepted" when he organizes it; "" when Google lists none for him).
     """
 
     event_id: str
@@ -296,10 +305,21 @@ class EventBrief:
     organizer_name: str = ""
     guests: tuple[Guest, ...] = ()
     recurring: bool = False
+    transparent: bool = False
+    event_type: str = ""
+    self_response: str = ""
 
     @property
     def all_day(self) -> bool:
         return self.all_day_start is not None
+
+    @property
+    def free(self) -> bool:
+        """The event leaves its time free: marked "show as free", or a working-location entry."""
+        return self.transparent or self.event_type == WORKING_LOCATION
+
+
+WORKING_LOCATION = "workingLocation"
 
 
 def default_token_path() -> Path:
@@ -342,6 +362,114 @@ def _icu_host_timezone() -> str | None:
     if not _IANA_NAME_RE.fullmatch(name) or name == "Etc/Unknown":
         return None
     return name
+
+
+_ICU_ZONE_OFFSET, _ICU_DST_OFFSET, _ICU_GREGORIAN = 15, 16, 1   # UCAL_ZONE_OFFSET, UCAL_DST_OFFSET, UCAL_GREGORIAN
+_icu_calls: Any = None
+_icu_lock = threading.Lock()
+
+
+def zone_offset(zone: str, moment: datetime) -> timedelta | None:
+    """The UTC offset of the IANA ``zone`` at the instant ``moment`` (a naive moment is read as this
+    PC's local time), daylight saving included; None when it can't be known. From Python's time
+    zone database when there is one, else from Windows' ICU (icu.dll, as :func:`local_timezone`;
+    Python has no tzdata here), else this PC's own rules when ``zone`` is this PC's zone. Never a
+    request to Google; nothing is logged."""
+    name = str(zone or "").strip()
+    if not name or not _IANA_NAME_RE.fullmatch(name):
+        return None
+    instant = _as_aware(moment)
+    try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    except ImportError:   # pragma: no cover - always there on 3.13
+        ZoneInfo, ZoneInfoNotFoundError = None, Exception   # type: ignore[assignment,misc]
+    if ZoneInfo is not None:
+        try:
+            return instant.astimezone(ZoneInfo(name)).utcoffset()
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            pass
+    found = _icu_offset(name, instant)
+    if found is not None:
+        return found
+    if name == local_timezone():
+        return instant.astimezone().utcoffset()
+    return None
+
+
+def wall_in_zone(moment: datetime, zone: str) -> datetime:
+    """``moment`` as a naive wall time in the IANA ``zone`` (zone_offset); a naive moment is a wall
+    time already, and a moment whose zone's offset can't be known keeps its own wall time."""
+    if moment.utcoffset() is None:
+        return moment
+    offset = zone_offset(zone, moment)
+    if offset is None:
+        return moment.replace(tzinfo=None)
+    return (moment.astimezone(timezone.utc) + offset).replace(tzinfo=None)
+
+
+def _icu_functions() -> Any:
+    """icu.dll's ucal functions this module uses (False when there is no ICU)."""
+    global _icu_calls
+    with _icu_lock:
+        if _icu_calls is not None:
+            return _icu_calls
+        _icu_calls = False
+        if os.name != "nt":
+            return _icu_calls
+        try:
+            import ctypes
+
+            icu = ctypes.WinDLL("icu")
+            status = ctypes.POINTER(ctypes.c_int)
+            canonical = icu.ucal_getCanonicalTimeZoneID
+            canonical.argtypes = [ctypes.c_wchar_p, ctypes.c_int32, ctypes.c_wchar_p, ctypes.c_int32,
+                                  ctypes.POINTER(ctypes.c_byte), status]
+            canonical.restype = ctypes.c_int32
+            open_ = icu.ucal_open
+            open_.argtypes = [ctypes.c_wchar_p, ctypes.c_int32, ctypes.c_char_p, ctypes.c_int, status]
+            open_.restype = ctypes.c_void_p
+            set_millis = icu.ucal_setMillis
+            set_millis.argtypes = [ctypes.c_void_p, ctypes.c_double, status]
+            set_millis.restype = None
+            get = icu.ucal_get
+            get.argtypes = [ctypes.c_void_p, ctypes.c_int, status]
+            get.restype = ctypes.c_int32
+            close = icu.ucal_close
+            close.argtypes = [ctypes.c_void_p]
+            close.restype = None
+        except (OSError, AttributeError, ValueError, TypeError):
+            return _icu_calls
+        _icu_calls = (ctypes, canonical, open_, set_millis, get, close)
+        return _icu_calls
+
+
+def _icu_offset(zone: str, instant: datetime) -> timedelta | None:
+    calls = _icu_functions()
+    if not calls:
+        return None
+    ctypes, canonical, open_, set_millis, get, close = calls
+    try:
+        buffer = ctypes.create_unicode_buffer(128)
+        system = ctypes.c_byte(0)
+        status = ctypes.c_int(0)
+        canonical(zone, len(zone), buffer, len(buffer), ctypes.byref(system), ctypes.byref(status))
+        if status.value > 0 or not system.value:   # not a zone ICU knows
+            return None
+        status = ctypes.c_int(0)
+        handle = open_(zone, len(zone), None, _ICU_GREGORIAN, ctypes.byref(status))
+        if not handle or status.value > 0:
+            return None
+        try:
+            set_millis(handle, instant.timestamp() * 1000.0, ctypes.byref(status))
+            raw = get(handle, _ICU_ZONE_OFFSET, ctypes.byref(status))
+            dst = get(handle, _ICU_DST_OFFSET, ctypes.byref(status))
+        finally:
+            close(handle)
+    except (OSError, ValueError, TypeError, OverflowError):
+        return None
+    if status.value > 0:
+        return None
+    return timedelta(milliseconds=int(raw) + int(dst))
 
 
 # --------------------------------------------------------------------------
@@ -698,8 +826,9 @@ class GoogleCalendar:
         return None
 
     def create_event(self, action: ProposedAction, *, interactive: bool = True,
-                     on_request: RequestHook | None = None) -> EventResult:
-        """Add ``action`` to the calendar unless a matching event is already there.
+                     on_request: RequestHook | None = None, footer: str = EVENT_FOOTER) -> EventResult:
+        """Add ``action`` to the calendar unless a matching event is already there (its description
+        ends with ``footer``: the card's event_footer).
 
         Signs in first when there is no saved sign-in (without ``interactive``:
         CalendarNotSignedIn instead, and nothing opens). The insert is never
@@ -718,7 +847,7 @@ class GoogleCalendar:
                                    existed=True)
             service = self._get_service(interactive=interactive)
             self._require_change_allowed()
-            body = build_event_body(action, tz)
+            body = build_event_body(action, tz, footer=footer)
             request = service.events().insert(calendarId=self._calendar_id, body=body)
             _tell_request(on_request, "events.insert", {"calendarId": self._calendar_id, "body": body})
             created = self._execute(request, "adding the event", mutation=True)
@@ -1050,13 +1179,20 @@ def _event_details(item: dict, event_id: str, calendar_id: str) -> EventDetails:
 # Event bodies
 # --------------------------------------------------------------------------
 
-def build_event_body(action: ProposedAction, time_zone: str) -> dict[str, Any]:
-    """The events.insert body for ``action`` in ``time_zone``."""
+def event_footer(action: Any) -> str:
+    """The footer an event added for ``action`` ends with: EVENT_FOOTERS by the card's mode (a day
+    plan's block: PLAN_EVENT_FOOTER); EVENT_FOOTER for every other card, a Todo's block included."""
+    return EVENT_FOOTERS.get(str(getattr(action, "mode", "") or ""), EVENT_FOOTER)
+
+
+def build_event_body(action: ProposedAction, time_zone: str, *, footer: str = EVENT_FOOTER) -> dict[str, Any]:
+    """The events.insert body for ``action`` in ``time_zone``; its description ends with ``footer``."""
     _require_actionable(action)
     notes = action.notes.strip()
+    footer = footer or EVENT_FOOTER
     body: dict[str, Any] = {
         "summary": action.title.strip(),
-        "description": f"{notes}\n\n{EVENT_FOOTER}" if notes else EVENT_FOOTER,
+        "description": f"{notes}\n\n{footer}" if notes else footer,
         "reminders": {"useDefault": True},
     }
     if action.where.strip():
@@ -1254,8 +1390,12 @@ def _brief_from(item: dict, calendar_id: str) -> EventBrief | None:
         return None
     organizer = item.get("organizer") if isinstance(item.get("organizer"), dict) else {}
     guests: list[Guest] = []
+    self_response = "accepted" if organizer.get("self") is True else ""
     for entry in item.get("attendees") or ():
-        if not isinstance(entry, dict) or entry.get("self") is True or entry.get("resource") is True:
+        if not isinstance(entry, dict) or entry.get("resource") is True:
+            continue
+        if entry.get("self") is True:   # the owner's own entry: his answer, never a guest
+            self_response = _response_word(entry.get("responseStatus")) or self_response
             continue
         address = entry.get("email")
         if not isinstance(address, str) or "@" not in address:
@@ -1269,7 +1409,23 @@ def _brief_from(item: dict, calendar_id: str) -> EventBrief | None:
         all_day_start=event.all_day_start, all_day_end=event.all_day_end,
         organizer_self=organizer.get("self") is True, organizer_email=organizer_email.strip(),
         organizer_name=" ".join(str(organizer.get("displayName") or "").split()), guests=tuple(guests),
-        recurring=bool(item.get("recurringEventId")))
+        recurring=bool(item.get("recurringEventId")), transparent=item.get("transparency") == "transparent",
+        event_type=_type_word(item.get("eventType")), self_response=self_response)
+
+
+_RESPONSE_WORDS = frozenset({"needsAction", "accepted", "declined", "tentative"})
+_EVENT_TYPE_RE = re.compile(r"[A-Za-z]{1,40}")
+
+
+def _response_word(value: Any) -> str:
+    return value if isinstance(value, str) and value in _RESPONSE_WORDS else ""
+
+
+def _type_word(value: Any) -> str:
+    """eventType as a plain word ("" for "default" or anything odd)."""
+    if not isinstance(value, str) or value == "default" or not _EVENT_TYPE_RE.fullmatch(value):
+        return ""
+    return value
 
 
 def _brief_sort_key(brief: EventBrief) -> tuple[datetime, int, str]:

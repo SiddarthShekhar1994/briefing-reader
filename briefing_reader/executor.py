@@ -97,6 +97,7 @@ from .actions import (
 )
 from .config import BACKEND_COMPOSIO, BACKEND_GOOGLE, DEFAULT_ACCOUNT, AccountConfig
 from .gcal import (
+    EVENT_FOOTER,
     NO_TITLE,
     RESPONSES,
     CalendarError,
@@ -107,6 +108,7 @@ from .gcal import (
     GoogleCalendar,
     NotAllowed,
     build_event_body,
+    event_footer,
 )
 from .gmail import GmailError, GmailReader, GmailSender, GmailUnknownOutcome, MailView, OutgoingMail, mail_view
 from .google_auth import (
@@ -460,6 +462,11 @@ class CalendarBackend:
                 event = action.block_event() if action.kind == TODO else action
                 if event is None:
                     raise ExecError("This to-do has no block time")
+                # The card's own footer (a day plan's block says so; the card, not its block_event,
+                # decides). Passed only when it is not the default, so any calendar keeps working.
+                footer = event_footer(action)
+                if footer != EVENT_FOOTER:
+                    hook["footer"] = footer
                 # Without interactive ("running" is saved) nothing may open the browser any more.
                 created = (calendar.create_event(event, **hook) if interactive
                            else calendar.create_event(event, interactive=False, **hook))
@@ -507,7 +514,7 @@ class CalendarBackend:
                 fields.append(Field("Repeats", event.repeat))
             fields.append(Field("Calendar", f"{account_of(action)} ({calendar_id})"))
             try:
-                description = str(build_event_body(event, "").get("description", ""))
+                description = str(build_event_body(event, "", footer=event_footer(action)).get("description", ""))
             except CalendarError:
                 description = ""
             return Payload("Will add exactly this", tuple(fields), "Description", description, start_open=False)
@@ -1361,6 +1368,12 @@ def request_differs(action: ProposedAction, method: str, params: Mapping[str, An
             differs.append("Where")
         if bool(body.get("recurrence")) != bool(event.rrule.strip()):
             differs.append("Repeats")
+        try:   # the description (notes and the card's own footer) as the countdown showed it
+            shown = str(build_event_body(event, "", footer=event_footer(action)).get("description", ""))
+        except CalendarError:
+            shown = ""
+        if "description" in body and str(body.get("description", "")) != shown:
+            differs.append("Description")
         return differs
     field = action.field
     expected = {RSVP: "events.patch", MOVE: "events.patch", CANCEL: "events.delete"}.get(action.kind)

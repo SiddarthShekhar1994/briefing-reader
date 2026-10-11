@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from briefing_reader.ask.usage import UsageLog
+from briefing_reader.ask.usage import BUNDLE_KINDS, KIND_BUNDLE, KIND_NUDGE, KIND_PLAN_DAY, KIND_PREP, UsageLog
 from tests.ask_fakes import NOW
 
 LOGGER = "briefing_reader.ask.usage"
@@ -283,6 +283,130 @@ class ResearchUsageTests(UsageTests):
             self.assertEqual((check.left_research_hour, check.left_research_day), (4, 18))
         self.assertEqual((usage.max_research_per_hour, usage.max_research_per_day), (6, 20))
         self.assertEqual(self.log(max_research_per_hour=0).max_research_per_hour, 1)
+
+
+class BundleUsageTests(UsageTests):
+    """The productivity bundle's runs: their kinds in the file, the daily bundle cap and the hourly
+    reserve for typed Asks; each is an Ask run too (R13: every check fills left_bundle_day)."""
+
+    def bundle(self, usage: UsageLog, count: int, kind: str = KIND_PLAN_DAY,
+               step: timedelta = timedelta(minutes=1)) -> None:
+        for _ in range(count):
+            usage.finish(usage.start(kind=kind), outcome="ok", duration_ms=9000, turns=2)
+            self.clock.now += step
+
+    def test_bundle_kinds_are_persisted_and_read(self) -> None:
+        usage = self.log()
+        self.bundle(usage, 1, KIND_PLAN_DAY)
+        self.bundle(usage, 1, KIND_PREP)
+        self.bundle(usage, 1, KIND_NUDGE)
+        self.spend(usage, 1)
+        kinds = [run.get("kind", "") for run in json.loads(self.path.read_text(encoding="utf-8"))["runs"]]
+        self.assertEqual(kinds, ["plan_day", "prep", "nudge", ""])
+        other = self.log()
+        self.assertEqual(other.counts(kind=KIND_PLAN_DAY), (1, 1))
+        self.assertEqual(other.counts(kind=KIND_PREP), (1, 1))
+        self.assertEqual(other.counts(kind=KIND_BUNDLE), (3, 3))
+        self.assertEqual(other.counts(kind="plan"), (4, 4))        # every non-research run, as before
+        self.assertEqual(other.counts(), (4, 4))
+        self.assertEqual(BUNDLE_KINDS, frozenset({"plan_day", "prep", "nudge"}))
+
+    def test_an_old_file_without_kinds_has_no_bundle_runs(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({"runs": [{"id": "a1", "at": NOW.isoformat(), "outcome": "ok"}]}),
+                             encoding="utf-8")
+        usage = self.log(max_bundle_per_day=20)
+        self.assertEqual(usage.counts(kind=KIND_BUNDLE), (0, 0))
+        check = usage.check()
+        self.assertEqual((check.left_hour, check.left_bundle_day), (19, 20))
+
+    def test_the_daily_bundle_cap(self) -> None:
+        usage = self.log(max_per_hour=20, max_per_day=60, max_bundle_per_day=3)
+        start = self.clock.now
+        self.bundle(usage, 3, step=timedelta(hours=2))
+        self.assertTrue(usage.check().allowed)                     # a typed Ask is still allowed
+        check = usage.check(runs=1, bundle=1, reserve=3)
+        self.assertFalse(check.allowed)
+        self.assertTrue(check.bundle_limit)
+        self.assertEqual(check.left_bundle_day, 0)
+        self.assertEqual(check.retry_at, start + timedelta(days=1))
+        self.assertEqual(check.message, "Today's limit for plans, briefs and drafts is reached; try again after "
+                                        "9:30 AM ([productivity] max_runs_per_day)")
+
+    def test_the_hourly_reserve_for_typed_asks(self) -> None:
+        usage = self.log(max_per_hour=6, max_per_day=60, max_bundle_per_day=20)
+        start = self.clock.now
+        self.spend(usage, 2)
+        self.assertTrue(usage.check(runs=1, bundle=1, reserve=3).allowed)    # 4 left: 3 stay after it
+        self.spend(usage, 1)
+        check = usage.check(runs=1, bundle=1, reserve=3)
+        self.assertFalse(check.allowed)
+        self.assertFalse(check.bundle_limit)
+        self.assertEqual(check.retry_at, start + timedelta(hours=1))
+        self.assertEqual(check.message, "Jarvis keeps 3 Ask runs this hour for your own requests; try again after "
+                                        "10:30 AM")
+        self.assertTrue(usage.check().allowed)                     # typed Asks never use the reserve
+        self.assertTrue(usage.check(runs=1, bundle=1, reserve=2).allowed)
+        self.spend(usage, 2)                                       # one Ask run left this hour
+        self.assertIn("Jarvis keeps 1 Ask run this hour", usage.check(runs=1, bundle=1, reserve=1).message)
+        self.assertTrue(usage.check(runs=1, bundle=1, reserve=0).allowed)
+
+    def test_every_check_fills_the_lefts(self) -> None:
+        """R13: the default check() of the app's readiness check and of _refusal gives the offers what
+        they need."""
+        usage = self.log(max_per_hour=20, max_per_day=60, max_bundle_per_day=20)
+        self.bundle(usage, 2)
+        self.spend(usage, 1)
+        for check in (usage.check(), usage.check(runs=2), usage.check(research=1), usage.check(bundle=1, reserve=3)):
+            self.assertEqual((check.left_hour, check.left_bundle_day), (17, 18))
+        usage.hold(self.clock.now + timedelta(hours=1))
+        held = usage.check()
+        self.assertTrue(held.held)
+        self.assertEqual(held.left_bundle_day, 18)
+
+    def test_a_kind_that_is_no_word_is_a_planner_run_and_never_raises(self) -> None:
+        """A hand-edited or corrupt file: a list or an object as "kind" counts as a planner run (an
+        unreadable entry never stops Ask), and the next write heals it."""
+        self.path.parent.mkdir(parents=True)
+        runs = [{"id": "a1", "at": NOW.isoformat(), "outcome": "ok", "kind": ["plan_day"]},
+                {"id": "a2", "at": NOW.isoformat(), "outcome": "ok", "kind": {"plan_day": 1}}]
+        self.path.write_text(json.dumps({"runs": runs}), encoding="utf-8")
+        usage = self.log(max_per_hour=20, max_bundle_per_day=20)
+        check = usage.check(runs=1, bundle=1, reserve=3)
+        self.assertTrue(check.allowed)
+        self.assertEqual((check.left_hour, check.left_bundle_day), (18, 20))
+        self.assertEqual(usage.counts(kind=KIND_BUNDLE), (0, 0))
+        self.assertEqual(usage.counts(kind="plan"), (2, 2))
+        usage.finish(usage.start(kind=KIND_PLAN_DAY), outcome="ok")
+        kinds = [run.get("kind", "") for run in json.loads(self.path.read_text(encoding="utf-8"))["runs"]]
+        self.assertEqual(kinds, ["", "", "plan_day"])
+
+    def test_a_reserve_as_large_as_the_hourly_cap_leaves_room_for_the_run(self) -> None:
+        """[ask] max_per_hour 3 with the default reserve of 3 would refuse every plan with "try again
+        after <now>": the reserve kept is at most the cap minus the run itself (warned once)."""
+        usage = self.log(max_per_hour=3, max_per_day=60, max_bundle_per_day=20)
+        with self.assertLogs(LOGGER, level="WARNING") as logs:
+            self.assertEqual(usage.reserve_kept(3), 2)
+            check = usage.check(runs=1, bundle=1, reserve=3)
+        self.assertTrue(check.allowed)
+        self.assertEqual(logs.output, ["WARNING:briefing_reader.ask.usage:Ask: [productivity] reserve_ask_runs (3) "
+                                       "leaves no room in [ask] max_per_hour (3); keeping 2"])
+        self.spend(usage, 1)
+        check = usage.check(runs=1, bundle=1, reserve=3)
+        self.assertFalse(check.allowed)
+        self.assertIn("Jarvis keeps 2 Ask runs this hour", check.message)
+        with self.assertLogs(LOGGER, level="WARNING"):
+            self.assertEqual(self.log(max_per_hour=1).reserve_kept(3), 0)
+        with self.assertNoLogs(LOGGER, level="WARNING"):
+            self.assertEqual(self.log(max_per_hour=20).reserve_kept(3), 3)
+
+    def test_the_ask_caps_come_first(self) -> None:
+        usage = self.log(max_per_hour=2, max_per_day=60, max_bundle_per_day=20)
+        self.bundle(usage, 2)
+        check = usage.check(runs=1, bundle=1, reserve=0)
+        self.assertFalse(check.allowed)
+        self.assertIn("[ask] max_per_hour", check.message)
+        self.assertFalse(check.bundle_limit)
 
 
 if __name__ == "__main__":

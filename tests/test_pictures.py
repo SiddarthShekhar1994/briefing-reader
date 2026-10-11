@@ -812,5 +812,88 @@ class PictureObjectTests(unittest.TestCase):
             self.assertNotIn(MARK.casefold(), str(item).casefold(), type(item).__name__)
 
 
+class PlanPictureTests(unittest.TestCase):
+    """A day plan drawn on its day: the events read (other roles; declined and free ones say so, R21)
+    and the proposed blocks (new), stamped PROPOSED: nothing is added before each block's own click."""
+
+    def events(self) -> dict:
+        import dataclasses
+
+        return {"personal": [event("Dentist", at(11), at(11, 45), "e1"),
+                             EventBrief("e2", "primary", "Conference", all_day_start=date(2026, 10, 9),
+                                        all_day_end=date(2026, 10, 9))],
+                "work": [dataclasses.replace(event("Team lunch", at(12), at(13), "e3"), self_response="declined"),
+                         dataclasses.replace(event("Office hours", at(16), at(17), "e4"), transparent=True),
+                         dataclasses.replace(event("Home", at(9), at(17), "e5"), event_type="workingLocation"),
+                         event("Next week", at(9, day=16), at(10, day=16), "e6")]}
+
+    def blocks(self) -> list:
+        import dataclasses
+
+        return [dataclasses.replace(line("Calendar: Work on: Lab report | 2026-10-09 14:00-15:30 | | | For: d1"),
+                                    mode="plan"),
+                dataclasses.replace(line("Calendar: Gym | 2026-10-10 07:00-08:00 | | | For: words"), mode="plan")]
+
+    def test_roles_titles_and_caption(self) -> None:
+        picture = pictures.plan_picture(self.events(), self.blocks(), day=date(2026, 10, 9), now=NOW)
+        self.assertEqual((picture.kind, picture.caption, picture.state),
+                         (pictures.KIND_DAY, "Your day plan", live.PICTURE_READY))
+        self.assertEqual(picture.note, "Drawn by Jarvis from the calendar he just read and the proposed blocks - "
+                                       "nothing added yet")
+        day = picture.day
+        self.assertEqual((day.change, day.days, day.account), (pictures.CHANGE_PLAN, ("Fri Oct 9",), "personal"))
+        roles = {block.title: block.role for block in day.blocks}
+        self.assertEqual(roles, {"Dentist": pictures.ROLE_OTHER, "Conference": pictures.ROLE_OTHER,
+                                 "Team lunch (declined)": pictures.ROLE_OTHER,
+                                 "Office hours (free)": pictures.ROLE_OTHER, "Home (free)": pictures.ROLE_OTHER,
+                                 "Work on: Lab report": pictures.ROLE_NEW})
+        self.assertEqual(day.headline, "Day plan for Fri Oct 9: 1 block proposed")
+        self.assertEqual(day.now_column, 0)
+        self.assertEqual(pictures.stamp(picture, live.STATUS_OK, ""), (pictures.PLAN_STAMP, pictures.TONE_WILL))
+        self.assertEqual(pictures.stamp(picture, live.STATUS_WARN, ""), (pictures.PLAN_STAMP, pictures.TONE_WILL))
+
+    def test_the_day_alone(self) -> None:
+        """The calendar.read picture (and a check that kept no block) proposes nothing: captioned as
+        read, never stamped PROPOSED."""
+        picture = pictures.plan_picture(self.events(), (), day=date(2026, 10, 9), now=NOW)
+        self.assertFalse(any(block.role == pictures.ROLE_NEW for block in picture.day.blocks))
+        self.assertEqual(picture.day.headline, "Fri Oct 9 as Jarvis read it")
+        self.assertEqual((picture.caption, picture.note), ("Your day as read",
+                                                           "Drawn by Jarvis from the calendar he just read"))
+        self.assertEqual(picture.day.others_note, pictures.NOTE_PLAN_DAY)
+        for status in (live.STATUS_OK, live.STATUS_WARN, live.STATUS_RUNNING):
+            self.assertEqual(pictures.stamp(picture, status, ""), ("", ""))
+        tomorrow = pictures.plan_picture(self.events(), self.blocks(), day=date(2026, 10, 10), now=NOW)
+        self.assertEqual(tomorrow.day.now_column, -1)
+        self.assertEqual([block.title for block in tomorrow.day.blocks], ["Gym"])
+        self.assertEqual(tomorrow.caption, "Your day plan")
+        self.assertEqual(pictures.stamp(tomorrow, live.STATUS_OK, ""), (pictures.PLAN_STAMP, pictures.TONE_WILL))
+
+    def test_now_is_drawn_in_the_personal_calendars_zone(self) -> None:
+        """The blocks' times are wall times in the personal calendar's zone, so "now" (and which day is
+        today) is too: 1:30 PM Friday in Los Angeles is 5:30 AM Saturday in Tokyo."""
+        from unittest import mock
+
+        from briefing_reader import gcal
+
+        def tokyo(zone: str, moment: datetime) -> timedelta | None:
+            return timedelta(hours=9) if zone == "Asia/Tokyo" else None
+
+        block = parse_action_line("Calendar: Gym | 2026-10-10 07:00-08:00 | | | For: words")
+        with mock.patch.object(gcal, "zone_offset", tokyo):
+            saturday = pictures.plan_picture({}, [block], day=date(2026, 10, 10), now=NOW, zone="Asia/Tokyo")
+            friday = pictures.plan_picture({}, [], day=date(2026, 10, 9), now=NOW, zone="Asia/Tokyo")
+        self.assertEqual((saturday.day.now_column, saturday.day.now_min), (0, 5 * 60 + 30))
+        self.assertEqual(saturday.day.days, ("Sat Oct 10",))
+        self.assertEqual(friday.day.now_column, -1)                    # Friday is over in Tokyo
+        here = pictures.plan_picture({}, [], day=date(2026, 10, 9), now=NOW)
+        self.assertEqual((here.day.now_column, here.day.now_min), (0, 13 * 60 + 30))
+
+    def test_no_repr_names_content(self) -> None:
+        picture = pictures.plan_picture({"work": [event(MARK, at(9), at(10))]}, [], day=date(2026, 10, 9), now=NOW)
+        for item in (picture, picture.day, *picture.day.blocks):
+            self.assertNotIn(MARK.casefold(), repr(item).casefold())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JarvisDayPlan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["say", "lines"],
+  "properties": {
+    "say": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "Write this first. One or two short sentences on what you lined up. Never claim anything was added."
+    },
+    "question": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "One short question when you would have to guess; empty otherwise."
+    },
+    "lines": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"type": "string", "maxLength": 600},
+      "description": "Calendar: lines only, each inside one <free> slot."
+    }
+  }
+}

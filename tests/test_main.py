@@ -125,6 +125,31 @@ class ArgumentTests(unittest.TestCase):
                 app.assert_not_called()
                 self.assertNotIn("SECRET-REQUEST-TEXT", "\n".join(logs.output))
 
+    def test_plan_dry_run_argument(self) -> None:
+        """The day plan's dry run: an optional request, its own mode, no Qt, no lock, never the text in the log."""
+        parser = entry.build_parser()
+        self.assertEqual(parser.parse_args(["--plan-dry-run"]).plan_dry_run, "")
+        self.assertEqual(parser.parse_args(["--plan-dry-run", "plan tomorrow"]).plan_dry_run, "plan tomorrow")
+        self.assertIsNone(parser.parse_args([]).plan_dry_run)
+        for argv in (["--plan-dry-run", "--ask-check"], ["--plan-dry-run", "x", "--run", "am"]):
+            with self.subTest(argv=argv):
+                with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                    parser.parse_args(argv)
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            entry.main(["--plan-dry-run", "--open"])
+        with tempfile.TemporaryDirectory() as tmp:
+            config = load_config(Path(tmp), environ={"LOCALAPPDATA": tmp})
+        with mock.patch("briefing_reader.config.setup_logging", return_value=Path("x.log")), \
+                mock.patch("briefing_reader.config.load_config", return_value=config), \
+                mock.patch("briefing_reader.ask.commands.run", return_value=0) as run, \
+                mock.patch.object(entry, "_claim_single_instance") as claim, \
+                self.assertLogs("briefing_reader", level="INFO") as logs:
+            self.assertEqual(entry.main(["--plan-dry-run", "plan my day, SECRET-PLAN-WORDS"]), 0)
+        (args, _config, _out), _ = run.call_args
+        self.assertEqual(args.plan_dry_run, "plan my day, SECRET-PLAN-WORDS")
+        claim.assert_not_called()
+        self.assertNotIn("SECRET-PLAN-WORDS", "\n".join(logs.output))
+
     def test_ask_start_mode(self) -> None:
         parser = entry.build_parser()
         args = parser.parse_args(["--ask"])

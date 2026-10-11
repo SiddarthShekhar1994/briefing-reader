@@ -876,6 +876,42 @@ class WebResearchControllerTests(unittest.TestCase):
         self.assertEqual(ask_ui.AskController._answer(empty), "I couldn't find an answer to that on the web.")
 
 
+PLAN_ON = "\n[productivity]\nenabled = true\n"
+PLAN_LINE = "Calendar: Work on: Read chapter 4 | 2026-10-04 15:00-16:00 | | | For: t1"
+
+
+class PlanModeControllerTests(unittest.TestCase):
+    """submit_mode (the productivity bundle): a typed plan route clears the bar on success, a
+    click-started run never touches it (R23); the mode's status line and LIVE task kind."""
+
+    def make(self, *runs) -> AppHarness:
+        app = AppHarness(self, runs=runs, config_extra=PLAN_ON)
+        app.reading(autoplay=False)
+        app.c.ask.start()
+        self.assertTrue(wait_for(lambda: app.c.ask.ready is not None), "readiness checked")
+        return app
+
+    def test_a_typed_plan_clears_the_bar_and_a_click_does_not(self) -> None:
+        from briefing_reader.ask.modes import MODE_PLAN, ORIGIN_OFFER, ModeRequest
+
+        gate = threading.Event()
+        app = self.make(GatedProcess(plan_stream({"say": "ok", "question": "", "lines": [PLAN_LINE]}), gate),
+                        plan_stream({"say": "ok", "question": "", "lines": [PLAN_LINE]}))
+        c, bar = app.c, app.c.window.reading.command_bar
+        submit(c, "plan my day")
+        self.assertEqual(c.ask.running_kind, live.TASK_PLAN)
+        self.assertTrue(wait_for(lambda: bar.status().startswith(ask_ui.MODE_STATUS[MODE_PLAN])))
+        gate.set()
+        self.assertTrue(wait_for(lambda: not c.ask.busy, 10))
+        self.assertEqual(bar.text(), "")
+        bar.set_text("something I was typing")
+        self.assertTrue(c.ask.submit_mode(ModeRequest(MODE_PLAN, ORIGIN_OFFER), "Plan my day"))
+        self.assertTrue(wait_for(lambda: not c.ask.busy, 10))
+        settle()
+        self.assertEqual(bar.text(), "something I was typing")
+        self.assertEqual(len(app.factory.runner.started), 2)
+
+
 if __name__ == "__main__":
     logging.disable(logging.NOTSET)
     unittest.main()

@@ -2202,6 +2202,387 @@ class MemoryPlannerTests(PlannerTestCase):
         self.assertEqual(path.read_bytes(), raw)
 
 
+
+# --------------------------------------------------------------------------
+# The productivity bundle's day plan (planner.plan_mode, spec 3.2, 7.2, 8.1)
+# --------------------------------------------------------------------------
+
+def plan_day_briefs() -> dict:
+    """Wed Oct 7 2026 (NOW is 9:30 AM): a dentist, a meeting with a guest, a declined lunch and
+    office hours shown as free; tomorrow's call is read but never planned around."""
+    from briefing_reader.gcal import EventBrief, Guest
+
+    def at(hour: int, minute: int = 0, days: int = 0):  # type: ignore[no-untyped-def]
+        return (NOW + timedelta(days=days)).replace(hour=hour, minute=minute)
+
+    return {"personal": [EventBrief("evtdentist01", "primary", "Dentist", start=at(11), end=at(11, 45))],
+            "work": [EventBrief("evtsync0001", "primary", "Project sync", start=at(14), end=at(15),
+                                guests=(Guest("ana@example.edu", "Ana Lima", "accepted"),),
+                                organizer_email="ana@example.edu", organizer_name="Ana Lima"),
+                     EventBrief("evtlunch001", "primary", "Team lunch", start=at(12), end=at(13),
+                                self_response="declined"),
+                     EventBrief("evtoffice01", "primary", "Office hours", start=at(16), end=at(17), transparent=True),
+                     EventBrief("evtcall0001", "primary", "Tomorrow call", start=at(9, days=1), end=at(10, days=1))]}
+
+
+PLAN_TODO_ID = "todocard00000001"
+PLAN_CONFIG = CONFIG + "\n[productivity]\nenabled = true\n"
+
+
+def plan_request(typed: str = "", part: str = "day"):  # type: ignore[no-untyped-def]
+    from briefing_reader.ask.modes import MODE_PLAN, ORIGIN_TYPED, ModeRequest
+
+    return ModeRequest(MODE_PLAN, ORIGIN_TYPED, typed=typed, part=part, typed_route=True)
+
+
+def plan_inputs(todos: bool = True, deadlines: bool = True):  # type: ignore[no-untyped-def]
+    from briefing_reader.ask.modes import ModeInputs, TodoFact
+
+    return ModeInputs(todos=(TodoFact("", PLAN_TODO_ID, "Read chapter 4", "2026-10-08", "ask"),) if todos else (),
+                      deadlines=("Lab report | 2026-10-09",) if deadlines else ())
+
+
+class PlanModeTests(PlannerTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_config(PLAN_CONFIG)
+        self.sources.briefs = plan_day_briefs()
+        self.sources.accounts_list = [AccountInfo("personal", "you@example.com", "yes", True, "no (not set up)",
+                                                  "America/Los_Angeles"),
+                                      AccountInfo("work", "you@example.edu", "yes", True, "yes",
+                                                  "America/Los_Angeles")]
+
+    def plan(self, ask: AskPlanner, typed: str = "", part: str = "day", inputs=None,  # type: ignore[no-untyped-def]
+             **kwargs):
+        self.stream = live.LiveStream()
+        task = self.stream.task(live.TASK_PLAN, "plan my day")
+        return ask.plan_mode(plan_request(typed, part), inputs=inputs or plan_inputs(), live=task, **kwargs)
+
+    def steps(self) -> list:
+        return list(self.stream.snapshot()[0].steps)
+
+    def test_a_plan_end_to_end(self) -> None:
+        from briefing_reader.ask.modes import MODE_PLAN
+
+        ask = self.make(stream("plan_ok"))
+        stages: list[str] = []
+        outcome = self.plan(ask, on_stage=stages.append,
+                            briefing=BriefingContext(sections=(("Today", ("The lab meets at 3 PM.",)),)))
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual((outcome.mode, outcome.runs, outcome.note_kind, outcome.refused), (MODE_PLAN, 1, "", 0))
+        self.assertEqual(len(self.runner.started), 1)                              # exactly one run
+        self.assertEqual(stages, [planner.STAGE_DAY, planner.STAGE_PLANNING])
+        lab, chapter = outcome.cards
+        self.assertEqual([card.kind for card in outcome.cards], ["calendar", "calendar"])
+        self.assertEqual([card.mode for card in outcome.cards], [MODE_PLAN, MODE_PLAN])
+        self.assertEqual((lab.title, lab.start.hour, lab.start.minute, lab.end.hour),
+                         ("Work on: Lab report", 9, 45, 11))
+        self.assertEqual((lab.notes, lab.serves), ("For: Lab report", ""))       # R28: Jarvis's own words
+        self.assertEqual((chapter.notes, chapter.serves), ("For: Read chapter 4", PLAN_TODO_ID))
+        self.assertEqual(outcome.plan_for, NOW.date())
+        self.assertEqual((outcome.window.label, outcome.slots, outcome.blocks_max), ("today", 3, 5))
+        started = self.runner.started[0]
+        self.assertEqual(started.argv[started.argv.index("--system-prompt-file") + 1],
+                         str(planner.cli.PLAN_PROMPT_FILE))
+        schema = self.schema()
+        self.assertEqual(schema["title"], "JarvisDayPlan")
+        self.assertNotIn("gmail_search", schema["properties"])                     # no search, no web
+        self.assertNotIn("web_research", schema["properties"])
+        stdin = self.stdin()
+        self.assertIn("<day>plan for=2026-10-07 (today) | from=09:35 | until=22:00", stdin)
+        self.assertIn("work | Team lunch | 2026-10-07 12:00-13:00 | declined", stdin)
+        self.assertIn("work | Office hours | 2026-10-07 16:00-17:00 | free", stdin)
+        self.assertIn("t1 | todo | Read chapter 4 | due 2026-10-08 | from ask", stdin)
+        self.assertIn("d1 | deadline | Lab report | 2026-10-09", stdin)
+        self.assertIn("<briefing>\n# Today\n- The lab meets at 3 PM.\n</briefing>", stdin)
+        for secret in ("ana@example.edu", "Ana Lima", "evtsync0001", PLAN_TODO_ID, "Tomorrow call", "<accounts>",
+                       "<contacts>", "<mail>"):
+            self.assertNotIn(secret, stdin)
+        self.assertEqual(self.usage.counts(NOW, kind="plan_day"), (1, 1))         # counted as a bundle run
+        self.assertEqual(outcome.caps.left_bundle_day, 19)
+        # The day read fresh: midnight to midnight in the personal zone, on every signed-in calendar.
+        self.assertEqual([call[0] for call in self.sources.calls], ["personal", "work"])
+        first, last = self.sources.calls[0][1], self.sources.calls[0][2]
+        self.assertEqual((first.isoformat(), last.isoformat()), ("2026-10-07T00:00:00-07:00",
+                                                                "2026-10-08T00:00:00-07:00"))
+        summary = outcome.summary()
+        self.assertIn("mode plan, slots 3, blocks 2/5", summary)
+        self.assertNotIn("Lab report", summary)
+        self.assertIsNotNone(outcome.calendar_read)
+
+    def test_the_plan_child_is_an_asks_but_for_its_prompt_and_schema(self) -> None:
+        """Spec 7: the same claude.exe, clean env and cwd as an Ask's run (ClaudeEngine.run_mode is a
+        path of its own); only the values of --system-prompt-file and --json-schema differ."""
+        ask = self.make(stream("plan_ok"), plan_stream({"say": SAY, "question": "", "lines": []}))
+        self.assertTrue(self.plan(ask).ok)
+        self.assertTrue(ask.plan("what's on today?").ok)
+        plan_child, ask_child = self.runner.started
+        for child in (plan_child, ask_child):
+            self.assertNotIn("ANTHROPIC_API_KEY", child.env)
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", child.env)
+            self.assertFalse(any("dummy" in value for value in child.env.values()))
+        self.assertEqual(plan_child.env, ask_child.env)
+        self.assertEqual(plan_child.cwd, ask_child.cwd)
+        self.assertEqual(plan_child.argv[0], ask_child.argv[0])
+        self.assertEqual(len(plan_child.argv), len(ask_child.argv))
+        differ = [plan_child.argv[number - 1] for number, (mine, theirs)
+                  in enumerate(zip(plan_child.argv, ask_child.argv)) if mine != theirs]
+        self.assertEqual(differ, ["--system-prompt-file", "--json-schema"])
+
+    def test_the_live_steps_of_a_plan(self) -> None:
+        ask = self.make(stream("plan_ok"))
+        self.plan(ask)
+        kinds = [step.kind for step in self.steps()]
+        self.assertEqual(kinds, [live.ASK_CHECKS, live.CALENDAR_READ, live.MODE_REQUEST, live.PLAN_FREE,
+                                 live.PLANNER_RUN, live.PLAN_VALIDATE])
+        steps = {step.kind: step for step in self.steps()}
+        checks = {field.label: field.value for field in steps[live.ASK_CHECKS].fields}
+        self.assertEqual(checks["Bundle runs left today"], "20 of 20")
+        self.assertEqual(checks["Kept for your own Asks"], "3 an hour")
+        free = steps[live.PLAN_FREE]
+        self.assertEqual([item.text for item in free.items],
+                         ["9:35-11:00 AM (85 min)", "11:45 AM-1:50 PM (125 min)", "3:10-10:00 PM (410 min)"])
+        given = {field.label: field.value for field in steps[live.MODE_REQUEST].fields}
+        self.assertIn("no guests", given["Given"])
+        run = {field.label: field.value for field in steps[live.PLANNER_RUN].fields}
+        self.assertEqual((run["Mail search"], run["Web research"]), ("no", "no"))
+        self.assertIn("plan_prompt.md", run["Command line"])
+        validate = steps[live.PLAN_VALIDATE]
+        self.assertEqual([item.note for item in validate.items], ["for Lab report", "for Read chapter 4"])
+        self.assertIsNotNone(validate.picture)
+        self.assertIsNotNone(steps[live.CALENDAR_READ].picture)
+        from briefing_reader import pictures
+
+        read = steps[live.CALENDAR_READ].picture                  # the day as read proposes nothing
+        self.assertEqual((read.caption, pictures.stamp(read, live.STATUS_OK, "")), ("Your day as read", ("", "")))
+        self.assertEqual(pictures.stamp(validate.picture, live.STATUS_OK, "")[0], pictures.PLAN_STAMP)
+
+    def test_clashes_and_rules_make_information_only_cards(self) -> None:
+        ask = self.make(stream("plan_clash"))
+        outcome = self.plan(ask)
+        self.assertTrue(outcome.ok, outcome)
+        errors = [card.error for card in outcome.cards]
+        self.assertEqual(errors, ["", "Overlaps Project sync at 2:00 PM", "Too close to Project sync at 2:00 PM",
+                                  "", "This block starts in the past",
+                                  "Outside the hours Jarvis plans (9:35 AM-10:00 PM)",
+                                  "A day plan only adds time blocks", "This block serves nothing on your list"])
+        self.assertEqual(outcome.refused, 6)
+        self.assertEqual(outcome.cards[3].start.hour, 12)                         # the declined lunch was free
+
+    def test_a_row_the_planner_never_saw_is_served_by_no_block(self) -> None:
+        """Rule 9: "For:" names a <todos> row shown in this run. With 45 to-dos the stdin keeps 40 rows,
+        so t45 and the deadline d1 (listed after the to-dos) were cut: blocks naming them are refused."""
+        from briefing_reader.ask import dayplan
+        from briefing_reader.ask.modes import ModeInputs, TodoFact
+
+        todos = tuple(TodoFact("", f"card{n:04d}", f"To-do {n:02d}", "2026-10-08", "ask") for n in range(45))
+        ask = self.make(plan_stream({"say": "Three blocks.", "question": "", "lines": [
+            "Calendar: Work on: Unseen | 2026-10-07 15:30-16:30 | | | For: t45",
+            "Calendar: Work on: Report | 2026-10-07 17:00-18:00 | | | For: d1",
+            "Calendar: Work on: First | 2026-10-07 19:00-20:00 | | | For: t1"]}))
+        outcome = self.plan(ask, inputs=ModeInputs(todos=todos, deadlines=("Lab report | 2026-10-09",)))
+        self.assertNotIn("t45 | todo", self.stdin())
+        self.assertNotIn("d1 | deadline", self.stdin())
+        self.assertEqual([card.error for card in outcome.cards],
+                         [dayplan.SERVES_NOTHING, dayplan.SERVES_NOTHING, ""])
+        self.assertEqual([card.serves for card in outcome.cards], ["", "", "card0000"])
+        self.assertEqual(outcome.cards[2].notes, "For: To-do 00")
+
+    def test_at_most_plan_max_blocks(self) -> None:
+        self.write_config(PLAN_CONFIG + "plan_max_blocks = 1\n")
+        ask = self.make(stream("plan_ok"))
+        outcome = self.plan(ask)
+        self.assertEqual(sum(1 for card in outcome.cards if not card.error), 1)
+        self.assertEqual(outcome.dropped, 1)
+        self.assertIn("1 more block(s) were left out", outcome.message)
+
+    def test_a_garbled_answer_and_a_question(self) -> None:
+        ask = self.make(stream("plan_garbled"), stream("plan_question"))
+        garbled = self.plan(ask)
+        self.assertFalse(garbled.ok)
+        self.assertEqual((garbled.kind, garbled.runs, garbled.cards), ("garbled", 1, ()))
+        question = self.plan(ask)
+        self.assertTrue(question.ok)
+        self.assertEqual((question.cards, question.question),
+                         ((), "Should the lab report or chapter 4 come first?"))
+
+    def test_no_run_when_the_day_is_full_or_nothing_needs_time(self) -> None:
+        from briefing_reader.gcal import EventBrief
+
+        ask = self.make()
+        busy = EventBrief("evtallday01", "primary", "Workshop", start=NOW.replace(hour=8), end=NOW.replace(hour=23))
+        self.sources.briefs = {"personal": [busy]}
+        full = self.plan(ask)
+        self.assertEqual((full.ok, full.note_kind, full.runs), (True, "day_full", 0))
+        self.assertEqual(full.message, "Your day is full, sir - there's no free stretch of half an hour left. "
+                                       'Type "plan tomorrow" for tomorrow.')
+        self.sources.briefs = plan_day_briefs()
+        nothing = self.plan(ask, inputs=plan_inputs(todos=False, deadlines=False))
+        self.assertEqual((nothing.note_kind, nothing.runs), ("nothing", 0))
+        self.assertEqual(nothing.message, "Nothing on your list needs time today, sir. Tell me what to fit in: "
+                                          '"plan my day, gym and reading".')
+        self.assertFalse(self.runner.started)
+        self.assertEqual(self.usage.counts(NOW), (0, 0))                           # nothing counted
+        self.assertEqual(self.steps()[-1].kind, live.PLAN_FREE)
+
+    def test_the_owners_words_always_need_time(self) -> None:
+        """R52: "plan my day, gym" with an empty list runs."""
+        ask = self.make(plan_stream({"say": "Gym after lunch.", "question": "",
+                                     "lines": ["Calendar: Gym | 2026-10-07 13:00-13:45 | | | For: words"]}))
+        outcome = self.plan(ask, typed="gym", inputs=plan_inputs(todos=False, deadlines=False))
+        self.assertEqual(outcome.runs, 1)
+        self.assertEqual(outcome.cards[0].error, "")
+        self.assertEqual(outcome.cards[0].notes, "For: your words")
+        self.assertIn("The owner's words: gym\n</command>", self.stdin())
+
+    def test_no_personal_calendar(self) -> None:
+        ask = self.make()
+        self.sources.accounts_list[0] = AccountInfo("personal", "you@example.com", "not signed in", True, "no")
+        outcome = self.plan(ask)
+        self.assertEqual((outcome.note_kind, outcome.message),
+                         ("no_calendar", "Plan my day needs your personal calendar - click Connect under TODAY."))
+        self.assertEqual(self.sources.calls, [])
+
+    def test_a_part_that_is_over(self) -> None:
+        ask = self.make()
+        ask.clock = lambda: NOW.replace(hour=11, minute=45)
+        over = self.plan(ask, part="morning")
+        self.assertEqual((over.note_kind, over.message),
+                         ("part_over", 'Your morning is over, sir; type "plan my day" for the rest of it.'))
+        self.assertEqual(self.sources.calls, [])
+
+    def test_late_in_the_day_plans_tomorrow(self) -> None:
+        """R30: from [agenda] evening_from_hour (18) "plan my day" plans tomorrow and says so."""
+        from briefing_reader.ask.modes import ModeInputs
+
+        self.sources.briefs = {}
+        evening = NOW.replace(hour=19)
+        ask = self.make(plan_stream({"say": "Chapter 4 first thing.", "question": "",
+                                     "lines": ["Calendar: Read chapter 4 | 2026-10-08 09:00-10:00 | | | For: t1"]}))
+        ask.clock = lambda: evening
+        outcome = self.plan(ask, inputs=ModeInputs(todos=plan_inputs().todos, evening_from_hour=18))
+        self.assertTrue(outcome.window.switched)
+        self.assertEqual((outcome.window.label, outcome.plan_for), ("tomorrow", NOW.date() + timedelta(days=1)))
+        self.assertEqual(outcome.cards[0].error, "")
+        self.assertIn("<day>plan for=2026-10-08 (tomorrow) | from=08:00 | until=22:00", self.stdin())
+        first = self.sources.calls[0][1]
+        self.assertEqual(first.isoformat(), "2026-10-08T00:00:00-07:00")
+
+    def test_caps_bundle_and_reserve_refuse_before_any_read(self) -> None:
+        self.write_config(PLAN_CONFIG.replace("max_per_hour = 20", "max_per_hour = 4"))
+        ask = self.make()
+        self.usage.finish(self.usage.start(), outcome="ok")
+        with self.assertLogs("briefing_reader.ask.planner", level="INFO") as logs:
+            outcome = self.plan(ask)                   # 3 left: they stay for typed Asks
+        self.assertIn("INFO:briefing_reader.ask.planner:Plan: no run (caps)", logs.output)
+        self.assertEqual((outcome.ok, outcome.kind), (False, planner.CAPS))
+        self.assertIn("Jarvis keeps 3 Ask runs this hour for your own requests", outcome.message)
+        self.assertEqual((self.sources.calls, self.runner.started), ([], []))
+        self.write_config(PLAN_CONFIG + "max_runs_per_day = 1\n")
+        capped_planner = AskPlanner(self.config, self.engine, self.sources, clock=lambda: NOW, monotonic=self.clock)
+        capped_planner.usage.finish(capped_planner.usage.start(kind="plan_day"), outcome="ok")
+        capped = self.plan(capped_planner)
+        self.assertEqual(capped.kind, planner.CAPS)
+        self.assertTrue(capped.message.startswith("Today's limit for plans, briefs and drafts is reached"))
+        self.assertEqual(self.sources.calls, [])
+
+    def test_one_at_a_time_with_asks(self) -> None:
+        ask = self.make()
+        self.assertTrue(ask._busy.acquire(blocking=False))
+        try:
+            outcome = self.plan(ask)
+        finally:
+            ask._busy.release()
+        self.assertEqual((outcome.kind, outcome.mode), ("busy", "plan"))
+        self.assertEqual(self.sources.calls, [])
+
+    def test_a_plan_may_suggest_a_grounded_note(self) -> None:
+        ask = self.make(plan_stream({"say": "Chapter 4 after lunch.", "question": "",
+                                     "lines": ["Calendar: Read chapter 4 | 2026-10-07 15:30-16:30 | | | For: t1"],
+                                     "remember": ["I keep Fridays for reading"]}))
+        ask.memory = lambda: ("I prefer deep work before noon.",)
+        ask.memory_suggestions = True
+        outcome = self.plan(ask, typed="I keep Fridays for reading")
+        self.assertIn("remember", self.schema()["properties"])
+        self.assertEqual(outcome.suggestion, "I keep Fridays for reading")
+        self.assertIn("<memory>", self.stdin())
+
+    def test_a_plan_never_suggests_an_ungrounded_note(self) -> None:
+        """8.6: a suggestion naming what neither the context nor the owner's words hold is dropped
+        (LIVE says so, with its reason word), never offered."""
+        ask = self.make(plan_stream({"say": "Chapter 4 after lunch.", "question": "",
+                                     "lines": ["Calendar: Read chapter 4 | 2026-10-07 15:30-16:30 | | | For: t1"],
+                                     "remember": ["Zed Example leads the lab"]}))
+        ask.memory = lambda: ("I prefer deep work before noon.",)
+        ask.memory_suggestions = True
+        with self.assertLogs("briefing_reader.ask.planner", level="INFO") as logs:
+            outcome = self.plan(ask, typed="chapter 4 first")
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual(outcome.suggestion, "")
+        self.assertIn("INFO:briefing_reader.ask.planner:Memory: a suggestion was dropped (ungrounded)", logs.output)
+        validate = next(step for step in self.steps() if step.kind == live.PLAN_VALIDATE)
+        item = next(item for item in validate.items if item.text.startswith("Note to remember"))
+        self.assertEqual(item.status_text, "DROPPED")
+        self.assertIn("ungrounded", item.note)
+
+    def test_logs_hold_no_title_or_words(self) -> None:
+        from briefing_reader.ask.modes import ModeInputs, TodoFact
+
+        ask = self.make(stream("plan_clash"))
+        inputs = ModeInputs(todos=(TodoFact("", "zq7cardid", "Zq7 Todo title", "2026-10-08", "ask"),),
+                            deadlines=("Zq7 deadline | 2026-10-09",))
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+            self.plan(ask, typed="zq7req words", inputs=inputs)
+        text = "\n".join(logs.output)
+        for secret in ("Zq7", "zq7", "Project sync", "Lab report", "Read chapter 4", "Dentist", "ana@example.edu"):
+            self.assertNotIn(secret, text)
+        self.assertIn("(mode plan)", text)
+        self.assertIn("Plan: 2 block(s) proposed (6 refused)", text)
+
+    def test_the_plan_dry_run(self) -> None:
+        ask = self.make()
+        dry = ask.plan_dry_run(plan_request(), inputs=plan_inputs())
+        self.assertEqual(self.runner.started, [])
+        self.assertEqual(self.usage.counts(NOW), (0, 0))
+        self.assertIn("personal | [title: 7 characters] | 2026-10-07 11:00-11:45 | busy", dry.prompt)
+        self.assertNotIn("Dentist", dry.prompt)
+        self.assertNotIn("Read chapter 4", dry.prompt)
+        self.assertIn(str(planner.cli.PLAN_PROMPT_FILE), dry.argv)
+        self.assertEqual((dry.counts["free stretches"], dry.counts["to-dos"], dry.note), (3, 1, ""))
+        empty = ask.plan_dry_run(plan_request(), inputs=plan_inputs(todos=False, deadlines=False))
+        self.assertTrue(empty.note.startswith("Nothing on your list needs time today"))
+
+    def test_the_plan_dry_run_command(self) -> None:
+        self.make()
+        environ = dict(self.environ, JARVIS_CLAUDE_EXE=str(self.exe.path))
+        out = io.StringIO()
+        code = commands.plan_dry_run("plan my afternoon, gym", self.config, out, briefing=None, environ=environ,
+                                     runner=self.runner, sources=self.sources, now=lambda: NOW)
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertTrue(text.startswith("Day plan dry run (no Claude request was made"))
+        self.assertIn("<day>plan for=2026-10-07 (this afternoon) | from=12:00 | until=17:00", text)
+        self.assertIn("The owner's words: gym", text)
+        self.assertIn("--system-prompt-file", text)
+        self.assertEqual(self.runner.started, [])
+        out = io.StringIO()
+        self.assertEqual(commands.plan_dry_run("move my sync", self.config, out, briefing=None, environ=environ,
+                                               runner=self.runner, sources=self.sources), 2)
+        self.assertEqual(out.getvalue().strip(), commands.NOT_A_PLAN)
+
+    def test_ask_check_counts_runs_by_kind(self) -> None:
+        self.make()
+        self.usage.finish(self.usage.start(kind="plan_day"), outcome="ok")
+        self.usage.finish(self.usage.start(), outcome="ok")
+        out = io.StringIO()
+        commands.ask_check(self.config, out, environ=self.environ, runner=self.runner, sources=self.sources,
+                           usage=self.usage)
+        text = out.getvalue()
+        self.assertIn("  Runs today by kind: Ask 1, web research 0, day plans 1, meeting briefs 0, drafts 0\n", text)
+        self.assertIn("  Plans, briefs and drafts today: 1 of 20 (3 Ask runs an hour kept for your requests)\n",
+                      text)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.CRITICAL)
     unittest.main()

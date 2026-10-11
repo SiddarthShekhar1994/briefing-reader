@@ -249,7 +249,8 @@ class HookCalendar(FakeCalendar):
         updates = {"external": "externalOnly"}.get(notify, notify)
         target = {"calendarId": kwargs.get("calendar_id") or "primary"}
         if name == "create_event":
-            return "events.insert", {**target, "body": gcal.build_event_body(args[0], self.ZONE)}
+            footer = kwargs.get("footer", gcal.EVENT_FOOTER)
+            return "events.insert", {**target, "body": gcal.build_event_body(args[0], self.ZONE, footer=footer)}
         if name == "respond":
             attendee = {"email": "me@example.edu", "responseStatus": gcal.RESPONSES[args[1]]}
             if kwargs.get("comment"):
@@ -378,6 +379,16 @@ class CalendarAndTodoTests(ExecutorTestCase):
         self.personal.outcomes["create_event"] = EventResult("old1", EVENT_LINK, existed=True)
         self.assertEqual(self.executor().execute(action).status, STATUS_EXISTS)
         self.assertEqual(self.work.calls, [])
+
+    def test_a_plan_block_carries_its_own_footer(self) -> None:
+        """G24: the day plan's footer goes with the insert (and with the preview); every other card
+        keeps the call exactly as before (no footer keyword)."""
+        block = dataclasses.replace(parse_action_line(CHESS + " | | | For: Lab report"), mode="plan")
+        self.executor().execute(block)
+        self.assertEqual(self.personal.changes(), [("create_event", (block,), {"footer": gcal.PLAN_EVENT_FOOTER})])
+        preview = self.executor().preview(block)
+        self.assertEqual(preview.body, "For: Lab report" + "\n\n" + "Added by Jarvis from your day plan.")
+        self.assertEqual(self.executor().preview(parse_action_line(CHESS)).body, gcal.EVENT_FOOTER)
 
     def test_todo_block_goes_to_the_personal_calendar_with_the_todo_id(self) -> None:
         todo = example("Todo")
@@ -1928,6 +1939,17 @@ class LiveRunTests(MailTestCase):
         self.assertEqual(self.fields(payload)["Title"], "Chess Club Weekly Meeting")
         self.assertEqual(self.fields(payload)["Calendar"], "personal (primary)")
         self.assertEqual(payload.blocks[0].text, gcal.EVENT_FOOTER)   # as build_event_body writes it
+        # A day plan's block: the payload shows its own footer, and the request sent matches it.
+        block = dataclasses.replace(parse_action_line(CHESS + " | | | For: Lab report"), mode="plan")
+        self.personal.__class__ = HookCalendar
+        self.personal.tamper, self.personal.requests = {}, []
+        task = self.task()
+        self.run_mail(block, live=task)
+        payload = self.step(task, live.ACTION_PAYLOAD)
+        self.assertTrue(payload.blocks[0].text.endswith("Added by Jarvis from your day plan."))
+        self.assertNotEqual(payload.status_text, "CHANGED SINCE")
+        sent = self.personal.requests[-1][1]["body"]["description"]
+        self.assertEqual(sent, "For: Lab report" + "\n\n" + "Added by Jarvis from your day plan.")
 
     def test_already_so_sends_nothing_and_says_so(self) -> None:
         cases = {"RSVP": ("respond", ChangeResult("abc123def456ghi789", EVENT_LINK, already=True), "ALREADY ANSWERED",
@@ -1994,6 +2016,22 @@ class LiveRunTests(MailTestCase):
                                                    "end": {"dateTime": "2026-10-08T17:00:00"}})
         self.assertEqual(executor.request_differs(move, "events.patch", late), ["Who gets an email", "New time"])
         self.assertEqual(executor.request_differs(move, "events.delete", good), ["Request"])
+
+    def test_a_plan_blocks_footer_differing_from_the_preview_reads_check(self) -> None:
+        """G24: the countdown showed the day plan's footer; a request carrying another description
+        (the briefing's footer here) is not what was shown."""
+        block = dataclasses.replace(parse_action_line("Calendar: Work on: Lab report | 2026-10-08 15:00-16:00 | | | "
+                                                      "For: Lab report"), mode="plan")
+        body = gcal.build_event_body(block, "America/Los_Angeles", footer=gcal.event_footer(block))
+        self.assertTrue(str(body["description"]).endswith(gcal.PLAN_EVENT_FOOTER))
+        params = {"calendarId": "primary", "body": body}
+        self.assertEqual(executor.request_differs(block, "events.insert", params), [])
+        briefing_footer = gcal.build_event_body(block, "America/Los_Angeles", footer=gcal.EVENT_FOOTER)
+        wrong = {"calendarId": "primary", "body": briefing_footer}
+        self.assertTrue(str(briefing_footer["description"]).endswith(gcal.EVENT_FOOTER))
+        self.assertEqual(executor.request_differs(block, "events.insert", wrong), ["Description"])
+        no_notes = dict(body, description="For: Lab report")
+        self.assertEqual(executor.request_differs(block, "events.insert", {"body": no_notes}), ["Description"])
 
     def last_task(self, action: ProposedAction) -> live.LiveTask:
         task = self.task()

@@ -383,6 +383,7 @@ GREEN = "#86efac"
 RED = "#fca5a5"
 RED_LINE = "#f87171"
 PINK = "#f5d0fe"
+LAVENDER = "#c4b5fd"         # LIVE's PLAN tag (the productivity bundle's day plan)
 SLATE = "#64748b"
 OFF = "#475569"
 STEP_DIM = "#3a4450"
@@ -1110,6 +1111,12 @@ class HudButton(QPushButton):
         return self.sizeHint()
 
     # ---- state tracking -----------------------------------------------------------
+
+    def show_focus_ring(self) -> None:
+        """Draw the keyboard focus ring now, though the focus came by program: the app moved the
+        focus here for someone using the keyboard, who must see where the next key lands (R1)."""
+        self._focus_visible = True
+        self.update()
 
     def focusInEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         self._focus_visible = _focus_ring_after(event.reason(), self._focus_visible)
@@ -4049,8 +4056,12 @@ class _ToolLink(HudButton):
             painter.end()
 
 
+_ACTIVATING_KEYS = (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Select)
+
+
 class _DecisionButton(HudButton):
-    """Deny / Approve: also reports a click made while it is disabled (``disabledClicked``).
+    """Deny / Approve: also reports a click made while it is disabled (``disabledClicked``), and
+    whether the click it is making came from the keyboard (``by_key``).
 
     A disabled QAbstractButton takes the mouse events itself (so they never
     reach a widget below), which is the only place such a click can be seen.
@@ -4069,7 +4080,25 @@ class _DecisionButton(HudButton):
         super().__init__(text, variant, compact=compact)
         self._hint_width = 0
         self._tight_width = 0
+        self._keyed = False   # the press that is clicking it now came from the keyboard (Space / Enter)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+    def by_key(self) -> bool:
+        """The click being handled came from a key (Space / Enter on the focused button), not the
+        mouse: the app ignores such a click right after it moved the focus here (R1)."""
+        return self._keyed
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if not event.isAutoRepeat() and event.key() in _ACTIVATING_KEYS:
+            self._keyed = True
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self._keyed = False
+        super().mousePressEvent(event)
+
+    def clear_key(self) -> None:
+        self._keyed = False
 
     def natural_width(self, text: str | None = None) -> int:
         """The width ``text`` (default: the shown text) asks for with the full padding."""
@@ -4664,6 +4693,10 @@ class ActionCard(QWidget):
         self._make_tools(kind, title, open_text, copy_text, edit_text, sign_in_text, event_text)
         self.deny_button = _DecisionButton(deny_text or "Deny", DENY, compact=True)
         self.approve_button = _DecisionButton(approve_text or "Approve", APPROVE, compact=True)
+        # Like Undo's: a screen reader says which card a decision button decides ("Add block (...)").
+        self._decides = f"{kind.upper()}: {title}"
+        self.deny_button.setAccessibleName(f"{self.deny_button.text()} ({self._decides})")
+        self.approve_button.setAccessibleName(f"{self.approve_button.text()} ({self._decides})")
         # Every text the button may show later, so a new one never moves Deny (an RSVP, Move or
         # Cancel card may also read Sign in or Done; a Reply / Email card Send or Done).
         self._fit_approve_width((approve_text or "Approve", RETRY_TEXT)
@@ -4757,7 +4790,11 @@ class ActionCard(QWidget):
         self.denyClicked.emit(self.action_id)
 
     def _on_approve(self) -> None:
-        self.approveClicked.emit(self.action_id)
+        try:
+            self.approveClicked.emit(self.action_id)
+        finally:
+            if shiboken6.isValid(self.approve_button):
+                self.approve_button.clear_key()
 
     def _on_open(self) -> None:
         self.openClicked.emit(self._link)
@@ -4791,6 +4828,7 @@ class ActionCard(QWidget):
         """Rename the right-hand button ("Accept" -> "Retry"); Deny never moves."""
         self._fit_approve_width((text,))
         self.approve_button.setText(text)
+        self.approve_button.setAccessibleName(f"{text} ({self._decides})")
 
     def approve_text(self) -> str:
         return self.approve_button.text()
@@ -8071,6 +8109,7 @@ LIVE_CUT_TEXT = "[{cut} more characters not shown]"
 LIVE_TAG_COLORS = {
     live_events.TASK_ASK: PINK, live_events.TASK_ACTION: AMBER, live_events.TASK_BRIEFING: TEXT_MUTED,
     live_events.TASK_BACKGROUND: TEXT_DIM, live_events.TASK_WEB: ACCENT, live_events.TASK_MEMORY: GREEN,
+    live_events.TASK_PLAN: LAVENDER,
 }
 _LIVE_BORDERS = {
     live_events.STATUS_RUNNING: rgba(ACCENT, 0.45), live_events.STATUS_OK: rgba(ACCENT, 0.18),

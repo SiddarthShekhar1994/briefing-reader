@@ -44,6 +44,17 @@ and not dismissed before (AskOutcome.suggestion; saved only on the owner's click
 
 The UI calls plan() on its Ask worker thread (it blocks: Google reads and up to two CLI runs);
 ``on_stage`` reports STAGE_* as it goes, and setting ``cancel`` ends a running CLI within a second.
+
+Planner modes (the productivity bundle): plan_mode(request, inputs=, briefing=, ...) runs one mode
+on the same thread and the same one-at-a-time lock as plan(). This build has the day plan
+(ask.modes.MODE_PLAN, "plan my day"): the Ask caps plus the bundle's daily cap and the hourly
+reserve for typed Asks, Claude Code ready, the personal calendar signed in; a fresh read of the day
+being planned on every calendar account; the free stretches and what needs time (ask.dayplan),
+where an empty day or a full one answers with no run at all; then one run with ClaudeEngine.run_mode
+(its own system prompt and schema, no tools, no mail, no web, no second run) and its lines checked
+by validate.to_cards(kinds={Calendar}, extra=dayplan.DayCheck) and keep_valid. Each valid block's
+notes become "For: <the to-do it serves>" (Jarvis's own words) and ``serves`` names the Todo card.
+plan_dry_run() shows the stdin with titles and notes as sizes (no run, nothing counted).
 """
 
 from __future__ import annotations
@@ -53,15 +64,15 @@ import os
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..actions import ProposedAction, link_host
-from ..config import Config
-from ..gcal import CalendarError, CalendarNotSignedIn, EventBrief, local_timezone
+from ..actions import TODO, ProposedAction, link_host
+from ..config import DEFAULT_ACCOUNT, Config
+from ..gcal import CalendarError, CalendarNotSignedIn, EventBrief, local_timezone, zone_offset
 from ..gmail import GmailError
 from ..google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SETUP, PROBLEM_SIGNED_OUT, logged_alias
 from . import cli
@@ -71,8 +82,11 @@ from ..live import (
     CALENDAR_READ,
     MAIL_SEARCH,
     MAIL_THREAD,
+    MODE_REQUEST,
     NO_STEP,
     NO_TASK,
+    PLAN_FREE,
+    PLAN_VALIDATE,
     PLANNER_RUN,
     STATUS_BLOCKED,
     STATUS_CANCELLED,
@@ -86,7 +100,7 @@ from ..live import (
     elapsed_text,
 )
 from ..live import quiet as _quiet
-from ..pictures import CalendarRead, email_picture, week_picture
+from ..pictures import CalendarRead, email_picture, plan_picture, week_picture
 from .context import (
     COMMAND_CAP,
     SOURCE_OWNER,
@@ -130,7 +144,9 @@ from .research_validate import notes as research_notes
 from .research_validate import validate as validate_research
 from .stream import CANCELLED, OVERAGE, AskFailure, InitSummary, Plan, RunResult, RunStats, run_planner
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
-from .validate import LINE_CARD, LINE_REFUSED, LINE_REPEAT, Cards, to_cards
+from .validate import LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, Cards, keep_valid, to_cards
+from . import dayplan, modes
+from .modes import MODE_KINDS, MODE_MAX_LINES, MODE_PLAN, MODE_USAGE, ModeInputs, ModeRequest
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +155,7 @@ STAGE_PLANNING = "planning"        # the first planner run
 STAGE_MAIL = "mail"                # running the search the planner asked for
 STAGE_PLANNING_AGAIN = "planning_again"   # the second run, with the mail
 STAGE_RESEARCH = "research"        # the web research run
+STAGE_DAY = "day"                  # a day plan: reading the day being planned
 
 # Refusals before any run (AskOutcome.kind), besides stream's failure kinds.
 EMPTY = "empty"
@@ -310,6 +327,43 @@ class ClaudeEngine:
                     result.stats.turns, result.stats.input_tokens, result.stats.output_tokens,
                     result.stats.cache_read_tokens, ",".join(init.tools) if init else "-",
                     "yes" if init and init.structured_tool else "no", result.stats.exit_code)
+        if result.failure is not None and result.failure.kind != CANCELLED:
+            self.forget()
+        return result
+
+    def mode_argv(self, ready: Readiness, mode: str, *, allow_remember: bool = False) -> list[str]:
+        """A planner mode's command line: Ask's exactly, but its own system prompt and schema."""
+        assert ready.exe is not None
+        return cli.build_argv(ready.exe.path, model=self.ask.model, max_turns=self.ask.max_turns,
+                              schema=cli.mode_schema_text(mode, allow_remember=allow_remember),
+                              hardened=ready.hardened, prompt_file=cli.MODE_PROMPTS[mode])
+
+    def run_mode(self, prompt: str, mode: str, *, cancel: threading.Event | None = None,
+                 progress: Callable[[str, Any], None] | None = None, capture: bool = False,
+                 allow_remember: bool = False) -> RunResult:
+        """One run of a planner mode (ask.modes: "plan") after preflight(): the same Claude Code,
+        clean environment, empty work folder, deny-all settings, flags and checks as run(), with the
+        mode's own prompt and schema (never gmail_search or web_research). ``allow_remember``: it may
+        suggest one note (a plan never carries mail)."""
+        from .stream import failure
+
+        ready, refused = self.preflight()
+        if refused is not None:
+            return RunResult(failure=refused)
+        if cancel is not None and cancel.is_set():
+            return RunResult(failure=failure(CANCELLED, "cancel"))
+        env = cli.clean_env(self._env_source())
+        argv = self.mode_argv(ready, mode, allow_remember=allow_remember)
+        result = run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                             timeout_s=float(self.ask.timeout_seconds), allow_search=False, cancel=cancel,
+                             clock=self._clock, progress=progress, capture=capture, allow_web=False,
+                             allow_remember=allow_remember)
+        init = result.init
+        logger.info("Ask: planner run %s in %.1f s (%d turn(s), %d in / %d out / %d cached tokens; tools %s, "
+                    "structured output %s, exit %s) (mode %s)", result.outcome, result.stats.duration_ms / 1000,
+                    result.stats.turns, result.stats.input_tokens, result.stats.output_tokens,
+                    result.stats.cache_read_tokens, ",".join(init.tools) if init else "-",
+                    "yes" if init and init.structured_tool else "no", result.stats.exit_code, mode)
         if result.failure is not None and result.failure.kind != CANCELLED:
             self.forget()
         return result
@@ -630,6 +684,19 @@ class AskOutcome:
     # A note the planner suggested keeping (memory.check_suggestion passed; shown with "Remember this",
     # saved only on the owner's click; never logged, never spoken).
     suggestion: str = field(default="", repr=False)
+    # A planner mode's answer (the productivity bundle): its mode ("plan"), a brief (a later build),
+    # choices to click (a later build), the day a plan is for, why it did not run (a word: "day_full",
+    # "nothing", "part_over", "no_hours", "no_calendar"; its words are ``message``), the plan's
+    # window (dayplan.PlanWindow: the UI replaces only the earlier plan cards it overlaps), its free
+    # stretches and the most blocks it may give.
+    mode: str = ""
+    brief: Any = field(default=None, repr=False, compare=False)
+    choices: tuple[Any, ...] = field(default=(), repr=False)
+    plan_for: date | None = None
+    note_kind: str = ""
+    window: Any = field(default=None, repr=False, compare=False)
+    slots: int = 0
+    blocks_max: int = 0
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
@@ -645,6 +712,13 @@ class AskOutcome:
         if report is not None:
             text += (f", research: {len(report.sources)} source(s), {len(report.left_out)} left out, "
                      f"{report.searches} search(es), {report.fetches} page read(s)")
+        if self.mode:
+            text += f", mode {self.mode}"
+            if self.note_kind:
+                text += f", no run ({self.note_kind})"
+            elif self.mode == MODE_PLAN and self.ok:
+                valid = sum(1 for card in self.cards if not card.error)
+                text += f", slots {self.slots}, blocks {valid}/{self.blocks_max}"
         return text
 
 
@@ -656,6 +730,7 @@ class DryRun:
     counts: Mapping[str, int]
     mail: MailReport
     research: bool = False            # a "web:" request's research run (its stdin and command line)
+    note: str = ""                    # a plan dry run: why the plan would not run ("" when it would)
 
 
 class AskPlanner:
@@ -688,7 +763,8 @@ class AskPlanner:
         self.usage = usage or UsageLog(config.data_dir / USAGE_FILE, max_per_hour=config.ask.max_per_hour,
                                        max_per_day=config.ask.max_per_day, clock=self.clock,
                                        max_research_per_hour=research_config.max_per_hour,
-                                       max_research_per_day=research_config.max_per_day)
+                                       max_research_per_day=research_config.max_per_day,
+                                       max_bundle_per_day=self._productivity().max_runs_per_day)
         self.research = research or ResearchEngine(research_config, engine)
         self._monotonic = monotonic
         self._busy = threading.Lock()
@@ -754,6 +830,12 @@ class AskPlanner:
         assistant = getattr(self.config, "assistant", None)
         return str(getattr(assistant, "address", "") or "")
 
+    def _productivity(self) -> Any:
+        """[productivity] (its defaults when the config has none, as in older tests)."""
+        from ..config import ProductivityConfig
+
+        return getattr(self.config, "productivity", None) or ProductivityConfig()
+
     def _hour24(self) -> bool:
         display = getattr(self.config, "display", None)
         return bool(getattr(display, "hour24", False))
@@ -786,15 +868,18 @@ class AskPlanner:
 
     def _run(self, prompt: str, *, allow_search: bool, cancel: threading.Event | None, live: LiveTask = NO_TASK,
              number: int = 1, search_words: str = "", allow_web: bool = False, web_words: str = "",
-             allow_remember: bool = False) -> RunResult:
-        step = _run_step(live, self.config.ask.model, prompt, number, search_words, web_words, allow_remember)
+             allow_remember: bool = False, mode: str = "") -> RunResult:
+        """One planner run, counted when it starts (``mode``: a planner mode's run, ClaudeEngine.run_mode,
+        counted as that mode's bundle kind)."""
+        step = _run_step(live, self.config.ask.model, prompt, number, search_words, web_words, allow_remember,
+                         mode=mode)
         ready, refused = self.engine.preflight()   # a run refused before it starts is not counted
         if refused is not None:
             step.rename_block(STDIN_PENDING, STDIN_NOT_SENT)
             step.done(STATUS_BLOCKED, status_text="SKIPPED", summary=f"Not started: {refused.message}")
             return RunResult(failure=refused, started=False)
-        _run_ready(step, self.engine, ready, allow_search, allow_web, allow_remember)
-        run = self.usage.start()
+        _run_ready(step, self.engine, ready, allow_search, allow_web, allow_remember, mode=mode)
+        run = self.usage.start(kind=MODE_USAGE[mode]) if mode else self.usage.start()
         result: RunResult | None = None
         try:
             extra: dict[str, Any] = {}
@@ -804,7 +889,10 @@ class AskPlanner:
                 extra["allow_web"] = True
             if allow_remember:        # the same
                 extra["allow_remember"] = True
-            result = self.engine.run(prompt, allow_search=allow_search, cancel=cancel, **extra)
+            if mode:
+                result = self.engine.run_mode(prompt, mode, cancel=cancel, **extra)
+            else:
+                result = self.engine.run(prompt, allow_search=allow_search, cancel=cancel, **extra)
             if result.limit is not None and result.limit.overage:
                 self._pause_for_overage(result.limit.resets_at)
             _run_result(step, result, keep_text=live.keep_text)
@@ -853,16 +941,22 @@ class AskPlanner:
         logger.info("Ask: %s", outcome.summary())
         return outcome
 
-    def _refusal(self, live: LiveTask = NO_TASK) -> AskOutcome | None:
+    def _refusal(self, live: LiveTask = NO_TASK, *, bundle: bool = False) -> AskOutcome | None:
+        """Ask on, the caps, Claude Code ready (no model request); ``bundle``: a planner mode's run,
+        which also needs a bundle run left today and must leave [productivity] reserve_ask_runs Ask
+        runs this hour for the owner's own requests."""
         step = live.step(ASK_CHECKS, CHECKS_TITLE)
         if not self.config.ask.enabled:
             step.field("Ask", "off")
             step.done(STATUS_BLOCKED, summary=DISABLED_MESSAGE)
             return AskOutcome(False, DISABLED, DISABLED_MESSAGE)
         step.field("Ask", "on")
-        caps = self.usage.check()
+        reserve = self.usage.reserve_kept(int(self._productivity().reserve_ask_runs)) if bundle else 0
+        caps = self.usage.check(runs=1, bundle=1, reserve=reserve) if bundle else self.usage.check()
         _checks_caps(step, caps, self.usage)
-        if self._research_config().enabled:
+        if bundle:
+            _checks_bundle(step, caps, self.usage, reserve)
+        elif self._research_config().enabled:
             research_live.checks_research(step, caps, self.usage)
         if not caps.allowed:
             step.done(STATUS_BLOCKED, summary=caps.message)
@@ -1038,6 +1132,198 @@ class AskPlanner:
             logger.info("Memory: a suggestion was dropped (%s)", reason)
             return "", reason
         return text, ""
+
+    # ---- planner modes (the productivity bundle) ---------------------------------------------
+
+    def plan_mode(self, request: ModeRequest, *, inputs: ModeInputs | None = None,
+                  briefing: BriefingContext | None = None, page_ids: Sequence[str] = (),
+                  cancel: threading.Event | None = None, on_stage: Callable[[str], None] = lambda stage: None,
+                  live: LiveTask | None = None) -> AskOutcome:
+        """One planner mode run (this build: the day plan) on the Ask thread: the same one-at-a-time
+        lock as plan(); never raises; ``live`` gets its steps (the caller finishes the task)."""
+        task = live or NO_TASK
+        if not self._busy.acquire(blocking=False):
+            task.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=BUSY_MESSAGE)
+            return AskOutcome(False, "busy", BUSY_MESSAGE, mode=request.mode)
+        started = self._monotonic()
+        self._reads.calendar = None
+        try:
+            if request.mode == MODE_PLAN:
+                outcome = self._plan_day(request, inputs or ModeInputs(), briefing, page_ids, cancel, on_stage, task)
+            else:
+                outcome = AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
+        except Exception as exc:  # noqa: BLE001 - a mode run must never take the app down
+            logger.warning("Ask: a %s run stopped by an unexpected error (%s)", request.mode, type(exc).__name__)
+            task.current().done(STATUS_FAILED, summary=f"unexpected error ({type(exc).__name__})")
+            outcome = AskOutcome(False, "error", "Jarvis stopped because of an unexpected error; nothing was proposed")
+        finally:
+            self._busy.release()
+        read, self._reads.calendar = getattr(self._reads, "calendar", None), None
+        outcome = replace(outcome, mode=request.mode, duration_ms=int((self._monotonic() - started) * 1000),
+                          caps=self.usage.check(), calendar_read=read)
+        logger.info("Ask: %s", outcome.summary())
+        return outcome
+
+    def _plan_no_run(self, kind: str, live: LiveTask, *, window: Any = None, part: str = "",
+                     step: LiveStep = NO_STEP) -> AskOutcome:
+        """A day plan that does not run: Jarvis's own words, no planner run, nothing counted."""
+        from ..persona import plan_no_run_text
+
+        label = window.label if window is not None else dayplan.LABELS.get(part, "today")
+        hint = window is not None and not window.tomorrow and kind == "day_full"
+        text = plan_no_run_text(kind, self._owner(), label=label, part=part or "morning",
+                                late=bool(window is not None and window.switched), hint_tomorrow=hint)
+        logger.info("Plan: no run (%s)", kind)
+        if step is NO_STEP:
+            step = live.step(PLAN_FREE, "Your free time")
+        _plan_free_no_run(step, kind, text)
+        return AskOutcome(True, "ok", text, mode=MODE_PLAN, note_kind=kind,
+                          plan_for=window.day if window is not None else None, window=window)
+
+    def _plan_day(self, request: ModeRequest, inputs: ModeInputs, briefing: BriefingContext | None,
+                  page_ids: Sequence[str], cancel: threading.Event | None, on_stage: Callable[[str], None],
+                  live: LiveTask = NO_TASK) -> AskOutcome:
+        """The day plan (spec 3.2): checks, the day read fresh, free time and what needs time (no
+        run when the day is full or nothing needs time), one run, the blocks checked."""
+        settings = self._productivity()
+        refusal = self._refusal(live, bundle=True)
+        if refusal is not None:
+            if refusal.kind != DISABLED:   # Ask off: the bundle's shortcut never routes here
+                logger.info("Plan: no run (%s)", CAPS if refusal.kind == CAPS else NOT_READY)
+            return refusal
+        accounts = self.sources.accounts()
+        personal = next((account for account in accounts if account.alias == DEFAULT_ACCOUNT), None)
+        if personal is None or personal.calendar != "yes":
+            return self._plan_no_run("no_calendar", live, part=request.part)
+        on_stage(STAGE_DAY)
+        zone = self.sources.time_zone()
+        now = self.clock()
+        window = dayplan.plan_window(now, request.part or dayplan.PART_DAY, settings, zone,
+                                     evening_from_hour=inputs.evening_from_hour)
+        if isinstance(window, str):
+            return self._plan_no_run(window, live, part=request.part)
+        events, read_accounts = self._read_day(window, accounts, cancel, live)
+        if cancel is not None and cancel.is_set():
+            return AskOutcome(False, CANCELLED, "Cancelled; nothing was proposed")
+        inputs = replace(inputs, todos=dayplan.plan_todos(inputs, window.day))
+        own = frozenset(inputs.own) | frozenset(account.address.casefold() for account in accounts if account.address)
+        slots = dayplan.free_slots(events, window, own=own)
+        notes = self._memory_notes()
+        _mode_given(live, window, events, inputs, notes, briefing, self._hour24())
+        step = _plan_free_step(live, window, slots, events, inputs, request.typed, own, self._hour24())
+        if not slots:
+            return self._plan_no_run("day_full", live, window=window, part=request.part, step=step)
+        wall_now = dayplan.to_wall(now, zone)
+        if not dayplan.needs_time(inputs, wall_now, request.typed):
+            return self._plan_no_run("nothing", live, window=window, part=request.part, step=step)
+        step.done(STATUS_OK, summary=f"{_count_words(len(slots), 'free stretch', 'free stretches')}, "
+                                     f"{dayplan.free_minutes(slots)} min")
+        prompt, index, shown_rows = modes.build_plan_prompt(now, zone, self._owner(), window, events, slots, inputs,
+                                                            briefing, notes, request,
+                                                            max_blocks=settings.plan_max_blocks,
+                                                            accounts=read_accounts)
+        logger.info("Ask: context of %d characters (%s; mode plan)", len(prompt),
+                    ", ".join(f"{name} {count}" for name, count in index.counts().items()))
+        on_stage(STAGE_PLANNING)
+        allow_remember = self._suggestions_on()
+        result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1,
+                           search_words=NO_MAIL_WORDS, web_words=NO_WEB_WORDS, allow_remember=allow_remember,
+                           mode=MODE_PLAN)
+        del prompt
+        if result.failure is not None or result.plan is None:
+            failure = result.failure
+            return AskOutcome(False, failure.kind if failure else "error", failure.message if failure else "",
+                              runs=1 if result.started else 0, init=result.init,
+                              stats=(result.stats,) if result.started else (), plan_for=window.day, window=window)
+        plan = result.plan
+        suggested = self._suggestion(plan.remember, index) if allow_remember else ("", "")
+        # Only the rows the planner was shown may be served (a row cut to fit the stdin is no target).
+        targets = {row: target for row, target in dayplan.row_targets(inputs).items() if row in shown_rows}
+        shown = [(alias, brief) for alias, briefs in events.items() for brief in briefs]
+        check = dayplan.DayCheck(window, slots, shown, wall_now, targets, owner_words=request.typed,
+                                 briefing=bool(briefing is not None and briefing.sections), notes=notes, own=own,
+                                 hour24=self._hour24())
+        cards = to_cards(plan.lines, index, now=now, link_hosts=self.config.actions.link_hosts, page_ids=page_ids,
+                         max_cards=MODE_MAX_LINES[MODE_PLAN], kinds=MODE_KINDS[MODE_PLAN], mode=MODE_PLAN, extra=check)
+        cards = keep_valid(cards, settings.plan_max_blocks)
+        cards = _served_cards(cards, check.served, targets)
+        _plan_validated(live, cards, check.served, targets, events, window, now, self._hour24(), suggested)
+        refused = sum(1 for card in cards.cards if card.error)
+        message_parts = []
+        if cards.dropped:
+            message_parts.append(f"{cards.dropped} more block(s) were left out")
+        if plan.via_fallback:
+            message_parts.append("(read from the planner's plain text)")
+        logger.info("Plan: %d block(s) proposed (%d refused)", len(cards.cards) - refused, refused)
+        return AskOutcome(True, "ok", "; ".join(message_parts), say=plan.say, question=plan.question,
+                          cards=cards.cards, dropped=cards.dropped, refused=refused, runs=1, init=result.init,
+                          stats=(result.stats,), suggestion=suggested[0], mode=MODE_PLAN, plan_for=window.day,
+                          window=window, slots=len(slots), blocks_max=settings.plan_max_blocks)
+
+    def _read_day(self, window: Any, accounts: Sequence[AccountInfo], cancel: threading.Event | None,
+                  live: LiveTask) -> tuple[dict[str, tuple[EventBrief, ...]], list[AccountInfo]]:
+        """The day being planned, fresh, on every account whose calendar is signed in (its midnight to
+        the next, in the personal calendar's zone), as CalendarRead for the LIVE day pictures."""
+        start, end = _day_bounds(window.day, window.zone)
+        ask = self.config.ask
+        step = _calendar_step(live, start, end, ask.calendars)
+        events: dict[str, tuple[EventBrief, ...]] = {}
+        updated: list[AccountInfo] = []
+        for account in accounts:
+            if account.calendar != "yes" or (cancel is not None and cancel.is_set()):
+                _calendar_account(step, account.alias, account.calendar, None,
+                                  cancelled=account.calendar == "yes")
+                updated.append(account)
+                continue
+            briefs, status = self.sources.event_briefs(account.alias, start, end, ask.calendars)
+            if status == "yes":
+                events[account.alias] = tuple(briefs)
+            _calendar_account(step, account.alias, status, briefs if status == "yes" else None)
+            updated.append(replace(account, calendar=status))
+        _day_read_done(step, events, updated, window, self.clock(), self._hour24(),
+                       cancelled=cancel is not None and cancel.is_set())
+        self._reads.calendar = CalendarRead(start, end, tuple(events.items()), self.clock())
+        return events, updated
+
+    def plan_dry_run(self, request: ModeRequest, *, inputs: ModeInputs | None = None,
+                     briefing: BriefingContext | None = None) -> DryRun:
+        """What a day plan would send (titles, briefing lines and notes as their sizes) and its command
+        line, without any run and without counting: the day is read fresh (read only). ``note``: why
+        it would not run ("" when it would)."""
+        from ..persona import plan_no_run_text
+
+        settings = self._productivity()
+        inputs = inputs or ModeInputs()
+        ready = self.engine.readiness()
+        accounts = self.sources.accounts()
+        zone = self.sources.time_zone()
+        now = self.clock()
+        window = dayplan.plan_window(now, request.part or dayplan.PART_DAY, settings, zone,
+                                     evening_from_hour=inputs.evening_from_hour)
+        argv: tuple[str, ...] = ()
+        if ready.exe is not None:
+            argv = tuple(self.engine.mode_argv(ready, MODE_PLAN))
+        if isinstance(window, str):
+            note = plan_no_run_text(window, self._owner(), part=request.part or "morning")
+            return DryRun("", argv, ready, {}, MailReport(), note=note)
+        events, read_accounts = self._read_day(window, accounts, None, NO_TASK)
+        self._reads.calendar = None
+        inputs = replace(inputs, todos=dayplan.plan_todos(inputs, window.day))
+        own = frozenset(inputs.own) | frozenset(account.address.casefold() for account in accounts if account.address)
+        slots = dayplan.free_slots(events, window, own=own)
+        note = ""
+        if not slots:
+            note = plan_no_run_text("day_full", self._owner(), label=window.label, late=window.switched,
+                                    hint_tomorrow=not window.tomorrow)
+        elif not dayplan.needs_time(inputs, dayplan.to_wall(now, zone), request.typed):
+            note = plan_no_run_text("nothing", self._owner(), label=window.label, late=window.switched)
+        prompt, index, _rows = modes.build_plan_prompt(now, zone, self._owner(), window, events, slots, inputs,
+                                                       briefing, self._memory_notes(), request, redact=True,
+                                                       max_blocks=settings.plan_max_blocks, accounts=read_accounts)
+        counts = {"events": sum(len(briefs) for briefs in events.values()), "free stretches": len(slots),
+                  "free minutes": dayplan.free_minutes(slots), "to-dos": len(inputs.todos),
+                  "deadlines": len(inputs.deadlines), "memory": index.memory_notes}
+        return DryRun(prompt, argv, ready, counts, MailReport(), note=note)
 
     # ---- web research -------------------------------------------------------------------------
 
@@ -1532,13 +1818,18 @@ def _threads_given(shown: Mapping[tuple[str, str], LiveStep], mail: Sequence[Mai
 
 @_quiet(NO_STEP)
 def _run_step(live: LiveTask, model: str, prompt: str, number: int, search_words: str,
-              web_words: str = "", allow_remember: bool = False) -> LiveStep:
+              web_words: str = "", allow_remember: bool = False, mode: str = "") -> LiveStep:
     if not live.enabled:
         return NO_STEP
     title = "Planner run 1" if number == 1 else f"Planner run {number} (with your mail)"
-    fields: list[Field | tuple[str, str]] = [Field("Model", model, mono=True),
-                                             ("May ask to search mail", search_words or "yes")]
-    if web_words:
+    if mode:
+        title = f"Planner run ({MODE_RUN_WORDS.get(mode, mode)})"
+    fields: list[Field | tuple[str, str]] = [Field("Model", model, mono=True)]
+    if mode:
+        fields += [("Mail search", "no"), ("Web research", "no")]
+    else:
+        fields.append(("May ask to search mail", search_words or "yes"))
+    if web_words and not mode:
         fields.append(("May ask for web research", web_words))
     if allow_remember:
         fields.append(("May suggest a note", REMEMBER_WORDS))
@@ -1550,7 +1841,7 @@ def _run_step(live: LiveTask, model: str, prompt: str, number: int, search_words
 
 @_quiet()
 def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool, allow_web: bool = False,
-               allow_remember: bool = False) -> None:
+               allow_remember: bool = False, mode: str = "") -> None:
     if step is NO_STEP:
         return
     hardened = "hardened (--safe-mode --restricted)" if ready.hardened else "not hardened"
@@ -1562,7 +1853,10 @@ def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool
     if allow_remember:
         extra["allow_remember"] = True
     try:
-        argv = engine.argv(ready, allow_search=allow_search, **extra)
+        if mode:
+            argv = engine.mode_argv(ready, mode, allow_remember=allow_remember)
+        else:
+            argv = engine.argv(ready, allow_search=allow_search, **extra)
     except Exception:  # noqa: BLE001 - only what the view shows
         return
     step.field("Command line", command_line_text(argv), mono=True)
@@ -1646,6 +1940,16 @@ def _checks_caps(step: LiveStep, caps: CapCheck, usage: Any) -> None:
     hour = getattr(usage, "max_per_hour", "?")
     day = getattr(usage, "max_per_day", "?")
     step.field("Planner runs left", f"{caps.left_hour} of {hour} this hour, {caps.left_day} of {day} today")
+
+
+@_quiet()
+def _checks_bundle(step: LiveStep, caps: CapCheck, usage: Any, reserve: int) -> None:
+    """A planner mode's own checks: the bundle runs left today and the Ask runs kept for typed requests."""
+    if step is NO_STEP:
+        return
+    most = getattr(usage, "max_bundle_per_day", "?")
+    step.field("Bundle runs left today", f"{caps.left_bundle_day} of {most}")
+    step.field("Kept for your own Asks", f"{reserve} an hour")
 
 
 @_quiet()
@@ -1784,6 +2088,176 @@ def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int
     if new:
         summary += f", {_count_words(new, 'recipient')} you didn't type"
     step.done(STATUS_WARN if cards.refused or cards.dropped or new else STATUS_OK, summary=summary)
+
+
+# --------------------------------------------------------------------------
+# The day plan's own LIVE steps (quiet, like every helper above) and its small helpers
+# --------------------------------------------------------------------------
+
+NO_MAIL_WORDS = "no - a day plan never reads mail"
+NO_WEB_WORDS = "no - a day plan never uses the web"
+MODE_RUN_WORDS = {MODE_PLAN: "day plan"}
+FREE_TITLE = "Your free time"
+
+
+def _day_bounds(day: date, zone: str) -> tuple[datetime, datetime]:
+    """Midnight of ``day`` to the next midnight in the IANA ``zone`` as aware times (each with the
+    offset the zone has that day; this PC's own rules when it can't be known)."""
+    from datetime import time as clock_time, timezone as fixed
+
+    def midnight(when: date) -> datetime:
+        probe = datetime.combine(when, clock_time(12)).replace(tzinfo=fixed.utc)
+        offset = zone_offset(zone, probe)
+        wall = datetime.combine(when, clock_time())
+        return wall.replace(tzinfo=fixed(offset)) if offset is not None else wall.astimezone()
+
+    return midnight(day), midnight(day + timedelta(days=1))
+
+
+def _served_cards(cards: Cards, served: Mapping[str, str], targets: Mapping[str, Any]) -> Cards:
+    """Each valid block's notes become "For: <what its row names>" (Jarvis's own words from the
+    row, R28) and a block for a to-do row carries that Todo card's id (``serves``). Notes and
+    ``serves`` are not part of a Calendar card's id."""
+    kept = []
+    for card in cards.cards:
+        row = served.get(card.id, "")
+        if card.error or not row:
+            kept.append(card)
+            continue
+        target = targets.get(row)
+        serves = target.action_id if isinstance(target, modes.TodoFact) else ""
+        kept.append(replace(card, notes=f"For: {dayplan.row_title(row, targets)}", serves=serves))
+    return replace(cards, cards=tuple(kept))
+
+
+def _when_words(window: Any, hour24: bool) -> str:
+    return f"{window.label} {dayplan.hours_text(window.start, window.end, hour24)}"
+
+
+@_quiet()
+def _mode_given(live: LiveTask, window: Any, events: Mapping[str, Sequence[EventBrief]], inputs: ModeInputs,
+                notes: Sequence[str], briefing: BriefingContext | None, hour24: bool) -> None:
+    """The mode.request step (the UI's "You typed" / "You clicked") gets what the plan is for and
+    what the run is given."""
+    if not live.enabled:
+        return
+    step = live.find(MODE_REQUEST)
+    created = step is NO_STEP
+    if created:
+        step = live.step(MODE_REQUEST, "Your request")
+    count = sum(len(briefs) for briefs in events.values())
+    proposed = sum(1 for todo in inputs.todos if todo.block)
+    todos = _count_words(len(inputs.todos), "to-do") + (f" ({proposed} already has a block proposed)"
+                                                         if proposed == 1 else
+                                                         f" ({proposed} already have a block proposed)"
+                                                         if proposed else "")
+    given = [f"{window.label}'s calendar {_count_words(count, 'event')}, titles, times and busy / free only, "
+             "no guests", todos, _count_words(len(inputs.deadlines), "deadline")]
+    if inputs.followup_counts is not None:
+        given.append("follow-up counts")
+    if notes:
+        given.append(_count_words(len(notes), "memory note"))
+    given.append("briefing sections" if briefing is not None and briefing.sections else "no briefing")
+    step.field("Plan for", _when_words(window, hour24) + f" ({window.zone})")
+    step.field("Given", " \u00b7 ".join(given))
+    if created:
+        step.done(STATUS_OK)
+
+
+@_quiet(NO_STEP)
+def _plan_free_step(live: LiveTask, window: Any, slots: Sequence[Any], events: Mapping[str, Sequence[EventBrief]],
+                    inputs: ModeInputs, typed: str, own: Collection[str], hour24: bool) -> LiveStep:
+    """"Your free time": the window, the buffers, each free stretch, the events counted as free and
+    what needs time."""
+    if not live.enabled:
+        return NO_STEP
+    step = live.step(PLAN_FREE, FREE_TITLE, fields=[
+        ("Window", _when_words(window, hour24) + f" ({window.zone})"),
+        ("Buffer", f"{dayplan.BUFFER_MIN} min before and after meetings with guests"),
+        ("Shortest stretch", f"{dayplan.MIN_SLOT_MIN} min")])
+    for slot in slots:
+        step.item(f"{dayplan.hours_text(slot.start, slot.end, hour24)} ({slot.minutes} min)", status=STATUS_OK)
+    step.field("Free in all", f"{dayplan.free_minutes(slots)} min")
+    free = [brief for briefs in events.values() for brief in briefs
+            if brief.start is not None and not brief.all_day and not dayplan.busy_event(brief)]
+    if free:
+        step.field("Counted as free", f"{_count_words(len(free), 'event')} (declined, show as free or a working "
+                                      "location)")
+    open_todos = sum(1 for todo in inputs.todos if not todo.block)
+    needs = [_count_words(open_todos, "to-do")] if open_todos else []
+    if inputs.deadlines:
+        needs.append(_count_words(len(inputs.deadlines), "deadline"))
+    if typed:
+        needs.append("your words")
+    step.field("Needs time", ", ".join(needs) or "nothing")
+    return step
+
+
+@_quiet()
+def _plan_free_no_run(step: LiveStep, kind: str, text: str) -> None:
+    if step is NO_STEP:
+        return
+    step.field("No planner run", text)
+    step.done(STATUS_WARN, status_text="NO RUN", summary=text)
+
+
+@_quiet()
+def _day_read_done(step: LiveStep, events: Mapping[str, Sequence[EventBrief]], accounts: Sequence[AccountInfo],
+                   window: Any, now: datetime, hour24: bool, *, cancelled: bool) -> None:
+    if step is NO_STEP:
+        return
+    listed = sorted(((brief, alias) for alias, briefs in events.items() for brief in briefs),
+                    key=lambda pair: (_event_key(pair[0]), pair[1]))
+    for brief, alias in listed:
+        step.item(event_item(alias, brief, hour24))
+    if not cancelled:
+        step.picture(plan_picture(events, (), day=window.day, now=now, hour24=hour24, zone=window.zone))
+    summary = f"{_count_words(len(listed), 'event')} read for {window.label}"
+    if cancelled:
+        step.done(STATUS_CANCELLED, summary=f"{summary}; Cancel clicked")
+    elif any(account.calendar == "error" for account in accounts):
+        step.done(STATUS_WARN, summary=f"{summary}; a calendar answered with an error")
+    else:
+        step.done(STATUS_OK, summary=summary)
+
+
+@_quiet()
+def _plan_validated(live: LiveTask, cards: Cards, served: Mapping[str, str], targets: Mapping[str, Any],
+                    events: Mapping[str, Sequence[EventBrief]], window: Any, now: datetime, hour24: bool,
+                    suggested: tuple[str, str] = ("", "")) -> None:
+    """"Checking the blocks": each line as a card (and the row it serves) or why not, the suggestion
+    kept or dropped, and the plan drawn on its day."""
+    if not live.enabled:
+        return
+    keep_text = live.keep_text
+    step = live.step(PLAN_VALIDATE, "Checking the blocks", fields=[
+        ("Checked against", f"the free time of {window.label}, the events read and your list")])
+    by_id = {card.id: card for card in cards.cards}
+    for entry in cards.report:
+        card = by_id.get(entry.card_id)
+        if entry.outcome == LINE_CARD and card is not None:
+            row = served.get(card.id, "")
+            note = f"for {dayplan.row_title(row, targets)}" if row else ""
+            step.item(card_text(card, hour24), status=STATUS_OK, note=note)
+        elif entry.outcome == LINE_REFUSED:
+            step.item(card_text(card, hour24) if card is not None else line_text(entry.line, keep_text),
+                      status=STATUS_BLOCKED, status_text="REFUSED", note=entry.reason)
+        elif entry.outcome == LINE_REPEAT:
+            step.item(line_text(entry.line, keep_text), status=STATUS_WARN, status_text="DROPPED",
+                      note="a repeat of an earlier line")
+        elif entry.outcome == LINE_OVER_CAP:
+            step.item(line_text(entry.line, keep_text), status=STATUS_WARN, status_text="DROPPED",
+                      note="more blocks than a plan may give")
+    _suggestion_item(step, suggested, keep_text)
+    valid = [card for card in cards.cards if not card.error]
+    step.picture(plan_picture(events, valid, day=window.day, now=now, hour24=hour24, zone=window.zone))
+    summary = f"{_count_words(len(valid), 'block')}, {cards.refused} refused, {cards.dropped} dropped"
+    step.done(STATUS_WARN if cards.refused or cards.dropped else STATUS_OK, summary=summary)
+
+
+def mode_todos(pending: Sequence[ProposedAction], planned: Mapping[str, date] | None = None) -> tuple[Any, ...]:
+    """The TodoFacts of the pending cards (modes.todo_facts) - the command line's and the app's."""
+    return modes.todo_facts([card for card in pending if card.kind == TODO], planned=planned)
 
 
 # --------------------------------------------------------------------------

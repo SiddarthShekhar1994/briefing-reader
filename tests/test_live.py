@@ -734,5 +734,25 @@ class MemoryTaskTests(unittest.TestCase):
         self.assertEqual(stream.running(), 0)
 
 
+
+class PlanTaskTests(unittest.TestCase):
+    """The productivity bundle's day plan: its own attention task and its steps."""
+
+    def test_plan_task_and_step_kinds_are_known(self) -> None:
+        self.assertIn(live.TASK_PLAN, live.TASK_KINDS)
+        self.assertEqual(live.TASK_TAGS[live.TASK_PLAN], "PLAN")
+        self.assertIn(live.TASK_PLAN, live.ATTENTION_KINDS)          # it opens LIVE like an Ask
+        self.assertNotIn(live.TASK_PLAN, live.COMPACT_KINDS)
+        for kind in (live.MODE_REQUEST, live.PLAN_FREE, live.PLAN_VALIDATE):
+            self.assertIn(kind, live.STEP_KINDS)
+        stream, _clock = make()
+        task = stream.task(live.TASK_PLAN, "plan my day")
+        task.step(live.MODE_REQUEST, "Your request", status=STATUS_OK, fields=[("You typed", "plan my day")])
+        task.step(live.PLAN_FREE, "Your free time", status=STATUS_OK)
+        view = stream.snapshot()[0]
+        self.assertEqual((view.kind, view.tag), (live.TASK_PLAN, "PLAN"))
+        self.assertEqual([step.kind for step in view.steps], [live.MODE_REQUEST, live.PLAN_FREE])
+
+
 if __name__ == "__main__":
     unittest.main()

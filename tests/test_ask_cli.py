@@ -618,6 +618,39 @@ class SubprocessRunnerTests(unittest.TestCase):
         self.assertLessEqual(threading.active_count(), before)
 
 
+class ModeArgvTests(unittest.TestCase):
+    """The productivity bundle's planner modes: Ask's command line but for the system prompt and the
+    schema; never a forbidden flag; the schema never searches mail or the web."""
+
+    EXE = Path("C:/Program Files/claude/claude.exe")
+
+    def test_only_the_prompt_file_and_the_schema_differ(self) -> None:
+        for hardened in (False, True):
+            ask = cli.build_argv(self.EXE, model="sonnet", max_turns=4, schema=cli.schema_text(allow_search=True),
+                                 hardened=hardened)
+            mode = cli.build_argv(self.EXE, model="sonnet", max_turns=4, schema=cli.mode_schema_text("plan"),
+                                  hardened=hardened, prompt_file=cli.MODE_PROMPTS["plan"])
+            self.assertEqual(len(ask), len(mode))
+            differ = [ask[number - 1] for number, (one, other) in enumerate(zip(ask, mode)) if one != other]
+            self.assertEqual(differ, ["--system-prompt-file", "--json-schema"])
+            self.assertEqual(mode[mode.index("--system-prompt-file") + 1], str(cli.PLAN_PROMPT_FILE))
+            self.assertFalse(set(mode) & set(cli.FORBIDDEN_FLAGS))
+            self.assertEqual(mode[mode.index("--tools") + 1], "")
+
+    def test_mode_schema_text(self) -> None:
+        plain = json.loads(cli.mode_schema_text("plan"))
+        noted = json.loads(cli.mode_schema_text("plan", allow_remember=True))
+        self.assertEqual(set(noted["properties"]) - set(plain["properties"]), {"remember"})
+        self.assertEqual(noted["properties"]["remember"], cli.REMEMBER_PROPERTY)
+        self.assertNotIn("gmail_search", noted["properties"])
+        self.assertNotIn("web_research", noted["properties"])
+        self.assertEqual(cli.mode_schema_text("plan"), cli.compact_json(json.loads(
+            cli.PLAN_SCHEMA_FILE.read_text(encoding="utf-8"))))
+        with self.assertRaises(KeyError):
+            cli.mode_schema_text("unknown")
+        self.assertTrue(all(path.is_file() for path in [*cli.MODE_PROMPTS.values(), *cli.MODE_SCHEMAS.values()]))
+
+
 class ImportTests(unittest.TestCase):
     def test_qt_free_and_ascii(self) -> None:
         code = ("import sys, briefing_reader.ask.planner, briefing_reader.ask.commands; "

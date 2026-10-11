@@ -788,5 +788,77 @@ class MemorySpeechTests(unittest.TestCase):
             self.assertFalse(persona.claims_done(text))
 
 
+NL = chr(10)
+
+
+class PlanSpeechTests(unittest.TestCase):
+    """The day plan's words: spoken sentences built from counts and times only (never a title or the
+    planner's say), every one checked against claims_done; the entry texts of spec 9.3."""
+
+    def test_spoken_sentences(self) -> None:
+        start = datetime(2026, 10, 7, 10, 30)
+        cases = [
+            (persona.plan_result_speech(4, start, "today"),
+             "I've lined up four blocks for today, the first at 10:30 AM. Each one waits for your OK, sir."),
+            (persona.plan_result_speech(1, start.replace(hour=15, minute=0), "tomorrow", ""),
+             "I've lined up one block for tomorrow, at 3 PM. It waits for your OK."),
+            (persona.plan_result_speech(0, None, "today"), "I couldn't fit a block into today, sir."),
+            (persona.plan_question_speech(), "I have a question before I plan, sir; it's on screen."),
+            (persona.plan_no_run_speech("day_full"), "Your day is full, sir."),
+            (persona.plan_no_run_speech("nothing", "boss", "tomorrow"),
+             "Nothing on your list needs time tomorrow, boss."),
+            (persona.plan_no_run_speech("part_over"), ""),
+        ]
+        for said, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(said, expected)
+                self.assertFalse(persona.claims_done(said))
+                self.assertTrue(said.isascii())
+
+    def test_no_run_texts(self) -> None:
+        self.assertEqual(persona.plan_no_run_text("day_full", hint_tomorrow=True),
+                         "Your day is full, sir - there's no free stretch of half an hour left. "
+                         'Type "plan tomorrow" for tomorrow.')
+        self.assertEqual(persona.plan_no_run_text("day_full", label="tomorrow", late=True),
+                         "It's late for today, so I looked at tomorrow. Tomorrow is full, sir - there's "
+                         "no free stretch of half an hour left.")              # no plan promised; "sir" once
+        self.assertEqual(persona.plan_no_run_text("nothing", label="tomorrow", late=True),
+                         "It's late for today, so I looked at tomorrow. Nothing on your list needs time tomorrow, "
+                         'sir. Tell me what to fit in: "plan tomorrow, gym and reading".')
+        self.assertEqual(persona.plan_no_run_text("nothing", "", label="this afternoon"),
+                         'Nothing on your list needs time this afternoon. Tell me what to fit in: '
+                         '"plan my afternoon, gym and reading".')
+        self.assertEqual(persona.plan_no_run_text("part_over", part="morning"),
+                         'Your morning is over, sir; type "plan my day" for the rest of it.')
+        self.assertEqual(persona.plan_no_run_text("no_calendar"), persona.PLAN_NO_CALENDAR_TEXT)
+        self.assertIn("day_start and day_end", persona.plan_no_run_text("no_hours", label="this evening"))
+        for kind in persona.PLAN_NO_RUN_KINDS:
+            self.assertFalse(persona.claims_done(persona.plan_no_run_text(kind)))
+
+    def test_the_answer_entry(self) -> None:
+        blocks = ["9:45-11:00 AM  Work on: Lab report", "3:30-4:30 PM  Read chapter 4"]
+        self.assertEqual(persona.plan_answer_text(blocks, "Lab report first.", label="today").split(NL),
+                         ["Here's a plan for today:", *blocks, "Lab report first.", persona.PLAN_ANSWER_TAIL])
+        late = persona.plan_answer_text(blocks[:1], "", label="tomorrow", late=True).split(NL)
+        self.assertEqual(late, ["It's late for today, sir - here's a plan for tomorrow:", blocks[0],
+                                persona.PLAN_ANSWER_TAIL])                       # said once, not twice
+        question = persona.plan_answer_text([], "Both need the same hour.", "Which comes first?").split(NL)
+        self.assertEqual(question, ["Both need the same hour.", "Question: Which comes first?",
+                                    'Answer with "plan my day, <your answer>".'])
+        # R46: the hint plans the window that was asked about again.
+        for label, typed in (("tomorrow", "plan tomorrow"), ("this afternoon", "plan my afternoon"),
+                             ("this morning", "plan my morning"), ("this evening", "plan my evening"),
+                             ("today", "plan my day")):
+            with self.subTest(label=label):
+                asked = persona.plan_answer_text([], "", "Which first?", label=label).split(NL)
+                self.assertEqual(asked[-1], f'Answer with "{typed}, <your answer>".')
+        late_question = persona.plan_answer_text([], "Both fit.", "Which first?", label="tomorrow", late=True)
+        self.assertEqual(late_question.split(NL), ["It's late for today, so I looked at tomorrow.", "Both fit.",
+                                                   "Question: Which first?",
+                                                   'Answer with "plan tomorrow, <your answer>".'])
+        refused = persona.plan_answer_text([], "I tried.", refused=2).split(NL)
+        self.assertEqual(refused, ["I tried.", "No block fitted (see the cards)."])
+
+
 if __name__ == "__main__":
     unittest.main()

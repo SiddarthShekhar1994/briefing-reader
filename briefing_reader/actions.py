@@ -164,6 +164,9 @@ class ProposedAction:
     source's link): its link is checked with the web rule (web_link_allowed:
     any public https host) instead of the Open allowlist, when it is read and
     again on the click. Not part of the id.
+    ``mode`` marks a card of the productivity bundle's planner modes ("plan":
+    a day plan's time block; later "prep" / "nudge"); ``serves`` is a plan
+    block's Todo card (that card's id; memory only). Neither is part of the id.
     """
 
     id: str
@@ -189,6 +192,8 @@ class ProposedAction:
     source: str = "briefing"                   # SOURCE_BRIEFING or SOURCE_ASK; never part of the id
     unverified: frozenset[str] = frozenset()   # Ask recipients you did not type (casefolded; memory only)
     web: bool = False                          # a web research card: its link follows the web rule
+    mode: str = ""                             # MODE_PLAN ("plan"), ...; "" for any other card; not in the id
+    serves: str = ""                           # a plan block: the id of the Todo card it serves (memory only)
 
     @property
     def decidable(self) -> bool:
@@ -324,7 +329,7 @@ def approve_label(action: ProposedAction) -> str:
     if not action.decidable:
         return ""
     if action.kind == CALENDAR:
-        return "Approve"
+        return ADD_BLOCK_TEXT if action.mode == MODE_PLAN else "Approve"
     if action.kind == TODO and action.start is not None:
         return "Add block"
     if action.kind == RSVP:
@@ -339,6 +344,8 @@ def approve_label(action: ProposedAction) -> str:
 
 
 SEND_TEXT = "Send"
+ADD_BLOCK_TEXT = "Add block"
+MODE_PLAN = "plan"            # ProposedAction.mode of a day plan's time block (ask.modes.MODE_PLAN)
 _RSVP_BUTTONS = {"yes": "Accept", "no": "Decline", "maybe": "Maybe"}
 
 
@@ -2179,6 +2186,8 @@ def kind_label(action: ProposedAction) -> str:
     the whole host is in the detail)."""
     if action.kind == UNKNOWN:
         return "note"
+    if action.kind == CALENDAR and action.mode == MODE_PLAN:
+        return "block"   # a day plan's time block ("Plan - block")
     if is_web_open(action):
         return f"web{_SEPARATOR}{label_host(link_host(action.link))}"
     if action.structured and action.account and action.kind in _ACCOUNT_KINDS:

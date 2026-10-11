@@ -120,6 +120,10 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--ask-text", metavar="TEXT",
                       help="Ask Jarvis once from the command line and print the proposals (one or two "
                            "requests on your Claude plan); with --ask-dry-run only print what would be sent")
+    mode.add_argument("--plan-dry-run", nargs="?", const="", metavar="REQUEST",
+                      help="the day plan of the productivity bundle: print what its run would get (your "
+                           "calendar read now, titles and notes as sizes) and its command line, and stop; no "
+                           "Claude request. REQUEST as typed in the app (default: \"plan my day\")")
     parser.add_argument("--ask-dry-run", action="store_true",
                         help="with --ask-text: print the exact text Jarvis would send to Claude Code "
                              "(email text shown as counts) and stop; no Claude request")
@@ -152,7 +156,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     view = _view_flag(args)
     if view:
         for flag, used in (("--catch-up", args.catch_up), ("--hotkey-agent", args.hotkey_agent),
-                           ("--ask-check", args.ask_check), ("--ask-text", args.ask_text is not None)):
+                           ("--ask-check", args.ask_check), ("--ask-text", args.ask_text is not None),
+                           ("--plan-dry-run", args.plan_dry_run is not None)):
             if used:
                 parser.error(f"{view} cannot be combined with {flag}")
         if args.read and args.ask:
@@ -200,12 +205,14 @@ def _run(args: argparse.Namespace) -> int:
 
     config = load_config()
     _log_config(config)
-    if getattr(args, "ask_check", False) or getattr(args, "ask_text", None) is not None:
+    if (getattr(args, "ask_check", False) or getattr(args, "ask_text", None) is not None
+            or getattr(args, "plan_dry_run", None) is not None):
         # Ask Jarvis on the command line: no window, no Qt, no single-instance lock. The request
         # text is never logged.
         from .ask import commands
 
-        logger.info("Ask from the command line: check=%s dry_run=%s", bool(args.ask_check), bool(args.ask_dry_run))
+        logger.info("Ask from the command line: check=%s dry_run=%s plan_dry_run=%s", bool(args.ask_check),
+                    bool(args.ask_dry_run), getattr(args, "plan_dry_run", None) is not None)
         return commands.run(args, config, sys.stdout)
     slots = _resolve_slots(args.slots, config.schedule.slots)
     if args.hotkey_agent:

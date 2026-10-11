@@ -2607,7 +2607,8 @@ class WebCardTests(unittest.TestCase):
         self.assertTrue(actions.restrict(web, {OPEN}, actions.SOURCE_ASK).web)
         self.assertTrue(actions.restrict(web, {TODO}, actions.SOURCE_ASK).web)   # refused, still web
         self.assertTrue(dataclasses.replace(web, title="x").web)
-        self.assertEqual(dataclasses.fields(ProposedAction)[-1].name, "web")
+        # web, then the planner modes' mode and serves (memory only, never in the id) come last.
+        self.assertEqual([field.name for field in dataclasses.fields(ProposedAction)][-3:], ["web", "mode", "serves"])
 
     def test_a_web_open_card(self) -> None:
         card = self.web_open()
@@ -2649,6 +2650,31 @@ class WebCardTests(unittest.TestCase):
         plain = parse_action_line(line, link_hosts=("www.example.org",))
         self.assertEqual(actions.open_text(plain), "Open")
         self.assertNotIn("opens", card_view(plain, TODAY).detail)
+
+
+class PlanModeCardTests(unittest.TestCase):
+    """A day plan's time block (the productivity bundle): ``mode`` and ``serves`` live in memory only,
+    never in the id; the card reads "block" and its button "Add block"."""
+
+    LINE = "Calendar: Work on: Lab report | 2026-10-07 10:00-11:00 | | | For: d1"
+
+    def test_mode_and_serves_are_not_part_of_the_id(self) -> None:
+        plain = parse_action_line(self.LINE)
+        block = dataclasses.replace(plain, mode="plan", serves="todo-card-1", notes="For: Lab report")
+        self.assertEqual(actions._action_id(block), plain.id)
+        self.assertEqual(actions._action_id(dataclasses.replace(plain, mode="nudge")), plain.id)
+        self.assertEqual((plain.mode, plain.serves), ("", ""))
+        refused = actions.with_error(block, "Too close")
+        self.assertEqual((refused.mode, refused.serves), ("plan", "todo-card-1"))
+        self.assertEqual(refused.id, actions.with_error(plain, "Too close").id)
+
+    def test_labels(self) -> None:
+        block = dataclasses.replace(parse_action_line(self.LINE), mode="plan")
+        self.assertEqual((approve_label(block), actions.kind_label(block)), ("Add block", "block"))
+        view = actions.card_view(block, date(2026, 10, 7))
+        self.assertEqual((view.kind_label, view.approve_text), ("block", "Add block"))
+        plain = parse_action_line(self.LINE)
+        self.assertEqual((approve_label(plain), actions.kind_label(plain)), ("Approve", "calendar"))
 
 
 if __name__ == "__main__":

@@ -9,10 +9,16 @@ import unittest
 
 from briefing_reader.ask.routes import (
     MEMORY_ROUTES,
+    PART_AFTERNOON,
+    PART_DAY,
+    PART_EVENING,
+    PART_MORNING,
+    PART_TOMORROW,
     ROUTE_MEMORY_FORGET,
     ROUTE_MEMORY_SAVE,
     ROUTE_MEMORY_SHOW,
     ROUTE_NONE,
+    ROUTE_PLAN,
     Route,
     RouteFlags,
     route,
@@ -89,6 +95,50 @@ class MemoryRouteTests(unittest.TestCase):
         found = route("remember that Zq7 is my lead", ON)
         self.assertEqual(repr(found), "Route(memory_save)")
         self.assertNotIn("Zq7", repr(found))
+
+
+PLAN_ON = RouteFlags(plan=True)
+BOTH = RouteFlags(memory=True, plan=True)
+
+
+class PlanRouteTests(unittest.TestCase):
+    def test_plan_variants(self) -> None:
+        cases = {
+            "plan my day": (PART_DAY, ""), "plan today": (PART_DAY, ""), "Plan the rest of my day": (PART_DAY, ""),
+            "plan the rest of today.": (PART_DAY, ""), "plan tomorrow": (PART_TOMORROW, ""),
+            "plan my day tomorrow": (PART_TOMORROW, ""), "plan my morning": (PART_MORNING, ""),
+            "plan my afternoon please": (PART_AFTERNOON, ""), "please plan my evening for me": (PART_EVENING, ""),
+            "jarvis, plan my day!": (PART_DAY, ""),
+            "plan my day, keep the afternoon free": (PART_DAY, "keep the afternoon free"),
+            "plan my day: gym and reading": (PART_DAY, "gym and reading"),
+            "plan tomorrow; lab report first": (PART_TOMORROW, "lab report first"),
+            "PLAN MY AFTERNOON for me , gym": (PART_AFTERNOON, "gym"),
+        }
+        for text, (part, extra) in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(route(text, PLAN_ON), Route(ROUTE_PLAN, extra, part))
+                self.assertEqual(route(text, BOTH).kind, ROUTE_PLAN)
+
+    def test_never_a_plan(self) -> None:
+        for text in ("planet news", "plan my day and email Ana", "plan a trip to Lisbon", "plan my day,",
+                     "can you plan my day", "plan my week", "web: plan my day", "plan", "planning my day"):
+            with self.subTest(text=text):
+                self.assertEqual(route(text, PLAN_ON).kind, ROUTE_NONE)
+
+    def test_the_flag_turns_it_off(self) -> None:
+        self.assertEqual(route("plan my day", ON).kind, ROUTE_NONE)   # memory only
+        self.assertEqual(route("plan my day", RouteFlags()).kind, ROUTE_NONE)
+
+    def test_memory_still_wins_its_own_words(self) -> None:
+        self.assertEqual(route("remember that I plan my day at 8", BOTH).kind, ROUTE_MEMORY_SAVE)
+        self.assertEqual(repr(route("plan my day, Zq7", BOTH)), "Route(plan)")
+
+    def test_part_words_match_dayplan(self) -> None:
+        from briefing_reader.ask import dayplan
+
+        self.assertEqual((PART_DAY, PART_MORNING, PART_AFTERNOON, PART_EVENING, PART_TOMORROW),
+                         (dayplan.PART_DAY, dayplan.PART_MORNING, dayplan.PART_AFTERNOON, dayplan.PART_EVENING,
+                          dayplan.PART_TOMORROW))
 
 
 if __name__ == "__main__":

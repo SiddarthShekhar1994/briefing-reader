@@ -73,6 +73,13 @@ your own scheduled routine (see
   only tools are web search and web fetch, and which gets your words and
   today's date, time and time zone, nothing else. You get a short answer with
   numbered sources, each an Open card. See [Web research](#web-research).
+- **Plan my day.** Type "plan my day" (or "plan tomorrow", "plan my
+  afternoon, gym and reading") and your Claude Code lines up time blocks for
+  your to-dos and deadlines in the free time around your meetings: at most 5
+  **Add block** cards, each naming the to-do it serves. It only proposes:
+  nothing goes on your calendar until your click on a block. Part of the
+  productivity bundle (`[productivity]`), off until you turn it on. See
+  [Plan my day](#plan-my-day).
 - **Memory.** Tell Jarvis "remember that Ana is my project lead" (or add it in
   the **MEMORY** tab) and he keeps that note on this PC, in `memory.json`, and
   gives your notes to your Claude Code with every Ask, never to web research.
@@ -276,15 +283,16 @@ not of this list.
 ## Roadmap
 
 Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
-**Memory** - see [Memory (the MEMORY tab)](#memory-the-memory-tab).
+**Memory** - see [Memory (the MEMORY tab)](#memory-the-memory-tab);
+**Plan my day** (typed) - see [Plan my day](#plan-my-day).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (proposals, your click, every step visible in LIVE):
 
 - **A live browser Jarvis drives**: he opens and fills in pages in a browser
   you can watch, and every submit waits for your click.
-- **Plan my day**: a proposed plan for the day from your calendar, deadlines
-  and to-dos, as cards you approve.
+- **A plan offer**: "Shall I plan your day?" after the morning briefing (today
+  you type "plan my day").
 - **Meeting prep**: a short brief before a meeting: who is coming, your last
   thread with them, what is still open.
 - **Follow-up nudges**: threads that wait on your answer, or on an answer you
@@ -1053,6 +1061,15 @@ voice when the online one cannot be reached), politely and to the point:
   proposals; a reworded answer can still carry what a note says, so mute him
   or set `[assistant] speak_replies = false` to keep every answer on screen
   only.
+- **Plan my day** (see [Plan my day](#plan-my-day)): "I've lined up four
+  blocks for today, the first at 10:30 AM. Each one waits for your OK, sir.",
+  "I couldn't fit a block into today, sir.", "I have a question before I plan,
+  sir; it's on screen." and, without a planner run, "Your day is full, sir."
+  or "Nothing on your list needs time today, sir." Built by Jarvis from the
+  blocks' count and first time, never the planner's own words or a title.
+  The result of an approved plan block is said **without its title**: "Done,
+  sir - I've added the event to your calendar for today at 10:30 AM." (the
+  JARVIS tab shows the title).
 
 Everything he says is also written in the JARVIS tab. While he speaks the orb
 reads SPEAKING and the large line next to it shows his words. He never talks
@@ -1130,6 +1147,15 @@ card, newest at the bottom:
   gave the planner ("Memory given: 3 notes, 412 characters"), its planner run
   whether it may suggest a note, and its check whether a suggested note passed
   the checks or was dropped and why.
+- **A day plan** (a lavender PLAN card; see [Plan my day](#plan-my-day)): your
+  request and the day and hours being planned; the readiness checks (with the
+  plans, briefs and drafts left today and the Ask runs kept for your own
+  requests); the fresh read of that day's calendar (with its picture); **Your
+  free time** (the free stretches, what needs time and why there is no run when
+  there is none); the planner run (the exact text sent, "no - a day plan never
+  reads mail", "no - a day plan never uses the web"); and **Checking the
+  blocks**, each block kept or refused with the reason, with a picture of the
+  proposed blocks on the day ("PROPOSED - NOT ADDED YET").
 
 The panel's strip shows what Jarvis is doing (IDLE, WORKING 0:12, SENDING IN 7
 S), then **Pop out** and **Clear** (in a narrow window Clear is in the pop-out
@@ -1190,6 +1216,12 @@ glance what Jarvis read or is about to change:
   only when Jarvis had already read that day (today's agenda, the Ask's
   calendar read): he never reads your calendar just for a picture.
 - **A 7-day strip** of the calendar an Ask read.
+- **A day plan on its day** ("Your day plan"): the events Jarvis read for
+  that day and the proposed blocks, stamped "PROPOSED - NOT ADDED YET";
+  nothing in it is on your calendar until you approve a block. The plan's
+  fresh read of the day is drawn the same way without blocks ("Your day as
+  read", no stamp), and so is a check that kept no block. "Now" is drawn in
+  your personal calendar's time zone, like the blocks.
 - **Each web search of a web research, drawn as its results page**: the exact
   query in a search box, then each result's title and its address, site first
   (and its snippet, when the search gave one), "+N more" past the first 10.
@@ -1263,6 +1295,98 @@ That first picture also starts Jarvis's network gate: a small proxy on this PC
 (127.0.0.1, a free port) that the hidden window must use. It too stays until
 Jarvis closes; any program on this PC that finds it reaches through it only
 what the window may: public https servers, under the same rules.
+
+### Plan my day
+
+Part of the productivity bundle: off in the public `config.toml`, on for this
+PC with the line `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (it also needs
+[Ask Jarvis](#ask-jarvis-optional) on and your personal calendar connected).
+Jarvis lines up time blocks for your to-dos and deadlines in the free time
+around your meetings, as cards you approve one by one. It only proposes:
+nothing goes on your calendar until you click **Add block** on a card.
+
+- **Ask for it.** Type `plan my day` (also `plan today`, `plan the rest of my
+  day`, `plan tomorrow`, `plan my day tomorrow`, `plan my morning`, `plan my
+  afternoon` or `plan my evening`, with `please` or `for me` if you like). Add
+  your own words after a comma, colon or semicolon: `plan my day, gym and
+  reading`, `plan my afternoon: keep 4 to 5 free`. Anything else (`plan my day
+  and email Ana`) is an ordinary Ask, and `web:` always wins.
+- **Which hours.** Between `[productivity] day_start` and `day_end` (08:00 to
+  22:00) in your personal calendar's time zone: today from a few minutes from
+  now; the morning until 12:00, the afternoon 12:00 to 17:00, the evening from
+  17:00. When it is late (less than `plan_min_free_minutes` before `day_end`,
+  or from `[agenda] evening_from_hour`, 18:00), `plan my day` plans
+  **tomorrow** and says so: "It's late for today, sir - here's a plan for
+  tomorrow:" (or "It's late for today, so I looked at tomorrow." before an
+  answer with no block). Earlier in the day it never plans tomorrow by itself.
+- **No run** (nothing counted, no Claude request) when your day has no free
+  stretch of half an hour left ("Your day is full, sir - there's no free
+  stretch of half an hour left. Type "plan tomorrow" for tomorrow."), when
+  nothing needs time ("Nothing on your list needs time today, sir. Tell me what
+  to fit in: "plan my day, gym and reading"."), when the part of the day you
+  named is over, or without your personal calendar ("Plan my day needs your
+  personal calendar - click Connect under TODAY.").
+- **What needs time**: the To-do cards still waiting under NEEDS YOUR OK (from
+  the briefing and from Ask) that have no block of their own yet, the
+  DEADLINES due within 7 days, and the words you typed after the comma.
+- **Free time** comes from a fresh read of that day on every calendar Ask
+  reads: stretches of at least 25 minutes, keeping 10 minutes free before and
+  after a meeting with other guests. Events you declined, events marked "show
+  as free" and working-location entries do not count as busy.
+- **One planner run** on your Claude plan: your own Claude Code with the plan's
+  own instructions and answer format, no tools, never your mail and never the
+  web. It may ask one question back instead ("I have a question before I plan,
+  sir; it's on screen."; answer with `plan my day, <your answer>`, or with
+  `plan tomorrow, ...`, `plan my afternoon, ...` and so on when that is what
+  you asked for; the entry says which), and it may suggest a note to remember,
+  like an Ask.
+- **Every block is checked** before it becomes a card: a timed event on the
+  day being planned, within its hours, starting in the future, 15 minutes to 3
+  hours, inside a free stretch (never overlapping or crowding a meeting, never
+  overlapping another block), with no address or link and no place (a block
+  never sets the event's location), not repeating one of your notes, and
+  naming the to-do, deadline or words it serves (one of the rows it was
+  shown). A block that fails is shown with the reason and cannot be approved.
+  At most `plan_max_blocks` (5) blocks are kept.
+- **The answer** (JARVIS tab): "Here's a plan for today:", one line per block
+  ("9:35-11:00 AM  Work on: Lab report"), the planner's comment, then "Each
+  block waits for your OK under NEEDS YOUR OK.", with **See every step**. The
+  cards are PLAN · BLOCK cards with **Add block**; a block's notes say
+  which to-do it serves ("For: Lab report"): **a plan block names the to-do it
+  serves**. Asking again replaces only the earlier blocks of that day that
+  overlap the new hours and that you have not decided, edited or started:
+  `plan my morning` then `plan my afternoon` keeps both.
+- **Add block** starts the usual 10-second countdown with **Undo**, then adds
+  the block to your personal calendar with the line "Added by Jarvis from your
+  day plan." in its description (LIVE shows it in the preview too). A block
+  whose start has passed is refused at the click: "This block's time has passed
+  - plan again". Once a block is added, the to-do it serves shows "Planned
+  10:30-12:00 today (day plan)" and the next plan of that day leaves it out.
+  When the countdown ends, the keyboard focus moves to the next block's **Add
+  block** only when it was on the finished card's button, inside NEEDS YOUR
+  OK or nowhere (never out of the command bar, a text field, a dialog or
+  another part of the window); when you were using the keyboard the button
+  shows its focus ring, and a screen reader says the card's kind and title
+  with the button's name. A key press within 1 second of that move does
+  nothing.
+- **Asking again** with a question back, or with every block refused, keeps
+  the earlier blocks: only a plan with a block to approve replaces them.
+- **What your Claude gets**: the date, time and time zone; how Jarvis
+  addresses you ("sir"); the day and hours being planned; that day's events as
+  account, title, times and busy or free; the free stretches; the to-dos and
+  deadlines as rows with Jarvis's row ids; the briefing's sections (never the
+  Ignore section or a card line); your notes (memory on); your words. An email
+  address in an event title, a to-do, a deadline or the briefing is sent as
+  "[address]"; your notes and your words go as you wrote them. At most 24,000
+  characters. Never sent: your mail, a meeting's guests or organizers, event
+  descriptions, locations or links, the web.
+- **Caps**: each plan is one Ask run (`[ask]` limits) and one of the
+  `max_runs_per_day` (20) runs a day for plans, briefs and drafts, and it never
+  takes the last `reserve_ask_runs` (3) Ask runs of an hour, kept for your own
+  requests: "Jarvis keeps 3 Ask runs this hour for your own requests; try
+  again after 3:00 PM". It keeps at most `[ask] max_per_hour` minus one, so a
+  plan can always run in an hour with no runs yet (the log warns once when
+  the setting asks for more).
 
 ### Memory (the MEMORY tab)
 
@@ -2016,7 +2140,9 @@ briefing; with the app already open, the same command brings it forward there.
 project lead`), `forget that ...` / `forget about ...` and `what do you
 remember?` are handled by Jarvis at once, with no Claude run and nothing
 counted; `web:` always wins over them, and `remember to ...` or a question is
-an ordinary request. **Suggestions**: a run whose input has no email text may
+an ordinary request. With the bundle on, `plan my day` (and its variants) is
+a day plan, with its own instructions and data and no mail (see
+[Plan my day](#plan-my-day)). **Suggestions**: a run whose input has no email text may
 also return one fact worth keeping (`remember` in its answer format, only then);
 Jarvis offers it only when its names and capitalized words come from your
 request or your calendar and briefing, and it is kept only on your click. A
@@ -2488,8 +2614,8 @@ proposals that the user decides one by one.)
 ## Command line
 
 ```
-py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask | --ask-check | --ask-text TEXT]
-                            [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--open | --now | --read]
+py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask | --ask-check | --ask-text TEXT
+                             | --plan-dry-run [REQUEST]] [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--open | --now | --read]
                             [--from-file PATH] [--debug] [--version]
 ```
 
@@ -2499,8 +2625,9 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--catch-up` | What the catch-up task runs at logon and unlock: if a scheduled briefing passed in the last 3 hours, was not announced, viewed or answered, and the app is not open, behave exactly like `--run` for that run; otherwise exit at once (see [Catch-up and the hotkey](#catch-up-and-the-hotkey)). |
 | `--hotkey-agent` | What the hotkey task runs at logon: listen for the `[hotkey]` combination until logoff. |
 | `--ask` | [Ask Jarvis](#ask-jarvis-optional) in the app: like `--open`, the assistant screen with the command bar ready to type, without playing the briefing or counting it as heard (Play does both). With the app already open, it comes forward there. Needs `[ask] enabled = true`; otherwise the screen says Ask is off. |
-| `--ask-check` | [Ask Jarvis](#ask-jarvis-optional): print whether Ask is ready (Claude Code found, its version and flags, a claude.ai plan sign-in, the work folder, mail reading per account, usage), then whether [web research](#web-research) is ready (`Web research ready: yes`; it never changes `Ready:` or the exit code). Runs only `claude --version`, `--help` and `auth status`: no Claude request. Exit code 0 when ready. |
+| `--ask-check` | [Ask Jarvis](#ask-jarvis-optional): print whether Ask is ready (Claude Code found, its version and flags, a claude.ai plan sign-in, the work folder, mail reading per account, usage: the runs of this hour and today, today's runs by kind - "Runs today by kind: Ask 3, web research 1, day plans 1, meeting briefs 0, drafts 0" - and "Plans, briefs and drafts today: 1 of 20 (3 Ask runs an hour kept for your requests)"), then whether [web research](#web-research) is ready (`Web research ready: yes`; it never changes `Ready:` or the exit code). Runs only `claude --version`, `--help` and `auth status`: no Claude request. Exit code 0 when ready. |
 | `--ask-text TEXT` | Ask Jarvis once from the command line, without a window: prints what the planner said, the proposals and how Claude Code started. One request on your Claude plan (two when it reads mail or hands the request to web research). Starting the text with `web:` runs web research only (one run; nothing is read from your accounts). With `--from-file`, the briefing comes from that fixture. With the productivity bundle's memory on, the planner gets your notes as in the app, read from `memory.json` without ever changing it; `remember that ...`, `forget that ...` and `what do you remember?` are the app's (MEMORY tab): the command line says so, saves nothing and exits with code 2. |
+| `--plan-dry-run [REQUEST]` | The productivity bundle's [day plan](#plan-my-day) without a run: reads that day of your calendar now (read only) and prints the exact text its run would get, with event titles, to-dos, briefing lines and notes as their sizes, the free stretches and the command line (only the prompt file and the answer format differ from an Ask's), or why there would be no run ("No planner run: ..."). REQUEST as typed in the app (`"plan tomorrow"`, `"plan my afternoon, gym"`; default `plan my day`); anything else exits with code 2. With `--from-file`, the to-dos, deadlines and briefing come from that fixture. No Claude request, nothing counted. |
 | `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text and memory notes as character counts) and the command line, and stop. With `web:`: the exact text the web research would get and its command line. No Claude request, nothing counted. |
 | `--slots am=10:12,pm=23:42` | The scheduled times (24-hour), which tell the app which briefing an answer belongs to. The tasks pass them; without it (or for a run it leaves out) `[schedule]` in `config.toml` applies. A value that cannot be read is logged and ignored. |
 | `--open` | Open Jarvis: the assistant screen in front, on its JARVIS tab, with a greeting (and "Your AM briefing is ready to view." when one is waiting); the briefing waits in its BRIEFING tab and nothing is read until you press Play. The same as starting without options. A running app comes forward. What the Start menu shortcut and the hotkey use. |
@@ -2511,7 +2638,7 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--version` | Print the name and version (such as `Jarvis Assistant 1.2.0`) and exit. |
 
 `--open`, `--now` and `--read` exclude each other, and none of them goes with
-`--catch-up`, `--hotkey-agent`, `--ask-check` or `--ask-text`. Without `--run`,
+`--catch-up`, `--hotkey-agent`, `--ask-check`, `--ask-text` or `--plan-dry-run`. Without `--run`,
 the app fetches the page once (retrying if Notion cannot be reached) and does
 not wait for a fresh one; a briefing that is not from today still gets the
 spoken stale note when it is read.
@@ -2619,11 +2746,16 @@ log. Changes apply the next time the app starts.
 | `[live] text` | `true` | Show the texts Jarvis read and sent in LIVE (email threads, the planner's input and reply, the outgoing message). `false`: only their sizes (also of the message text in the planner's proposal lines); subjects, names, addresses, event titles and Jarvis's answer still show. `false` also takes no page pictures and leaves the email texts out of the pictures (their headers still show). |
 | `[live] pictures` | `true` | Email, calendar and search pictures in LIVE ([Pictures in LIVE](#pictures-in-live)), drawn by Jarvis on this PC from the text he already has: no email HTML, no images from the web, no page opened for them. `false`: none. |
 | `[live] page_snapshots` | `true` | Page pictures ([Pictures in LIVE](#pictures-in-live)): each public https page a web research read or a checked source its answer cites, opened on this PC in a private window (no sign-ins, nothing saved). The site sees your IP address (for a source not read: only for the picture). `false`: no page is opened. |
-| `[productivity] enabled` | `false` | The productivity bundle (this version: [Memory](#memory-the-memory-tab)); it also needs `[ask] enabled = true`. Turn it on for this PC with `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (it overrides this key both ways). |
+| `[productivity] enabled` | `false` | The productivity bundle (this version: [Memory](#memory-the-memory-tab) and [Plan my day](#plan-my-day)); it also needs `[ask] enabled = true`. Turn it on for this PC with `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (it overrides this key both ways). |
 | `[productivity] memory` | `true` | The MEMORY tab, `remember that ...` / `forget that ...` and the notes given to the planner. |
 | `[productivity] memory_suggestions` | `true` | Jarvis may suggest a note after an Ask that read no mail; it is kept only when you click. |
 | `[productivity] max_memory` | `100` | Notes kept (10-200); more are refused ("Your memory is full"). |
-| `[productivity]` other keys | see `config.toml` | `plan_offer`, `plan_offer_until`, `day_start`, `day_end`, `plan_max_blocks`, `plan_min_free_minutes`, the `prep_...` keys, `minimized_check`, `followups`, `scan_...`, `waiting_after_hours`, `owed_after_days`, `followups_shown`, `quiet_from`, `quiet_until`, `max_runs_per_day` and `reserve_ask_runs` are read and checked (a bad value falls back with a warning) but not used yet: they belong to plan my day, meeting prep and follow-ups, which later versions add. |
+| `[productivity] day_start`, `day_end` | `"08:00"`, `"22:00"` | The hours a day plan fills with blocks (your personal calendar's time zone). |
+| `[productivity] plan_max_blocks` | `5` | Blocks a day plan keeps (1-8); more are left out. |
+| `[productivity] plan_min_free_minutes` | `60` | `plan my day` plans tomorrow once less than this is left before `day_end` (30-240). |
+| `[productivity] max_runs_per_day` | `20` | Planner runs a day for plans, briefs and drafts (1-60); each is also an Ask run. |
+| `[productivity] reserve_ask_runs` | `3` | Ask runs of each hour a plan, brief or draft never takes: kept for your own requests (0-10; at most `[ask] max_per_hour` minus one is kept). |
+| `[productivity]` other keys | see `config.toml` | `plan_offer`, `plan_offer_until`, the `prep_...` keys, `minimized_check`, `followups`, `scan_...`, `waiting_after_hours`, `owed_after_days`, `followups_shown`, `quiet_from` and `quiet_until` are read and checked (a bad value falls back with a warning) but not used yet: they belong to the plan offer, meeting prep and follow-ups, which later versions add. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -2785,6 +2917,15 @@ suggestion dismissed", "Memory: could not read memory.json (json); kept
 read-only" and "Memory: could not save memory.json (...); kept for this run
 only"; an Ask's context line adds "memory 3" (how many notes it gave). Never a
 note, a suggestion or a hash.
+A day plan logs the same way: "Ask 4 started (mode plan, typed)", "Plan: no
+run (day_full)" (day_full, nothing, part_over, no_hours, no_calendar, caps or
+not_ready), "Ask: context of 6120 characters (...; mode plan)", "Ask: planner
+run ... (mode plan)", "Plan: 4 block(s) proposed (1 refused)", the outcome
+line with ", mode plan, slots 3, blocks 4/5", "Plan: 4 card(s) shown under ASK
+(1 refused)", "Plan: replaced 2 earlier plan card(s), kept 1", "Plan: a served
+to-do was noted", "Approve ...: a plan block whose time has passed; nothing
+added" and "Approve ...: ignored a key press right after the focus moved".
+Never a block's title, an event, a to-do or your words.
 
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
@@ -2794,7 +2935,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `google_token_personal.json`, `google_token_work.json` | The Google sign-in of each account (access and refresh token, the permissions Google granted, and which Google account it was issued for). Private: never share them. Delete one to sign that account out on this PC. Older versions kept a single `google_token.json`; it becomes `google_token_personal.json` at the first start. |
 | `accounts.json` | Which Google account each account name is (its address and Google's account id), written by the first sign-in that says so, and whether you confirmed it ("confirmed", after "Signed in as ... - is that right?"; nothing is sent or changed for a name until then). **No, use another account** removes the entry; or delete an entry, or the file, to bind a name to another Google account (setup step 8, "Disconnecting"). A name with a saved sign-in but no entry Jarvis can read (deleted, or the file is not valid JSON) sends and changes nothing until it signs in again. |
 | `recipients.json` | The addresses Jarvis sent replies and emails to, as one-way hashes (never the addresses), with the time; at most 5000. An address in it needs no NEW RECIPIENT confirmation. Delete it to confirm every address again. |
-| `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome (web research runs carry `"kind": "research"` and count against both the Ask caps and the research caps); and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
+| `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome (web research runs carry `"kind": "research"` and count against both the Ask caps and the research caps; day plans carry `"kind": "plan_day"`, meeting briefs `"prep"` and drafts `"nudge"`, and count against both the Ask caps and `[productivity] max_runs_per_day`); and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), and when and how a classic prompt was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
@@ -2815,7 +2956,9 @@ The app talks to these services, all free:
   it into speech, and the same way Jarvis's own sentences ([Jarvis
   talks](#jarvis-talks)): greetings, "Your AM briefing is ready to view", Ask's
   answers, your next event's title in a greeting, and the event titles and email
-  subjects in his confirmations (never an email's text or an address). They are
+  subjects in his confirmations (never an email's text or an address; an
+  approved plan block's result, and what he says about a day plan, carry only
+  times and counts, never a title). They are
   never logged or saved after the app closes; muting him (the speaker button,
   Ctrl+M) or `[assistant] speak = false` stops sending them;
 - the Google Calendar API, and only for an account you signed in with a click
@@ -2841,7 +2984,10 @@ The app talks to these services, all free:
   in to your claude.ai plan. Each request sends Anthropic what is listed under
   "What Claude Code gets" there: event titles, guests' names and addresses,
   today's briefing, for a request about an email that email's text, and, with
-  the productivity bundle's memory on, your memory notes. This
+  the productivity bundle's memory on, your memory notes. A day plan (see
+  [Plan my day](#plan-my-day)) sends that day's event titles, times and busy
+  or free (no guests), your to-dos and deadlines, the briefing's sections, your
+  notes and your words, never mail. This
   is the same kind of data your briefing routine already sends Claude. It runs
   on your plan's usage, never on an API key (Claude Code gets only the Windows
   basics of Jarvis's environment, never an `ANTHROPIC_*` or `CLAUDE*` variable
@@ -2892,8 +3038,8 @@ read it and, if Windows clipboard history (Win+V) is turned on, Windows keeps a
 copy until you clear it (Win+V > Clear all).
 
 There are no paid API calls of any kind. Ask Jarvis uses your Claude plan (keep
-its extra usage off, see Ask's setup step 3), never an API key. The offline voice
-runs entirely on this PC.
+its extra usage off, see Ask's setup step 3), never an API key; a day plan is one
+Ask run on that plan. The offline voice runs entirely on this PC.
 
 Driving your own signed-in Claude Code from your own app is ordinary personal
 use of it; sharing such a feature in a public project is less clear-cut, which
@@ -2972,6 +3118,14 @@ an unreadable `memory.json` is left byte for byte as it was, and that a note
 removed from the file by hand (or the whole file deleted) is never sent or
 written back.
 
+The day plan tests (`test_dayplan.py` for the hours, free stretches and block
+checks, `test_ask_modes.py` with a golden copy of a plan's input,
+`test_mode_prompts.py`, which checks that the plan's instructions carry the
+Ask's safety preamble word for word, `test_plan_app.py` for the app, and plan
+cases in the Ask, usage, routes, calendar, executor, persona, pictures and LIVE
+tests) play invented plan runs (`tests\fixtures\ask\plan_*.jsonl`) on a fixed
+invented day, with a fake calendar that records each block and its footer.
+
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
 and release it within seconds; they never start the app. The catch-up tests run
@@ -2991,6 +3145,25 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   bundle is off. Put `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (with Ask on)
   and restart Jarvis. While another request runs, the command bar takes no
   typing: use MEMORY's **Add a note...** field.
+- **"plan my day" started an ordinary Ask**: the productivity bundle is off (as
+  above), or more words came without a comma (`plan my day and email Ana` is an
+  Ask; `plan my day, gym` is a plan).
+- **A day plan says "Your day is full" or "Nothing on your list needs time"**
+  and makes no run: no free stretch of half an hour is left between `day_start`
+  and `day_end` (meetings with guests keep 10 minutes free around them), or no
+  To-do card, deadline within 7 days or words of yours need time. Type what to
+  fit in (`plan my day, gym and reading`) or `plan tomorrow`. LIVE's **Your free
+  time** step shows the stretches it found.
+- **A plan planned tomorrow**: it is late for today (from `[agenda]
+  evening_from_hour`, or less than `plan_min_free_minutes` before `day_end`);
+  type `plan my evening` for the rest of today.
+- **A plan block can't be approved**: it failed a check (the card says why:
+  "Overlaps Dentist at 11:00 AM", "Outside the hours Jarvis plans ...") or its
+  time has passed ("This block's time has passed - plan again"). Plan again.
+- **A plan is refused with "Today's limit for plans, briefs and drafts is
+  reached"** or **"Jarvis keeps 3 Ask runs this hour for your own requests"**:
+  the bundle's caps (`[productivity] max_runs_per_day`, `reserve_ask_runs`);
+  your own typed Asks still run. `--ask-check` shows the counts.
 - **Ask: "Claude Code not found"**: install it (Ask's setup step 1), or put
   `JARVIS_CLAUDE_EXE=<path to claude.exe>` in `.env`. A `claude.cmd` from npm is
   not used (only a `claude.exe`). `--ask-check` shows which one Jarvis found.
@@ -3348,10 +3521,12 @@ briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (c
                               the caps (usage), one request end to end (planner), --ask-check / --ask-text (commands),
                               web research: its run and isolation (research), its answer's check (research_validate)
                               and its LIVE steps (research_live), the typed shortcuts such as "remember that ..."
-                              (routes); ask/assets: the planner's and the research's instructions, answer formats
-                              and settings
+                              and "plan my day" (routes), the productivity bundle's planner modes: their requests
+                              and inputs (modes) and the day plan's hours, free time and block checks (dayplan);
+                              ask/assets: the planner's, the day plan's (plan_prompt.md, plan_schema.json) and the
+                              research's instructions, answer formats and settings
 briefing_reader/live.py       the LIVE view's event stream (no Qt): every step Jarvis takes, in memory only, bounded
-briefing_reader/pictures.py   LIVE's pictures as data (no Qt): an email, what a card sends, a calendar change on its day, the week, a page
+briefing_reader/pictures.py   LIVE's pictures as data (no Qt): an email, what a card sends, a calendar change on its day, the week, a day plan, a page
 briefing_reader/snapshots.py  page pictures' rules (no Qt): which pages may be opened, what the hidden window may load, the per-research cap
 briefing_reader/snapshot_engine.py  page pictures on this PC: the hidden private window (QtWebEngine, loaded on first use) and LIVE's side of it
 briefing_reader/snapshot_gate.py  the hidden window's network gate (no Qt): every connection it makes, to public IPv4 addresses on port 443 only

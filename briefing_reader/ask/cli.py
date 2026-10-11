@@ -61,6 +61,14 @@ RESEARCH_SETTINGS_FILE = ASSETS / "research_settings.json"
 RESEARCH_SCHEMA_FILE = ASSETS / "research_schema.json"
 RESEARCH_WORK_FOLDER = "research"
 WEB_SEARCH_TOOL, WEB_FETCH_TOOL = "WebSearch", "WebFetch"
+# The productivity bundle's planner modes: each its own system prompt and answer schema; every other
+# part of the command line (no tools, no MCP, the deny-all settings, the Ask work folder) is Ask's.
+PLAN_PROMPT_FILE = ASSETS / "plan_prompt.md"
+PLAN_SCHEMA_FILE = ASSETS / "plan_schema.json"
+PREP_PROMPT_FILE = ASSETS / "prep_prompt.md"      # meeting prep (a later build)
+NUDGE_PROMPT_FILE = ASSETS / "nudge_prompt.md"    # follow-up drafts (a later build)
+MODE_PROMPTS = {"plan": PLAN_PROMPT_FILE}
+MODE_SCHEMAS = {"plan": PLAN_SCHEMA_FILE}
 
 SOURCE_ENV = "JARVIS_CLAUDE_EXE"
 SOURCE_PATH = "PATH"
@@ -703,6 +711,20 @@ def schema_text(*, allow_search: bool, allow_web: bool = False, allow_remember: 
         data.get("properties", {}).pop("web_research", None)
     if allow_remember:
         data.setdefault("properties", {})["remember"] = dict(REMEMBER_PROPERTY)
+    return compact_json(data)
+
+
+def mode_schema_text(mode: str, *, allow_remember: bool = False) -> str:
+    """A planner mode's --json-schema value (MODE_SCHEMAS, compact): never gmail_search or
+    web_research (a mode never searches mail or the web, so it has no second run and no hand-off);
+    ``allow_remember`` adds REMEMBER_PROPERTY as "remember" (a run whose stdin has no <mail>).
+    KeyError for a mode without a schema."""
+    data = json.loads(MODE_SCHEMAS[mode].read_text(encoding="utf-8"))
+    properties = data.setdefault("properties", {})
+    properties.pop("gmail_search", None)
+    properties.pop("web_research", None)
+    if allow_remember:
+        properties["remember"] = dict(REMEMBER_PROPERTY)
     return compact_json(data)
 
 

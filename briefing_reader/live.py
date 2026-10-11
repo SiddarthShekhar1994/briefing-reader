@@ -90,11 +90,12 @@ TASK_BRIEFING = "briefing"
 TASK_BACKGROUND = "background"
 TASK_WEB = "web"                  # a web research started with "web:" (ask.research)
 TASK_MEMORY = "memory"            # the owner's notes kept on this PC (the productivity bundle's memory)
-TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB, TASK_MEMORY)
+TASK_PLAN = "plan"                # a day plan (the productivity bundle's "plan my day")
+TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB, TASK_MEMORY, TASK_PLAN)
 TASK_TAGS = {TASK_ASK: "ASK", TASK_ACTION: "ACTION", TASK_BRIEFING: "BRIEFING", TASK_BACKGROUND: "BACKGROUND",
-             TASK_WEB: "WEB", TASK_MEMORY: "MEMORY"}
+             TASK_WEB: "WEB", TASK_MEMORY: "MEMORY", TASK_PLAN: "PLAN"}
 # Tasks that open the LIVE view by themselves ([live] auto_open) and set the tab's dot.
-ATTENTION_KINDS = frozenset({TASK_ASK, TASK_ACTION, TASK_WEB})
+ATTENTION_KINDS = frozenset({TASK_ASK, TASK_ACTION, TASK_WEB, TASK_PLAN})
 COMPACT_KINDS = frozenset({TASK_BRIEFING, TASK_BACKGROUND, TASK_MEMORY})
 BACKGROUND_KEY = "background"
 BACKGROUND_TITLE = "Background reads"
@@ -127,10 +128,14 @@ RESEARCH_INPUT = "research.input"         # what the web research gets (the isol
 RESEARCH_RUN = "research.run"             # the web research run (Claude Code with web tools only)
 RESEARCH_VALIDATE = "research.validate"   # the research answer checked: sources and suggestions
 MEMORY_SAVE = "memory.save"               # a note saved, changed, removed or restored (or not saved, and why)
+MODE_REQUEST = "mode.request"             # what started a planner mode run (a typed plan, a click) and what it gets
+PLAN_FREE = "plan.free"                   # a day plan's free time (or why it does not run)
+PLAN_VALIDATE = "plan.validate"           # a day plan's blocks checked (each card or why not, the row it serves)
 STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, PLANNER_RUN, ASK_VALIDATE,
               ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_COUNTDOWN, ACTION_SIGNIN, ACTION_CHECKS,
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
-              WEB_FETCH, WEB_SOURCE, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE, MEMORY_SAVE)
+              WEB_FETCH, WEB_SOURCE, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE, MEMORY_SAVE, MODE_REQUEST,
+              PLAN_FREE, PLAN_VALIDATE)
 
 # Internal link ids a Field may carry besides a Jarvis-made Google result link: "tab:jarvis" (a tab),
 # "live:3" (a task), "picture:12" (step 12's picture shown larger; the step itself while it has none).

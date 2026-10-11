@@ -12,6 +12,8 @@
                                       Move, Cancel, RSVP), with the day's other events only when Jarvis
                                       had already read that day (KnownDays) - never a Google call for it
     week_picture(events, start, end, ...)   the 7 days of an Ask's calendar read (CALENDAR_READ)
+    plan_picture(events, blocks, day=, ...)  a day plan (PLAN_VALIDATE): the day as Jarvis read it and
+                                      the proposed blocks, stamped PROPOSED (nothing added yet)
     search_picture(query, hits, ...)  one web search of a research run (WEB_SEARCH) drawn as a compact
                                       results page: the exact query in a search box, then each result's
                                       title and address (and snippet, when the search gave one)
@@ -74,6 +76,8 @@ CAPTION_EMAIL = "Email"
 CAPTION_DAY = "Calendar change"
 CAPTION_WEEK = "Calendar"
 CAPTION_SEARCH = "Web search"
+CAPTION_PLAN = "Your day plan"
+CAPTION_PLAN_DAY = "Your day as read"       # a plan's day with no proposed block on it (the day read)
 
 BODY_CAP = 6_000        # characters of a body drawn; the rest is counted as cut
 OLDER_SHOWN = 5         # older messages listed under the newest
@@ -98,6 +102,8 @@ NOTE_OUTGOING = "Exactly what will be sent, drawn by Jarvis"
 NOTE_WEEK = "Drawn from the calendar Jarvis just read"
 NOTE_DAY = "Drawn by Jarvis from the card and what he already read - no call to Google for it"
 NOTE_SEARCH = "Drawn by Jarvis from what the search returned - no page opened, nothing clickable"
+NOTE_PLAN = "Drawn by Jarvis from the calendar he just read and the proposed blocks - nothing added yet"
+NOTE_PLAN_DAY = "Drawn by Jarvis from the calendar he just read"
 SEARCH_EMPTY = "No pages listed"
 SEARCH_UNREAD = "The results came back as text Jarvis could not list"
 # A page snapshot (Build B's snapshots.py uses these words too).
@@ -114,7 +120,8 @@ CHANGE_TODO = "todo"
 CHANGE_MOVE = "move"
 CHANGE_CANCEL = "cancel"
 CHANGE_RSVP = "rsvp"
-CHANGES = (CHANGE_ADD, CHANGE_TODO, CHANGE_MOVE, CHANGE_CANCEL, CHANGE_RSVP)
+CHANGE_PLAN = "plan"     # a day plan: the day as read, the proposed blocks (nothing added yet)
+CHANGES = (CHANGE_ADD, CHANGE_TODO, CHANGE_MOVE, CHANGE_CANCEL, CHANGE_RSVP, CHANGE_PLAN)
 ROLE_OTHER = "other"     # another event that day, as Jarvis last read it
 ROLE_BEFORE = "before"   # Move: where it is now (ghost)
 ROLE_AFTER = "after"     # Move: the new time
@@ -1087,6 +1094,83 @@ def _day_alt(picture: DayPicture, affected: Sequence[tuple[_Spot, str, str]], da
 
 
 # --------------------------------------------------------------------------
+# A day plan (the productivity bundle): the day as read, and the proposed blocks
+# --------------------------------------------------------------------------
+
+def plan_picture(events: Mapping[str, Sequence[Any]], blocks: Sequence[Any], *, day: date, now: datetime,
+                 hour24: bool = False, zone: str = "") -> Picture:
+    """A day plan drawn on its day: the events Jarvis just read for it (every account, as
+    ROLE_OTHER; a declined one titled "... (declined)", a "show as free" or working-location one
+    "... (free)", R21) and the proposed blocks (ROLE_NEW, stamped PROPOSED: nothing is added before
+    each block's own click). ``blocks=()`` (or none on that day) draws the day alone, captioned as
+    read and never stamped. ``zone``: the personal calendar's (events of another calendar, and now,
+    are moved into it; gcal.wall_in_zone): the frame of the blocks' times. Kind KIND_DAY, no new role."""
+    from .gcal import wall_in_zone
+
+    # "now" (and which day is today) in the blocks' frame: the personal calendar's zone, else this PC's.
+    now_wall = wall_in_zone(now, zone) if zone and isinstance(now, datetime) else _wall(now, _zone(now))
+    today = (now_wall or datetime.now()).date()
+
+    def wall(moment: Any) -> datetime | None:
+        if not isinstance(moment, datetime):
+            return None
+        return wall_in_zone(moment, zone) if zone else _event_wall(moment)
+
+    others: list[tuple[tuple, DayBlock]] = []
+    for briefs in events.values():
+        for brief in briefs or ():
+            title = _line(getattr(brief, "title", "") or NO_TITLE, EVENT_TITLE_CAP - 12)
+            if getattr(brief, "self_response", "") == "declined":
+                title += " (declined)"
+            elif getattr(brief, "transparent", False) or getattr(brief, "event_type", "") == "workingLocation":
+                title += " (free)"
+            first = getattr(brief, "all_day_start", None)
+            if isinstance(first, date) and not isinstance(first, datetime):
+                last = getattr(brief, "all_day_end", None) or first
+                if first <= day <= last:
+                    spot = _Spot(all_day_start=first, all_day_end=last)
+                    others.append(((0, _midnight(day)), _block(spot, 0, day, title, _spot_text(spot, hour24),
+                                                               ROLE_OTHER)))
+                continue
+            start, end = wall(getattr(brief, "start", None)), wall(getattr(brief, "end", None))
+            if start is None:
+                continue
+            end = end if end is not None and end >= start else start + timedelta(minutes=30)
+            begin, finish = _midnight(day), _midnight(day) + timedelta(days=1)
+            if not (start < finish and (end > begin or (end == start and start >= begin))):
+                continue
+            spot = _Spot(start=start, end=end)
+            others.append(((1, start), _block(spot, 0, day, title, _spot_text(spot, hour24), ROLE_OTHER)))
+    others.sort(key=lambda pair: pair[0])
+    drawn = [block for _key, block in others]
+    more = max(0, len(drawn) - DAY_OTHERS_CAP)
+    proposed: list[DayBlock] = []
+    for card in blocks:
+        start, end = getattr(card, "start", None), getattr(card, "end", None)
+        if not isinstance(start, datetime) or start.date() != day:
+            continue
+        spot = _Spot(start=start.replace(tzinfo=None),
+                     end=(end.replace(tzinfo=None) if isinstance(end, datetime) else start + timedelta(minutes=30)))
+        proposed.append(_block(spot, 0, day, _line(getattr(card, "title", "") or NO_TITLE, EVENT_TITLE_CAP),
+                               _spot_text(spot, hour24), ROLE_NEW))
+    all_blocks = _with_lanes(drawn[:DAY_OTHERS_CAP] + proposed)
+    first_min, last_min = _hours(all_blocks)
+    now_column = 0 if day == today and now_wall is not None else -1
+    count = len(proposed)
+    headline = (f"Day plan for {day_label(day, today)}: {_plural(count, 'block')} proposed" if blocks
+                else f"{day_label(day, today)} as Jarvis read it")
+    note = NOTE_PLAN if proposed else NOTE_PLAN_DAY
+    picture = DayPicture(change=CHANGE_PLAN, headline=_line(headline, 200), account="personal",
+                         days=(day_label(day, today),), first_min=first_min, last_min=last_min, blocks=all_blocks,
+                         others_shown=True, others_note=note, others_more=more, hour24=bool(hour24),
+                         now_min=_minutes(now_wall, today) if now_column == 0 and now_wall is not None else -1,
+                         now_column=now_column)
+    alt = f"{headline}; {_plural(len(drawn), 'event')} that day"
+    return Picture(KIND_DAY, CAPTION_PLAN if proposed else CAPTION_PLAN_DAY, live.PICTURE_READY, note=note,
+                   alt=_line(alt, ALT_CAP), day=picture)
+
+
+# --------------------------------------------------------------------------
 # The week strip of an Ask's calendar read
 # --------------------------------------------------------------------------
 
@@ -1280,6 +1364,7 @@ def page_unavailable(url: str, reason: str) -> Picture:
 _WILL = {CHANGE_ADD: "WILL BE ADDED", CHANGE_TODO: "WILL BE ADDED", CHANGE_MOVE: "WILL MOVE",
          CHANGE_CANCEL: "WILL BE CANCELLED"}
 _DONE = {CHANGE_ADD: "ADDED", CHANGE_TODO: "ADDED", CHANGE_MOVE: "MOVED", CHANGE_CANCEL: "CANCELLED"}
+PLAN_STAMP = "PROPOSED - NOT ADDED YET"
 
 
 def stamp(picture: Any, status: str, status_text: str) -> tuple[str, str]:
@@ -1293,6 +1378,9 @@ def stamp(picture: Any, status: str, status_text: str) -> tuple[str, str]:
     mail = kind == KIND_OUTGOING
     day = getattr(picture, "day", None)
     change = getattr(day, "change", "")
+    if change == CHANGE_PLAN:   # proposed blocks: each is added only after its own click
+        proposed = any(block.role == ROLE_NEW for block in getattr(day, "blocks", ()))
+        return (PLAN_STAMP, TONE_WILL) if proposed else ("", "")   # the day as read proposes nothing
     chip = next((block.chip for block in getattr(day, "blocks", ()) if block.chip), "")
     text = (status_text or "").upper()
     if status == live.STATUS_RUNNING:

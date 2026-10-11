@@ -14,6 +14,11 @@
                                      the answer, its sources, what was left out and the cards; with
                                      --ask-dry-run the exact text the research would get and its
                                      command line
+    --plan-dry-run ["plan ..."]      the productivity bundle's day plan: what its run would get (the
+                                     day read fresh, read only; titles, briefing lines and notes as
+                                     their sizes), its free stretches and its command line; no run,
+                                     nothing counted. Default "plan my day"; "plan tomorrow", "plan my
+                                     afternoon, gym" ... as typed in the app
 
 With the productivity bundle's memory on ([productivity] enabled and memory), --ask-text gives the
 planner the owner's notes like the app does, from memory.json opened read-only (the dry run shows
@@ -41,15 +46,18 @@ from .context import BriefingContext
 from .planner import AskPlanner, ClaudeEngine, GoogleSources, Readiness, ResearchEngine, briefing_from_page
 from .research import forced_question
 from .research_validate import steps_words
-from .routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags, route
-from .usage import KIND_RESEARCH, USAGE_FILE, UsageLog
+from .routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, ROUTE_PLAN, RouteFlags, route
+from .usage import KIND_BUNDLE, KIND_NUDGE, KIND_PLAN_DAY, KIND_PREP, KIND_RESEARCH, USAGE_FILE, UsageLog
 
 logger = logging.getLogger(__name__)
 
 ACTIONS_FILE = "actions.json"   # as ui.ACTIONS_FILE (ui imports Qt; this module must not)
 STAGE_WORDS = {"context": "Reading your calendar...", "planning": "Planning (uses your Claude plan)...",
                "mail": "Reading your mail...", "planning_again": "Planning with your mail (uses your Claude plan)...",
-               "research": "Searching the web (uses your Claude plan)..."}
+               "research": "Searching the web (uses your Claude plan)...",
+               "day": "Reading the day being planned..."}
+PLAN_DRY_RUN_DEFAULT = "plan my day"
+NOT_A_PLAN = 'Not a day plan request: try "plan my day", "plan tomorrow" or "plan my afternoon, gym and reading".'
 MEMORY_ROUTE_WORDS = {ROUTE_MEMORY_SAVE: "Notes are kept in the app (MEMORY tab); nothing was saved.",
                       ROUTE_MEMORY_FORGET: "Notes are kept in the app (MEMORY tab); nothing was changed.",
                       ROUTE_MEMORY_SHOW: "Notes are kept in the app (MEMORY tab)."}
@@ -164,12 +172,23 @@ def ask_check(config: Config, out: TextIO, *, environ: Mapping[str, str] | None 
         out.write(f"  Account {account.alias}: calendar {account.calendar}, sending "
                   f"{'set up' if account.send_mail else 'not set up'}, mail reading {account.read_mail}\n")
     research = config.research
+    productivity = config.productivity
     usage = usage or UsageLog(config.data_dir / USAGE_FILE, max_per_hour=config.ask.max_per_hour,
                               max_per_day=config.ask.max_per_day, max_research_per_hour=research.max_per_hour,
-                              max_research_per_day=research.max_per_day)
+                              max_research_per_day=research.max_per_day,
+                              max_bundle_per_day=productivity.max_runs_per_day)
     hour, day = usage.counts()
     out.write(f"  Usage: {hour} of {config.ask.max_per_hour} planner runs this hour, {day} of "
               f"{config.ask.max_per_day} today\n")
+    kinds = [("Ask", "plan"), ("web research", KIND_RESEARCH), ("day plans", KIND_PLAN_DAY),
+             ("meeting briefs", KIND_PREP), ("drafts", KIND_NUDGE)]
+    per_kind = [(name, usage.counts(kind=kind)[1]) for name, kind in kinds]
+    per_kind[0] = ("Ask", per_kind[0][1] - usage.counts(kind=KIND_BUNDLE)[1])   # typed Asks: without the bundle's
+    out.write("  Runs today by kind: " + ", ".join(f"{name} {count}" for name, count in per_kind) + "\n")
+    bundle_day = usage.counts(kind=KIND_BUNDLE)[1]
+    kept = usage.reserve_kept(productivity.reserve_ask_runs)
+    out.write(f"  Plans, briefs and drafts today: {bundle_day} of {productivity.max_runs_per_day} "
+              f"({kept} Ask run{'' if kept == 1 else 's'} an hour kept for your requests)\n")
     caps = usage.check()
     if caps.held:
         out.write(f"  Paused: {caps.message}\n")
@@ -222,6 +241,48 @@ def ask_dry_run(text: str, config: Config, out: TextIO, *, briefing: BriefingCon
         out.write(f"Command line: not built ({dry.readiness.message})\n")
     out.write("Context: " + ", ".join(f"{name} {count}" for name, count in dry.counts.items())
               + f", mail {dry.mail.threads} thread(s), {dry.mail.messages} message(s), {dry.mail.chars} characters\n")
+    if not dry.readiness.ok:
+        out.write(f"Not ready to run: {dry.readiness.message}\n")
+    return 0
+
+
+def plan_dry_run(text: str, config: Config, out: TextIO, *, briefing: BriefingContext | None,
+                 environ: Mapping[str, str] | None = None, runner: cli.Runner | None = None,
+                 sources: GoogleSources | None = None, now: Callable[[], datetime] | None = None) -> int:
+    """Print what a day plan's run would get (the day read fresh, read only; titles, briefing lines and
+    notes as their sizes), its free stretches and its command line: no run, nothing counted. 2 when
+    ``text`` is no plan request."""
+    from .modes import MODE_PLAN, ORIGIN_TYPED, ModeInputs, ModeRequest, todo_facts
+
+    found = route(text or PLAN_DRY_RUN_DEFAULT, RouteFlags(plan=True))
+    if found.kind != ROUTE_PLAN:
+        out.write(NOT_A_PLAN + "\n")
+        return 2
+    environ = os.environ if environ is None else environ
+    engine = ClaudeEngine(config.ask, config.data_dir, runner=runner, environ=environ)
+    planner = AskPlanner(config, engine, sources if sources is not None else google_sources(config), clock=now)
+    _with_memory(planner, config)
+    pending = briefing.pending if briefing is not None else ()
+    inputs = ModeInputs(todos=todo_facts(pending), deadlines=tuple(briefing.deadlines if briefing else ()),
+                        evening_from_hour=int(config.agenda.evening_from_hour))
+    request = ModeRequest(MODE_PLAN, ORIGIN_TYPED, typed=found.payload, part=found.part, typed_route=True)
+    dry = planner.plan_dry_run(request, inputs=inputs, briefing=briefing)
+    out.write("Day plan dry run (no Claude request was made; nothing was counted; titles and notes as sizes)\n")
+    if not (config.ask.enabled and config.productivity.enabled):
+        out.write("Note: the day plan is off in the app ([ask] enabled and [productivity] enabled, or "
+                  "JARVIS_PRODUCTIVITY_ENABLED=true in .env)\n")
+    if dry.note:
+        out.write(f"No planner run: {dry.note}\n")
+    if dry.prompt:
+        out.write("---- stdin ----\n")
+        out.write(dry.prompt)
+        out.write("---- end of stdin ----\n")
+    if dry.argv:
+        out.write("Command line (the prompt goes to stdin, never here):\n  " + subprocess.list2cmdline(dry.argv) + "\n")
+    else:
+        out.write(f"Command line: not built ({dry.readiness.message})\n")
+    if dry.counts:
+        out.write("Context: " + ", ".join(f"{name} {count}" for name, count in dry.counts.items()) + "\n")
     if not dry.readiness.ok:
         out.write(f"Not ready to run: {dry.readiness.message}\n")
     return 0
@@ -315,7 +376,7 @@ def ask_once(text: str, config: Config, out: TextIO, *, briefing: BriefingContex
 
 
 def run(args: Any, config: Config, out: TextIO | None) -> int:
-    """The __main__ entry for --ask-check / --ask-text [--ask-dry-run]."""
+    """The __main__ entry for --ask-check / --ask-text [--ask-dry-run] / --plan-dry-run."""
     stream: Any = out if out is not None else _NullOut()
     reconfigure = getattr(stream, "reconfigure", None)
     if callable(reconfigure):
@@ -325,6 +386,11 @@ def run(args: Any, config: Config, out: TextIO | None) -> int:
             pass
     if args.ask_check:
         return ask_check(config, stream)
+    plan_text = getattr(args, "plan_dry_run", None)
+    if plan_text is not None:
+        now = datetime.now().astimezone()
+        briefing = cli_briefing(config, getattr(args, "from_file", None), now=now, out=stream)
+        return plan_dry_run(plan_text, config, stream, briefing=briefing)
     if forced_question(args.ask_text or "") is None:
         found = route(args.ask_text or "", RouteFlags(memory=memory_on(config)))
         if found.kind in MEMORY_ROUTE_WORDS:   # the app's MEMORY tab keeps notes: no Ask, nothing saved

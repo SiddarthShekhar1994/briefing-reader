@@ -9,6 +9,7 @@ and unique per test.
 
 from __future__ import annotations
 
+import dataclasses
 import http.client as http_client
 import json
 import logging
@@ -297,6 +298,17 @@ class ModuleTests(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 class EventBodyTests(unittest.TestCase):
+    def test_the_footer_by_mode(self) -> None:
+        """A day plan's block ends its description with its own footer (G24); every other card as before."""
+        plan = dataclasses.replace(make_action(notes="For: Lab report"), mode="plan")
+        self.assertEqual(gcal.event_footer(plan), "Added by Jarvis from your day plan.")
+        self.assertEqual(gcal.event_footer(make_action()), EVENT_FOOTER)
+        self.assertEqual(gcal.event_footer(dataclasses.replace(make_action(), mode="nudge")), EVENT_FOOTER)
+        body = build_event_body(plan, TZ, footer=gcal.event_footer(plan))
+        self.assertEqual(body["description"], "For: Lab report\n\nAdded by Jarvis from your day plan.")
+        self.assertEqual(build_event_body(plan, TZ)["description"], f"For: Lab report\n\n{EVENT_FOOTER}")
+        self.assertEqual(build_event_body(make_action(), TZ, footer="")["description"], EVENT_FOOTER)
+
     def test_timed_event(self) -> None:
         action = make_action(start=datetime(2026, 10, 9, 15, 0), end=datetime(2026, 10, 9, 16, 0))
         self.assertEqual(build_event_body(action, TZ), {
@@ -603,6 +615,12 @@ class CreateEventTests(GcalTestCase):
         self.assertEqual(kwargs["body"]["location"], "Central Library, Media Lab")
         self.assertEqual(kwargs["body"]["recurrence"], ["RRULE:FREQ=WEEKLY;COUNT=4"])
         self.assertIn("created event evt123", "\n".join(captured.output))
+
+    def test_creates_a_plan_block_with_its_footer(self) -> None:
+        cal = self.signed_in_calendar()
+        cal.create_event(make_action(notes="For: Lab report"), footer=gcal.PLAN_EVENT_FOOTER)
+        (kwargs, _retries), = self.service.calls_to("events.insert")
+        self.assertEqual(kwargs["body"]["description"], "For: Lab report\n\nAdded by Jarvis from your day plan.")
         self.assertEqual(self.flow.calls, [])
 
     def test_check_runs_before_insert(self) -> None:
@@ -1418,6 +1436,33 @@ class EventBriefTests(GcalTestCase):
         for never in ("description", "location", "hangoutLink", "conferenceData", "attachments", "htmlLink"):
             self.assertNotIn(never, gcal.BRIEF_FIELDS)
         self.assertEqual(self.flow.calls, [])
+        # The day plan (R21): "show as free" and the event's type, pinned on purpose.
+        self.assertEqual(gcal.BRIEF_FIELDS, "items(id,status,summary,start,end,recurringEventId,transparency,"
+                                            "eventType,organizer(email,displayName,self),attendees(email,"
+                                            "displayName,responseStatus,self,resource,organizer)),nextPageToken")
+
+    def test_free_working_location_and_the_owners_own_answer(self) -> None:
+        """R21 and the owner's own response (the attendee with self: true is never a guest)."""
+        self.service.outcomes["events.list"] = [{"items": [
+            _listed("Office hours", "2026-10-05T16:00:00-04:00", "2026-10-05T17:00:00-04:00", uid="evt0003cc",
+                    transparency="transparent", eventType="default",
+                    organizer={"email": "dean@example.edu"},
+                    attendees=[{"email": "you@example.edu", "self": True, "responseStatus": "declined"},
+                               {"email": "dean@example.edu", "organizer": True, "responseStatus": "accepted"}]),
+            _listed("Home", "2026-10-05T09:00:00-04:00", "2026-10-05T17:00:00-04:00", uid="evt0004dd",
+                    eventType="workingLocation", transparency="opaque"),
+            _listed("Odd", "2026-10-05T18:00:00-04:00", "2026-10-05T19:00:00-04:00", uid="evt0005ee",
+                    eventType="not a type!", attendees=[{"email": "you@example.edu", "self": True,
+                                                         "responseStatus": "bogus"}]),
+        ]}]
+        office, home, odd = sorted(self.signed_in_calendar().list_event_briefs(DAY_START, DAY_END),
+                                   key=lambda brief: brief.event_id)
+        self.assertEqual((office.transparent, office.event_type, office.self_response, office.free),
+                         (True, "", "declined", True))
+        self.assertEqual([guest.email for guest in office.guests], ["dean@example.edu"])
+        self.assertEqual((home.transparent, home.event_type, home.self_response, home.free),
+                         (False, gcal.WORKING_LOCATION, "", True))
+        self.assertEqual((odd.event_type, odd.self_response, odd.free), ("", "", False))
 
     def test_brief_of_an_event(self) -> None:
         self.service.outcomes["events.list"] = [{"items": [
@@ -1435,7 +1480,8 @@ class EventBriefTests(GcalTestCase):
                             start=datetime(2026, 10, 5, 14, 0, tzinfo=timezone(timedelta(hours=-4))),
                             end=datetime(2026, 10, 5, 15, 0, tzinfo=timezone(timedelta(hours=-4))),
                             organizer_self=True, organizer_email="you@example.edu",
-                            guests=(gcal.Guest("ana@example.edu", "Ana Lima", "needsAction"),), recurring=True),
+                            guests=(gcal.Guest("ana@example.edu", "Ana Lima", "needsAction"),), recurring=True,
+                            self_response="accepted"),   # he organizes it (the field came with the day plan)
         ])
         self.assertTrue(briefs[0].all_day)
         self.assertNotIn("SECRET", repr(briefs))

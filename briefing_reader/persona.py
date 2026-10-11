@@ -804,3 +804,127 @@ def memory_refusal_text(reason: str, address: str = "sir", *, kept: str = "", ca
 def memory_suggestion_text(text: str, address: str = "sir") -> str:
     """'Shall I remember this, sir? "Ana Lima organizes the weekly Project sync."' (never spoken)."""
     return with_address("Shall I remember this, {sir}?", address) + " " + quoted_note(text)
+
+
+# --------------------------------------------------------------------------
+# The day plan (the productivity bundle): entries in the JARVIS tab and the few words said aloud.
+# Spoken sentences are built from counts and times only: never a block's title or the planner's say.
+# --------------------------------------------------------------------------
+
+PLAN_LATE_TEXT = "It's late for today, {sir} - here's a plan for tomorrow:"   # a late answer's first line
+PLAN_LATE_LOOKED = "It's late for today, so I looked at tomorrow."    # before a late answer with no block
+PLAN_ANSWER_TAIL = "Each block waits for your OK under NEEDS YOUR OK."
+PLAN_NO_BLOCK_TEXT = "No block fitted (see the cards)."
+PLAN_ANSWER_HINT = 'Answer with "plan my day, <your answer>".'      # today's; plan_answer_hint(label)
+PLAN_QUESTION_SPEECH = "I have a question before I plan, {sir}; it's on screen."
+PLAN_NO_CALENDAR_TEXT = "Plan my day needs your personal calendar - click Connect under TODAY."
+PLAN_NO_RUN_KINDS = ("day_full", "nothing", "part_over", "no_hours", "no_calendar")
+# A no-run reason in a few words (ACTIVITY's row, the LIVE task's end): never the raw reason word.
+_PLAN_NO_RUN_WORDS = {"day_full": "day full", "nothing": "nothing needs time",
+                      "part_over": "that part of the day is over", "no_hours": "outside the planned hours",
+                      "no_calendar": "no personal calendar"}
+# What a plan is for, said in a sentence: the window's label ("today", "tomorrow", "this morning" ...).
+_PLAN_WHOSE = {"today": "Your day", "tomorrow": "Tomorrow", "this morning": "Your morning",
+               "this afternoon": "Your afternoon", "this evening": "Your evening"}
+_PLAN_TYPED = {"tomorrow": "plan tomorrow", "this morning": "plan my morning",
+               "this afternoon": "plan my afternoon", "this evening": "plan my evening"}
+
+
+def plan_no_run_text(kind: str, address: str = "sir", *, label: str = "today", part: str = "",
+                     late: bool = False, hint_tomorrow: bool = False) -> str:
+    """Why a day plan did not run (no planner run): ``day_full`` (no free stretch of half an hour;
+    ``hint_tomorrow`` for a today plan that is not late adds 'Type "plan tomorrow" for tomorrow.',
+    R30), ``nothing`` (nothing needs time; how to name what to fit in, R52), ``part_over``,
+    ``no_hours``, ``no_calendar``. ``late``: "plan my day" switched to tomorrow (PLAN_LATE_LOOKED
+    first: no plan is promised, and the address is said once)."""
+    whose = _PLAN_WHOSE.get(label, "Your day")
+    typed = _PLAN_TYPED.get(label, "plan my day")
+    if kind == "day_full":
+        text = f"{whose} is full, {{sir}} - there's no free stretch of half an hour left."
+        if hint_tomorrow:
+            text += ' Type "plan tomorrow" for tomorrow.'
+    elif kind == "nothing":
+        text = (f"Nothing on your list needs time {label}, {{sir}}. Tell me what to fit in: "
+                f'"{typed}, gym and reading".')
+    elif kind == "part_over":
+        text = f'Your {part or "morning"} is over, {{sir}}; type "plan my day" for the rest of it.'
+    elif kind == "no_hours":
+        text = (f"{whose} is outside the hours I plan, {{sir}} ([productivity] day_start and day_end in "
+                "config.toml).")
+    else:
+        text = PLAN_NO_CALENDAR_TEXT
+    if late and kind in ("day_full", "nothing"):
+        text = f"{PLAN_LATE_LOOKED} {text}"
+    return with_address(text, address)
+
+
+def plan_no_run_words(kind: str) -> str:
+    """"day full", "nothing needs time", "that part of the day is over", "outside the planned
+    hours", "no personal calendar" (a plan that did not run, in ACTIVITY and LIVE)."""
+    return _PLAN_NO_RUN_WORDS.get(kind, str(kind).replace("_", " "))
+
+
+def plan_answer_hint(label: str = "today") -> str:
+    """How to answer a plan's question (R46), for the window asked about: 'Answer with "plan
+    tomorrow, <your answer>".' for tomorrow (following it plans the same window again)."""
+    return f'Answer with "{_PLAN_TYPED.get(label, "plan my day")}, <your answer>".'
+
+
+def plan_answer_text(blocks: Sequence[str], say: str, question: str = "", address: str = "sir", *,
+                     label: str = "today", late: bool = False, refused: int = 0) -> str:
+    """The plan's JARVIS entry (on screen only): "Here's a plan for today:" (late: "It's late for
+    today, sir - here's a plan for tomorrow:"), one line per valid block ("10:30-12:00  Work on: Lab
+    report"), the planner's say, "Each block waits for your OK under NEEDS YOUR OK."; a question and
+    no block: the say, "Question: ..." and how to answer for that window (R46); every block refused:
+    the say and "No block fitted (see the cards)."; no block when late: PLAN_LATE_LOOKED first."""
+    parts: list[str] = []
+    say = " ".join(str(say or "").split())
+    question = " ".join(str(question or "").split())
+    if blocks:
+        parts.append(with_address(PLAN_LATE_TEXT, address) if late else f"Here's a plan for {label}:")
+        parts += list(blocks)
+        if say:
+            parts.append(say)
+        if question:
+            parts.append(f"Question: {question}")
+        parts.append(PLAN_ANSWER_TAIL)
+    else:
+        if late:
+            parts.append(PLAN_LATE_LOOKED)
+        if say:
+            parts.append(say)
+        if question:
+            parts += [f"Question: {question}", plan_answer_hint(label)]
+        elif refused:
+            parts.append(PLAN_NO_BLOCK_TEXT)
+        elif not say:
+            parts.append(with_address(f"I couldn't fit a block into {label}, {{sir}}.", address))
+    return "\n".join(parts)
+
+
+def plan_result_speech(count: int, first_start: datetime | None, label: str = "today", address: str = "sir") -> str:
+    """"I've lined up four blocks for today, the first at 10:30 AM. Each one waits for your OK,
+    sir." (one block: "..., at 10:30 AM. It waits for your OK, sir."); none: "I couldn't fit a block
+    into today, sir." Counts and times only."""
+    if count <= 0 or first_start is None:
+        return with_address(f"I couldn't fit a block into {label}, {{sir}}.", address)
+    if count == 1:
+        return with_address(f"I've lined up one block for {label}, at {spoken_clock(first_start)}. "
+                            "It waits for your OK, {sir}.", address)
+    return with_address(f"I've lined up {count_words(count)} blocks for {label}, the first at "
+                        f"{spoken_clock(first_start)}. Each one waits for your OK, {{sir}}.", address)
+
+
+def plan_question_speech(address: str = "sir") -> str:
+    """"I have a question before I plan, sir; it's on screen." (a plan answer with no block, R46)."""
+    return with_address(PLAN_QUESTION_SPEECH, address)
+
+
+def plan_no_run_speech(reason: str, address: str = "sir", label: str = "today") -> str:
+    """"Your day is full, sir." / "Nothing on your list needs time today, sir."; "" for the other
+    reasons (the entry says them)."""
+    if reason == "day_full":
+        return with_address(f"{_PLAN_WHOSE.get(label, 'Your day')} is full, {{sir}}.", address)
+    if reason == "nothing":
+        return with_address(f"Nothing on your list needs time {label}, {{sir}}.", address)
+    return ""

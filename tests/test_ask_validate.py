@@ -173,5 +173,62 @@ class ToCardsTests(unittest.TestCase):
         self.assertNotIn("evil", repr(result.report))
 
 
+def block(start: str, end: str, title: str = "Work on: Lab report") -> str:
+    return f"Calendar: {title} | 2026-10-08 {start}-{end} | | | For: t1"
+
+
+class ModeCardsTests(unittest.TestCase):
+    """A planner mode's own kinds, its extra check and its mode on every card; keep_valid. The
+    defaults leave every Ask exactly as before."""
+
+    def cards(self, *lines: str, **kwargs):  # type: ignore[no-untyped-def]
+        return to_cards(list(lines), index_for(), now=NOW, **kwargs)
+
+    def test_kinds_refusal_and_mode(self) -> None:
+        result = self.cards(block("10:00", "11:00"), email("ana@example.edu"), move(),
+                            kinds=frozenset({"calendar"}), mode="plan")
+        self.assertEqual([card.mode for card in result.cards], ["plan"] * 3)
+        self.assertEqual([card.error for card in result.cards],
+                         ["", "A day plan only adds time blocks", "A day plan only adds time blocks"])
+        self.assertEqual(result.refused, 2)
+        self.assertTrue(all(card.source == SOURCE_ASK for card in result.cards))
+        unreadable = self.cards("Calendar: no date at all", kinds=frozenset({"calendar"}), mode="plan")
+        self.assertIn("no date", unreadable.cards[0].error)   # a line that can't be read keeps its own reason
+
+    def test_extra_runs_after_the_page_and_repeat_checks(self) -> None:
+        seen: list[str] = []
+
+        def extra(card) -> str:  # type: ignore[no-untyped-def]
+            seen.append(card.title)
+            return "Too close" if card.start.hour == 13 else ""
+
+        page = {parse_action_line(block("09:00", "10:00", "Listed")).id}
+        result = self.cards(block("10:00", "11:00"), block("10:00", "11:00"), block("13:00", "14:00", "Close"),
+                            block("09:00", "10:00", "Listed"), kinds=frozenset({"calendar"}), mode="plan",
+                            extra=extra, page_ids=page)
+        self.assertEqual(seen, ["Work on: Lab report", "Close"])   # not the repeat, not the listed one
+        self.assertEqual([card.error for card in result.cards], ["", "Too close", validate.ALREADY_LISTED])
+        self.assertEqual((result.dropped, result.refused), (1, 2))
+        self.assertEqual([item.outcome for item in result.report],
+                         [validate.LINE_CARD, validate.LINE_REPEAT, validate.LINE_REFUSED, validate.LINE_REFUSED])
+
+    def test_keep_valid(self) -> None:
+        lines = [block(f"{9 + n}:00", f"{9 + n}:30", f"Block {n}") for n in range(6)] + [move()]
+        result = self.cards(*lines, kinds=frozenset({"calendar"}), mode="plan")
+        kept = validate.keep_valid(result, 4)
+        self.assertEqual([card.title for card in kept.cards if not card.error], [f"Block {n}" for n in range(4)])
+        self.assertEqual(len([card for card in kept.cards if card.error]), 1)   # information-only cards stay
+        self.assertEqual((kept.dropped, kept.refused), (result.dropped + 2, result.refused))
+        self.assertEqual([item.outcome for item in kept.report][4:6], [validate.LINE_OVER_CAP] * 2)
+        self.assertIs(validate.keep_valid(result, 8), result)
+
+    def test_defaults_are_unchanged(self) -> None:
+        plain = self.cards(move(), block("10:00", "11:00"))
+        self.assertEqual([card.mode for card in plain.cards], ["", ""])
+        self.assertEqual([card.error for card in plain.cards], ["", ""])
+        slack = self.cards("Slack: channel=C0123ABCD | ts=1696000000.000100 | who=Ana | body=Sure")
+        self.assertEqual(slack.cards[0].error, "Ask can't propose Slack")
+
+
 if __name__ == "__main__":
     unittest.main()
