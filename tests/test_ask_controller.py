@@ -727,7 +727,7 @@ class WebResearchControllerTests(unittest.TestCase):
         self.assertEqual((task.status, task.summary), (live.STATUS_OK, "2 source cards + 1 proposal"))
         self.assertEqual([step.kind for step in task.steps],
                          [live.ASK_REQUEST, live.ASK_CHECKS, live.RESEARCH_INPUT, live.RESEARCH_RUN, live.WEB_SEARCH,
-                          live.WEB_FETCH, live.RESEARCH_VALIDATE, live.ASK_CARDS])
+                          live.WEB_FETCH, live.RESEARCH_VALIDATE, live.WEB_SOURCE, live.ASK_CARDS])
         cards = task.steps[-1]
         shown = {field.label: field.value for field in cards.fields}
         self.assertEqual(shown["Jarvis says"], RESEARCH_ANSWER["answer"])

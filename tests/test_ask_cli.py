@@ -417,6 +417,20 @@ class ResearchCliTests(unittest.TestCase):
                      "Never write Email,\n  Reply, RSVP, Move, Cancel, Slack or Share lines",
                      "Never say that you did\n  anything", "Nothing else is given to you."):
             self.assertIn(rule, prompt)
+        # Read the deciding page(s) when the search results alone do not settle it, within the cap.
+        words = " ".join(prompt.split())
+        for rule in ("Whenever they alone do not settle the question (dates, prices, eligibility, availability, "
+                     "deadlines), read the most relevant result page or pages with WebFetch before you answer: up "
+                     "to 2 pages, within the page reads in <limits>.",
+                     "When <limits> allows no page reads, answer from the search results and say the pages were "
+                     "not read.",
+                     "Cite the pages you read for the facts they gave you."):
+            self.assertIn(rule, words)
+        self.assertNotIn("Fewer searches and page reads are better", words)
+        how = words.split("HOW TO RESEARCH", 1)[1].split("ANSWER (the JSON schema", 1)[0]
+        self.assertLess(how.index("Stay within <limits>"), how.index("read the most relevant result page"))
+        self.assertTrue(prompt.isascii())
+        self.assertNotIn("\r", prompt)
 
     def test_the_planner_schema_with_and_without_web_research(self) -> None:
         for allow_search in (False, True):

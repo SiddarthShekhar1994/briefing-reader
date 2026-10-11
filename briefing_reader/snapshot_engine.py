@@ -1,5 +1,6 @@
-"""Page snapshots, the Qt half: a hidden private window that opens a page a web research read and
-takes a picture of its first screen, for the LIVE view (pictures.page_ready).
+"""Page snapshots, the Qt half: a hidden private window that opens a page a web research read, or a
+checked source its answer cites, and takes a picture of its first screen, for the LIVE view
+(pictures.page_ready).
 
     webengine_available()             PySide6 has QtWebEngine 6.8+ (checked without importing it)
     prepare_application()             Qt's attributes the web engine needs, set before QApplication
@@ -887,7 +888,8 @@ class PageSnapshotter(QObject):
         logger.info("Page snapshot: unavailable (%s)", snapshots.reason_kind(reason))
 
     def request(self, step: Any, url: str, *, task_id: int) -> None:
-        """Picture the page ``url`` a research run (LIVE task ``task_id``) read, on ``step``.
+        """Picture the page ``url`` a research run (LIVE task ``task_id``) read, or a checked source
+        its answer cites, on ``step``.
         Refused (UNAVAILABLE at once, no page opened): after shutdown, [live] text = false, a page
         that is not public https or a search results page, past MAX_PER_RUN, the same page again.
         Never raises, never blocks (any thread)."""

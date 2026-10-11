@@ -660,7 +660,8 @@ class DryRun:
 
 class AskPlanner:
     # The app's snapshot_engine.PageSnapshotter ([live] page_snapshots; None: no page pictures). It is
-    # only handed the pages a research run read, for the LIVE view; nothing goes back to a run.
+    # only handed the pages a research run read and the sources its checked answer shows, for the
+    # LIVE view; nothing goes back to a run.
     page_snapshots: Any = None
     # The owner's notes (the productivity bundle's memory.json, newest first, at most 4 KB) as the
     # app holds them right now; called on the ask thread for every planner context (never for web
@@ -1127,50 +1128,57 @@ class AskPlanner:
                                  hour24=self._hour24(), check=check, planner_question=planner_question,
                                  planner_why=planner_why, lines_left=lines_left)
         on_stage(STAGE_RESEARCH)
-        result = self._research_run(prompt, question, cancel, live)
-        del prompt
-        if result.started:
-            runs, stats = runs + 1, stats + (result.stats,)
-        init = init or result.init
-        answer = result.answer
-        if result.failure is not None or not isinstance(answer, ResearchAnswer) or result.web is None:
-            failure = result.failure
-            return AskOutcome(False, failure.kind if failure else "error",
-                              failure.message if failure else "The web research's answer could not be read; nothing "
-                                                              "was proposed",
-                              runs=runs, stats=stats, init=init, mail=mail)
-        cards, found = validate_research(answer, result.web, now=now, max_sources=self.research.limits.max_sources,
-                                         max_cards=self.config.ask.max_cards, page_ids=page_ids,
-                                         question=sent_question, hint=sent_hint, forced=forced)
-        research_live.validated(live, cards, found, answer, result.web, self._hour24())
-        logger.info("Research: %d source(s) shown, %d left out, %d suggestion card(s), %d dropped",
-                    len(found.sources), len(found.left_out), len(found.suggested), len(found.dropped))
-        message = "; ".join([*notes, *research_notes(found)])
-        return AskOutcome(True, "ok", message, say=found.answer, cards=cards,
-                          refused=sum(1 for card in cards if card.error), runs=runs, init=init, stats=stats,
-                          mail=mail, research=found)
+        # The run's web steps (with the LIVE view): its searches and page reads as they happen, then
+        # the pictures of the sources the checked answer cites. Its page pictures end with this
+        # research (finished()), after those of the sources: also when it failed or never started.
+        web_steps = research_live.WebSteps(live, limits, snapshots=self.page_snapshots) if live.enabled else None
+        try:
+            result = self._research_run(prompt, question, cancel, live, web_steps)
+            del prompt
+            if result.started:
+                runs, stats = runs + 1, stats + (result.stats,)
+            init = init or result.init
+            answer = result.answer
+            if result.failure is not None or not isinstance(answer, ResearchAnswer) or result.web is None:
+                failure = result.failure
+                return AskOutcome(False, failure.kind if failure else "error",
+                                  failure.message if failure else "The web research's answer could not be read; "
+                                                                  "nothing was proposed",
+                                  runs=runs, stats=stats, init=init, mail=mail)
+            cards, found = validate_research(answer, result.web, now=now,
+                                             max_sources=self.research.limits.max_sources,
+                                             max_cards=self.config.ask.max_cards, page_ids=page_ids,
+                                             question=sent_question, hint=sent_hint, forced=forced)
+            research_live.validated(live, cards, found, answer, result.web, self._hour24(),
+                                    web_steps=web_steps)
+            logger.info("Research: %d source(s) shown, %d left out, %d suggestion card(s), %d dropped",
+                        len(found.sources), len(found.left_out), len(found.suggested), len(found.dropped))
+            message = "; ".join([*notes, *research_notes(found)])
+            return AskOutcome(True, "ok", message, say=found.answer, cards=cards,
+                              refused=sum(1 for card in cards if card.error), runs=runs, init=init, stats=stats,
+                              mail=mail, research=found)
+        finally:
+            if web_steps is not None:
+                web_steps.finished()   # no more page pictures for this research
 
     def _research_run(self, prompt: str, question: str, cancel: threading.Event | None,
-                      live: LiveTask = NO_TASK) -> RunResult:
+                      live: LiveTask = NO_TASK, web_steps: research_live.WebSteps | None = None) -> RunResult:
         """The research run with its LIVE steps; counted (kind "research") only when it starts.
-        With the LIVE view and ``page_snapshots`` (the app's snapshot_engine.PageSnapshotter), the
-        pages the run read are pictured on their web.fetch steps; the run is told nothing of it."""
+        ``web_steps`` (with the LIVE view) shows its searches (each drawn as a results page) and
+        page reads as they happen; with ``page_snapshots`` (the app's
+        snapshot_engine.PageSnapshotter) the pages the run read are pictured on their web.fetch
+        steps. The run is told nothing of it."""
         research = self._research_config()
         limits = self.research.limits
         step = research_live.run_step(live, model=research.model, prompt=prompt, limits=limits,
                                       timeout_s=research.timeout_seconds)
-        web_steps = research_live.WebSteps(live, limits, snapshots=self.page_snapshots) if step is not NO_STEP \
-            else None
-        try:
-            ready, refused = self.research.preflight()   # a run refused before it starts is not counted
-            if refused is not None:
-                research_live.run_skipped(step, refused.message)
-                return RunResult(failure=refused, started=False)
-            research_live.run_ready(step, self.research, ready)
-            return self._research_started(prompt, question, cancel, live, step, web_steps)
-        finally:
-            if web_steps is not None:
-                web_steps.finished()   # no more page pictures for this run (also when it never started)
+        ready, refused = self.research.preflight()   # a run refused before it starts is not counted
+        if refused is not None:
+            research_live.run_skipped(step, refused.message)
+            return RunResult(failure=refused, started=False)
+        research_live.run_ready(step, self.research, ready)
+        return self._research_started(prompt, question, cancel, live, step,
+                                      web_steps if step is not NO_STEP else None)
 
     def _research_started(self, prompt: str, question: str, cancel: threading.Event | None, live: LiveTask,
                           step: LiveStep, web_steps: research_live.WebSteps | None) -> RunResult:

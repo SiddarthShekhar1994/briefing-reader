@@ -211,7 +211,12 @@ Widgets
         thumbnail button: Enter, Space or a click opens it larger);
         ``open_picture(step_id)`` shows a READY picture in the viewer,
         ``picture_viewer()`` (None until one was opened); during a countdown a
-        short view shows the payload picture's changed part.
+        short view shows the payload picture's changed part. A field's
+        "picture:<step id>" link (a research's check pointing at a source's
+        picture) is followed here (``follow_link``): that picture larger (its
+        close gives the focus back to the link, scrolled into view), or that
+        step (``reveal_step``) while its picture is not READY (the keyboard
+        focus the link had goes along, to that step's picture).
     LIVE pictures (pictures.py's data, drawn in the HUD theme at the size
         shown): ``picture_height(picture, width, stamp=, max_height=)``,
         ``paint_picture(painter, rect, picture, stamp=, max_height=)``,
@@ -219,10 +224,13 @@ Widgets
         taller than ``max_height`` is cut with a fade and "Enter: see all"),
         ``picture_focus(...)`` (where a calendar change's changed blocks are),
         ``week_label`` / ``week_labels`` (the week strip's day labels, one form
-        for all), ``picture_state_text(picture)``; the caps
+        for all), ``search_address_lines(hit, width)`` (a search result's
+        address line: its site first, cut in the middle when too wide),
+        ``picture_state_text(picture)``; the caps
         ``LIVE_PICTURE_MAX_W``, ``LIVE_PICTURE_MAIL_MAX_PX``,
         ``LIVE_PICTURE_DAY_MAX_PX``, ``LIVE_PICTURE_WEEK_MAX_PX``,
-        ``LIVE_PICTURE_PAGE_MAX_PX``, ``LIVE_PICTURE_PENDING_PX``.
+        ``LIVE_PICTURE_PAGE_MAX_PX``, ``LIVE_PICTURE_SEARCH_MAX_PX`` (a web
+        search drawn as a compact results page), ``LIVE_PICTURE_PENDING_PX``.
         ``PictureViewer(parent)``: a picture larger inside Jarvis (non-modal;
         ``show_picture(step_id, picture, stamp, title)``, ``refresh``,
         ``step_id()``, ``picture()``, ``closed(step_id)``; Esc / Enter / Space /
@@ -8417,8 +8425,21 @@ class _LiveValue(QLabel):
         menu.deleteLater()
 
 
+LIVE_PICTURE_LINK_WORDS = "shows that picture larger, or its step while it has none"
+
+
+def _link_name(item: live_events.Field) -> str:
+    """A link field's accessible name: its label and value (the label is a separate, plain label),
+    and for a "picture:<step id>" link what pressing it does."""
+    name = f"{item.label}: {item.value}" if item.label else item.value
+    if item.link.startswith(live_events.PICTURE_LINK):
+        name += f" - {LIVE_PICTURE_LINK_WORDS}"
+    return name
+
+
 class _LiveFields(QWidget):
-    """A step's fields: "LABEL  value" rows; a value with a link is a _WrapLink. Two columns (the
+    """A step's fields: "LABEL  value" rows; a value with a link is a _WrapLink (its accessible name
+    says its label too: _link_name). Two columns (the
     label column LIVE_FIELD_LABEL_PX wide) when at least LIVE_FIELDS_WIDE_PX wide; narrower, down to
     LIVE_FIELDS_MEDIUM_PX, still two columns with the label column as wide as its longest word (a
     short LIVE tab shows more rows); narrower still each label above its value. It places its
@@ -8429,7 +8450,7 @@ class _LiveFields(QWidget):
     _NARROW_GAP = 8
     _NARROW_ROW_GAP = 4
 
-    def __init__(self, on_link: Callable[[str], None]) -> None:
+    def __init__(self, on_link: Callable[[str, QWidget | None], None]) -> None:
         super().__init__()
         self._on_link = on_link
         self._fields: tuple[live_events.Field, ...] = ()
@@ -8466,6 +8487,7 @@ class _LiveFields(QWidget):
                     value.set_text(new.value)   # type: ignore[attr-defined]
                     if isinstance(value, _WrapLink):
                         value.setProperty("live_link", new.link)
+                        value.setAccessibleName(_link_name(new))
             self._fields = fields
             self._fit_narrow_label()
             self._arrange()
@@ -8479,6 +8501,7 @@ class _LiveFields(QWidget):
             label = _live_label(item.label.upper(), fonts.label, TEXT_DIM)
             if item.link:
                 value: QWidget = _WrapLink(item.value)
+                value.setAccessibleName(_link_name(item))
                 value.setProperty("live_link", item.link)
                 value.clicked.connect(lambda _checked=False, button=value: self._clicked(button))
             else:
@@ -8496,7 +8519,7 @@ class _LiveFields(QWidget):
     def _clicked(self, button: QWidget) -> None:
         link = button.property("live_link")
         if isinstance(link, str) and link:
-            self._on_link(link)
+            self._on_link(link, button)
 
     def value_widget(self, label: str) -> QWidget | None:
         for index, item in enumerate(self._fields):
@@ -8867,6 +8890,7 @@ LIVE_PICTURE_MAIL_MAX_PX = 300    # an email picture taller than this is cut wit
 LIVE_PICTURE_DAY_MAX_PX = 440     # a calendar change is drawn to fit (its hours closer together)
 LIVE_PICTURE_WEEK_MAX_PX = 320
 LIVE_PICTURE_PAGE_MAX_PX = 400    # a page picture is scaled down to fit
+LIVE_PICTURE_SEARCH_MAX_PX = 320  # a web search's results taller than this are cut with a fade ("Enter: see all")
 LIVE_PICTURE_PENDING_PX = 120
 PICTURE_VIEWER_SCREEN = 0.9       # the viewer is at most this much of its screen
 PICTURE_VIEWER_MODEL_W = 720      # an email / calendar picture is drawn at most this wide in the viewer
@@ -8881,7 +8905,7 @@ PICTURE_TONE_COLORS = {
 _PICTURE_MAX = {
     live_pictures.KIND_EMAIL: LIVE_PICTURE_MAIL_MAX_PX, live_pictures.KIND_OUTGOING: LIVE_PICTURE_MAIL_MAX_PX,
     live_pictures.KIND_DAY: LIVE_PICTURE_DAY_MAX_PX, live_pictures.KIND_WEEK: LIVE_PICTURE_WEEK_MAX_PX,
-    live_pictures.KIND_PAGE: LIVE_PICTURE_PAGE_MAX_PX,
+    live_pictures.KIND_PAGE: LIVE_PICTURE_PAGE_MAX_PX, live_pictures.KIND_SEARCH: LIVE_PICTURE_SEARCH_MAX_PX,
 }
 _RSVP_CHIP_COLORS = {"YES": GREEN, "NO": RED, "MAYBE": AMBER}
 _PIC_PAD = 12
@@ -9453,6 +9477,125 @@ def _paint_week(painter: QPainter | None, rect: QRectF, picture: Any, stamp: tup
     return y + 10 - top
 
 
+_SEARCH_GLASS_W = 26.0     # the search box's magnifier column
+_SEARCH_PATH_GAP = 6.0     # between a result's site and the rest of its address
+_SEARCH_PATH_MIN = 24.0    # narrower than this left for the rest of the address: the site alone
+
+
+def _paint_glass(painter: QPainter, center: QPointF, radius: float, color: str | QColor) -> None:
+    """A small magnifying glass (the search box's sign)."""
+    pen = QPen(QColor(color), 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(center, radius, radius)
+    reach = radius * 0.72
+    painter.drawLine(QPointF(center.x() + reach, center.y() + reach),
+                     QPointF(center.x() + reach + radius * 0.8, center.y() + reach + radius * 0.8))
+
+
+def search_address_lines(hit: Any, width: float) -> tuple[_TextLines, _TextLines | None]:
+    """A search result's address line ``width`` px wide as a results page shows it: its site (the
+    host, whose site it is; "https://" left out) and the rest of the address after it, cut at its
+    end (None when there is no rest or no room for it). A site too wide for the line is cut in its
+    middle, so the end of the host (".example.edu") always shows. An address without a host is
+    the address as listed, cut at its end, alone."""
+    if not hit.site:
+        return _TextLines(hit.url, "pic_small", width, max_lines=1), None
+    font = _LiveFonts.get().pic_small
+    site = hit.site
+    if _text_advance(font, site) > width - 1:
+        site = QFontMetricsF(font).elidedText(site, Qt.TextElideMode.ElideMiddle, max(1.0, width - 1))
+    shown = _TextLines(site, "pic_small", width, max_lines=1)
+    room = width - shown.natural_width - _SEARCH_PATH_GAP
+    if not hit.path or room < _SEARCH_PATH_MIN:
+        return shown, None
+    return shown, _TextLines(hit.path, "pic_small", room, max_lines=1)
+
+
+def _paint_search_address(painter: QPainter | None, hit: Any, left: float, y: float, width: float) -> float:
+    """A result's address line (search_address_lines): the site, then the rest dimmer. Returns its
+    height."""
+    site, rest = search_address_lines(hit, width)
+    _pic_draw(painter, site, left, y, TEXT_MUTED if hit.site else TEXT_SUB)
+    if rest is not None:
+        _pic_draw(painter, rest, left + site.natural_width + _SEARCH_PATH_GAP, y, TEXT_DIM)
+    return site.height
+
+
+def _paint_search(painter: QPainter | None, rect: QRectF, picture: Any, stamp: tuple[str, str] = _NO_STAMP,
+                  limit: float | None = None) -> float:
+    """A web search as a compact results page: the count of results, the exact query in a search
+    box (the sites it was kept to or kept from under it), then each result as its title, its
+    address (its site first: _paint_search_address) and (only when the search gave one) its
+    snippet, "+N more" when not all are drawn.
+    Plain text only: no link, nothing loads. Measures only without a painter; stops past
+    ``limit`` (its height then exceeds it)."""
+    search = picture.search
+    left, width, top = rect.left() + _PIC_PAD, max(40.0, rect.width() - 2 * _PIC_PAD), rect.top()
+    stop = None if limit is None else top + limit
+    y = top + 10
+    chip_w = _pic_chip(painter, "WEB SEARCH", left, y, width, TEXT_MUTED)
+    total = len(search.hits) + search.more
+    count = ("results Jarvis could not list" if search.unread
+             else f"{total:,} result{'s' if total != 1 else ''} listed")
+    counted = _TextLines(count, "pic_small", max(10.0, width - chip_w - 8), 1)
+    _pic_draw(painter, counted, left + chip_w + 8, y + 1, TEXT_DIM)
+    y += 26
+    query = _TextLines(search.query, "pic_value", max(10.0, width - _SEARCH_GLASS_W - 10), max_lines=3)
+    box_h = max(32.0, query.height + 14)
+    if painter is not None:
+        box = QRectF(left, y, width, box_h)
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.fillPath(chamfer_path(box, 5, CUT_TL | CUT_BR), rgba(ACCENT, 0.07))
+            painter.setPen(QPen(rgba(ACCENT, 0.55), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(chamfer_path(box.adjusted(0.5, 0.5, -0.5, -0.5), 5, CUT_TL | CUT_BR))
+            _paint_glass(painter, QPointF(left + _SEARCH_GLASS_W / 2 - 1, y + box_h / 2 - 1.5), 4.6, ACCENT)
+        finally:
+            painter.restore()
+    _pic_draw(painter, query, left + _SEARCH_GLASS_W, y + (box_h - query.height) / 2, TEXT_BRIGHT)
+    y += box_h + 6
+    for label, sites in (("ONLY THESE SITES", search.only), ("NOT THESE SITES", search.never)):
+        if sites:
+            lines = _TextLines(f"{label}: {sites}", "pic_small", width, max_lines=2)
+            _pic_draw(painter, lines, left, y, TEXT_SUB)
+            y += lines.height + 2
+    if search.hits:
+        caption = _TextLines(LIVE_UNTRUSTED_TEXT, "pic_small", width, max_lines=2)
+        _pic_draw(painter, caption, left, y + 2, AMBER_META)
+        y += caption.height + 2
+    y += 6
+    _pic_rule(painter, left, y, width)
+    y += 9
+    if not search.hits:
+        words = live_pictures.SEARCH_UNREAD if search.unread else live_pictures.SEARCH_EMPTY
+        lines = _TextLines(words, "pic_small", width, max_lines=2)
+        _pic_draw(painter, lines, left, y, AMBER if search.unread else TEXT_DIM)
+        y += lines.height
+    for index, hit in enumerate(search.hits):
+        if stop is not None and y > stop:
+            return y - top
+        if index:
+            y += 9
+        title = _TextLines(hit.title, "pic_headline", width, max_lines=2)
+        _pic_draw(painter, title, left, y, TEXT_BRIGHT)
+        y += title.height + 1
+        y += _paint_search_address(painter, hit, left, y, width)
+        if hit.snippet:
+            snippet = _TextLines(hit.snippet, "pic_small", width, max_lines=3)
+            _pic_draw(painter, snippet, left, y + 2, TEXT_SOFT)
+            y += snippet.height + 2
+    if search.more:
+        more = _TextLines(f"+{search.more:,} more result{'s' if search.more != 1 else ''}", "pic_small", width,
+                          max_lines=1)
+        _pic_draw(painter, more, left, y + 8, TEXT_DIM)
+        y += more.height + 8
+    return y + 12 - top
+
+
 def _page_size(page: Any, width: float, max_height: float | None = None) -> tuple[float, float]:
     """A page picture's size at most ``width`` wide (and ``max_height`` tall), its shape kept."""
     if page is None or page.width <= 0 or page.height <= 0:
@@ -9469,8 +9612,8 @@ def picture_height(picture: Any, width: int, stamp: tuple[str, str] = _NO_STAMP,
                    max_height: float | None = None) -> int:
     """The natural height of a READY picture drawn ``width`` logical px wide (texts wrap at that
     width in readable fonts, never a scaled-down bitmap). A day / week picture squeezes its hours to
-    fit ``max_height``; an email picture stops measuring past it (then it is taller); a page keeps
-    its shape. 0 for a picture that is not READY."""
+    fit ``max_height``; an email or search picture stops measuring past it (then it is taller); a
+    page keeps its shape. 0 for a picture that is not READY."""
     if picture is None or picture.state != live_events.PICTURE_READY:
         return 0
     rect = QRectF(0, 0, max(1, width), 0)
@@ -9483,6 +9626,8 @@ def picture_height(picture: Any, width: int, stamp: tuple[str, str] = _NO_STAMP,
         return math.ceil(_paint_week(None, rect, picture, stamp, max_height))
     if picture.page is not None and kind == live_pictures.KIND_PAGE:
         return math.ceil(_page_size(picture.page, width, max_height)[1])
+    if picture.search is not None and kind == live_pictures.KIND_SEARCH:
+        return math.ceil(_paint_search(None, rect, picture, stamp, max_height))
     return 0
 
 
@@ -9502,8 +9647,8 @@ def picture_focus(picture: Any, width: int, stamp: tuple[str, str] = _NO_STAMP,
 
 def paint_picture(painter: QPainter, rect: QRectF, picture: Any, stamp: tuple[str, str] = _NO_STAMP,
                   max_height: float | None = None) -> None:
-    """Draw a READY picture into ``rect`` (an email / calendar picture on its card; a page's image
-    in a thin border)."""
+    """Draw a READY picture into ``rect`` (an email / calendar / search picture on its card; a
+    page's image in a thin border)."""
     if picture is None or picture.state != live_events.PICTURE_READY:
         return
     painter.save()
@@ -9530,6 +9675,8 @@ def paint_picture(painter: QPainter, rect: QRectF, picture: Any, stamp: tuple[st
             _paint_day(painter, rect, picture, stamp, max_height)
         elif picture.week is not None:
             _paint_week(painter, rect, picture, stamp, max_height)
+        elif picture.search is not None:
+            _paint_search(painter, rect, picture, stamp, rect.height())
     finally:
         painter.restore()
 
@@ -9537,8 +9684,8 @@ def paint_picture(painter: QPainter, rect: QRectF, picture: Any, stamp: tuple[st
 def picture_pixmap(picture: Any, width: float, dpr: float = 1.0, stamp: tuple[str, str] = _NO_STAMP,
                    max_height: float | None = None) -> QPixmap:
     """``picture`` drawn ``width`` logical px wide into a pixmap of that size times ``dpr`` (crisp
-    at 150 %). With ``max_height`` a picture taller than that (an email; a calendar picture even
-    squeezed) is cut with a fade and "Enter: see all", never silently; a page is scaled down to fit."""
+    at 150 %). With ``max_height`` a picture taller than that (an email, a search; a calendar picture
+    even squeezed) is cut with a fade and "Enter: see all", never silently; a page is scaled down to fit."""
     dpr = max(1.0, float(dpr or 1.0))
     if picture is not None and picture.kind == live_pictures.KIND_PAGE:
         w, h = _page_size(picture.page, width, max_height)
@@ -10025,7 +10172,8 @@ class _LiveDetails(QWidget):
     notes ("+1.2 s  ..."), the text blocks. Only what changed is redone (a block's text is set once
     per revision)."""
 
-    def __init__(self, on_link: Callable[[str], None], on_picture: Callable[[], None] | None = None) -> None:
+    def __init__(self, on_link: Callable[[str, QWidget | None], None],
+                 on_picture: Callable[[], None] | None = None) -> None:
         super().__init__()
         fonts = _LiveFonts.get()
         self.picture = _LivePicture(on_picture)
@@ -10285,7 +10433,7 @@ class _LiveStep(QWidget):
         changed = False
         if open_:
             if self.details is None:
-                self.details = _LiveDetails(self._log.linkClicked.emit, self._open_picture)
+                self.details = _LiveDetails(self._log.follow_link, self._open_picture)
                 self._layout.addWidget(self.details)
                 changed = True
             changed |= self.details.apply(view)
@@ -10641,7 +10789,8 @@ class LiveLog(QScrollArea):
     ``removed`` ids go; ``reset`` replaces everything). Every text is plain text (painted, or a
     PlainText QLabel / read-only QPlainTextEdit); nothing is a link but a field's result link
     (``linkClicked(link)``: a Jarvis-made Google result link or an internal id such as
-    "tab:jarvis"), and nothing loads from anywhere. Details and text blocks are made on their
+    "tab:jarvis"; a "picture:<step id>" link is followed here: follow_link), and nothing loads
+    from anywhere. Details and text blocks are made on their
     first open. The elapsed times tick with the view's own timer: every 250 ms while a countdown
     shows, every second while a step runs, never while hidden, minimized or idle; running glyphs
     blink on the shared blink clock. It follows the newest step unless the owner scrolled in the
@@ -10685,7 +10834,8 @@ class LiveLog(QScrollArea):
         self._header_first = False
         self._tab_order_pending = False
         self._viewer: PictureViewer | None = None   # made on the first picture opened larger (kept)
-        self._viewer_ring = False                   # the thumbnail had a keyboard focus ring when opened
+        self._viewer_ring = False                   # its opener had a keyboard focus ring when opened
+        self._viewer_opener: QWidget | None = None  # the "Picture [n]" link it was opened from (None: a thumbnail)
         self._viewer_restore = True                 # its close gives the focus back (False: Jarvis closed it unseen)
         self.apply_count = 0
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -10763,17 +10913,23 @@ class LiveLog(QScrollArea):
         viewer = self._viewer
         return viewer if viewer is not None and shiboken6.isValid(viewer) else None
 
-    def open_picture(self, step_id: int) -> bool:
+    def open_picture(self, step_id: int, opener: QWidget | None = None) -> bool:
         """Show step ``step_id``'s READY picture larger in the viewer (inside Jarvis, its parent this
         log's window: the main window or the pop-out). False when the step or a READY picture is
-        not there."""
+        not there. Its close gives the focus back to ``opener`` (a link in this log it was opened
+        from), else to the step's thumbnail."""
         step = self.step_widget(step_id)
         view = step.view if step is not None else None
         picture = view.picture if view is not None else None
         if picture is None or picture.state != live_events.PICTURE_READY:
             return False
-        thumbnail = step.picture_widget()
-        self._viewer_ring = thumbnail is not None and thumbnail.focus_ring()
+        if opener is not None and shiboken6.isValid(opener) and self.isAncestorOf(opener):
+            self._viewer_opener = opener
+            self._viewer_ring = isinstance(opener, _LiveButton) and opener.focus_ring()
+        else:
+            thumbnail = step.picture_widget()
+            self._viewer_opener = None
+            self._viewer_ring = thumbnail is not None and thumbnail.focus_ring()
         viewer = self.picture_viewer()
         if viewer is None or viewer.parentWidget() is not self.window():
             if viewer is not None:
@@ -10783,6 +10939,68 @@ class LiveLog(QScrollArea):
             viewer.closed.connect(self._viewer_closed)
         viewer.show_picture(step_id, picture, live_pictures.stamp(picture, view.status, view.status_text), view.title)
         return True
+
+    def follow_link(self, link: str, opener: QWidget | None = None) -> None:
+        """A field's link: "picture:<step id>" (a research's check pointing at a source's picture)
+        shows that picture larger here when it is READY (its close comes back to ``opener``, the
+        link pressed), else that step (its picture on its way or unavailable; when ``opener`` had
+        the focus, that step's picture takes it, with a ring if the link had one: the focus never
+        stays on a link scrolled out of view); every other link goes out as ``linkClicked``."""
+        if not isinstance(link, str) or not link:
+            return
+        if link.startswith(live_events.PICTURE_LINK):
+            try:
+                step_id = int(link[len(live_events.PICTURE_LINK):])
+            except ValueError:
+                return
+            if opener is None:
+                focused = QApplication.focusWidget()
+                opener = focused if focused is not None and self.isAncestorOf(focused) else None
+            if not self.open_picture(step_id, opener):
+                focus = None
+                if opener is not None and shiboken6.isValid(opener) and opener.hasFocus():
+                    ring = isinstance(opener, _LiveButton) and opener.focus_ring()
+                    focus = Qt.FocusReason.ShortcutFocusReason if ring else Qt.FocusReason.OtherFocusReason
+                self.reveal_step(step_id, focus)
+            return
+        self.linkClicked.emit(link)
+
+    def reveal_step(self, step_id: int, focus: Qt.FocusReason | None = None) -> bool:
+        """Scroll to step ``step_id`` with its details open (its task opened too); False when it is
+        not shown. The view then holds there like after the owner's own scroll. With ``focus`` (the
+        link followed here had the keyboard focus) the step's picture (its row when it shows none)
+        takes the focus for that reason once in view, while the focus is still in this log."""
+        card = next((card for card in self._cards.values() if card.step_widget(step_id) is not None), None)
+        if card is None:
+            return False
+        card.set_expanded(True)
+        step = card.step_widget(step_id)
+        if step is None:
+            return False
+        step.set_open(True)
+        self._user_scrolled_at = time.monotonic()
+        self._follow = False
+        self.widget().layout().activate()
+        QTimer.singleShot(0, lambda: self._scroll_to_step(step_id, focus))
+        return True
+
+    def _scroll_to_step(self, step_id: int, focus: Qt.FocusReason | None = None) -> None:
+        if not shiboken6.isValid(self):
+            return
+        step = self.step_widget(step_id)
+        if step is None or not step.isVisible():
+            return
+        bar = self.verticalScrollBar()
+        top = step.mapTo(self.widget(), QPoint(0, 0)).y()
+        bar.setValue(max(0, min(bar.maximum(), top - self._GAP)))
+        current = QApplication.focusWidget()
+        if focus is None or current is None or not self.isAncestorOf(current):
+            return   # a click, or the focus went elsewhere meanwhile: it is not taken
+        picture = step.details.picture if step.details is not None else None
+        target = picture if picture is not None and picture.isVisible() else step.row
+        if target.isVisible():
+            target.setFocus(focus)
+            self.ensureWidgetVisible(target, 0, self._GAP)
 
     def _sync_viewer(self) -> None:
         """The viewer follows its step: a new picture or stamp is shown again; it closes when the
@@ -10810,15 +11028,23 @@ class LiveLog(QScrollArea):
                 self._viewer_restore = True
 
     def _viewer_closed(self, step_id: int) -> None:
-        """Back to the thumbnail it was opened from (with its ring when it had one), when the owner
-        closed it or was in it."""
-        if not shiboken6.isValid(self) or not self._viewer_restore:
+        """Back to where it was opened from (with its ring when it had one), when the owner closed
+        it or was in it: the "Picture [n]" link, scrolled into view, else the step's thumbnail."""
+        if not shiboken6.isValid(self):
+            return
+        opener, self._viewer_opener = self._viewer_opener, None
+        if not self._viewer_restore:
+            return
+        reason = Qt.FocusReason.ShortcutFocusReason if self._viewer_ring else Qt.FocusReason.OtherFocusReason
+        if opener is not None and shiboken6.isValid(opener) and opener.isVisible() and self.isAncestorOf(opener):
+            opener.window().activateWindow()
+            opener.setFocus(reason)
+            self.ensureWidgetVisible(opener, 0, self._GAP)
             return
         step = self.step_widget(step_id)
         thumbnail = step.picture_widget() if step is not None else None
         if thumbnail is not None and thumbnail.isVisible():
             thumbnail.window().activateWindow()
-            reason = Qt.FocusReason.ShortcutFocusReason if self._viewer_ring else Qt.FocusReason.OtherFocusReason
             thumbnail.setFocus(reason)
 
     def _sync_empty(self) -> None:

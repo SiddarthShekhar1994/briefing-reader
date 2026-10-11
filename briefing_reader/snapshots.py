@@ -25,6 +25,7 @@ hidden private window may load, how many pictures a research gets, and the words
     resolved_problem(addresses)       the gate's decision for the addresses a name resolved to (every
                                       one a public IPv4 address, else refused: DNS rebinding)
     reason_kind(reason)               the one word a log line may carry for a reason ("timeout")
+    over_cap_reason(cap)              the refusal past a research's picture cap, with that cap's number
     RunBudget                         at most MAX_PER_RUN pictures per research, one per page (thread-safe)
     ShotResult                        what one shot gave: the JPEG bytes and sizes, or a reason
 
@@ -57,7 +58,8 @@ __all__ = [
     "OFFLINE_FLAGS",
     "NOTE_OPENING", "NOTE_OPENED", "snapshot_url_problem", "request_problem", "final_host_note",
     "chromium_flags", "flag_tokens", "sandbox_problem", "engine_flags_problem", "tunnel_target",
-    "resolved_problem", "reason_kind", "RunBudget", "ShotResult", "GATE_FLAGS", "GATE_PORT", "RESOLVER_RULES",
+    "resolved_problem", "reason_kind", "over_cap_reason", "RunBudget", "ShotResult", "GATE_FLAGS", "GATE_PORT",
+    "RESOLVER_RULES",
 ]
 
 MAX_PER_RUN = 4                 # pictures per research run (the fetch cap); min(4, [research] max_fetches)
@@ -99,7 +101,8 @@ GATE_PORT = 443                 # the one port the gate connects to
 # Reasons ("Picture unavailable: <reason>"), shown in LIVE; a log line carries reason_kind() only.
 R_NOT_PUBLIC_HTTPS = "Jarvis opens only public https pages"   # + the rule's own words in brackets
 R_SEARCH_PAGE = "a search results page is not opened"
-R_OVER_CAP = "at most 4 page pictures per research"
+R_OVER_CAP = "at most 4 page pictures per research"   # over_cap_reason(MAX_PER_RUN); a lower cap says its own
+R_NO_PICTURES = "no page pictures for a research that reads no pages ([research] max_fetches = 0)"
 R_SAME_PAGE = "the same page as an earlier picture"
 R_TIMEOUT = "the page did not load within 15 s"
 R_LOAD_FAILED = "the page did not load on this PC"
@@ -211,7 +214,7 @@ def _search_page(host: str, path: str, query: str) -> bool:
 
 
 def snapshot_url_problem(url: Any) -> str:
-    """Why a page a research read may not be pictured ("" = it may): it must pass
+    """Why a page a research read or cites may not be pictured ("" = it may): it must pass
     actions.web_link_problem (https, a public host by name, no IP address, no user:pass, port none
     or 443, no dot segments, at most 2,048 characters, none of | < > " `), and it is not a search
     results page (Google, Bing, DuckDuckGo, Yahoo, Brave, Yandex, Baidu, Ecosia, Startpage).
@@ -489,6 +492,20 @@ def resolved_problem(addresses: Any) -> str:
         return G_LOCAL
 
 
+def over_cap_reason(cap: Any) -> str:
+    """Why a page past a research's picture cap gets none, naming that cap (it is min(4, [research]
+    max_fetches)): R_OVER_CAP at 4, "at most 2 page pictures per research", R_NO_PICTURES at 0."""
+    try:
+        count = max(0, int(cap))
+    except (TypeError, ValueError, OverflowError):
+        count = MAX_PER_RUN
+    if count == MAX_PER_RUN:
+        return R_OVER_CAP
+    if count == 0:
+        return R_NO_PICTURES
+    return f"at most {count} page picture{'s' if count != 1 else ''} per research"
+
+
 def reason_kind(reason: Any) -> str:
     """The one word a log line may carry for a reason: timeout / load_failed / too_large / blank /
     crashed / no_engine / engine_failed / sandbox / cancelled / test_run / shutdown, else refused
@@ -544,7 +561,7 @@ class RunBudget:
         return run
 
     def admit(self, task_id: int, url: str, cap: int = MAX_PER_RUN) -> str:
-        """"" and the page counted, or why it gets no picture (R_SAME_PAGE, R_OVER_CAP,
+        """"" and the page counted, or why it gets no picture (R_SAME_PAGE, over_cap_reason(cap),
         R_CANCELLED for a cancelled run)."""
         key = _page_key(url) if isinstance(url, str) else ""
         with self._lock:
@@ -554,7 +571,7 @@ class RunBudget:
             if key in run.pages:
                 return R_SAME_PAGE
             if run.count >= max(0, int(cap)):
-                return R_OVER_CAP
+                return over_cap_reason(cap)
             run.pages.add(key)
             run.count += 1
             return ""

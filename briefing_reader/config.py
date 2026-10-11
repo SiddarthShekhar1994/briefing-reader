@@ -324,8 +324,9 @@ class LiveConfig:
     auto_open: str = LIVE_OPEN_TAB   # "tab" | "window" | "off" (true -> "tab", false -> "off" accepted)
     background: bool = True        # the rolling "Background reads" row (agenda, event checks, sign-ins...)
     text: bool = True              # keep the text blocks (false: only their sizes)
-    pictures: bool = True          # email and calendar pictures in LIVE, drawn on this PC
-    page_snapshots: bool = True    # pictures of the pages a web research read: the only part that uses the network
+    pictures: bool = True          # email, calendar and web search pictures in LIVE, drawn on this PC
+    # pictures of the pages a web research read or cites: the only part that uses the network
+    page_snapshots: bool = True
 
 
 # The productivity bundle ([productivity]): plan my day, meeting prep, follow-ups and memory. Off in

@@ -443,7 +443,7 @@ class RoutedTests(ResearchAppCase):
         self.assertLess(kinds.index(live.PLANNER_RUN), kinds.index(live.RESEARCH_INPUT))
         self.assertEqual(kinds[kinds.index(live.RESEARCH_INPUT):],
                          [live.RESEARCH_INPUT, live.RESEARCH_RUN, live.WEB_SEARCH, live.WEB_FETCH,
-                          live.RESEARCH_VALIDATE, live.ASK_CARDS])
+                          live.RESEARCH_VALIDATE, live.WEB_SOURCE, live.ASK_CARDS])
         self.assertEqual((task.status, task.summary), (live.STATUS_OK, "2 source cards + 1 proposal"))
         planner_run = next(step for step in task.steps if step.kind == live.PLANNER_RUN)
         self.assertEqual(planner_run.summary, "asked for web research - opening hours are on the web")
@@ -495,9 +495,10 @@ class PagePictureTests(ResearchAppCase):
         task_id = self.c.ask.task_id
         self.finish()
         self.drained()
-        self.assertEqual(snaps.requests, [(VISIT_URL, task_id)])
+        # The page read, then (after the check) the cited source no page read pictured.
+        self.assertEqual(snaps.requests, [(VISIT_URL, task_id), (HOURS_URL, task_id)])
         self.assertEqual(snaps.ended, [task_id])
-        self.assertEqual(snaps.threads, ["ask"])                       # asked from the Ask's thread
+        self.assertEqual(snaps.threads, ["ask", "ask"])                # asked from the Ask's thread
         step = self.fetch_step(task_id)
         self.assertEqual((step.view.status, step.view.picture.state), (live.STATUS_OK, live.PICTURE_PENDING))
         self.assertTrue(step.is_open())                                # a step with a picture starts open
@@ -514,6 +515,31 @@ class PagePictureTests(ResearchAppCase):
         self.assertTrue(self.reading.live_log.open_picture(step.view.id))   # Enter / click: larger, inside Jarvis
         viewer = self.reading.live_log.picture_viewer()
         self.assertTrue(viewer is not None and viewer.isVisible())
+        viewer.close()
+        settle()
+        # The cited source: its own step with its picture; the check's "Picture [2]" link shows it.
+        card = self.reading.live_log.task_widget(task_id)
+        source = next(step for step in card.step_widgets() if step.view.kind == live.WEB_SOURCE)
+        self.assertEqual(source.view.title, "Source [2]: museum.example.net")
+        self.assertTrue(source.is_open() and source.picture_widget().pending())
+        check = next(step for step in card.step_widgets() if step.view.kind == live.RESEARCH_VALIDATE)
+        check.set_open(True)
+        settle()
+        link = check.details.fields.value_widget("Picture [2]")
+        self.assertIsInstance(link, hud._WrapLink)
+        link.click()                                                   # not READY yet: the step comes into view
+        settle()
+        self.assertFalse(viewer.isVisible())
+        snaps.complete(1)
+        self.drained()
+        link = check.details.fields.value_widget("Picture [2]")
+        outside: list[str] = []
+        self.reading.live_log.linkClicked.connect(outside.append)
+        link.click()                                                   # READY: shown larger, inside Jarvis
+        settle()
+        self.assertEqual(outside, [])                                  # an internal link: it never leaves LIVE
+        self.assertTrue(viewer.isVisible())
+        self.assertEqual(viewer.step_id(), source.view.id)
         viewer.close()
         settle()
         # Clear: the snapshotter drops what nobody would see any more.

@@ -12,7 +12,11 @@
                                       Move, Cancel, RSVP), with the day's other events only when Jarvis
                                       had already read that day (KnownDays) - never a Google call for it
     week_picture(events, start, end, ...)   the 7 days of an Ask's calendar read (CALENDAR_READ)
-    page_pending / page_ready / page_unavailable   a page snapshot of a web research's page read
+    search_picture(query, hits, ...)  one web search of a research run (WEB_SEARCH) drawn as a compact
+                                      results page: the exact query in a search box, then each result's
+                                      title and address (and snippet, when the search gave one)
+    page_pending / page_ready / page_unavailable   a page snapshot of a page a web research read
+                                      (WEB_FETCH) or cited (WEB_SOURCE)
     stamp(picture, status, status_text)     the stamp on an outgoing / calendar picture ("WILL BE SENT",
                                             "SENT", "UNDONE - NOT SENT" ...) and its tone
     KnownDays                         the days Jarvis already read (today's agenda, an Ask's calendar
@@ -20,10 +24,11 @@
     CalendarRead                      what one Ask read from the calendars (AskOutcome.calendar_read)
 
 Rules: every string in a picture went through live.clean_line / live.clean_block (secrets redacted,
-control, bidi and invisible characters shown as "<U+202E>"), exactly like the LIVE text. Email and
-calendar pictures are drawn by Jarvis from the plain text and times he already has: never email HTML,
-never a remote image or font, nothing clickable. Pictures are memory only: nothing here writes a file,
-logs, or touches the network; repr() of every object names kinds, states and sizes only.
+control, bidi and invisible characters shown as "<U+202E>"), exactly like the LIVE text. Email,
+calendar and search pictures are drawn by Jarvis from the plain text and times he already has: never
+email HTML, never a remote image or font, nothing opened for them, nothing clickable. Pictures are
+memory only: nothing here writes a file, logs, or touches the network; repr() of every object names
+kinds, states and sizes only.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import live
 from .actions import (
@@ -58,13 +64,16 @@ KIND_EMAIL = "email"        # a thread Ask read (MAIL_THREAD)
 KIND_OUTGOING = "outgoing"  # what a Reply / Email card sends (ACTION_PAYLOAD)
 KIND_DAY = "day"            # a calendar card's change on its day (ACTION_PAYLOAD)
 KIND_WEEK = "week"          # Ask's calendar read (CALENDAR_READ)
-KIND_PAGE = "page"          # a page snapshot of a web research's page read (WEB_FETCH)
-KINDS = (KIND_EMAIL, KIND_OUTGOING, KIND_DAY, KIND_WEEK, KIND_PAGE)
-MODEL_KINDS = frozenset({KIND_EMAIL, KIND_OUTGOING, KIND_DAY, KIND_WEEK})   # drawn by Jarvis ([live] pictures)
+KIND_PAGE = "page"          # a page snapshot of a page a web research read (WEB_FETCH) or cited (WEB_SOURCE)
+KIND_SEARCH = "search"      # one web search of a research run, drawn as a results page (WEB_SEARCH)
+KINDS = (KIND_EMAIL, KIND_OUTGOING, KIND_DAY, KIND_WEEK, KIND_PAGE, KIND_SEARCH)
+# Drawn by Jarvis on this PC from what he already has ([live] pictures); a page is a snapshot instead.
+MODEL_KINDS = frozenset({KIND_EMAIL, KIND_OUTGOING, KIND_DAY, KIND_WEEK, KIND_SEARCH})
 
 CAPTION_EMAIL = "Email"
 CAPTION_DAY = "Calendar change"
 CAPTION_WEEK = "Calendar"
+CAPTION_SEARCH = "Web search"
 
 BODY_CAP = 6_000        # characters of a body drawn; the rest is counted as cut
 OLDER_SHOWN = 5         # older messages listed under the newest
@@ -77,11 +86,20 @@ WEEK_TITLE_CAP = 60
 DAY_OTHERS_CAP = 40     # other events drawn on one day picture ("+N more" beyond)
 ALT_CAP = 300           # accessible description
 URL_CAP = 2_048
+QUERY_CAP = 500         # a search's query as drawn (WebSearch queries are short)
+SEARCH_HITS_SHOWN = 10  # results drawn of one search ("+N more" beyond)
+SEARCH_TITLE_CAP = 160  # one result's title
+SEARCH_URL_CAP = 300    # one result's address line (plain text, never a link)
+SEARCH_SNIPPET_CAP = 300   # one result's snippet (only when the search gave one)
+SEARCH_DOMAINS_CAP = 200   # "Only these sites" / "Not these sites"
 
 NOTE_EMAIL = "Drawn by Jarvis from the email's text - no images, no links"
 NOTE_OUTGOING = "Exactly what will be sent, drawn by Jarvis"
 NOTE_WEEK = "Drawn from the calendar Jarvis just read"
 NOTE_DAY = "Drawn by Jarvis from the card and what he already read - no call to Google for it"
+NOTE_SEARCH = "Drawn by Jarvis from what the search returned - no page opened, nothing clickable"
+SEARCH_EMPTY = "No pages listed"
+SEARCH_UNREAD = "The results came back as text Jarvis could not list"
 # A page snapshot (Build B's snapshots.py uses these words too).
 NOTE_OPENING = "Opening it on this PC in a private window (no sign-ins) to show you..."
 NOTE_OPENED = "Opened on this PC in a private window (no sign-ins) to show you"
@@ -264,9 +282,40 @@ class PagePicture:
 
 
 @dataclass(frozen=True, repr=False)
+class SearchHit:
+    """One result of a web search as a results page lists it (clean lines; plain text, never a link)."""
+
+    title: str             # "(no title)" when the search gave none
+    url: str               # the address as listed (<= SEARCH_URL_CAP)
+    host: str              # "www.example.org" ("" when the address names none)
+    snippet: str = ""      # only when the search gave one ("" with [live] text = false)
+    site: str = ""         # its address line's first part: the host ("http://" + host for plain http, ":port"
+                           # when it names one); "" when the address names no host (the url is drawn instead)
+    path: str = ""         # the rest of the address after the site ("/admissions?term=spring"; "" for "/")
+
+    def __repr__(self) -> str:
+        return "<SearchHit>"
+
+
+@dataclass(frozen=True, repr=False)
+class SearchPicture:
+    """One web search of a research run: the exact query and what it listed, in order."""
+
+    query: str                         # the exact query (clean line <= QUERY_CAP)
+    hits: tuple[SearchHit, ...] = ()   # at most SEARCH_HITS_SHOWN, in the search's order
+    more: int = 0                      # results listed but not drawn
+    only: str = ""                     # "example.org, example.net" (the search's allowed sites)
+    never: str = ""                    # its blocked sites
+    unread: bool = False               # the results came back as text Jarvis could not list
+
+    def __repr__(self) -> str:
+        return f"<SearchPicture {len(self.hits)} result(s), {self.more} more>"
+
+
+@dataclass(frozen=True, repr=False)
 class Picture:
     kind: str              # KIND_*
-    caption: str           # "Email" / "Calendar change" / "Calendar" / "Page: example.org"
+    caption: str           # "Email" / "Calendar change" / "Calendar" / "Web search" / "Page: example.org"
     state: str = live.PICTURE_READY
     note: str = ""         # one clean line under it (what happened; "Picture unavailable: <reason>")
     alt: str = ""          # accessible description (clean line <= ALT_CAP)
@@ -274,6 +323,7 @@ class Picture:
     day: DayPicture | None = None
     week: WeekPicture | None = None
     page: PagePicture | None = None
+    search: SearchPicture | None = None
 
     @property
     def cost(self) -> int:
@@ -283,7 +333,11 @@ class Picture:
         return image + 2 * _picture_chars(self) + 256
 
     def without_text(self) -> Picture:
-        """[live] text = false: an email keeps its headers, not its text (its size stays known)."""
+        """[live] text = false: an email keeps its headers, not its text (its size stays known); a
+        search keeps its query, titles and addresses (the step lists them too), not its snippets."""
+        if self.search is not None:
+            hits = tuple(replace(hit, snippet="") for hit in self.search.hits)
+            return replace(self, search=replace(self.search, hits=hits))
         if self.mail is None:
             return self
         older = tuple(replace(line, snippet="") for line in self.mail.older)
@@ -317,6 +371,11 @@ def _picture_chars(picture: Picture) -> int:
     page = picture.page
     if page is not None:
         total += len(page.url) + len(page.host) + len(page.final_host)
+    search = picture.search
+    if search is not None:
+        total += (len(search.query) + len(search.only) + len(search.never)
+                  + sum(len(hit.title) + len(hit.url) + len(hit.host) + len(hit.snippet) + len(hit.site)
+                        + len(hit.path) for hit in search.hits))
     return total
 
 
@@ -1096,6 +1155,73 @@ def week_picture(events: Mapping[str, Sequence[Any]], start: datetime, end: date
     if later:
         alt += f", {later} later"
     return Picture(KIND_WEEK, CAPTION_WEEK, live.PICTURE_READY, note=NOTE_WEEK, alt=_line(alt, ALT_CAP), week=week)
+
+
+# --------------------------------------------------------------------------
+# A web search of a research run, drawn as a compact results page
+# --------------------------------------------------------------------------
+
+def _address(url: str) -> tuple[str, str]:
+    """A result's address as a results page shows it: the site (its host, the part that says whose
+    site it is; "http://" first for any scheme but https, ":port" when it names one; never a user
+    name) and the rest (path, query, fragment; "" for the site's root). ("", "") without a host."""
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").rstrip(".")
+        port = parts.port
+    except ValueError:
+        return "", ""
+    if not host:
+        return "", ""
+    site = host if port is None else f"{host}:{port}"
+    scheme = parts.scheme.lower()
+    if scheme and scheme != "https":
+        site = f"{scheme}://{site}"
+    rest = parts.path + (f"?{parts.query}" if parts.query else "") + (f"#{parts.fragment}" if parts.fragment else "")
+    return site, ("" if rest == "/" else rest)
+
+
+def _search_hit(item: Any) -> SearchHit | None:
+    """A result as the research stream lists it: (title, url), or (title, url, snippet)."""
+    if not isinstance(item, (tuple, list)) or len(item) < 2:
+        return None
+    title, url = item[0], item[1]
+    if not isinstance(url, str) or not url.strip():
+        return None
+    snippet = item[2] if len(item) > 2 and isinstance(item[2], str) else ""
+    site, path = _address(url.strip())
+    return SearchHit(title=_line(title if isinstance(title, str) else "", SEARCH_TITLE_CAP) or "(no title)",
+                     url=_line(url.strip(), SEARCH_URL_CAP), host=_line(link_host(url.strip()), 255),
+                     snippet=_line(snippet, SEARCH_SNIPPET_CAP), site=_line(site, 300),
+                     path=_line(path, SEARCH_URL_CAP))
+
+
+def search_picture(query: Any, hits: Iterable[Any] = (), *, only: Sequence[str] = (), never: Sequence[str] = (),
+                   unread: bool = False) -> Picture | None:
+    """One web search drawn as a compact results page: the exact ``query`` in a search box, then
+    each result's title, address and snippet (only when the search gave one) in the order the
+    search listed them, at most SEARCH_HITS_SHOWN ("+N more" beyond). ``hits``: the research
+    stream's (title, url) pairs (a third item: a snippet). ``unread``: the results came back as
+    text Jarvis could not list. Drawn by Jarvis from that text alone: nothing is opened for it and
+    nothing in it can be clicked. None without a query."""
+    shown_query = _line(query, QUERY_CAP)
+    if not shown_query:
+        return None
+    found = [hit for hit in (_search_hit(item) for item in (hits or ())) if hit is not None]
+    drawn = tuple(found[:SEARCH_HITS_SHOWN])
+    search = SearchPicture(query=shown_query, hits=drawn, more=max(0, len(found) - len(drawn)),
+                           only=_line(", ".join(str(site) for site in only or ()), SEARCH_DOMAINS_CAP),
+                           never=_line(", ".join(str(site) for site in never or ()), SEARCH_DOMAINS_CAP),
+                           unread=bool(unread) and not found)
+    if search.unread:
+        listed = "results Jarvis could not list"
+    elif not found:
+        listed = "no pages listed"
+    else:
+        sites = ", ".join(dict.fromkeys(hit.host or hit.url for hit in drawn))
+        listed = f"{_plural(len(found), 'result')}: {sites}"
+    alt = _line(f"Web search for {shown_query}: {listed}", ALT_CAP)
+    return Picture(KIND_SEARCH, CAPTION_SEARCH, live.PICTURE_READY, note=NOTE_SEARCH, alt=alt, search=search)
 
 
 # --------------------------------------------------------------------------

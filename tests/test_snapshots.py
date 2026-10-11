@@ -434,8 +434,22 @@ class RunBudgetTests(unittest.TestCase):
     def test_a_smaller_cap(self) -> None:
         budget = RunBudget()
         self.assertEqual(budget.admit(1, "https://www.example.org/a", cap=1), "")
-        self.assertEqual(budget.admit(1, "https://www.example.org/b", cap=1), R_OVER_CAP)
-        self.assertEqual(budget.admit(2, "https://www.example.org/a", cap=0), R_OVER_CAP)
+        self.assertEqual(budget.admit(1, "https://www.example.org/b", cap=1), "at most 1 page picture per research")
+        self.assertEqual(budget.admit(2, "https://www.example.org/a", cap=0), snapshots.R_NO_PICTURES)
+        for index in range(2):
+            budget.admit(3, f"https://www.example.org/{index}", cap=2)
+        self.assertEqual(budget.admit(3, "https://www.example.org/c", cap=2), "at most 2 page pictures per research")
+
+    def test_the_refusal_names_the_cap_it_was_refused_at(self) -> None:
+        # The cap is min(4, [research] max_fetches): a lower one never reads "at most 4".
+        self.assertEqual(snapshots.over_cap_reason(4), R_OVER_CAP)
+        self.assertEqual(snapshots.over_cap_reason(snapshots.MAX_PER_RUN), R_OVER_CAP)
+        self.assertEqual(snapshots.over_cap_reason(3), "at most 3 page pictures per research")
+        self.assertEqual(snapshots.over_cap_reason(1), "at most 1 page picture per research")
+        self.assertEqual(snapshots.over_cap_reason(0), snapshots.R_NO_PICTURES)
+        self.assertEqual(snapshots.over_cap_reason(-2), snapshots.R_NO_PICTURES)
+        self.assertEqual(snapshots.over_cap_reason("x"), R_OVER_CAP)
+        self.assertEqual(snapshots.reason_kind(snapshots.over_cap_reason(2)), "refused")
 
     def test_end_cancel_forget(self) -> None:
         budget = RunBudget()

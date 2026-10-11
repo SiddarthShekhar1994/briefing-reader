@@ -3595,7 +3595,7 @@ class AppController(QObject):
         # The calendar days Jarvis already read (today's agenda, Ask's reads): a day picture draws a
         # day's other events only from these (memory only; never a Google call for a picture).
         self._known_days = _pictures.KnownDays()
-        # The pictures of the pages a web research read ([live] page_snapshots; None when off).
+        # The pictures of the pages a web research read or cites ([live] page_snapshots; None when off).
         self._snapshots: Any = self._create_snapshotter(live_config)
         reading = self.window.reading
         reading.set_live_available(self.live.enabled)
@@ -6020,7 +6020,7 @@ class AppController(QObject):
             logger.warning("Could not set up Ask Jarvis (%s)", type(exc).__name__)
             return None
         if self._snapshots is not None and hasattr(planner, "page_snapshots"):
-            planner.page_snapshots = self._snapshots   # the pages a research read, pictured in LIVE
+            planner.page_snapshots = self._snapshots   # the pages a research read or cites, pictured in LIVE
         reading = self.window.reading
         controller = ask_ui.AskController(self.config, planner, reading.command_bar, context=self._ask_context,
                                           blocked=self._ask_blocked, calendars=self._calendars, live=self.live,

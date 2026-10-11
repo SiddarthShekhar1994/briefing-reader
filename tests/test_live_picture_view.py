@@ -105,10 +105,17 @@ def page_picture() -> pictures.Picture:
     return pictures.page_ready(URL, image=jpeg(), width=960, height=600, final_url="https://www.example.net/x")
 
 
+def search_picture(count: int = 12) -> pictures.Picture:
+    hits = [(f"Spring admissions {n} - Example University", f"https://www{n}.example.edu/admissions/spring-{n}",
+             "Applications close on March 1." if n == 1 else "") for n in range(1, count + 1)]
+    return pictures.search_picture("Example University spring 2027 application deadline", hits,
+                                   only=("example.edu",))
+
+
 def every_kind() -> dict[str, pictures.Picture]:
     return {"email": email_picture(), "outgoing": outgoing_picture(), "move": day_picture(MOVE),
             "cancel": day_picture(CANCEL), "add": day_picture(ADD), "rsvp": day_picture(RSVP), "week": week_picture(),
-            "page": page_picture()}
+            "page": page_picture(), "search": search_picture()}
 
 
 def room(viewer: hud.PictureViewer) -> int:
@@ -809,6 +816,275 @@ class PopOutPictureTests(LogCase):
                 widget.repaint()
             widget._thumb(widget.width())
         self.assertEqual(measured.call_count, 0)   # measured when it was first shown
+
+
+class SearchAddressTests(unittest.TestCase):
+    """A result's address line in a search picture: the site first (no "https://"), then the rest of
+    the address, cut at its end; a site too wide is cut in its middle, so the end of the host (whose
+    site it is) always shows."""
+
+    def hit(self, url: str) -> pictures.SearchHit:
+        picture = pictures.search_picture("deadline", [("Admissions", url)])
+        return picture.search.hits[0]
+
+    def test_the_site_then_the_rest(self) -> None:
+        hit = self.hit("https://admissions.example.edu/spring/apply?term=2027")
+        site, rest = hud.search_address_lines(hit, 400)
+        self.assertEqual(site.shown, "admissions.example.edu")
+        self.assertEqual(rest.shown, "/spring/apply?term=2027")
+        root, nothing = hud.search_address_lines(self.hit("https://www.example.org/"), 400)
+        self.assertEqual((root.shown, nothing), ("www.example.org", None))
+        plain, _rest = hud.search_address_lines(self.hit("http://old.example.org/a"), 400)
+        self.assertEqual(plain.shown, "http://old.example.org")                  # not https: said so
+
+    def test_a_long_host_keeps_its_end(self) -> None:
+        host = "admissions.the-very-long-name-of-the-example-university-of-natural-history.example.edu"
+        hit = self.hit(f"https://{host}/spring/apply")
+        for width in (180.0, 260.0, 360.0):
+            with self.subTest(width=width):
+                site, rest = hud.search_address_lines(hit, width)
+                self.assertTrue(site.shown.endswith(".example.edu"), site.shown)   # whose site it is
+                self.assertTrue(site.shown.startswith("admissions."), site.shown)
+                self.assertLessEqual(site.natural_width, width)
+                self.assertEqual(site.line_count, 1)
+                self.assertIsNone(rest)                                        # no room left for the rest
+        site, rest = hud.search_address_lines(self.hit("https://a.example.edu/" + "x" * 300), 200.0)
+        self.assertEqual(site.shown, "a.example.edu")
+        self.assertTrue(rest.shown.startswith("/xxx") and rest.line_count == 1)
+        self.assertLessEqual(site.natural_width + rest.natural_width, 200.0)
+
+    def test_an_address_without_a_host_is_drawn_as_listed(self) -> None:
+        hit = pictures.SearchHit(title="Notes", url="urn:example:notes", host="")
+        only, rest = hud.search_address_lines(hit, 300)
+        self.assertEqual((only.shown, rest), ("urn:example:notes", None))
+
+
+class SearchPictureViewTests(LogCase):
+    """A web search drawn as a compact results page: cut with a fade in the thumbnail, whole in the
+    viewer; and the check's "picture:<step id>" links, followed inside LIVE."""
+
+    def test_heights_the_fade_and_the_whole_results_page(self) -> None:
+        picture = search_picture()
+        heights = [hud.picture_height(picture, width) for width in (200, 360, 640)]
+        self.assertEqual(heights, sorted(heights, reverse=True))           # wider: titles need fewer lines
+        self.assertGreater(heights[-1], hud.LIVE_PICTURE_SEARCH_MAX_PX)   # 10 results: more than a thumbnail
+        cut = hud.picture_pixmap(picture, 360, 1.0, ("", ""), hud.LIVE_PICTURE_SEARCH_MAX_PX)
+        self.assertEqual(cut.height(), hud.LIVE_PICTURE_SEARCH_MAX_PX)
+        whole = hud.picture_pixmap(picture, 360, 1.0, ("", ""), None)
+        self.assertEqual(whole.height(), heights[1])
+        small = search_picture(1)
+        self.assertLess(hud.picture_height(small, 360), hud.LIVE_PICTURE_SEARCH_MAX_PX)
+        for empty in (pictures.search_picture("museum", []), pictures.search_picture("museum", [], unread=True)):
+            image = hud.picture_pixmap(empty, 360, 1.5, ("", ""), hud.LIVE_PICTURE_SEARCH_MAX_PX).toImage()
+            self.assertGreater(len(colours(image)), 3)
+        self.assertEqual(hud.picture_height(picture.dropped("x"), 360), 0)
+
+    def test_the_search_step_shows_it_and_enter_opens_it_larger(self) -> None:
+        log = self.log()
+        task = self.stream.task(live.TASK_WEB, "Web research")
+        step = task.step(live.WEB_SEARCH, "Web search 1", status=live.STATUS_OK, summary="12 results",
+                         fields=[("Query (exact)", "Example University spring 2027 application deadline")])
+        step.picture(search_picture())
+        self.apply()
+        widget = log.step_widget(step.id).picture_widget()
+        self.assertIsNotNone(widget)                                       # open by itself, the picture first
+        self.assertTrue(widget.ready())
+        self.assertLess(widget.y(), log.step_widget(step.id).details.fields.y())
+        self.assertLessEqual(widget._thumb(widget.width())[1], hud.LIVE_PICTURE_SEARCH_MAX_PX)
+        self.assertTrue(widget.accessibleName().startswith(
+            "Web search picture: Web search for Example University spring 2027 application deadline: 12 results"))
+        self.assertGreater(len(colours(widget.grab().toImage())), 3)
+        widget.setFocus(Qt.FocusReason.TabFocusReason)
+        QTest.keyClick(widget, Qt.Key.Key_Return)
+        settle()
+        viewer = log.picture_viewer()
+        self.assertTrue(viewer is not None and viewer.isVisible())
+        self.assertEqual(viewer.windowTitle(), "Web search - Jarvis")
+        self.assertEqual(viewer.canvas.width(), min(hud.PICTURE_VIEWER_MODEL_W, room(viewer)))
+        self.assertGreater(viewer.canvas.height(), hud.LIVE_PICTURE_SEARCH_MAX_PX)   # every result drawn
+        QTest.keyClick(viewer.scroll, Qt.Key.Key_Escape)
+        settle()
+        self.assertIs(QApplication.focusWidget(), widget)
+
+    def test_a_picture_link_opens_the_picture_or_shows_its_step(self) -> None:
+        log = self.log(560, 400)
+        task = self.stream.task(live.TASK_WEB, "Web research")
+        read = task.step(live.WEB_FETCH, "Page read 1", status=live.STATUS_OK)
+        read.picture(page_picture())
+        for number in range(6):
+            task.step(live.WEB_FETCH, f"Filler {number}", status=live.STATUS_OK, fields=[("Size", "1 byte")])
+        source = task.step(live.WEB_SOURCE, "Source [2]: museum.example.net", status=live.STATUS_OK)
+        source.picture(pictures.page_pending("https://museum.example.net/hours"))
+        check = task.step(live.RESEARCH_VALIDATE, "Checking the answer", status=live.STATUS_WARN, fields=[
+            live.Field("Picture [1]", "Page read 1: www.example.org", link=f"picture:{read.id}"),
+            live.Field("Picture [2]", "Source [2]: museum.example.net", link=f"picture:{source.id}"),
+            live.Field("Elsewhere", "JARVIS tab", link="tab:jarvis")])
+        self.apply()
+        outside: list[str] = []
+        log.linkClicked.connect(outside.append)
+        details = log.step_widget(check.id).details
+        details.fields.value_widget("Picture [1]").click()                 # READY: shown larger
+        settle()
+        viewer = log.picture_viewer()
+        self.assertTrue(viewer is not None and viewer.isVisible() and viewer.step_id() == read.id)
+        viewer.close()
+        settle()
+        log.step_widget(source.id).set_open(False)                         # closed by hand
+        log.verticalScrollBar().setValue(0)
+        settle()
+        details.fields.value_widget("Picture [2]").click()                 # not READY: its step, opened
+        settle(6)
+        target = log.step_widget(source.id)
+        self.assertTrue(target.is_open())
+        self.assertFalse(viewer.isVisible())
+        top = target.mapTo(log.widget(), QPoint(0, 0)).y()
+        bar = log.verticalScrollBar()
+        self.assertLessEqual(abs(bar.value() - min(bar.maximum(), max(0, top - 6))), 2)
+        self.assertFalse(log.following())                                  # it holds there
+        details.fields.value_widget("Elsewhere").click()                   # any other link goes out
+        settle()
+        self.assertEqual(outside, ["tab:jarvis"])
+        link = details.fields.value_widget("Picture [2]")                  # its name says label, value, action
+        self.assertEqual(link.accessibleName(),
+                         f"Picture [2]: Source [2]: museum.example.net - {hud.LIVE_PICTURE_LINK_WORDS}")
+        self.assertEqual(details.fields.value_widget("Elsewhere").accessibleName(), "Elsewhere: JARVIS tab")
+        check.field("Picture [2]", "Source [2]: shop.example.net", link=f"picture:{source.id}")
+        self.apply()
+        self.assertIs(details.fields.value_widget("Picture [2]"), link)   # the same row: a new value only
+        self.assertEqual(link.accessibleName(),
+                         f"Picture [2]: Source [2]: shop.example.net - {hud.LIVE_PICTURE_LINK_WORDS}")
+        log.follow_link("picture:999999")                                  # a step that is gone: nothing
+        log.follow_link("picture:x")
+        settle()
+        self.assertEqual(outside, ["tab:jarvis"])
+        self.assertEqual(live.result_link("picture:12"), "picture:12")
+        self.assertEqual(live.result_link("picture:12x"), "")
+
+    def link_and_sources(self) -> tuple[hud.LiveLog, QWidget, live.LiveStep]:
+        """A short log: the check with its "Picture [2]" link first, then two source steps with page
+        pictures (so the second source's thumbnail is far below the link)."""
+        log = self.log(560, 400)
+        task = self.stream.task(live.TASK_WEB, "Web research")
+        check = task.step(live.RESEARCH_VALIDATE, "Checking the answer", status=live.STATUS_OK, fields=[
+            live.Field("Answer", "Open daily from 10 AM.")])
+        sources = []
+        for number, host in ((1, "ai.example.edu"), (2, "pass.example.edu")):
+            source = task.step(live.WEB_SOURCE, f"Source [{number}]: {host}", status=live.STATUS_OK)
+            source.picture(page_picture())
+            sources.append(source)
+        check.field("Picture [2]", "Source [2]: pass.example.edu", link=f"picture:{sources[1].id}")
+        self.apply()
+        log.step_widget(check.id).set_open(True)
+        settle(4)
+        link = log.step_widget(check.id).details.fields.value_widget("Picture [2]")
+        log.verticalScrollBar().setValue(0)
+        settle()
+        return log, link, sources[1]
+
+    def in_view(self, log: hud.LiveLog, widget: QWidget) -> bool:
+        top = widget.mapTo(log.viewport(), QPoint(0, 0)).y()
+        return top >= 0 and top + widget.height() <= log.viewport().height()
+
+    def test_closing_a_picture_opened_from_its_link_gives_the_focus_back_to_the_link(self) -> None:
+        log, link, source = self.link_and_sources()
+        self.assertTrue(self.in_view(log, link))
+        thumbnail = log.step_widget(source.id).picture_widget()
+        self.assertFalse(self.in_view(log, thumbnail))                     # far below the link
+        link.setFocus(Qt.FocusReason.TabFocusReason)
+        settle()
+        self.assertTrue(link.focus_ring())
+        QTest.keyClick(link, Qt.Key.Key_Return)                             # Enter on the link: the picture larger
+        settle()
+        viewer = log.picture_viewer()
+        self.assertTrue(viewer is not None and viewer.isVisible() and viewer.step_id() == source.id)
+        log.verticalScrollBar().setValue(log.verticalScrollBar().maximum())   # the log moved meanwhile
+        settle()
+        self.assertFalse(self.in_view(log, link))
+        QTest.keyClick(viewer.scroll, Qt.Key.Key_Escape)
+        settle(4)
+        self.assertFalse(viewer.isVisible())
+        self.assertIs(QApplication.focusWidget(), link)                     # back on the link, not the thumbnail
+        self.assertTrue(link.focus_ring())                                  # with its ring (it had one)
+        self.assertTrue(self.in_view(log, link))                            # scrolled back into view
+
+    def test_a_click_on_the_link_comes_back_to_it_too_and_a_thumbnail_to_itself(self) -> None:
+        log, link, source = self.link_and_sources()
+        QTest.mouseClick(link, Qt.MouseButton.LeftButton, pos=QPoint(4, link.height() // 2))
+        settle()
+        viewer = log.picture_viewer()
+        self.assertTrue(viewer is not None and viewer.isVisible())
+        viewer.close()
+        settle(4)
+        self.assertIs(QApplication.focusWidget(), link)
+        self.assertFalse(link.focus_ring())                                 # a click: no ring
+        thumbnail = log.step_widget(source.id).picture_widget()
+        log.ensureWidgetVisible(thumbnail)
+        thumbnail.setFocus(Qt.FocusReason.TabFocusReason)
+        QTest.keyClick(thumbnail, Qt.Key.Key_Return)                        # opened from the thumbnail ...
+        settle()
+        self.assertTrue(viewer.isVisible())
+        QTest.keyClick(viewer.scroll, Qt.Key.Key_Escape)
+        settle(4)
+        self.assertIs(QApplication.focusWidget(), thumbnail)                # ... back to the thumbnail
+
+    def test_a_link_to_a_picture_not_ready_takes_the_keyboard_focus_to_it(self) -> None:
+        """A "Picture [n]" link to a picture still on its way (a source is pictured only after the
+        check) or unavailable (past the cap): its step comes into view and the keyboard focus goes
+        along, to that picture with its ring - never left on the link scrolled out of view. A click
+        moves no focus."""
+        log = self.log(560, 400)
+        task = self.stream.task(live.TASK_WEB, "Web research")
+        check = task.step(live.RESEARCH_VALIDATE, "Checking the answer", status=live.STATUS_OK, fields=[
+            live.Field("Answer", "Open daily from 10 AM.")])
+        for number, host in ((1, "ai.example.edu"), (2, "pass.example.edu")):
+            task.step(live.WEB_SOURCE, f"Source [{number}]: {host}", status=live.STATUS_OK).picture(page_picture())
+        pending = task.step(live.WEB_SOURCE, "Source [3]: shop.example.net", status=live.STATUS_OK)
+        pending.picture(pictures.page_pending("https://shop.example.net/hours"))
+        over = task.step(live.WEB_SOURCE, "Source [4]: cafe.example.com", status=live.STATUS_OK)
+        over.picture(pictures.page_unavailable("https://cafe.example.com/", "at most 4 page pictures per research"))
+        check.field("Picture [3]", "Source [3]: shop.example.net", link=f"picture:{pending.id}")
+        check.field("Picture [4]", "Source [4]: cafe.example.com", link=f"picture:{over.id}")
+        self.apply()
+        log.step_widget(check.id).set_open(True)
+        settle(4)
+        fields = log.step_widget(check.id).details.fields
+        for name, step in (("Picture [3]", pending), ("Picture [4]", over)):
+            log.verticalScrollBar().setValue(0)
+            settle()
+            link = fields.value_widget(name)
+            self.assertTrue(self.in_view(log, link))
+            link.setFocus(Qt.FocusReason.TabFocusReason)
+            settle()
+            QTest.keyClick(link, Qt.Key.Key_Return)
+            settle(6)
+            target = log.step_widget(step.id)
+            picture = target.picture_widget()
+            self.assertIsNone(log.picture_viewer(), name)                    # not READY: nothing larger
+            self.assertFalse(self.in_view(log, link), name)                  # the link scrolled away ...
+            self.assertIs(QApplication.focusWidget(), picture, name)         # ... the focus went along
+            self.assertTrue(picture.focus_ring(), name)                      # with its ring (the link had one)
+            self.assertTrue(self.in_view(log, picture) and self.in_view(log, target.row), name)
+            QTest.keyClick(picture, Qt.Key.Key_Tab, Qt.KeyboardModifier.ShiftModifier)
+            settle()
+            self.assertIs(QApplication.focusWidget(), target.row, name)      # Tab goes on from there
+            self.assertTrue(self.in_view(log, target.row), name)
+        quiet = log.step_widget(over.id).row                                 # no ring: none after it either
+        log.verticalScrollBar().setValue(0)
+        settle()
+        link = fields.value_widget("Picture [3]")
+        link.setFocus(Qt.FocusReason.OtherFocusReason)
+        log.follow_link(f"picture:{pending.id}", link)
+        settle(6)
+        picture = log.step_widget(pending.id).picture_widget()
+        self.assertIs(QApplication.focusWidget(), picture)
+        self.assertFalse(picture.focus_ring())
+        quiet.setFocus(Qt.FocusReason.TabFocusReason)
+        log.verticalScrollBar().setValue(0)
+        settle()
+        QTest.mouseClick(link, Qt.MouseButton.LeftButton, pos=QPoint(4, link.height() // 2))
+        settle(6)
+        self.assertIs(QApplication.focusWidget(), quiet)                     # a click: the focus stays put
+        self.assertTrue(self.in_view(log, log.step_widget(pending.id).row))  # (the step still comes into view)
 
 
 if __name__ == "__main__":

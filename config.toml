@@ -260,14 +260,17 @@ background = true
 # pictures (their headers still show).
 text = true
 # Pictures in LIVE: an email Jarvis read or will send drawn as an email, a
-# calendar change drawn on its day (before and after), and an Ask's calendar
-# read as a 7-day strip. Drawn by Jarvis on this PC from the text he already
-# has: no email HTML, no images from the web.
+# calendar change drawn on its day (before and after), an Ask's calendar read
+# as a 7-day strip, and each web search of a research drawn as its results
+# page. Drawn by Jarvis on this PC from the text he already has: no email HTML,
+# no images from the web, no page opened for them.
 pictures = true
-# Page pictures of web research: each page a research read is opened again on
+# Page pictures of web research: each page a research read, and each page its
+# answer cites that a search listed, is opened (again, for a page it read) on
 # this PC in a private window (no sign-ins, nothing saved) and its first screen
 # shown. That is an ordinary page visit from this PC: the site sees your IP
-# address. false: no page is opened; the research works the same.
+# address, also a cited site the research never read, which would not have
+# seen it otherwise. false: no page is opened; the research works the same.
 page_snapshots = true
 
 [productivity]
