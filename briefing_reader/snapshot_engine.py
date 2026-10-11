@@ -40,10 +40,13 @@ Logging: counts, kinds and times only ("Page snapshot: taken in 2.3 s (1 of 2 fo
 
 from __future__ import annotations
 
+import atexit
 import importlib.util
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter, deque
@@ -119,6 +122,21 @@ def webengine_available() -> bool:
                    for name in ("PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtQuick"))
     except Exception:  # noqa: BLE001 - "not available" is the safe answer
         return False
+
+
+_DOWNLOAD_FOLDER: list[str] = []   # this process's private download folder, made on first use
+
+
+def download_folder() -> str:
+    """The pictured pages' download folder: a private temporary folder of this process, never the
+    owner's Downloads (Chromium prepares even a download it is told to cancel in the profile's
+    download folder). Every download is cancelled, so it stays empty; it is deleted when Jarvis
+    exits. Raises OSError when it cannot be made (the shot then fails: no fallback folder)."""
+    if not _DOWNLOAD_FOLDER:
+        path = tempfile.mkdtemp(prefix="jarvis-snapshots-")
+        _DOWNLOAD_FOLDER.append(path)
+        atexit.register(shutil.rmtree, path, True)
+    return _DOWNLOAD_FOLDER[0]
 
 
 def prepare_application() -> None:
@@ -536,6 +554,7 @@ class PageCamera(QObject):
         # is collected and then checks nothing.
         shot.interceptor = classes.Interceptor(lambda info: self._judge(shot, info), profile)
         profile.setUrlRequestInterceptor(shot.interceptor)
+        profile.setDownloadPath(download_folder())   # never the owner's Downloads, even for a cancelled one
         profile.downloadRequested.connect(lambda download: self._refuse("downloads", download, "cancel"))
         settings = profile.settings()
         attribute = classes.QWebEngineSettings.WebAttribute

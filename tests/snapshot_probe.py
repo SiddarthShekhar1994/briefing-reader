@@ -434,7 +434,23 @@ def main(case: str) -> dict:
         listeners = Listeners(CHANNEL_TCP, CHANNEL_UDP)
         camera = make(decide=lambda url, **kw: (recording(url, **kw), decide(url, **kw))[1], settle_ms=3000)
         page = HOOKS_HTML.replace("</body>", channels_html(listeners.ports) + "</body>")
+        download_dirs: list[str] = []
+        refuse = camera._refuse
+
+        def refuse_recording(name, request, method):   # where Chromium meant to put the refused download
+            if name == "downloads":
+                try:
+                    download_dirs.append(request.downloadDirectory())
+                except Exception:  # noqa: BLE001
+                    download_dirs.append("?")
+            refuse(name, request, method)
+
+        camera._refuse = refuse_recording
         result, _early = shoot(camera, PAGE_URL, page)
+        pause(0.5)
+        folder = snapshot_engine.download_folder()
+        report.update(download_dirs=download_dirs, download_folder=folder,
+                      download_folder_entries=sorted(os.listdir(folder)) if os.path.isdir(folder) else None)
         pause(0.5)
         listeners.stop.set()
         report.update(channel_hits=listeners.counts(), reports=dict(reports))
@@ -510,9 +526,12 @@ def main(case: str) -> dict:
         pause(1.0)
         after = {name: sorted(os.listdir(path)) if path and os.path.isdir(path) else None
                  for name, path in roots.items()}
+        folder = snapshot_engine.download_folder()
         report.update(result=describe(result),
                       new_in_env_folders={name: sorted(set(after[name] or []) - set(before[name] or []))
                                           for name in roots},
+                      download_folder=folder,
+                      download_folder_entries=sorted(os.listdir(folder)) if os.path.isdir(folder) else None,
                       app_folders_made=[bool(path) and APP_NAME in path and os.path.exists(path)
                                         for path in locations[:3]],
                       app_named_folder_in_generic_cache=os.path.exists(os.path.join(locations[3], APP_NAME)))
