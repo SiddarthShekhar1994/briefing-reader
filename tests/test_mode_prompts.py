@@ -1,6 +1,7 @@
-"""The planner modes' system prompts and schemas (spec 7.1, 7.2): every mode prompt starts with the
+"""The planner modes' system prompts and schemas (spec 7.1-7.3): every mode prompt starts with the
 same shared preamble, byte for byte up to and including "MODE RULES" (the drift test, G9; the note
-rule of R7 included); prompts and schemas are ASCII; no schema has gmail_search or web_research.
+rule of R7 included); the brief's Reply grammar line, field rules and drafts rule are the Ask's own,
+byte for byte; prompts and schemas are ASCII; no schema has gmail_search or web_research.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ def preamble_of(text: str) -> str:
 class ModePromptTests(unittest.TestCase):
     def test_mode_prompts_share_preamble(self) -> None:
         texts = {mode: path.read_text(encoding="ascii") for mode, path in cli.MODE_PROMPTS.items()}
-        self.assertIn("plan", texts)
+        self.assertEqual(set(texts), {"plan", "prep"})
         for mode, text in texts.items():
             with self.subTest(mode=mode):
                 self.assertEqual(preamble_of(text), PREAMBLE)
@@ -92,6 +93,52 @@ class ModePromptTests(unittest.TestCase):
                      '"[address]" in the data stands for a removed email address: never copy it.'):
             with self.subTest(rule=rule):
                 self.assertIn(rule, text)
+
+    def test_the_prep_schema(self) -> None:
+        schema = json.loads(cli.mode_schema_text("prep"))
+        self.assertEqual(schema["title"], "JarvisPrepBrief")
+        self.assertEqual(schema["required"], ["say", "threads", "open", "points", "lines"])
+        properties = schema["properties"]
+        self.assertEqual(set(properties), {"say", "threads", "open", "points", "lines"})
+        self.assertEqual(properties["say"]["maxLength"], 200)
+        threads = properties["threads"]
+        self.assertEqual((threads["maxItems"], threads["items"]["required"], threads["items"]["additionalProperties"]),
+                         (3, ["thread", "summary", "waiting_on"], False))
+        self.assertEqual(threads["items"]["properties"]["waiting_on"]["enum"], ["owner", "them", "nobody"])
+        self.assertEqual(threads["items"]["properties"]["summary"]["maxLength"], 300)
+        self.assertEqual((properties["open"]["maxItems"], properties["open"]["items"]["required"]),
+                         (6, ["text", "thread"]))
+        self.assertEqual((properties["points"]["maxItems"], properties["points"]["items"]["maxLength"]), (4, 160))
+        self.assertEqual((properties["lines"]["maxItems"], properties["lines"]["items"]["maxLength"]), (2, 12000))
+
+    def test_the_prep_prompt_quotes_the_asks_reply_rules(self) -> None:
+        """7.1: the Reply grammar line, the field rules ("Times are 24-hour ... never with angle
+        brackets.") and the drafts rule are planner_prompt.md's own, byte for byte."""
+        planner = cli.PROMPT_FILE.read_text(encoding="ascii")
+        prep = cli.PREP_PROMPT_FILE.read_text(encoding="ascii")
+        reply = next(line for line in planner.split("\n") if line.startswith("  Reply: "))
+        self.assertIn("\n" + reply + "\n", prep)
+
+        def block(text: str, first: str, last: str) -> str:
+            start = text.index(first)
+            return text[start:text.index(last, start) + len(last)]
+
+        for first, last in (("- Times are 24-hour wall-clock times", "never with angle brackets."),
+                            ("- Drafts are short, friendly and complete", "did not ask to share.")):
+            with self.subTest(rule=first):
+                self.assertEqual(block(prep, first, last), block(planner, first, last))
+
+    def test_the_prep_prompt_rules(self) -> None:
+        text = cli.PREP_PROMPT_FILE.read_text(encoding="ascii")
+        for rule in ('"waiting_on" = owner, them or nobody', "Never quote; never copy sentences.",
+                     "up to 6 concrete open points", "up to 4 short points",
+                     "Never invent agendas, numbers, dates or\n  commitments.",
+                     "from the meeting's account", "only to people already in that\n  message",
+                     "Never copy a <memory> note into a draft.", "never spoken"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, text)
+        self.assertNotIn("gmail_search", text)
+        self.assertNotIn("web_research", text)
 
 
 if __name__ == "__main__":

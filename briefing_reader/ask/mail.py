@@ -10,6 +10,9 @@
                                    typed in the command, an address typed there, or a person Jarvis
                                    supplied from the calendar or the briefing whose name the command
                                    names. Email text never grounds a search.
+    is_security_sender(address, own_domains=)   an account-security or payment sender (the check
+                                   check_query applies to from: / to: / cc:; a meeting prep applies
+                                   it to every guest too, with no own domains)
     thread_from_api(data, account) a users.threads.get answer (format=full) -> MailThread
     message_text(payload)          one message's readable text: text/plain (else the HTML made
                                    plain), without quoted history, signatures, attachments or
@@ -320,6 +323,26 @@ def _owned_text(text: str, grounding: SearchGrounding | None, named: Mapping[str
     return narrows
 
 
+def _in_domain(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
+
+
+def is_security_sender(address: str, *, own_domains: Collection[str] = ()) -> bool:
+    """``address`` (or a bare domain) belongs to an account-security or payment sender: its domain
+    is one of _SECURITY_DOMAINS or a subdomain of one, unless it is one of ``own_domains`` (the
+    owner's own work domain: only the follow-up list passes them), or its local part is one of
+    _SECURITY_LOCALS (never exempt). A search Jarvis builds (the Ask's, a meeting prep's) asks with
+    no ``own_domains``."""
+    folded = str(address or "").strip().casefold().strip("<>")
+    local, at, domain = folded.rpartition("@")
+    host = domain if at else folded
+    owned = {str(item).strip().casefold().strip(".") for item in own_domains if str(item).strip()}
+    if any(_in_domain(host, blocked) for blocked in _SECURITY_DOMAINS) \
+            and not any(_in_domain(host, mine) for mine in owned):
+        return True
+    return bool(at) and local in _SECURITY_LOCALS
+
+
 def _owned_who(value: str, grounding: SearchGrounding | None, named: Mapping[str, frozenset[str]],
                negated: bool) -> bool:
     """A from: / to: / cc: value: never an account-security sender; with ``grounding``, an address
@@ -327,10 +350,8 @@ def _owned_who(value: str, grounding: SearchGrounding | None, named: Mapping[str
     folded = value.casefold().strip("<>")
     if folded == "me":
         return False
-    local, at, domain = folded.rpartition("@")
-    host = domain if at else folded
-    if any(host == blocked or host.endswith("." + blocked) for blocked in _SECURITY_DOMAINS) \
-            or (at and local in _SECURITY_LOCALS):
+    at = "@" in folded
+    if is_security_sender(folded):
         raise QueryRefused("Jarvis does not search mail from account-security or payment senders")
     words = {word for word in address_words(folded) if len(word) >= 3}
     if not words:

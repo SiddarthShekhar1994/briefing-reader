@@ -283,14 +283,18 @@ def _ordered_events(ctx: AskContext) -> list[tuple[str, EventBrief]]:
     return sorted(items, key=priority)
 
 
+def account_row(account: AccountInfo) -> str:
+    """One <accounts> row: "work | address=... | calendar=yes | send_mail=yes | read_mail=yes |
+    time_zone=America/Los_Angeles" (a meeting brief's <accounts> has its meeting's account only)."""
+    return " | ".join((data(account.alias, 24), f"address={email_address(account.address) or 'unknown'}",
+                       f"calendar={data(account.calendar, 40)}",
+                       f"send_mail={'yes' if account.send_mail else 'no'}",
+                       f"read_mail={data(account.read_mail, 80)}",
+                       f"time_zone={data(account.time_zone, 60) or 'unknown'}"))
+
+
 def _accounts_block(ctx: AskContext) -> str:
-    rows = []
-    for account in ctx.accounts:
-        rows.append(" | ".join((data(account.alias, 24), f"address={email_address(account.address) or 'unknown'}",
-                                f"calendar={data(account.calendar, 40)}",
-                                f"send_mail={'yes' if account.send_mail else 'no'}",
-                                f"read_mail={data(account.read_mail, 80)}",
-                                f"time_zone={data(account.time_zone, 60) or 'unknown'}")))
+    rows = [account_row(account) for account in ctx.accounts]
     rows.append("Calendar and Todo lines go to personal.")
     return "\n".join(rows)
 

@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JarvisPrepBrief",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["say", "threads", "open", "points", "lines"],
+  "properties": {
+    "say": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "Write this first. One short sentence about the meeting. Never claim anything was sent."
+    },
+    "threads": {
+      "type": "array",
+      "maxItems": 3,
+      "description": "One item per thread in <mail>, keyed by its thread= id.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["thread", "summary", "waiting_on"],
+        "properties": {
+          "thread": {"type": "string", "maxLength": 64},
+          "summary": {"type": "string", "maxLength": 300},
+          "waiting_on": {"type": "string", "enum": ["owner", "them", "nobody"]}
+        }
+      }
+    },
+    "open": {
+      "type": "array",
+      "maxItems": 6,
+      "description": "Concrete open points, each with the thread= id it comes from, or \"\".",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text", "thread"],
+        "properties": {
+          "text": {"type": "string", "maxLength": 200},
+          "thread": {"type": "string", "maxLength": 64}
+        }
+      }
+    },
+    "points": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {"type": "string", "maxLength": 160},
+      "description": "Short points worth raising in the meeting."
+    },
+    "lines": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {"type": "string", "maxLength": 12000},
+      "description": "Reply: lines only, usually none."
+    }
+  }
+}

@@ -237,6 +237,36 @@ class TrimTests(unittest.TestCase):
         self.assertEqual(trim_threads([]), [])
 
 
+class SecuritySenderTests(unittest.TestCase):
+    """is_security_sender: factored out of check_query's from: / to: / cc: check (unchanged there);
+    a meeting prep applies it to every guest with no own domains, the follow-up list with them."""
+
+    def test_domains_subdomains_and_locals(self) -> None:
+        for address in ("no-reply@accounts.google.com", "pat@google.com", "x@id.apple.com", "billing@paypal.com",
+                        "security@example.edu", "alerts@example.org", "LOGIN@Example.com", "<otp@example.net>",
+                        "google.com", "mail.github.com"):
+            with self.subTest(address=address):
+                self.assertTrue(mail.is_security_sender(address))
+        for address in ("ana@example.edu", "ana@googlemail.example.com", "security.team.lead@example.edu",
+                        "pat@notgoogle.com", "", "examplegithub.com"):
+            with self.subTest(address=address):
+                self.assertFalse(mail.is_security_sender(address))
+
+    def test_own_domains_exempt_the_domain_only(self) -> None:
+        self.assertFalse(mail.is_security_sender("pat@google.com", own_domains=("google.com",)))
+        self.assertFalse(mail.is_security_sender("pat@mail.google.com", own_domains=("Google.com.",)))
+        self.assertTrue(mail.is_security_sender("pat@google.com", own_domains=("example.edu",)))
+        self.assertTrue(mail.is_security_sender("security@google.com", own_domains=("google.com",)))   # the local part
+
+    def test_check_query_still_refuses_them(self) -> None:
+        """_owned_who's behaviour is unchanged: the same senders refused, the same words."""
+        for query in ("from:pat@google.com", "to:alerts@example.org", "cc:x@accounts.google.com", "from:google.com"):
+            with self.subTest(query=query):
+                with self.assertRaisesRegex(QueryRefused, "account-security or payment senders"):
+                    check_query(query, None)
+        self.assertEqual(check_query("from:ana@example.edu", None), "from:ana@example.edu")
+
+
 class BriefingThreadTests(unittest.TestCase):
     REPLY = ("Reply: acct=work | thread=18c0ffee00000001 | msgid=<CAB1@mail.example.edu> | gmid= | "
              "to=Ana Lima <ana@example.edu> | cc= | subject=Re: Budget review for Q4 | replied=no | due= | link= | "

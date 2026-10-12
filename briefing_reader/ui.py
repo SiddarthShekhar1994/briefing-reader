@@ -176,7 +176,7 @@ from .agenda import (
     merge_deadlines,
 )
 from .ask.dayplan import hours_text
-from .ask.modes import MODE_PLAN, MODE_TITLES, ModeInputs, block_line, todo_facts
+from .ask.modes import MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_CHOICE, ModeInputs, ModeRequest, block_line, todo_facts
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import DEFAULT_ACCOUNT, AgendaConfig, Config
@@ -297,6 +297,11 @@ from .persona import (
     plan_no_run_words,
     plan_question_speech,
     plan_result_speech,
+    prep_choice_text,
+    prep_choices_text,
+    prep_no_run_speech,
+    prep_no_run_words,
+    prep_result_speech,
     quoted_note,
     research_reply_speech,
     salutation,
@@ -2335,9 +2340,9 @@ MEMORY_NOT_KEPT_TEXT = "Not kept."
 MEMORY_PUSHED_TEXT = "No longer pending - add it in MEMORY."
 MEMORY_NO_MATCH_TEXT = "I have no note about that, {sir}."
 MEMORY_SEVERAL_TEXT = "Which note, {sir}? I've opened MEMORY with the matches."
-# Who gets the notes (this build: Ask; plans, briefs and drafts join it when they are built).
-MEMORY_GIVEN_TO = "every Ask"
-MEMORY_SENT_WORDS = "Sent with your Asks; never to web research"
+# Who gets the notes (drafts join them when they are built).
+MEMORY_GIVEN_TO = "every Ask, plan and brief"
+MEMORY_SENT_WORDS = "Sent with your Asks, plans and briefs; never to web research"
 MEMORY_STATUS = ("Kept only on this PC (memory.json). Given to your Claude with {given} - never to web research. "
                  "{count} " + DOT + " {kb:.1f} of {cap} KB sent.")
 MEMORY_STORED_WORDS = "memory.json (on this PC)"
@@ -2399,6 +2404,8 @@ _ASK_CARDS_MAX = 16                    # Ask cards kept (this run, memory only);
 # A planner mode's cards (the productivity bundle) say which mode proposed them ("Plan - block").
 _MODE_TITLES = MODE_TITLES
 PLAN_BLOCK_PASSED_NOTE = "This block's time has passed - plan again"
+PREP_CHOICE_LINK = "prep-choice:"       # + an opaque counter: Prep this one (a meeting to brief)
+PREP_THIS_ONE_TEXT = "Prep this one"
 PLANNED_NOTE = "Planned {hours} {day} (day plan)"   # on a Todo card a created plan block serves (R28)
 _PLAN_FOCUS_GUARD_S = 1.0              # a key press this soon after Jarvis moved the focus never approves (R1)
 ALREADY_LISTED_TEXT = ALREADY_LISTED   # an Ask card the briefing also proposes (information only)
@@ -3485,6 +3492,12 @@ class AppController(QObject):
         self._planned_notes: dict[str, str] = {}
         self._plan_focus_guard: tuple[str, float] = ("", -math.inf)
         self._mode_auto_opened = 0
+        # The meeting brief (memory only): "Prep this one" links by counter -> the meeting, the link's
+        # words, the entries of the same choice (one click starts one brief: the others lose their
+        # link) and the typed words that led to it (cleared from the bar once the brief is in, while
+        # the bar still holds exactly them, R23).
+        self._prep_choices: dict[int, tuple[Any, str, tuple[int, ...], str]] = {}
+        self._prep_choice_seq = 0
 
     @property
     def _calendar_jobs(self) -> dict[str, str]:
@@ -6266,7 +6279,7 @@ class AppController(QObject):
         was_live = self.window.reading.current_tab() == hud.TAB_LIVE
         if not self._live_auto_open(kind, self._ask_task_id):
             self.window.reading.set_tab(hud.TAB_JARVIS)
-        elif kind == _live.TASK_PLAN and not was_live:
+        elif kind in (_live.TASK_PLAN, _live.TASK_PREP) and not was_live:
             # LIVE came up only through this run: its answer brings JARVIS back, unless the owner
             # changes tabs meanwhile (_on_tab_changed forgets it; R33). The owner's own LIVE stays.
             self._mode_auto_opened = self._ask_task_id
@@ -6375,6 +6388,9 @@ class AppController(QObject):
         self._remember_ask_read(outcome)
         if getattr(outcome, "mode", "") == MODE_PLAN:
             self._on_plan_outcome(outcome)
+            return
+        if getattr(outcome, "mode", "") == MODE_PREP:
+            self._on_prep_outcome(outcome)
             return
         self._converse_ask(outcome)
         if outcome.ok and getattr(outcome, "suggestion", ""):
@@ -6499,14 +6515,149 @@ class AppController(QObject):
         self._say(KIND_REPLY, spoken)   # built here from counts and times: never a title or the planner's say
 
     def _plan_gives_way(self) -> None:
-        """LIVE became current only through this plan run's own auto-open and the owner has not changed
-        tabs since: JARVIS comes back with the answer in view (R33)."""
+        """LIVE became current only through this plan or brief run's own auto-open and the owner has not
+        changed tabs since: JARVIS comes back with the answer in view (R33)."""
         reading = self.window.reading
         if self._mode_auto_opened and self._mode_auto_opened == self._ask_task_id \
                 and reading.current_tab() == hud.TAB_LIVE:
             reading.set_tab(hud.TAB_JARVIS)
             reading.conversation.scroll_to_newest()
         self._mode_auto_opened = 0
+
+    # ---- the meeting brief (the productivity bundle) -------------------------------------------
+
+    def _prep_on(self) -> bool:
+        """"prep me" is a shortcut: the bundle is on, with Ask (the bar exists) and [calendar] on."""
+        productivity = getattr(self.config, "productivity", None)
+        return (self.ask is not None and bool(getattr(productivity, "enabled", False))
+                and bool(getattr(self.config.calendar, "enabled", False)))
+
+    def _on_prep_outcome(self, outcome: Any) -> None:
+        """A finished meeting brief: the brief entry (or the choices, or why there is none), what
+        Jarvis says (the meeting's time only), its Reply cards under ASK, one ACTIVITY row of counts."""
+        self._converse_prep(outcome)
+        brief = getattr(outcome, "brief", None)
+        if outcome.ok and brief is not None:
+            self._take_ask_cards(list(outcome.cards))
+            if outcome.note_kind:
+                message = "Prep: brief without a planner run"
+                sub = [prep_no_run_words(outcome.note_kind)]
+            else:
+                message = f"Prep: brief ready ({_plural(outcome.mail.threads, 'thread')} read)"
+                sub = [f"{outcome.duration_ms / 1000:.1f} s", _plural(outcome.runs, "planner run")]
+            replies = sum(1 for card in outcome.cards if not card.error)
+            if replies:
+                message += f", {_plural(replies, 'reply')}"
+            if outcome.refused:
+                message += f" ({outcome.refused} refused)"
+            self._activity(hud.TAG_ASK, message, f" {DOT} ".join(sub))
+            logger.info("Prep: %d card(s) shown under ASK (%d refused)", len(outcome.cards), outcome.refused)
+        elif outcome.ok:
+            self._activity(hud.TAG_ASK, f"Prep: no run ({prep_no_run_words(outcome.note_kind)})", "no planner run")
+        elif outcome.kind not in ("empty", "busy"):
+            self._activity(hud.TAG_STOP, "Prep: nothing was proposed", _short(outcome.message or outcome.kind))
+        self._refresh_actions_ui()
+
+    def _converse_prep(self, outcome: Any) -> None:
+        """The brief in JARVIS (prep.brief_text: shown only, never logged or spoken), with "See every
+        step"; the choices, each with "Prep this one"; or why there is no brief. LIVE opened by this
+        run gives way to JARVIS (R33); then the spoken sentence, which says where the brief is."""
+        from .ask.prep import brief_text
+
+        assistant = self.config.assistant
+        address = assistant.address
+        if not outcome.ok:
+            self._converse_ask(outcome)   # the same failure entry and words as an Ask's
+            self._plan_gives_way()
+            return
+        brief = getattr(outcome, "brief", None)
+        if brief is None and outcome.note_kind == "choices" and outcome.choices:
+            self._prep_choice_entries(outcome)
+            self._plan_gives_way()
+            self._prep_say(prep_no_run_speech("choices", address, choices=len(outcome.choices)))
+            return
+        if brief is None:
+            self._jarvis(outcome.message, tone=hud.TONE_WARN, sub="no planner run")
+            self._plan_gives_way()
+            self._prep_say(outcome.message)   # Jarvis's own fixed words (persona.prep_no_run_text): no title
+            return
+        hour24 = self.config.display.hour24
+        text = brief_text(brief, hour24)
+        if not outcome.note_kind:
+            for note in (part for part in (outcome.message or "").split("; ") if part):
+                note = note[:1].upper() + note[1:]
+                text += "\n" + (note if note.endswith((".", "!", "?", ")")) else note + ".")
+        sub = ["prep brief"]
+        if outcome.note_kind:
+            sub.append("no planner run")
+        else:
+            sub += [f"{_plural(outcome.mail.threads, 'thread')} read", _plural(outcome.runs, "planner run"),
+                    f"{outcome.duration_ms / 1000:.1f} s"]
+        if brief.dropped:
+            sub.append(f"{_plural(brief.dropped, 'item')} left out")
+        task_id = self._ask_task_id
+        link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
+        self._jarvis(text, tone=hud.TONE_DONE, sub=f" {DOT} ".join(sub), link=link)
+        self._plan_gives_way()
+        reading = self.window.reading
+        in_jarvis = reading.current_tab() == hud.TAB_JARVIS or self.window.isMinimized()
+        self._prep_say(prep_result_speech(brief.start, address, in_jarvis_tab=in_jarvis, day=brief.day))
+
+    def _prep_say(self, spoken: str) -> None:
+        """Say a brief's sentence ([assistant] speak_replies; built here from its time only)."""
+        if spoken and self.config.assistant.speak_replies:
+            self._say(KIND_REPLY, spoken)
+        else:
+            self._voice_call("cancel_key", ASK_ACK_KEY)
+
+    def _prep_choice_entries(self, outcome: Any) -> None:
+        """"Which meeting shall I prepare, sir? ...", then one entry per meeting with "Prep this one"
+        (the link maps, in memory only, to the meeting's account, calendar and id)."""
+        hour24 = self.config.display.hour24
+        conversation = self.window.reading.conversation
+        typed = self.ask.bar.text() if self.ask is not None else ""
+        lead = self._jarvis(outcome.message or prep_choices_text(len(outcome.choices), self.config.assistant.address),
+                            tone=hud.TONE_WARN, sub="no planner run")
+        made: list[tuple[int, Any, str]] = []
+        entries: list[int] = []
+        for choice in outcome.choices:
+            self._prep_choice_seq += 1
+            number = self._prep_choice_seq
+            text = prep_choice_text(choice.title, choice.start, choice.ref.alias, day=choice.day, hour24=hour24)
+            entries.append(self._jarvis(text, tone=hud.TONE_IDLE,
+                                        link=(PREP_THIS_ONE_TEXT, f"{PREP_CHOICE_LINK}{number}")))
+            made.append((number, choice.ref, f"{PREP_THIS_ONE_TEXT}: {text}"))
+        for number, ref, words in made:
+            self._prep_choices[number] = (ref, words, tuple(entries), typed)
+        while len(self._prep_choices) > 30:   # memory only: the oldest group goes, whole, links included
+            gone = self._prep_choices[next(iter(self._prep_choices))][2]
+            for key in [key for key, value in self._prep_choices.items() if value[2] == gone]:
+                self._prep_choices.pop(key)
+            for entry in gone:
+                conversation.update(entry, link_text="", link_id="")
+        conversation.follow_from(lead)   # the question first, then the choices (never a bare link on top)
+
+    def _prep_choice_link(self, number_text: str) -> None:
+        """"Prep this one": a brief of that meeting (a click-started run: the bar's text stays unless
+        it is still exactly the typed words that led to these choices, R23). A gone link does
+        nothing; a click while busy is refused and the link stays."""
+        try:
+            number = int(number_text)
+        except ValueError:
+            return
+        found = self._prep_choices.get(number)
+        if found is None or self.ask is None or self.state == STATE_QUITTING:
+            logger.info("Prep: a choice link that is gone")
+            return
+        ref, words, entries, typed = found
+        started = self.ask.submit_mode(ModeRequest(MODE_PREP, ORIGIN_CHOICE, event=ref), words, clear_text=typed)
+        if not started:
+            return
+        conversation = self.window.reading.conversation
+        for gone in [key for key, value in self._prep_choices.items() if value[2] == entries]:
+            self._prep_choices.pop(gone, None)
+        for entry in entries:
+            conversation.update(entry, link_text="", link_id="")
 
     def _refresh_ask(self) -> None:
         """A Google sign-in changed: which accounts' mail Ask may read (never Claude Code's checks)."""
@@ -6604,8 +6755,9 @@ class AppController(QObject):
                     "; memory.json can't be read, kept read-only" if self.memory_store.read_only else "")
 
     def _route_flags(self) -> RouteFlags:
-        """The typed shortcuts on now: memory ("remember that ..."), the day plan ("plan my day")."""
-        return RouteFlags(memory=self.memory_store is not None, plan=self._plan_on())
+        """The typed shortcuts on now: memory ("remember that ..."), the day plan ("plan my day"),
+        the meeting brief ("prep me for my 2 PM")."""
+        return RouteFlags(memory=self.memory_store is not None, plan=self._plan_on(), prep=self._prep_on())
 
     def _memory_prompt_notes(self) -> tuple[str, ...]:
         """The notes the planner gets (any thread: the GUI thread swaps the whole tuple)."""
@@ -7226,6 +7378,8 @@ class AppController(QObject):
             self._memory_save_link(link_id[len(MEMORY_SAVE_LINK):])
         elif link_id == MEMORY_OPEN_LINK and self.memory_store is not None:
             self.window.reading.set_tab(hud.TAB_MEMORY)
+        elif link_id.startswith(PREP_CHOICE_LINK):
+            self._prep_choice_link(link_id[len(PREP_CHOICE_LINK):])
 
     # ---- the LIVE view -----------------------------------------------------------------------
 

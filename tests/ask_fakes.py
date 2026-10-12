@@ -168,14 +168,18 @@ def all_day(event_id: str, title: str, first: date, last: date | None = None) ->
 
 
 class FakeReader:
-    """GmailReader stand-in: ``threads`` maps thread id -> users.threads.get JSON."""
+    """GmailReader stand-in: ``threads`` maps thread id -> users.threads.get JSON. A search returns
+    ``found``, or with ``found_for`` (address -> thread ids) the ids of the first address the query
+    names (none when it names none of them)."""
 
     def __init__(self, alias: str, threads: Mapping[str, dict] | None = None, *, problem: tuple[str, str] = ("", ""),
-                 found: Sequence[str] = (), error: Exception | None = None) -> None:
+                 found: Sequence[str] = (), error: Exception | None = None,
+                 found_for: Mapping[str, Sequence[str]] | None = None) -> None:
         self.alias = alias
         self.threads = dict(threads or {})
         self.problem = problem
         self.found = list(found)
+        self.found_for = {address: list(ids) for address, ids in (found_for or {}).items()}
         self.error = error
         self.searches: list[str] = []
         self.reads: list[str] = []
@@ -187,6 +191,9 @@ class FakeReader:
         self.searches.append(query)
         if self.error is not None:
             raise self.error
+        if self.found_for:
+            ids = next((ids for address, ids in self.found_for.items() if address in query), [])
+            return ids[:max_threads]
         return self.found[:max_threads]
 
     def thread(self, thread_id: str) -> dict:

@@ -55,6 +55,19 @@ where an empty day or a full one answers with no run at all; then one run with C
 by validate.to_cards(kinds={Calendar}, extra=dayplan.DayCheck) and keep_valid. Each valid block's
 notes become "For: <the to-do it serves>" (Jarvis's own words) and ``serves`` names the Todo card.
 plan_dry_run() shows the stdin with titles and notes as sizes (no run, nothing counted).
+
+The meeting brief (ask.modes.MODE_PREP, "prep me for my 2 PM", spec 3.3): Ask on, nothing more up
+front; the meeting read fresh (typed words resolved by ask.prep.resolve_meeting against today and
+tomorrow: none, several, or one found by only some title words answer with no read at all; a
+clicked meeting is found again by its calendar and id, wherever it moved; gone or ended stops).
+Mail only when the meeting's account can be read, and only after Claude Code's readiness and the
+caps (the bundle's too) were checked right then: else a brief of Jarvis's own, with no run (R12).
+Each guest the meeting has (not the owner, a group or a guest who declined; at most
+prep_max_guests) is looked up with Jarvis's own search (ask.prep.prep_query: that address, the
+last prep_lookback_days days) after ask.prep.guest_allowed (R2), until 3 threads are found, one per
+guest; those are read and given to one run (its own prompt and schema), whose answer is checked
+(ask.prep.check_prep; its Reply lines by validate.to_cards with ask.prep.PrepCheck). No thread
+found: the brief of Jarvis's own (who is coming, what each lookup found), no run.
 """
 
 from __future__ import annotations
@@ -88,6 +101,9 @@ from ..live import (
     PLAN_FREE,
     PLAN_VALIDATE,
     PLANNER_RUN,
+    PREP_MEETING,
+    PREP_PEOPLE,
+    PREP_VALIDATE,
     STATUS_BLOCKED,
     STATUS_CANCELLED,
     STATUS_FAILED,
@@ -142,11 +158,11 @@ from .research import (
 from .research_validate import ResearchReport
 from .research_validate import notes as research_notes
 from .research_validate import validate as validate_research
-from .stream import CANCELLED, OVERAGE, AskFailure, InitSummary, Plan, RunResult, RunStats, run_planner
+from .stream import CANCELLED, OVERAGE, AskFailure, InitSummary, Plan, RunResult, RunStats, run_cli, run_planner
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
 from .validate import LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, Cards, keep_valid, to_cards
-from . import dayplan, modes
-from .modes import MODE_KINDS, MODE_MAX_LINES, MODE_PLAN, MODE_USAGE, ModeInputs, ModeRequest
+from . import dayplan, modes, prep
+from .modes import MODE_KINDS, MODE_MAX_LINES, MODE_PLAN, MODE_PREP, MODE_USAGE, ModeInputs, ModeRequest
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +172,7 @@ STAGE_MAIL = "mail"                # running the search the planner asked for
 STAGE_PLANNING_AGAIN = "planning_again"   # the second run, with the mail
 STAGE_RESEARCH = "research"        # the web research run
 STAGE_DAY = "day"                  # a day plan: reading the day being planned
+STAGE_PREP_MAIL = "prep_mail"      # a meeting brief: Jarvis's own searches and reads of the guests' threads
 
 # Refusals before any run (AskOutcome.kind), besides stream's failure kinds.
 EMPTY = "empty"
@@ -341,10 +358,12 @@ class ClaudeEngine:
     def run_mode(self, prompt: str, mode: str, *, cancel: threading.Event | None = None,
                  progress: Callable[[str, Any], None] | None = None, capture: bool = False,
                  allow_remember: bool = False) -> RunResult:
-        """One run of a planner mode (ask.modes: "plan") after preflight(): the same Claude Code,
-        clean environment, empty work folder, deny-all settings, flags and checks as run(), with the
-        mode's own prompt and schema (never gmail_search or web_research). ``allow_remember``: it may
-        suggest one note (a plan never carries mail)."""
+        """One run of a planner mode (ask.modes: "plan", "prep") after preflight(): the same Claude
+        Code, clean environment, empty work folder, deny-all settings, flags and checks as run()
+        (stream.check_init / check_event), with the mode's own prompt and schema (never gmail_search
+        or web_research) and the mode's reader: a plan's answer is a Plan (RunResult.plan), a brief's
+        a prep.PrepAnswer (RunResult.answer). ``allow_remember``: it may suggest one note (a plan
+        never carries mail; a brief always does, so never)."""
         from .stream import failure
 
         ready, refused = self.preflight()
@@ -353,11 +372,19 @@ class ClaudeEngine:
         if cancel is not None and cancel.is_set():
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
+        if mode == MODE_PREP:
+            allow_remember = False
         argv = self.mode_argv(ready, mode, allow_remember=allow_remember)
-        result = run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
-                             timeout_s=float(self.ask.timeout_seconds), allow_search=False, cancel=cancel,
-                             clock=self._clock, progress=progress, capture=capture, allow_web=False,
-                             allow_remember=allow_remember)
+        if mode == MODE_PREP:
+            result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                             timeout_s=float(self.ask.timeout_seconds),
+                             read=lambda event, init: prep.read_prep_result(event, init), cancel=cancel,
+                             clock=self._clock, progress=progress, capture=capture)
+        else:
+            result = run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                                 timeout_s=float(self.ask.timeout_seconds), allow_search=False, cancel=cancel,
+                                 clock=self._clock, progress=progress, capture=capture, allow_web=False,
+                                 allow_remember=allow_remember)
         init = result.init
         logger.info("Ask: planner run %s in %.1f s (%d turn(s), %d in / %d out / %d cached tokens; tools %s, "
                     "structured output %s, exit %s) (mode %s)", result.outcome, result.stats.duration_ms / 1000,
@@ -684,11 +711,14 @@ class AskOutcome:
     # A note the planner suggested keeping (memory.check_suggestion passed; shown with "Remember this",
     # saved only on the owner's click; never logged, never spoken).
     suggestion: str = field(default="", repr=False)
-    # A planner mode's answer (the productivity bundle): its mode ("plan"), a brief (a later build),
-    # choices to click (a later build), the day a plan is for, why it did not run (a word: "day_full",
-    # "nothing", "part_over", "no_hours", "no_calendar"; its words are ``message``), the plan's
-    # window (dayplan.PlanWindow: the UI replaces only the earlier plan cards it overlaps), its free
-    # stretches and the most blocks it may give.
+    # A planner mode's answer (the productivity bundle): its mode ("plan", "prep"), a meeting brief
+    # (prep.PrepBrief: shown, never logged or spoken), meetings to pick from (prep.PrepChoice: "Prep
+    # this one"), the day a plan is for, why it did not run (a word: a plan's "day_full", "nothing",
+    # "part_over", "no_hours", "no_calendar"; a brief's "no_match", "gone", "ended", "no_calendar",
+    # "choices", or with a brief of Jarvis's own "no_thread", "mail_off", "unreadable", "caps",
+    # "not_ready"; its words are ``message``), the plan's window (dayplan.PlanWindow: the UI
+    # replaces only the earlier plan cards it overlaps), its free stretches and the most blocks it
+    # may give.
     mode: str = ""
     brief: Any = field(default=None, repr=False, compare=False)
     choices: tuple[Any, ...] = field(default=(), repr=False)
@@ -714,6 +744,10 @@ class AskOutcome:
                      f"{report.searches} search(es), {report.fetches} page read(s)")
         if self.mode:
             text += f", mode {self.mode}"
+            brief = self.brief
+            if self.mode == MODE_PREP and brief is not None:
+                text += (f", brief threads {len(brief.threads)} / open {len(brief.open)} / points "
+                         f"{len(brief.points)}, {brief.dropped} dropped")
             if self.note_kind:
                 text += f", no run ({self.note_kind})"
             elif self.mode == MODE_PLAN and self.ok:
@@ -1139,8 +1173,9 @@ class AskPlanner:
                   briefing: BriefingContext | None = None, page_ids: Sequence[str] = (),
                   cancel: threading.Event | None = None, on_stage: Callable[[str], None] = lambda stage: None,
                   live: LiveTask | None = None) -> AskOutcome:
-        """One planner mode run (this build: the day plan) on the Ask thread: the same one-at-a-time
-        lock as plan(); never raises; ``live`` gets its steps (the caller finishes the task)."""
+        """One planner mode run (the day plan, the meeting brief) on the Ask thread: the same
+        one-at-a-time lock as plan(); never raises; ``live`` gets its steps (the caller finishes the
+        task)."""
         task = live or NO_TASK
         if not self._busy.acquire(blocking=False):
             task.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=BUSY_MESSAGE)
@@ -1150,6 +1185,8 @@ class AskPlanner:
         try:
             if request.mode == MODE_PLAN:
                 outcome = self._plan_day(request, inputs or ModeInputs(), briefing, page_ids, cancel, on_stage, task)
+            elif request.mode == MODE_PREP:
+                outcome = self._prep(request, inputs or ModeInputs(), briefing, page_ids, cancel, on_stage, task)
             else:
                 outcome = AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
         except Exception as exc:  # noqa: BLE001 - a mode run must never take the app down
@@ -1326,6 +1363,307 @@ class AskPlanner:
         return DryRun(prompt, argv, ready, counts, MailReport(), note=note)
 
     # ---- web research -------------------------------------------------------------------------
+
+    # ---- meeting prep (spec 3.3) ---------------------------------------------------------------
+
+    def _prep(self, request: ModeRequest, inputs: ModeInputs, briefing: BriefingContext | None,
+              page_ids: Sequence[str], cancel: threading.Event | None, on_stage: Callable[[str], None],
+              live: LiveTask = NO_TASK) -> AskOutcome:
+        """A meeting brief: Ask on (readiness and the caps wait for the first mail read, R12), the
+        meeting as read now, its guests looked up and their threads read, one run; or a brief of
+        Jarvis's own with no run (mail can't be read, the checks refuse, no thread found)."""
+        settings = self._productivity()
+        days = prep.lookback(settings.prep_lookback_days)
+        step = live.step(ASK_CHECKS, CHECKS_TITLE)
+        if not self.config.ask.enabled:
+            step.field("Ask", "off")
+            step.done(STATUS_BLOCKED, summary=DISABLED_MESSAGE)
+            return AskOutcome(False, DISABLED, DISABLED_MESSAGE)
+        step.field("Ask", "on")
+        step.field("Claude Code and the limits", PREP_CHECKS_LATER)
+        step.done(STATUS_OK)
+        on_stage(STAGE_CONTEXT)
+        zone = self.sources.time_zone()
+        now = self.clock()
+        accounts = self.sources.accounts()
+        own = frozenset(inputs.own) | frozenset(account.address.casefold() for account in accounts if account.address)
+        found = self._prep_meeting(request, accounts, own, now, zone, cancel, live)
+        if isinstance(found, AskOutcome):
+            return found
+        meeting = found
+        alias = meeting.alias
+        lookups = prep.prep_guests(meeting.brief, own, settings.prep_max_guests)
+        known = next((account for account in accounts if account.alias == alias), None)
+        people = _prep_people_step(live, days)
+        notes = self._memory_notes()
+        pending = tuple(briefing.pending) if briefing is not None else ()
+        reader = self.sources.reader(alias)
+        if not self.config.ask.read_mail or known is None or known.read_mail != "yes" or reader is None:
+            reason = "mail_off" if not self.config.ask.read_mail else "unreadable"
+            said = replace(known, read_mail=READ_OFF) if known is not None and reason == "mail_off" else known
+            return self._prep_without_run(reason, meeting, lookups, pending, notes, unreadable_note(alias, said),
+                                          days, live, people)
+        reserve = self.usage.reserve_kept(int(settings.reserve_ask_runs))
+        caps = self.usage.check(runs=1, bundle=1, reserve=reserve)
+        ready = self.engine.readiness()
+        _prep_checks(people, caps, self.usage, reserve, ready)
+        if not caps.allowed:
+            return self._prep_without_run("caps", meeting, lookups, pending, notes, f"{MAIL_NOT_READ}{caps.message}",
+                                          days, live, people)
+        if not ready.ok:
+            return self._prep_without_run("not_ready", meeting, lookups, pending, notes,
+                                          f"{MAIL_NOT_READ}{ready.message}", days, live, people)
+        on_stage(STAGE_PREP_MAIL)
+        lookups, searches, refused = self._prep_lookups(meeting, lookups, accounts, days,
+                                                        bool(settings.prep_other_accounts), cancel, live, people)
+        shown: dict[tuple[str, str], LiveStep] = {}   # the mail.thread steps (this call's memory only)
+        mail_notes: list[str] = []
+        threads, lookups = self._prep_reads(lookups, mail_notes, cancel, live, shown)
+        unsearched = sum(1 for lookup in lookups if lookup.status not in (prep.FOUND, prep.NONE, prep.SAME, prep.OWN))
+        logger.info("Prep: %d search(es) (%d refused), %d index hit(s), %d thread(s) read, %d guest(s) not searched",
+                    searches, refused, 0, len(threads), unsearched)
+        if cancel is not None and cancel.is_set():
+            _prep_people_done(people, lookups, days, alias)
+            return AskOutcome(False, CANCELLED, "Cancelled; nothing was proposed", mail=report(threads))
+        if not threads:
+            return self._prep_without_run("no_thread", meeting, lookups, pending, notes, "", days, live, people)
+        _prep_people_done(people, lookups, days, alias)
+        people_text = prep.people_block(lookups, days, alias)
+        prompt, index = modes.build_prep_prompt(now, self._owner(), known, alias, meeting.brief, people_text, threads,
+                                                notes, request, accounts=accounts, zone=zone)
+        logger.info("Ask: context of %d characters (%s; mode prep)", len(prompt),
+                    ", ".join(f"{name} {count}" for name, count in index.counts().items()))
+        _threads_given(shown, trim_threads(threads, max_threads=prep.MAX_THREADS), prompt)
+        on_stage(STAGE_PLANNING)
+        result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1,
+                           search_words=PREP_NO_SEARCH_WORDS, web_words=PREP_NO_WEB_WORDS, mode=MODE_PREP)
+        del prompt
+        mail = report(threads)
+        answer = result.answer
+        if result.failure is not None or not isinstance(answer, prep.PrepAnswer):
+            failure = result.failure
+            return AskOutcome(False, failure.kind if failure else "error", failure.message if failure else "",
+                              runs=1 if result.started else 0, init=result.init,
+                              stats=(result.stats,) if result.started else (), mail=mail)
+        brief = prep.check_prep(answer, meeting, lookups, threads, notes, days=days, zone=zone)
+        cards = to_cards(answer.lines, index, now=now, link_hosts=self.config.actions.link_hosts, page_ids=page_ids,
+                         max_cards=MODE_MAX_LINES[MODE_PREP], kinds=MODE_KINDS[MODE_PREP], mode=MODE_PREP,
+                         extra=prep.PrepCheck(alias, threads, notes, own=own))
+        _prep_validated(live, answer, brief, cards, self._hour24())
+        held = {card.error for card in cards.cards}
+        if prep.NOTE_LEAK in held:
+            logger.info("Prep: a draft held back (note)")
+        if prep.MAIL_LEAK in held:
+            logger.info("Prep: a draft held back (mail)")
+        message_parts = list(mail_notes)
+        if cards.dropped:
+            message_parts.append(f"{cards.dropped} more reply draft(s) were left out")
+        if answer.via_fallback:
+            message_parts.append("(read from the planner's plain text)")
+        return AskOutcome(True, "ok", "; ".join(message_parts), say=answer.say, cards=cards.cards,
+                          dropped=cards.dropped, refused=cards.refused, runs=1, init=result.init,
+                          stats=(result.stats,), mail=mail, brief=brief, mode=MODE_PREP)
+
+    def _prep_meeting(self, request: ModeRequest, accounts: Sequence[AccountInfo], own: frozenset[str],
+                      now: datetime, zone: str, cancel: threading.Event | None,
+                      live: LiveTask) -> prep.PrepMeeting | AskOutcome:
+        """The meeting as read now (spec 3.3 step 2), or why there is no brief (no reads of mail):
+        typed words resolved against a fresh read of today and tomorrow on every signed-in calendar
+        (none, several or one found by only some title words: no brief yet, R5); an offered or chosen
+        meeting read again on its own calendar over the same two days and found by its calendar and
+        id, wherever it moved (R20). Gone or ended stops."""
+        from ..persona import prep_no_run_text
+
+        ask = self.config.ask
+        wall_now = dayplan.to_wall(now, zone)
+        first = _day_bounds(wall_now.date(), zone)[0]
+        last = _day_bounds(wall_now.date() + timedelta(days=1), zone)[1]
+        step = _prep_meeting_step(live, request)
+        owner = self._owner()
+        events: dict[str, tuple[EventBrief, ...]] = {}
+        failed = False
+        moved = ""
+        if request.event is None:
+            for account in accounts:
+                if account.calendar != "yes" or (cancel is not None and cancel.is_set()):
+                    continue
+                briefs, status = self.sources.event_briefs(account.alias, first, last, ask.calendars)
+                _prep_read_field(step, account.alias, status, briefs)
+                if status == "yes":
+                    events[account.alias] = tuple(briefs)
+                else:
+                    failed = True
+            self._reads.calendar = CalendarRead(first, last, tuple(events.items()), now)
+            if cancel is not None and cancel.is_set():
+                _prep_meeting_stop(step, STATUS_CANCELLED, "Cancel clicked")
+                return AskOutcome(False, CANCELLED, "Cancelled; nothing was proposed")
+            if not events:
+                connect = not any(account.calendar == "yes" for account in accounts)
+                return self._prep_no_run("no_calendar", prep_no_run_text("no_calendar", owner, connect=connect), step)
+            match = prep.resolve_meeting(request.target, events, now, own, zone=zone)
+            if not match.refs:
+                kind = "no_calendar" if failed else "no_match"
+                return self._prep_no_run(kind, prep_no_run_text(kind, owner), step)
+            if len(match.refs) > 1 or match.how == prep.MATCH_TITLE_SOME:
+                choices = tuple(prep.choice_of(alias, brief, now, zone) for alias, brief in match.found)
+                return self._prep_choices(choices, step)
+            alias, brief = match.found[0]
+        else:
+            ref = request.event
+            alias = ref.alias
+            briefs, status = self.sources.event_briefs(alias, first, last, ask.calendars)
+            _prep_read_field(step, alias, status, briefs)
+            if status == "yes":
+                events[alias] = tuple(briefs)
+            self._reads.calendar = CalendarRead(first, last, tuple(events.items()), now)
+            if status != "yes":
+                text = prep_no_run_text("no_calendar", owner, connect=status in ("no", "not signed in"))
+                return self._prep_no_run("no_calendar", text, step)
+            found = prep.find_event(briefs, ref.calendar_id, ref.event_id)
+            if found is None or found.start is None or found.all_day:
+                return self._prep_no_run("gone", prep_no_run_text("gone", owner), step)
+            brief = found
+            if ref.start is not None and brief.start != ref.start:
+                moved_to = prep.meeting_of(alias, brief, now, zone)
+                day = "" if moved_to.day == "today" else f"{moved_to.day} "
+                moved = f"moved to {day}{dayplan.clock_text(moved_to.start, self._hour24())}"
+        meeting = prep.meeting_of(alias, brief, now, zone)
+        if wall_now >= meeting.end:
+            return self._prep_no_run("ended", prep_no_run_text("ended", owner), step)
+        _prep_meeting_done(live, step, meeting, moved, events, now, zone, self._hour24())
+        return meeting
+
+    def _prep_no_run(self, kind: str, text: str, step: LiveStep = NO_STEP) -> AskOutcome:
+        """No brief and nothing read from mail: no such meeting, gone, ended, no calendar."""
+        logger.info("Prep: no run (%s)", kind)
+        _prep_meeting_stop(step, STATUS_WARN, text, status_text="NO RUN")
+        return AskOutcome(True, "ok", text, mode=MODE_PREP, note_kind=kind)
+
+    def _prep_choices(self, choices: Sequence[prep.PrepChoice], step: LiveStep = NO_STEP) -> AskOutcome:
+        """Several meetings match, or one only by some title words (R5): the owner picks; nothing is
+        read until that click."""
+        from ..persona import prep_choices_text
+
+        logger.info("Prep: no run (choices)")
+        words = (f"{len(choices)} meetings match - Jarvis asks which one" if len(choices) > 1 else
+                 "one meeting matches some of your words - Jarvis asks first")
+        _prep_meeting_stop(step, STATUS_WARN, words, status_text="CHOOSE", choices=choices, hour24=self._hour24())
+        return AskOutcome(True, "ok", prep_choices_text(len(choices), self._owner()), mode=MODE_PREP,
+                          note_kind="choices", choices=tuple(choices))
+
+    def _prep_without_run(self, reason: str, meeting: prep.PrepMeeting, lookups: Sequence[prep.GuestLookup],
+                          pending: Sequence[ProposedAction], notes: Sequence[str], why: str, days: int,
+                          live: LiveTask, people: LiveStep = NO_STEP) -> AskOutcome:
+        """The brief of Jarvis's own (G4): no planner run, nothing counted."""
+        from ..persona import PREP_NO_RUN_STATUS, prep_no_run_words
+
+        kept = [replace(lookup, status=prep.NOT_SEARCHED, why=prep.NOT_READ_WHY)
+                if lookup.status == prep.PENDING else lookup for lookup in lookups]
+        brief = prep.deterministic_brief(meeting, kept, pending, notes, why, days=days)
+        logger.info("Prep: brief without a planner run (%s)", reason)
+        _prep_people_done(people, kept, days, meeting.alias)
+        _prep_no_run_step(live, prep_no_run_words(reason))
+        return AskOutcome(True, "ok", PREP_NO_RUN_STATUS, mode=MODE_PREP, note_kind=reason, brief=brief)
+
+    def _prep_lookups(self, meeting: prep.PrepMeeting, lookups: Sequence[prep.GuestLookup],
+                      accounts: Sequence[AccountInfo], days: int, other_accounts: bool,
+                      cancel: threading.Event | None, live: LiveTask,
+                      people: LiveStep) -> tuple[list[prep.GuestLookup], int, int]:
+        """Each guest still to look up, in order, until 3 threads are found (spec 3.3 step 6):
+        guest_allowed first (R2: refused -> never searched), then Jarvis's own search on the meeting's
+        account (and, with prep_other_accounts, on the other readable ones when that finds nothing).
+        A thread another guest's search already found is not read twice (SAME). (lookups, searches,
+        refused)."""
+        lookups = list(lookups)
+        alias = meeting.alias
+        others = [account.alias for account in accounts
+                  if other_accounts and account.alias != alias and account.read_mail == "yes"
+                  and self.sources.reader(account.alias) is not None]
+        found: dict[tuple[str, str], str] = {}
+        searches = refused = 0
+        for number, lookup in enumerate(lookups):
+            if lookup.status != prep.PENDING:
+                continue
+            if cancel is not None and cancel.is_set():
+                lookups[number] = replace(lookup, status=prep.NOT_SEARCHED, why=prep.CANCELLED_WHY)
+                continue
+            if len(found) >= prep.MAX_THREADS:
+                lookups[number] = replace(lookup, status=prep.NOT_SEARCHED, why=prep.THREADS_WHY)
+                continue
+            address = lookup.guest.address
+            if not prep.guest_allowed(address, days):
+                refused += 1
+                lookups[number] = replace(lookup, status=prep.REFUSED, why=prep.REFUSED_WHY)
+                continue
+            query = check_query(prep.prep_query(address, days), None)
+            outcome = replace(lookup, status=prep.NONE)
+            for target in [alias, *others]:
+                searches += 1
+                ids, error = self._prep_search(target, query, lookup, days, live, also=target != alias)
+                if error:
+                    if target == alias:
+                        outcome = replace(lookup, status=prep.NOT_SEARCHED, why=prep.FAILED_WHY)
+                        break
+                    continue
+                if ids:
+                    key = (target, ids[0])
+                    if key in found:
+                        outcome = replace(lookup, status=prep.SAME, alias=target, thread_id=ids[0], why=found[key])
+                    else:
+                        found[key] = lookup.guest.display
+                        outcome = replace(lookup, status=prep.FOUND, alias=target, thread_id=ids[0])
+                    break
+            lookups[number] = outcome
+        return lookups, searches, refused
+
+    def _prep_search(self, alias: str, query: str, lookup: prep.GuestLookup, days: int, live: LiveTask, *,
+                     also: bool = False) -> tuple[list[str], bool]:
+        """One search Jarvis built himself (one guest's address, the lookback, read only, at most one
+        thread): (thread ids, failed)."""
+        step = _prep_search_step(live, alias, query, lookup, days, also)
+        reader = self.sources.reader(alias)
+        if reader is None:
+            _prep_search_done(step, None, f"Jarvis can't read the {alias} account's mail")
+            return [], True
+        try:
+            ids = list(reader.search(query, max_threads=1))
+        except GmailError as exc:
+            _prep_search_done(step, None, f"Jarvis couldn't search your mail ({exc})")
+            return [], True
+        except Exception as exc:  # noqa: BLE001 - one guest's search must not stop the brief
+            logger.warning("Prep: a %s search failed unexpectedly (%s)", logged_alias(alias), type(exc).__name__)
+            _prep_search_done(step, None, f"unexpected error ({type(exc).__name__})")
+            return [], True
+        _prep_search_done(step, ids[:1], "", days=days)
+        return ids[:1], False
+
+    def _prep_reads(self, lookups: Sequence[prep.GuestLookup], notes: list[str], cancel: threading.Event | None,
+                    live: LiveTask, shown: dict[tuple[str, str], LiveStep]
+                    ) -> tuple[list[MailThread], list[prep.GuestLookup]]:
+        """The threads found, read in guest order (at most 3; _read_thread: LIVE mail.thread with
+        its email picture); a thread that can't be read is left out and its guests say so."""
+        lookups = list(lookups)
+        threads: list[MailThread] = []
+        read: set[tuple[str, str]] = set()
+        for number, lookup in enumerate(lookups):
+            if lookup.status != prep.FOUND:
+                continue
+            if cancel is not None and cancel.is_set() or len(threads) >= prep.MAX_THREADS:
+                why = prep.CANCELLED_WHY if cancel is not None and cancel.is_set() else prep.THREADS_WHY
+                lookups[number] = replace(lookup, status=prep.NOT_SEARCHED, why=why)
+                continue
+            thread = self._read_thread(lookup.alias, lookup.thread_id, notes, live, prep.WHY_PREP, shown)
+            if thread is None:
+                lookups[number] = replace(lookup, status=prep.NOT_SEARCHED, why=prep.UNREAD_WHY)
+                continue
+            newest = thread.messages[-1].sent_at if thread.messages else None
+            lookups[number] = replace(lookup, thread_id=thread.thread_id, last_at=newest)
+            read.add((lookup.alias, lookup.thread_id))
+            threads.append(thread)
+        for number, lookup in enumerate(lookups):
+            if lookup.status == prep.SAME and (lookup.alias, lookup.thread_id) not in read:
+                lookups[number] = replace(lookup, status=prep.NOT_SEARCHED, why=prep.UNREAD_WHY)
+        return threads, lookups
 
     def _research_refusal(self, live: LiveTask = NO_TASK) -> AskOutcome | None:
         """The checks of a "web:" request ("Ready to research?"), first refusal wins; no run."""
@@ -1915,10 +2253,22 @@ def _run_result(step: LiveStep, result: RunResult, *, keep_text: bool = True) ->
                       f"Suggests a note [{_count_words(len(note), 'character')} - not kept ([live] text = false)]")
         for line in plan.lines:
             step.item(line_text(line, keep_text), mono=True)
+    answer = result.answer
+    if isinstance(answer, prep.PrepAnswer):   # a meeting brief's answer (its items: "Checking the brief")
+        if answer.say:
+            step.item(f"Says: {answer.say}")
+        step.item(f"A brief: {_count_words(len(answer.threads), 'thread note')}, "
+                  f"{_count_words(len(answer.open), 'open item')}, {_count_words(len(answer.points), 'point')}")
+        for line in answer.lines:
+            step.item(line_text(line, keep_text), mono=True)
     failure = result.failure
     if failure is None and plan is not None and plan.web is not None and plan.search is None:
         why = plan.web.why if 0 < len(plan.web.why) <= HANDOVER_WHY_CHARS else ""
         step.done(STATUS_OK, summary=HANDOVER_WORDS + (f" - {why}" if why else ""))
+    elif failure is None and isinstance(answer, prep.PrepAnswer):
+        step.done(STATUS_OK, summary="a brief" + (f" and {_count_words(len(answer.lines), 'reply draft')}"
+                                                  if answer.lines else "") + (" (from its plain text)"
+                                                                              if answer.via_fallback else ""))
     elif failure is None:
         lines = len(plan.lines) if plan is not None else 0
         step.done(STATUS_OK, summary=_count_words(lines, "proposal") + (" (from its plain text)"
@@ -2096,7 +2446,7 @@ def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int
 
 NO_MAIL_WORDS = "no - a day plan never reads mail"
 NO_WEB_WORDS = "no - a day plan never uses the web"
-MODE_RUN_WORDS = {MODE_PLAN: "day plan"}
+MODE_RUN_WORDS = {MODE_PLAN: "day plan", MODE_PREP: "meeting brief"}
 FREE_TITLE = "Your free time"
 
 
@@ -2253,6 +2603,201 @@ def _plan_validated(live: LiveTask, cards: Cards, served: Mapping[str, str], tar
     step.picture(plan_picture(events, valid, day=window.day, now=now, hour24=hour24, zone=window.zone))
     summary = f"{_count_words(len(valid), 'block')}, {cards.refused} refused, {cards.dropped} dropped"
     step.done(STATUS_WARN if cards.refused or cards.dropped else STATUS_OK, summary=summary)
+
+
+# --------------------------------------------------------------------------
+# The meeting brief's own LIVE steps (quiet, like every helper above)
+# --------------------------------------------------------------------------
+
+PREP_CHECKS_LATER = "checked right before any mail is read (a brief without mail needs neither)"
+MAIL_NOT_READ = "I didn't read mail: "
+PREP_NO_SEARCH_WORDS = "no - Jarvis searched himself, one guest's address at a time"
+PREP_NO_WEB_WORDS = "no - a meeting brief never uses the web"
+PREP_SEARCH_WHY = "Jarvis's own search: the latest thread with a guest of this meeting, last {days} days, read only"
+PREP_PEOPLE_RULE = ("each guest's latest thread with you, last {days} days, at most 3 threads and one per guest; "
+                    "never you, a group address or a guest who declined")
+_LOOKUP_STATUS = {prep.FOUND: (STATUS_OK, ""), prep.SAME: (STATUS_OK, ""), prep.NONE: (STATUS_WARN, "NO MAIL"),
+                  prep.REFUSED: (STATUS_BLOCKED, "NOT SEARCHED"), prep.GROUP: (STATUS_WARN, "SKIPPED"),
+                  prep.DECLINED: (STATUS_WARN, "SKIPPED"), prep.NOT_SEARCHED: (STATUS_WARN, "SKIPPED"),
+                  prep.PENDING: (STATUS_WARN, "SKIPPED")}
+
+
+@_quiet(NO_STEP)
+def _prep_meeting_step(live: LiveTask, request: ModeRequest) -> LiveStep:
+    if not live.enabled:
+        return NO_STEP
+    if request.event is None:
+        how = "the meeting your words name, read now (today and tomorrow, every calendar, read only)"
+    else:
+        how = "the meeting you clicked, read again now (its calendar, today and tomorrow, read only)"
+    return live.step(PREP_MEETING, "The meeting, as read now", fields=[("Looking for", how)])
+
+
+@_quiet()
+def _prep_read_field(step: LiveStep, alias: str, status: str, briefs: Sequence[EventBrief]) -> None:
+    if step is NO_STEP:
+        return
+    step.field(f"Read {alias}", _count_words(len(briefs), "event") if status == "yes"
+               else _CALENDAR_WORDS.get(status, f"{status} - not read"))
+
+
+@_quiet()
+def _prep_meeting_stop(step: LiveStep, status: str, summary: str, *, status_text: str = "",
+                       choices: Sequence[Any] = (), hour24: bool = False) -> None:
+    if step is NO_STEP:
+        return
+    for choice in choices:
+        step.item(f"{choice.title or '(No title)'} - {choice.day} "
+                  f"{dayplan.hours_text(choice.start, choice.end, hour24)} ({choice.ref.alias})")
+    step.done(status, status_text=status_text, summary=summary)
+
+
+@_quiet()
+def _prep_meeting_done(live: LiveTask, step: LiveStep, meeting: Any, moved: str,
+                       events: Mapping[str, Sequence[EventBrief]], now: datetime, zone: str, hour24: bool) -> None:
+    """The meeting as read now: its title, time, guests and their answers (on screen only), moved,
+    and its day drawn as read."""
+    if step is NO_STEP:
+        return
+    brief = meeting.brief
+    when = f"{meeting.day} {dayplan.hours_text(meeting.start, meeting.end, hour24)} ({meeting.alias})"
+    step.field("Meeting", brief.title or "(No title)")
+    step.field("When", when)
+    if moved:
+        step.field("Moved", moved)
+        step.note(f"The meeting {moved}; the brief is for its new time")
+    organizer = "you organize it" if brief.organizer_self else (
+        f"organized by {brief.organizer_name or brief.organizer_email or 'someone else'}")
+    step.field("Organizer", organizer)
+    step.field("Guests", _count_words(len(brief.guests), "guest") + (" besides you" if brief.guests else ""))
+    for guest in brief.guests[:MAX_PEOPLE_SHOWN]:
+        who = f"{guest.name} <{guest.email}>" if guest.name else guest.email
+        step.item(f"{who} - {prep.RESPONSE_WORDS.get(guest.response or '', 'no answer yet')}")
+    own_day = {meeting.alias: tuple(events.get(meeting.alias, ()))}   # the meeting's own calendar, as read
+    step.picture(plan_picture(own_day, (), day=meeting.start.date(), now=now, hour24=hour24, zone=zone,
+                              account=meeting.alias))
+    step.done(STATUS_OK, summary=f"{brief.title or '(No title)'}, {when}")
+    request = live.find(MODE_REQUEST)
+    if request is not NO_STEP:
+        request.field("Brief for", f"{brief.title or '(No title)'}, {when}")
+
+
+@_quiet(NO_STEP)
+def _prep_people_step(live: LiveTask, days: int) -> LiveStep:
+    if not live.enabled:
+        return NO_STEP
+    return live.step(PREP_PEOPLE, "Who Jarvis looks up", fields=[("Rule", PREP_PEOPLE_RULE.format(days=days))])
+
+
+@_quiet()
+def _prep_checks(step: LiveStep, caps: CapCheck, usage: Any, reserve: int, ready: Readiness) -> None:
+    """Readiness and the caps, as checked right before the first search (R12)."""
+    if step is NO_STEP:
+        return
+    step.note("Checked right before any mail is read: Claude Code and the limits")
+    _checks_caps(step, caps, usage)
+    _checks_bundle(step, caps, usage, reserve)
+    _checks_ready(step, ready)
+
+
+@_quiet()
+def _prep_people_done(step: LiveStep, lookups: Sequence[Any], days: int, alias: str) -> None:
+    """Each guest: looked up (from Jarvis's own search) and what it found, or not and why."""
+    if step is NO_STEP:
+        return
+    for lookup in lookups:
+        if lookup.status == prep.OWN:
+            continue
+        guest = lookup.guest
+        who = f"{guest.name} <{guest.address}>" if guest.name else guest.address
+        status, status_text = _LOOKUP_STATUS.get(lookup.status, (STATUS_WARN, ""))
+        if lookup.status == prep.FOUND:
+            note = f"searched: found a thread on {lookup.alias}"
+        elif lookup.status == prep.SAME:
+            note = f"searched: {prep.lookup_words(lookup, days, alias)}"
+        elif lookup.status == prep.NONE:
+            note = f"searched: {prep.lookup_words(lookup, days, alias)}"
+        else:
+            note = prep.lookup_words(lookup, days, alias)
+        step.item(f"{who} - {prep.response_words(guest)}", status=status, status_text=status_text, note=note)
+    found = sum(1 for lookup in lookups if lookup.status == prep.FOUND)
+    step.done(STATUS_OK if found else STATUS_WARN, summary=f"{_count_words(found, 'thread')} found")
+
+
+@_quiet(NO_STEP)
+def _prep_search_step(live: LiveTask, alias: str, query: str, lookup: Any, days: int, also: bool) -> LiveStep:
+    if not live.enabled:
+        return NO_STEP
+    guest = lookup.guest
+    title = "Jarvis's own search" + (f" (also {alias}: nothing on the meeting's account)" if also else "")
+    step = live.step(MAIL_SEARCH, title, fields=[
+        ("Account", alias), ("For", guest.display if guest.name else guest.address),
+        Field("Gmail query (exact)", query, mono=True), ("Why", PREP_SEARCH_WHY.format(days=days)),
+        ("Rules", "read only - never spam or trash - at most 1 thread")])
+    step.note("Sent to Gmail (read only)")
+    return step
+
+
+@_quiet()
+def _prep_search_done(step: LiveStep, ids: Sequence[str] | None, problem: str, *, days: int = 14) -> None:
+    if step is NO_STEP:
+        return
+    if ids is None:
+        step.done(STATUS_FAILED, summary=problem)
+    elif ids:
+        step.field("Found", "1 thread (the newest)")
+        step.done(STATUS_OK, summary="found a thread")
+    else:
+        step.done(STATUS_WARN, status_text="NOTHING FOUND", summary=prep.NO_MAIL.format(days=days))
+
+
+@_quiet()
+def _prep_no_run_step(live: LiveTask, words: str) -> None:
+    if not live.enabled:
+        return
+    live.step(PLANNER_RUN, f"Planner run ({MODE_RUN_WORDS[MODE_PREP]})", status=STATUS_WARN, status_text="NO RUN",
+              summary=f"No planner run: {words}")
+
+
+@_quiet()
+def _prep_validated(live: LiveTask, answer: Any, brief: Any, cards: Cards, hour24: bool) -> None:
+    """"Checking the brief": each thread note and open item kept or dropped (and why), the points,
+    each reply line as a card or refused (a note leak included)."""
+    if not live.enabled:
+        return
+    keep_text = live.keep_text
+    read = {label for _who, label, _summary, _waiting in brief.threads}
+    step = live.step(PREP_VALIDATE, "Checking the brief", fields=[
+        ("Checked against", f"the {_count_words(len(read), 'thread')} Jarvis read for this brief")])
+    kept_threads = sum(1 for _who, _label, summary, _waiting in brief.threads if summary)
+    for thread_id, summary, waiting in answer.threads:
+        shown = summary if keep_text else f"[{_count_words(len(summary), 'character')}]"
+        step.item(f"Thread {thread_id}: {shown} (waiting on {waiting})")
+    for text, thread_id in answer.open:
+        shown = text if keep_text else f"[{_count_words(len(text), 'character')}]"
+        step.item(f"Open: {shown}" + (f" (thread {thread_id})" if thread_id else ""))
+    step.field("Kept", f"{_count_words(kept_threads, 'thread note')}, {_count_words(len(brief.open), 'open item')}, "
+                       f"{_count_words(len(brief.points), 'point')}")
+    if brief.dropped:
+        step.field("Left out", f"{_count_words(brief.dropped, 'item')} (a thread Jarvis didn't read, or a repeat)")
+    by_id = {card.id: card for card in cards.cards}
+    for entry in cards.report:
+        card = by_id.get(entry.card_id)
+        if entry.outcome == LINE_CARD and card is not None:
+            notes = [f"NEW recipient {address}: you didn't type it - tick it in Edit before Send"
+                     for address in sorted(card.unverified)]
+            step.item(card_text(card, hour24), status=STATUS_WARN if notes else STATUS_OK, note="; ".join(notes))
+        elif entry.outcome == LINE_REFUSED:
+            step.item(card_text(card, hour24) if card is not None else line_text(entry.line, keep_text),
+                      status=STATUS_BLOCKED, status_text="REFUSED", note=entry.reason)
+        else:
+            step.item(line_text(entry.line, keep_text), status=STATUS_WARN, status_text="DROPPED",
+                      note="a repeat or more replies than a brief may give")
+    replies = sum(1 for card in cards.cards if not card.error)
+    summary = (f"brief: {_count_words(kept_threads, 'thread note')}, {_count_words(len(brief.open), 'open item')}, "
+               f"{_count_words(len(brief.points), 'point')}; {_count_words(replies, 'reply', 'replies')}")
+    problems = brief.dropped or cards.refused or cards.dropped
+    step.done(STATUS_WARN if problems else STATUS_OK, summary=summary)
 
 
 def mode_todos(pending: Sequence[ProposedAction], planned: Mapping[str, date] | None = None) -> tuple[Any, ...]:

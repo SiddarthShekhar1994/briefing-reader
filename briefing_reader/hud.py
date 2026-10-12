@@ -384,6 +384,7 @@ RED = "#fca5a5"
 RED_LINE = "#f87171"
 PINK = "#f5d0fe"
 LAVENDER = "#c4b5fd"         # LIVE's PLAN tag (the productivity bundle's day plan)
+PEACH = "#fdba74"            # LIVE's PREP tag (the productivity bundle's meeting brief)
 SLATE = "#64748b"
 OFF = "#475569"
 STEP_DIM = "#3a4450"
@@ -7292,6 +7293,7 @@ ROLE_YOU = "you"
 _ROLE_TEXT = {ROLE_JARVIS: "JARVIS", ROLE_YOU: "YOU"}
 _ROLE_COLORS = {ROLE_JARVIS: ACCENT, ROLE_YOU: TEXT_MUTED}
 CONVERSATION_EMPTY_TEXT = "Jarvis's answers and what he has done appear here."
+_LINK_NAME_CHARS = 120      # a link's accessible name: the entry's first line, at most this long
 
 
 class _ConversationEntry(QWidget):
@@ -7368,6 +7370,12 @@ class _ConversationEntry(QWidget):
     def _update_accessible(self) -> None:
         role, stamp, text, sub = self.entry
         self.setAccessibleName(f"{_ROLE_TEXT[role]} {stamp}: {text}" + (f" ({sub})" if sub else ""))
+        # The link says what it acts on ("Prep this one: Project sync at 2:00 PM (work)"): several
+        # entries may carry the same link words. The entry's first line only, capped: a brief's "See
+        # every step" must not read the whole brief again (the entry itself already carries it).
+        link = self.link_button.text()
+        first = text.split("\n", 1)[0][:_LINK_NAME_CHARS]
+        self.link_button.setAccessibleName(f"{link}: {first}" if link else "")
 
 
 class ConversationLog(QScrollArea):
@@ -7378,7 +7386,9 @@ class ConversationLog(QScrollArea):
     ``MAX_ENTRIES`` are kept (the oldest go). Adding or updating scrolls to the newest entry unless
     the owner scrolled within the last ``SCROLL_HOLD_S`` seconds: to the bottom, or, when that entry
     is taller than the view, to its top (its "JARVIS  2:41 PM" header first), so a long reply is
-    read from its first line and never shows up cut off at the top. Memory only.
+    read from its first line and never shows up cut off at the top. ``follow_from(entry_id)`` does
+    the same for a group of entries posted together (a question and its choices): while they do not
+    all fit, the view starts at that entry, until the next ``add`` or the owner's scroll. Memory only.
     """
 
     linkClicked = Signal(str)
@@ -7399,6 +7409,7 @@ class ConversationLog(QScrollArea):
         self._hour24 = False
         self._user_scrolled_at = -math.inf
         self._follow = True
+        self._anchor = 0     # follow_from: the entry a group is followed from (0: the newest entry alone)
         bar = self.verticalScrollBar()
         bar.actionTriggered.connect(self._on_user_scroll)
         bar.rangeChanged.connect(self._on_range_changed)
@@ -7421,8 +7432,16 @@ class ConversationLog(QScrollArea):
             old.hide()
             old.deleteLater()
         self.empty_label.hide()
+        self._anchor = 0
         self._follow_newest()
         return entry.entry_id
+
+    def follow_from(self, entry_id: int) -> None:
+        """Follow the entries from ``entry_id`` (a group posted together) as one: while they do not
+        all fit the view, it starts at that entry's header instead of ending at the newest entry.
+        Until the next ``add`` or the owner's scroll; a gone entry means the newest entry alone."""
+        self._anchor = entry_id if self.entry(entry_id) is not None else 0
+        self._follow_newest()
 
     def update(self, *args: Any, text: str | None = None, sub: str | None = None,  # type: ignore[override]
                tone: str | None = None, link_text: str | None = None, link_id: str | None = None) -> Any:
@@ -7453,6 +7472,7 @@ class ConversationLog(QScrollArea):
             entry.hide()
             entry.deleteLater()
         self._entries = []
+        self._anchor = 0
         self.empty_label.show()
 
     def following(self) -> bool:
@@ -7464,15 +7484,17 @@ class ConversationLog(QScrollArea):
         bar.setValue(self._newest_target(bar.maximum()))
 
     def _newest_target(self, maximum: int) -> int:
-        """Where following the newest entry scrolls to: the bottom, or the top of that entry when it
-        does not fit in the view."""
+        """Where following the newest entry scrolls to: the bottom, or the top of that entry (of the
+        follow_from entry, for a group) when it does not fit in the view."""
         if not self._entries:
             return maximum
-        entry = self._entries[-1]
-        height = entry.height()
+        newest = self._entries[-1]
+        entry = (self.entry(self._anchor) if self._anchor else None) or newest
+        height = newest.y() + newest.height() - entry.y()   # the entry, or the group from its anchor down
         # Not shown and laid out yet (just added): the bottom, as before; the range change that
         # follows its layout comes back here with its real place and height.
-        if not entry.isVisibleTo(self) or height <= 0 or height + 2 * _ENTRY_TOP_GAP <= self.viewport().height():
+        if not newest.isVisibleTo(self) or newest.height() <= 0 \
+                or height + 2 * _ENTRY_TOP_GAP <= self.viewport().height():
             return maximum
         return max(0, min(maximum, entry.y() - _ENTRY_TOP_GAP))
 
@@ -7494,6 +7516,7 @@ class ConversationLog(QScrollArea):
     def _on_user_scroll(self, _action: int) -> None:
         # actionTriggered fires for wheel, drag, clicks and keys, never for setValue().
         self._user_scrolled_at = time.monotonic()
+        self._anchor = 0
         bar = self.verticalScrollBar()
         QTimer.singleShot(0, lambda: self._after_user_scroll(bar))
 
@@ -8109,7 +8132,7 @@ LIVE_CUT_TEXT = "[{cut} more characters not shown]"
 LIVE_TAG_COLORS = {
     live_events.TASK_ASK: PINK, live_events.TASK_ACTION: AMBER, live_events.TASK_BRIEFING: TEXT_MUTED,
     live_events.TASK_BACKGROUND: TEXT_DIM, live_events.TASK_WEB: ACCENT, live_events.TASK_MEMORY: GREEN,
-    live_events.TASK_PLAN: LAVENDER,
+    live_events.TASK_PLAN: LAVENDER, live_events.TASK_PREP: PEACH,
 }
 _LIVE_BORDERS = {
     live_events.STATUS_RUNNING: rgba(ACCENT, 0.45), live_events.STATUS_OK: rgba(ACCENT, 0.18),

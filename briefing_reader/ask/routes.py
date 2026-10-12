@@ -1,6 +1,6 @@
 """Typed shortcuts in the command bar that are not an Ask: "remember that ...", "forget that ...",
-"what do you remember?" (the productivity bundle's memory) and "plan my day" (its day plan; the
-later builds add prep and follow-ups).
+"what do you remember?" (the productivity bundle's memory), "plan my day" (its day plan) and "prep
+me for my 2 PM" (its meeting prep; a later build adds follow-ups).
 
     route(text, flags) -> Route     ROUTE_NONE (a normal Ask) or the shortcut and its words
 
@@ -14,6 +14,13 @@ PLAN: "plan my day", "plan today", "plan the rest of my day", "plan tomorrow", "
 tomorrow", "plan my morning|afternoon|evening", with an optional "please" / "for me" and the
 owner's own extra words after "," ":" or ";" ("plan my day, keep the afternoon free"): Route.part
 is the part of the day (ask.dayplan.PART_*), Route.payload the extra words.
+
+PREP: "prep me", "prepare me", "meeting prep", "prep me for <meeting>" / "prepare me for ..." / "...
+on ..." (any words after "for" / "on": a time, "my next meeting", title words), "brief me on my next
+meeting" / "brief me for the call" / "brief me on my 2 PM (meeting)": Route.payload is the target
+words ("" for the next meeting). They only pick the meeting (ask.prep.resolve_meeting) and are never
+sent to Claude. "prepare the report" and "brief me on the news" stay Asks; a prep route never falls
+through to an Ask.
 
 Pure; nothing is logged (Route's repr names its kind only).
 """
@@ -42,7 +49,7 @@ class RouteFlags:
 @dataclass(frozen=True)
 class Route:
     kind: str
-    payload: str = ""        # note / forget words / plan extra words / prep target
+    payload: str = ""        # note / forget words / plan extra words / prep target words
     part: str = ""           # plan: dayplan.PART_*
 
     def __repr__(self) -> str:   # never the owner's words
@@ -65,6 +72,10 @@ _MEMORY_SHOW_RE = _pattern(r"what\s+do\s+you\s+remember\??|show\s+(?:me\s+)?(?:m
 _PLAN_RE = _pattern(r"plan\s+(?P<what>my\s+day\s+tomorrow|my\s+day|today|tomorrow|the\s+rest\s+of\s+"
                     r"(?:my\s+day|today)|my\s+morning|my\s+afternoon|my\s+evening)(?:\s+(?:please|for\s+me))?"
                     r"(?:\s*[,:;]\s*(?P<extra>\S.*))?")
+_PREP_RE = _pattern(r"(?:prep|prepare)\s+me(?:\s+(?:for|on)\s+(?P<target>\S.*))?"
+                    r"|brief\s+me\s+(?:for|on)\s+(?P<target2>(?:my|the)\s+(?:next\s+)?(?:meeting|call)"
+                    r"|my\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s+(?:meeting|call))?)"
+                    r"|meeting\s+prep")
 
 
 def _plan_part(what: str) -> str:
@@ -91,6 +102,11 @@ def route(text: str, flags: RouteFlags) -> Route:
         if match:
             extra = (match.group("extra") or "").strip()
             return Route(ROUTE_PLAN, extra, _plan_part(match.group("what")))
+    if flags.prep:
+        match = _PREP_RE.fullmatch(text)
+        if match:
+            target = (match.group("target") or match.group("target2") or "").strip()
+            return Route(ROUTE_PREP, target.rstrip(".!?").strip())
     return NO_ROUTE
 
 

@@ -194,6 +194,9 @@ class ModeCardsTests(unittest.TestCase):
         self.assertTrue(all(card.source == SOURCE_ASK for card in result.cards))
         unreadable = self.cards("Calendar: no date at all", kinds=frozenset({"calendar"}), mode="plan")
         self.assertIn("no date", unreadable.cards[0].error)   # a line that can't be read keeps its own reason
+        brief = self.cards(block("10:00", "11:00"), email("ana@example.edu"), kinds=frozenset({"reply"}), mode="prep")
+        self.assertEqual([card.error for card in brief.cards], ["A meeting brief only drafts replies"] * 2)
+        self.assertEqual([card.mode for card in brief.cards], ["prep"] * 2)
 
     def test_extra_runs_after_the_page_and_repeat_checks(self) -> None:
         seen: list[str] = []

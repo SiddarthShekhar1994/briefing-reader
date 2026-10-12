@@ -754,5 +754,28 @@ class PlanTaskTests(unittest.TestCase):
         self.assertEqual([step.kind for step in view.steps], [live.MODE_REQUEST, live.PLAN_FREE])
 
 
+class PrepTaskTests(unittest.TestCase):
+    """The productivity bundle's meeting brief: its own attention task and its steps."""
+
+    def test_prep_task_and_step_kinds_are_known(self) -> None:
+        from briefing_reader import hud
+
+        self.assertIn(live.TASK_PREP, live.TASK_KINDS)
+        self.assertEqual(live.TASK_TAGS[live.TASK_PREP], "PREP")
+        self.assertIn(live.TASK_PREP, live.ATTENTION_KINDS)          # it opens LIVE like an Ask
+        self.assertNotIn(live.TASK_PREP, live.COMPACT_KINDS)
+        self.assertIn(live.TASK_PREP, hud.LIVE_TAG_COLORS)
+        for kind in (live.PREP_MEETING, live.PREP_PEOPLE, live.PREP_VALIDATE):
+            self.assertIn(kind, live.STEP_KINDS)
+        stream, _clock = make()
+        task = stream.task(live.TASK_PREP, "prep me for my 2 PM")
+        task.step(live.PREP_MEETING, "The meeting, as read now", status=STATUS_OK)
+        task.step(live.PREP_PEOPLE, "Who Jarvis looks up", status=STATUS_OK)
+        task.step(live.PREP_VALIDATE, "Checking the brief", status=STATUS_OK)
+        view = stream.snapshot()[0]
+        self.assertEqual((view.kind, view.tag), (live.TASK_PREP, "PREP"))
+        self.assertEqual([step.kind for step in view.steps], [live.PREP_MEETING, live.PREP_PEOPLE, live.PREP_VALIDATE])
+
+
 if __name__ == "__main__":
     unittest.main()

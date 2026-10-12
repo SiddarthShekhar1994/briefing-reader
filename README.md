@@ -80,9 +80,20 @@ your own scheduled routine (see
   nothing goes on your calendar until your click on a block. Part of the
   productivity bundle (`[productivity]`), off until you turn it on. See
   [Plan my day](#plan-my-day).
+- **Meeting prep.** Type "prep me for my 2 PM" (or "prep me", "brief me on my
+  next meeting", "prepare me for Project sync") and Jarvis finds that meeting
+  in today's and tomorrow's calendar, looks up your latest thread of the last
+  14 days with each guest (his own read-only search, one guest's address at a
+  time, at most 3 threads) and your Claude Code writes a short brief in the
+  JARVIS tab: who is coming, where each thread stands, what is still open,
+  points worth raising, and at most 2 reply drafts you approve one by one.
+  With no recent thread there is no Claude run at all: Jarvis's own brief of
+  who is coming. Part of the productivity bundle (`[productivity]`), off until
+  you turn it on. See [Meeting prep](#meeting-prep).
 - **Memory.** Tell Jarvis "remember that Ana is my project lead" (or add it in
   the **MEMORY** tab) and he keeps that note on this PC, in `memory.json`, and
-  gives your notes to your Claude Code with every Ask, never to web research.
+  gives your notes to your Claude Code with every Ask, day plan and meeting
+  brief, never to web research.
   He may offer to remember a fact himself; it is kept only when you click
   **Remember this**. Part of the productivity bundle (`[productivity]`), off
   until you turn it on. See [Memory (the MEMORY tab)](#memory-the-memory-tab).
@@ -128,9 +139,14 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
   (once more) and each source a search listed that it cites without reading
   it (a visit from your PC made only for the picture) ([Pictures in
   LIVE](#pictures-in-live); `[live] page_snapshots = false` turns that off).
+- **A mail search Jarvis builds himself uses only a guest's address from your
+  calendar, and only after your click** (or your typed "prep me ..."): one
+  read-only search per guest of that meeting, the last 14 days, at most one
+  thread per guest and 3 in all. A guest at an account-security or payment
+  address (a sign-in or billing sender) is never searched.
 - **Memory is kept only on this PC (`memory.json`) and holds only your notes
   or the suggestions you kept; your notes go to your Claude Code with every
-  Ask, never to web research.** Passwords, codes and account numbers are
+  Ask, day plan and meeting brief, never to web research.** Passwords, codes and account numbers are
   refused; a suggestion you dismiss leaves a short hash of each word, not the
   sentence (a common word or a name could still be guessed from its hash). A
   note is never an instruction: it adds no recipient, action or search, and an
@@ -284,7 +300,8 @@ not of this list.
 
 Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
 **Memory** - see [Memory (the MEMORY tab)](#memory-the-memory-tab);
-**Plan my day** (typed) - see [Plan my day](#plan-my-day).
+**Plan my day** (typed) - see [Plan my day](#plan-my-day);
+**Meeting prep** (typed) - see [Meeting prep](#meeting-prep).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (proposals, your click, every step visible in LIVE):
@@ -293,8 +310,8 @@ keep the same rules (proposals, your click, every step visible in LIVE):
   you can watch, and every submit waits for your click.
 - **A plan offer**: "Shall I plan your day?" after the morning briefing (today
   you type "plan my day").
-- **Meeting prep**: a short brief before a meeting: who is coming, your last
-  thread with them, what is still open.
+- **Prep offers**: "Shall I prepare a brief?" 15 minutes before a meeting with
+  guests (today you type "prep me").
 - **Follow-up nudges**: threads that wait on your answer, or on an answer you
   are owed.
 - **Radar**: internships, hackathons, deadlines and subscriptions (renewals,
@@ -695,11 +712,12 @@ cd "<project folder>"
    | `https://www.googleapis.com/auth/calendar.events` | Add the event you approved, and first look for the same event (same title and start) so it is not added twice; read your events of today (or tomorrow) and the next 14 days for TODAY and DEADLINES; read one event by its id for an invitation, move or cancel card. Only after your click on that card and its undo countdown: answer an invitation (only your own answer is sent), move an event you organize (or may change as a guest) or cancel an event you organize, always telling the guests as the card says ("guests notified" by default). It never changes or deletes anything else. |
    | `https://www.googleapis.com/auth/calendar.settings.readonly` | Read your calendar's time zone, so that "15:00" means 15:00 where your calendar is. |
    | `https://www.googleapis.com/auth/gmail.send` | Only for an account with `"gmail_send"` in its features (step 8b). Only after your click on **Send** on that card and its undo countdown: send that one reply or email, exactly as the card shows it. It cannot read, search, change or delete any mail. |
-   | `https://www.googleapis.com/auth/gmail.readonly` | Asked for at every sign-in of an account with `"gmail_read"` in its features (the shipped `config.toml` has it on both accounts), **even while Ask Jarvis is off**; remove `"gmail_read"` if you do not use Ask (step 8c). Used only while Ask Jarvis is on: read the Gmail threads one request is about (at most 3, each read only when you ask Jarvis something). Read only: it cannot send, change or delete any mail; the text is used for that one request and never saved or logged. |
+   | `https://www.googleapis.com/auth/gmail.readonly` | Asked for at every sign-in of an account with `"gmail_read"` in its features (the shipped `config.toml` has it on both accounts), **even while Ask Jarvis is off**; remove `"gmail_read"` if you do not use Ask (step 8c). Used only while Ask Jarvis is on: read the Gmail threads one request is about (at most 3, each read only when you ask Jarvis something); with the productivity bundle on, also a [meeting brief](#meeting-prep)'s reads, only after your typed "prep me ..." or your click: one lookup per guest of that meeting on the meeting's account, from the **last 14 days**, at most one thread per guest and 3 in all. Read only: it cannot send, change or delete any mail; the text is used for that one request and never saved or logged. |
    | `openid`, `https://www.googleapis.com/auth/userinfo.email` | Learn which Google account a sign-in is (its address and account id), to bind the account name to it (see above). Nothing else. |
 
    No other access: Jarvis reads mail only through `gmail.readonly`, for Ask
-   Jarvis (step 8c), and has no access to Drive, contacts or anything else.
+   Jarvis (step 8c) and its meeting briefs, and has no access to Drive,
+   contacts or anything else.
 
    **Disconnecting.** Right after a name's first sign-in, **No, use another
    account** in the question above does it for you: that name's saved sign-in
@@ -1070,6 +1088,16 @@ voice when the online one cannot be reached), politely and to the point:
   The result of an approved plan block is said **without its title**: "Done,
   sir - I've added the event to your calendar for today at 10:30 AM." (the
   JARVIS tab shows the title).
+- **Meeting prep** (see [Meeting prep](#meeting-prep)): "Your brief for the 2
+  PM meeting is ready, sir." when the JARVIS tab is in front (or the window is
+  minimized), "Your brief for the 2 PM meeting is in the JARVIS tab, sir." when
+  you are on another tab ("tomorrow's 9 AM meeting" for one tomorrow); "Which
+  meeting, sir? The choices are on screen."; "I don't see a meeting like that
+  today or tomorrow, sir.", "That meeting has ended, sir." or "That meeting is
+  no longer on your calendar, sir." The meeting's time only: never its title,
+  a guest, a subject or the brief, which stays on screen. An approved prep
+  reply's result is said **without its subject**: "Sent, sir - your reply is
+  on its way."
 
 Everything he says is also written in the JARVIS tab. While he speaks the orb
 reads SPEAKING and the large line next to it shows his words. He never talks
@@ -1156,6 +1184,19 @@ card, newest at the bottom:
   reads mail", "no - a day plan never uses the web"); and **Checking the
   blocks**, each block kept or refused with the reason, with a picture of the
   proposed blocks on the day ("PROPOSED - NOT ADDED YET").
+- **A meeting brief** (a peach PREP card; see [Meeting prep](#meeting-prep)):
+  your request and the meeting it is for; "Ask on" (Claude Code and the
+  limits are checked later, right before any mail is read); **The meeting, as
+  read now** (its time, organizer and guests with their answers, "moved to 4:00
+  PM" when it moved, or why there is no brief: no such meeting, the choices,
+  gone, ended), with its day drawn as read; **Who Jarvis looks up** (the
+  limits as checked then, and each guest: found a thread, no email in the last
+  14 days, or not searched and why, a refused address in red); one **Jarvis's
+  own search** per guest (the exact query, why, found or not); each thread read
+  (its email picture); the planner run (the exact text sent) or "No planner
+  run: no recent thread" (or the limits, Claude Code not ready, mail off); and
+  **Checking the brief** (each thread note and open point kept or left out,
+  each reply draft as a card or refused with the reason).
 
 The panel's strip shows what Jarvis is doing (IDLE, WORKING 0:12, SENDING IN 7
 S), then **Pop out** and **Clear** (in a narrow window Clear is in the pop-out
@@ -1221,7 +1262,9 @@ glance what Jarvis read or is about to change:
   nothing in it is on your calendar until you approve a block. The plan's
   fresh read of the day is drawn the same way without blocks ("Your day as
   read", no stamp), and so is a check that kept no block. "Now" is drawn in
-  your personal calendar's time zone, like the blocks.
+  your personal calendar's time zone, like the blocks. A meeting brief draws
+  its meeting's day the same way, from that meeting's own calendar as just
+  read.
 - **Each web search of a web research, drawn as its results page**: the exact
   query in a search box, then each result's title and its address, site first
   (and its snippet, when the search gave one), "+N more" past the first 10.
@@ -1388,6 +1431,110 @@ nothing goes on your calendar until you click **Add block** on a card.
   plan can always run in an hour with no runs yet (the log warns once when
   the setting asks for more).
 
+### Meeting prep
+
+Part of the productivity bundle: off in the public `config.toml`, on for this
+PC with the line `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (it also needs
+[Ask Jarvis](#ask-jarvis-optional) on and `[calendar] enabled`). Before a
+meeting, Jarvis reads your latest thread with each of its guests and your
+Claude Code writes a short brief: where each thread stands, what is still
+open, points worth raising. The brief is shown in the JARVIS tab only: never
+spoken, saved or logged.
+
+- **Ask for it.** `prep me` (your next meeting with guests), `prep me for my 2
+  PM`, `prep me for 14:00 tomorrow`, `prepare me for Project sync`, `brief me
+  on my next meeting`, `brief me on my 2 PM call`, `meeting prep`. Your words
+  only pick the meeting: they are never sent to Claude. `prepare the report`
+  and `brief me on the news` stay ordinary Asks; a prep request never turns
+  into an Ask, and `web:` always wins.
+- **Which meeting.** Jarvis reads today and tomorrow on every signed-in
+  calendar, now. Only meetings with at least one other guest that you have
+  not declined count. A time picks the meeting starting within 10 minutes of
+  it ("2" may be 2 AM or 2 PM; "tomorrow" picks tomorrow's); "next" (or
+  nothing) the next one from now; other words the meetings whose title has
+  them. When every word you typed is in the title it goes straight on; when
+  several meetings match, or one only by some of your words ("my call with
+  Ben" and only "Call with Dana" today), Jarvis lists them ("Project sync at
+  2:00 PM (work), tomorrow") with **Prep this one** and reads nothing until
+  your click. No match: "I don't see a meeting like that today or tomorrow,
+  sir."
+- **The meeting, read again.** A meeting you clicked is read again on its
+  calendar: moved anywhere today or tomorrow, the brief is for its new time;
+  gone ("That meeting is no longer on your calendar, sir.") or over ("That
+  meeting has ended, sir.") stops with nothing read.
+- **Whom Jarvis looks up**: the organizer first, then the guests who
+  accepted, said maybe or have not answered, at most `prep_max_guests` (5).
+  Never you (any of your own addresses), a group address (team@, all@,
+  class@, ...) or a guest who declined. A guest whose address is an
+  account-security or payment sender (Google, Microsoft, Apple, PayPal and
+  the like, or a security@ / alerts@ address), whose address would make a
+  search Jarvis refuses, or whose address is no plain mailbox (an invite can
+  carry an address with `{`, `}` or other search syntax in it, which could
+  widen a search), is never searched, also when your own work domain is such
+  a provider.
+- **Jarvis's own search**, one per guest, on the meeting's account only
+  (`prep_other_accounts = true` also searches your other accounts for a guest
+  with nothing there): `{from:"ana@example.edu" to:"ana@example.edu"
+  cc:"ana@example.edu"} newer_than:14d` (your latest thread with that person
+  of the last `prep_lookback_days`, 14 at most; the address quoted, so Gmail
+  reads it as one value), read only, never spam or trash, one thread per
+  guest and 3 threads in all. LIVE shows each exact query.
+- **Checked first, right before any mail is read**: Claude Code ready and
+  the limits (the Ask limits, plus the bundle's daily limit and the Ask runs
+  kept for you). If mail can't be read (`[ask] read_mail = false`, no
+  `"gmail_read"`, a sign-in needed), a limit is reached or Claude Code is not
+  ready, or no guest has a recent thread, there is **no Claude run** and
+  nothing is counted: you get Jarvis's own brief of who is coming and what he
+  found ("no email in the last 14 days", "not searched (...)"), with the
+  briefing's cards still waiting for a decision that go to a guest, and your
+  notes that name one.
+- **One planner run** otherwise: your Claude Code with the brief's own
+  instructions and answer format, no tools, no mail search of its own and
+  never the web. **What your Claude gets**: the date, time and time zone; how
+  Jarvis addresses you; the meeting's account; the meeting (title, times,
+  organizer, the first 10 guests and their answers); who Jarvis looked up and
+  what he found; the threads he read (at most 3, as quoted text); your notes
+  (memory on); a fixed command. Never your typed words, other meetings or
+  other accounts' mail.
+- **The brief** (JARVIS tab, with **See every step**):
+
+  ```
+  Brief: Project sync - today 2:00-2:30 PM (work)
+  Who: Ana Lima (organizer, accepted) · Ben Ode (accepted) · Cy Park (no answer yet)
+  Last threads:
+  - Ana Lima - "Budget numbers", Oct 8: she asked for the Q3 numbers. Waiting on you.
+  - Ben Ode - no email in the last 14 days.
+  - Cy Park - not searched (only 3 threads are read).
+  Still open:
+  - Send Ana the Q3 numbers before the meeting.
+  Points to raise:
+  - Agree the date for the demo.
+  From your notes:
+  - Ana Lima is my project lead.
+  ```
+
+  Who is coming, their answers and each thread's subject and date (in your
+  calendar's time zone) are Jarvis's own; a summary, an open point or a point
+  is the planner's, kept only when it names a thread Jarvis read for this
+  brief (the rest is left out and counted: "2 items left out").
+- **Reply drafts**: at most 2, as PREP · REPLY cards under NEEDS YOUR OK with
+  **Send**, only in a thread Jarvis read, from the meeting's account, only to
+  people already in that thread, never repeating one of your notes in the
+  subject or the body (such a draft is held back, information only: "This
+  draft repeats one of your private notes, so Jarvis holds it back"), and
+  never repeating what another guest wrote in another thread read for the
+  brief (a whole line of theirs, or 7 of its words in a row: "This draft
+  repeats mail from another thread, so Jarvis holds it back"). Every
+  recipient is a NEW RECIPIENT you tick in Edit unless Jarvis wrote to them
+  before. Change a draft with **Edit**, not Deny.
+- **Spoken**: the meeting's time only (see [Jarvis talks](#jarvis-talks)).
+  LIVE opened by the brief gives way to the JARVIS tab when the brief arrives,
+  unless you changed tabs meanwhile.
+- **Caps**: each brief with a run is one Ask run and one of the
+  `max_runs_per_day` (20) plans, briefs and drafts, and never takes the last
+  `reserve_ask_runs` (3) Ask runs of an hour; a brief without a run costs
+  nothing.
+
 ### Memory (the MEMORY tab)
 
 Part of the productivity bundle: off in the public `config.toml`, on for this
@@ -1435,7 +1582,8 @@ prefer deep work before noon"), kept only on this PC in
   numbers, a run of 12 or more digits (a phone number is fine), notes longer
   than 200 characters, a note you already have, and more than 100 notes
   (`max_memory`).
-- **What your Claude gets**: with every Ask, your notes in a `<memory>` block
+- **What your Claude gets**: with every Ask, day plan and meeting brief, your
+  notes in a `<memory>` block
   (newest first, at most 4 KB), marked as facts and preferences, never
   instructions. Web research never gets them. Your notes are never logged, an
   Ask's spoken answer that repeats one is replaced by a counts-only sentence
@@ -2142,7 +2290,10 @@ remember?` are handled by Jarvis at once, with no Claude run and nothing
 counted; `web:` always wins over them, and `remember to ...` or a question is
 an ordinary request. With the bundle on, `plan my day` (and its variants) is
 a day plan, with its own instructions and data and no mail (see
-[Plan my day](#plan-my-day)). **Suggestions**: a run whose input has no email text may
+[Plan my day](#plan-my-day)), and `prep me ...` / `brief me on my next
+meeting` a meeting brief, with its own instructions and the threads Jarvis
+reads with that meeting's guests (see [Meeting prep](#meeting-prep)); a brief
+never suggests a note (its input has email text). **Suggestions**: a run whose input has no email text may
 also return one fact worth keeping (`remember` in its answer format, only then);
 Jarvis offers it only when its names and capitalized words come from your
 request or your calendar and briefing, and it is kept only on your click. A
@@ -2702,7 +2853,7 @@ log. Changes apply the next time the app starts.
 | `[actions] trusted_domains` | `[]` | Email recipient domains that do not get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). An Ask recipient you did not type yourself is the exception: it is new even in these domains. Any other address must be one Jarvis sent to before, or Send asks you to confirm it in Edit first; the sending account's own address is never sent to (see [Replies and emails](#replies-and-emails)). |
 | `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in, and its first sign-in binds the name to it in `accounts.json` (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
 | `[accounts.<name>] backend` | `"google"` | Who carries out the account's actions. Only `"google"` (your own OAuth client) works in this version; `"composio"` is accepted but its cards say "Composio is not built into this version". |
-| `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send", "gmail_read"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b); `"gmail_read"` lets Ask Jarvis read the threads a request is about (read only, never used to send; step 8c). Adding a feature means one new Google sign-in for that account. `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
+| `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send", "gmail_read"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b); `"gmail_read"` lets Ask Jarvis read the threads a request is about, and a [meeting brief](#meeting-prep) your latest thread with each guest of the last 14 days (read only, never used to send; step 8c). Adding a feature means one new Google sign-in for that account. `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
 | `[schedule] am` | `"10:12"` | Time of the AM task (24-hour `HH:MM`); the default is only an example, set it a few minutes after your own briefing task runs. `install-schedule.ps1` uses it unless you pass `-AmTime`; the app uses it to tell which briefing an answer belongs to when it was started without `--slots`. Rerun the script after a change. |
 | `[schedule] pm` | `"23:42"` | Time of the PM task, the same way (`-PmTime`). |
 | `[hotkey] enabled` | `true` | The global hotkey that opens Jarvis. `false`: `install-schedule.ps1` does not install the hotkey task (and removes an existing one); an agent that is started anyway exits at once. |
@@ -2722,7 +2873,7 @@ log. Changes apply the next time the app starts.
 | `[ask] calendars` | `["primary"]` | The calendars of each account Ask sees. |
 | `[ask] max_cards` | `8` | Proposals from one request (1-8); more are left out, and the status line says how many. |
 | `[ask] hardened_flags` | `true` | Run Claude Code with `--safe-mode --restricted` when it has them. |
-| `[ask] read_mail` | `true` | `false`: Ask never reads mail, whatever the accounts' features say. |
+| `[ask] read_mail` | `true` | `false`: Ask never reads mail, whatever the accounts' features say (a meeting brief is then Jarvis's own, without your threads and without a Claude run). |
 | `[research] enabled` | `true` | [Web research](#web-research) (part of Ask: it needs `[ask] enabled = true`): `web:` requests and the planner handing a request over. `false`: `web:` says web research is off and the planner never hands anything over. `JARVIS_RESEARCH_ENABLED` in `.env` overrides it both ways. |
 | `[research] planner_may_ask` | `true` | The Ask planner may hand a request to web research; `false`: only `web:` starts it. |
 | `[research] model` | `"sonnet"` | The model the research runs with; `"haiku"` uses less of your plan. A name that starts with `-` or has spaces is refused. |
@@ -2746,7 +2897,7 @@ log. Changes apply the next time the app starts.
 | `[live] text` | `true` | Show the texts Jarvis read and sent in LIVE (email threads, the planner's input and reply, the outgoing message). `false`: only their sizes (also of the message text in the planner's proposal lines); subjects, names, addresses, event titles and Jarvis's answer still show. `false` also takes no page pictures and leaves the email texts out of the pictures (their headers still show). |
 | `[live] pictures` | `true` | Email, calendar and search pictures in LIVE ([Pictures in LIVE](#pictures-in-live)), drawn by Jarvis on this PC from the text he already has: no email HTML, no images from the web, no page opened for them. `false`: none. |
 | `[live] page_snapshots` | `true` | Page pictures ([Pictures in LIVE](#pictures-in-live)): each public https page a web research read or a checked source its answer cites, opened on this PC in a private window (no sign-ins, nothing saved). The site sees your IP address (for a source not read: only for the picture). `false`: no page is opened. |
-| `[productivity] enabled` | `false` | The productivity bundle (this version: [Memory](#memory-the-memory-tab) and [Plan my day](#plan-my-day)); it also needs `[ask] enabled = true`. Turn it on for this PC with `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (it overrides this key both ways). |
+| `[productivity] enabled` | `false` | The productivity bundle (this version: [Memory](#memory-the-memory-tab), [Plan my day](#plan-my-day) and [Meeting prep](#meeting-prep)); it also needs `[ask] enabled = true`. Turn it on for this PC with `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (it overrides this key both ways). |
 | `[productivity] memory` | `true` | The MEMORY tab, `remember that ...` / `forget that ...` and the notes given to the planner. |
 | `[productivity] memory_suggestions` | `true` | Jarvis may suggest a note after an Ask that read no mail; it is kept only when you click. |
 | `[productivity] max_memory` | `100` | Notes kept (10-200); more are refused ("Your memory is full"). |
@@ -2755,7 +2906,10 @@ log. Changes apply the next time the app starts.
 | `[productivity] plan_min_free_minutes` | `60` | `plan my day` plans tomorrow once less than this is left before `day_end` (30-240). |
 | `[productivity] max_runs_per_day` | `20` | Planner runs a day for plans, briefs and drafts (1-60); each is also an Ask run. |
 | `[productivity] reserve_ask_runs` | `3` | Ask runs of each hour a plan, brief or draft never takes: kept for your own requests (0-10; at most `[ask] max_per_hour` minus one is kept). |
-| `[productivity]` other keys | see `config.toml` | `plan_offer`, `plan_offer_until`, the `prep_...` keys, `minimized_check`, `followups`, `scan_...`, `waiting_after_hours`, `owed_after_days`, `followups_shown`, `quiet_from` and `quiet_until` are read and checked (a bad value falls back with a warning) but not used yet: they belong to the plan offer, meeting prep and follow-ups, which later versions add. |
+| `[productivity] prep_max_guests` | `5` | Guests of a meeting a brief looks up (1-10), the organizer first; the rest are "not searched". |
+| `[productivity] prep_lookback_days` | `14` | How far back a brief's search for each guest's latest thread looks (3-14 days; never more than `scan_days`). |
+| `[productivity] prep_other_accounts` | `false` | `true`: a guest with no thread on the meeting's account is also searched on your other readable accounts. |
+| `[productivity]` other keys | see `config.toml` | `plan_offer`, `plan_offer_until`, `prep_offers`, `prep_lead_minutes`, `prep_offers_per_day`, `prep_max_offer_guests`, `prep_skip_words`, `prep_speak_minimized`, `minimized_check`, `followups`, `scan_...`, `waiting_after_hours`, `owed_after_days`, `followups_shown`, `quiet_from` and `quiet_until` are read and checked (a bad value falls back with a warning) but not used yet: they belong to the plan and prep offers and to follow-ups, which later versions add. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -2927,6 +3081,18 @@ to-do was noted", "Approve ...: a plan block whose time has passed; nothing
 added" and "Approve ...: ignored a key press right after the focus moved".
 Never a block's title, an event, a to-do or your words.
 
+A meeting brief logs "Ask 5 started (mode prep, typed)" (or "choice"), "Prep:
+no run (no_match)" (no_match, gone, ended, no_calendar or choices), "Prep: 3
+search(es) (0 refused), 0 index hit(s), 1 thread(s) read, 0 guest(s) not
+searched", "Prep: brief without a planner run (no_thread)" (no_thread,
+mail_off, unreadable, caps or not_ready), "Ask: context of ... characters (...;
+mode prep)", "Ask: planner run ... (mode prep)", "Prep: a draft held back
+(note)" (or "(mail)" for a draft that repeats another thread's mail), the
+outcome line with ", mode prep, brief threads 1 / open 2 / points 1, 0
+dropped" and "Prep: 1 card(s) shown under ASK (0 refused)". Never the
+meeting, a guest's name or address, a Gmail query Jarvis built, a subject, a
+thread id, the brief or your words.
+
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
 | File | What it is |
@@ -2958,7 +3124,9 @@ The app talks to these services, all free:
   answers, your next event's title in a greeting, and the event titles and email
   subjects in his confirmations (never an email's text or an address; an
   approved plan block's result, and what he says about a day plan, carry only
-  times and counts, never a title). They are
+  times and counts, never a title; what he says about a meeting brief, and an
+  approved prep reply's result, carry only the meeting's time, never a title,
+  a guest, a subject or the brief). They are
   never logged or saved after the app closes; muting him (the speaker button,
   Ctrl+M) or `[assistant] speak = false` stops sending them;
 - the Google Calendar API, and only for an account you signed in with a click
@@ -2976,7 +3144,9 @@ The app talks to these services, all free:
   card shows (From, To, Cc, subject, text, and the thread headers of a reply).
   Sending has no permission to read, search or change your mail. With Ask Jarvis
   on and `"gmail_read"` (step 8c), Jarvis also searches and reads the threads one
-  request is about (at most 3), read only, and only when you ask something. Each
+  request is about (at most 3), read only, and only when you ask something; for
+  a meeting brief, after your request, one search per guest of that meeting (the
+  last 14 days, the meeting's account) and at most 3 threads read. Each
   sign-in also tells Jarvis which Google account it is (`openid`,
   `userinfo.email`): the address is kept in `accounts.json` on this PC and shown
   on the cards, never logged;
@@ -2987,7 +3157,12 @@ The app talks to these services, all free:
   the productivity bundle's memory on, your memory notes. A day plan (see
   [Plan my day](#plan-my-day)) sends that day's event titles, times and busy
   or free (no guests), your to-dos and deadlines, the briefing's sections, your
-  notes and your words, never mail. This
+  notes and your words, never mail. A meeting brief (see [Meeting
+  prep](#meeting-prep)) sends that meeting (title, times, organizer and
+  guests), who Jarvis looked up and what he found, at most 3 threads with its
+  guests from the last 14 days (read by Jarvis's own search of each guest's
+  address, only after your request), and your notes; never your typed words.
+  This
   is the same kind of data your briefing routine already sends Claude. It runs
   on your plan's usage, never on an API key (Claude Code gets only the Windows
   basics of Jarvis's environment, never an `ANTHROPIC_*` or `CLAUDE*` variable
@@ -3038,8 +3213,9 @@ read it and, if Windows clipboard history (Win+V) is turned on, Windows keeps a
 copy until you clear it (Win+V > Clear all).
 
 There are no paid API calls of any kind. Ask Jarvis uses your Claude plan (keep
-its extra usage off, see Ask's setup step 3), never an API key; a day plan is one
-Ask run on that plan. The offline voice runs entirely on this PC.
+its extra usage off, see Ask's setup step 3), never an API key; a day plan, and a
+meeting brief with a run, is one Ask run on that plan. The offline voice runs
+entirely on this PC.
 
 Driving your own signed-in Claude Code from your own app is ordinary personal
 use of it; sharing such a feature in a public project is less clear-cut, which
@@ -3126,6 +3302,17 @@ cases in the Ask, usage, routes, calendar, executor, persona, pictures and LIVE
 tests) play invented plan runs (`tests\fixtures\ask\plan_*.jsonl`) on a fixed
 invented day, with a fake calendar that records each block and its footer.
 
+The meeting prep tests (`test_prep.py` for which meeting typed words name, whom
+a brief looks up and with which search, the security-sender refusal, the
+`<people>` rows, the answer's shape and its checks and the brief's text;
+`test_ask_modes.py` with a golden copy of a brief's input; `test_prep_app.py`
+for the app: the brief, its Prep · reply card, the choices with Prep this one,
+what is said and where; and prep cases in the Ask, routes, mail, calendar,
+prompts, persona and LIVE tests) play invented brief runs
+(`tests\fixtures\ask\prep_*.jsonl`, an injection and a note leak included) with
+a fake Gmail reader that answers each guest's search, and check that no
+meeting, guest, subject or brief ever reaches a log or anything spoken.
+
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
 and release it within seconds; they never start the app. The catch-up tests run
@@ -3164,6 +3351,24 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   reached"** or **"Jarvis keeps 3 Ask runs this hour for your own requests"**:
   the bundle's caps (`[productivity] max_runs_per_day`, `reserve_ask_runs`);
   your own typed Asks still run. `--ask-check` shows the counts.
+- **"prep me ..." started an ordinary Ask**: the productivity bundle is off,
+  or `[calendar] enabled = false`. **"I don't see a meeting like that today or
+  tomorrow"**: only today's and tomorrow's meetings with at least one other
+  guest that you have not declined count; try the time (`prep me for my 2 PM`)
+  or `prep me` for the next one.
+- **A brief says "not searched (Jarvis doesn't search that address)"**: that
+  guest's address is an account-security or payment sender's domain (Google,
+  Microsoft, Apple, PayPal and the like) or a security@ / alerts@ address, or
+  it has a word Jarvis never searches for. A colleague at such a provider (an
+  internship there, say) is never searched for a brief, even when it is your
+  own work domain.
+- **A brief without a planner run ("no email in the last 14 days")**: no guest
+  has a thread with you from the last `prep_lookback_days`, or mail could not
+  be read (the brief says why: `[ask] read_mail`, `"gmail_read"`, a sign-in, a
+  limit or Claude Code not ready). Nothing was counted.
+- **A draft says it repeats one of your notes**: a prep reply that copies one
+  of your memory notes is held back (information only); write the reply
+  yourself, or ask again.
 - **Ask: "Claude Code not found"**: install it (Ask's setup step 1), or put
   `JARVIS_CLAUDE_EXE=<path to claude.exe>` in `.env`. A `claude.cmd` from npm is
   not used (only a `claude.exe`). `--ask-check` shows which one Jarvis found.
@@ -3520,11 +3725,13 @@ briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (c
                               input (context), email text and searches (mail), cards with provenance checks (validate),
                               the caps (usage), one request end to end (planner), --ask-check / --ask-text (commands),
                               web research: its run and isolation (research), its answer's check (research_validate)
-                              and its LIVE steps (research_live), the typed shortcuts such as "remember that ..."
-                              and "plan my day" (routes), the productivity bundle's planner modes: their requests
-                              and inputs (modes) and the day plan's hours, free time and block checks (dayplan);
-                              ask/assets: the planner's, the day plan's (plan_prompt.md, plan_schema.json) and the
-                              research's instructions, answer formats and settings
+                              and its LIVE steps (research_live), the typed shortcuts such as "remember that ...",
+                              "plan my day" and "prep me" (routes), the productivity bundle's planner modes: their
+                              requests and inputs (modes), the day plan's hours, free time and block checks
+                              (dayplan) and the meeting brief's meeting, guests, searches and checks (prep);
+                              ask/assets: the planner's, the day plan's (plan_prompt.md, plan_schema.json), the
+                              meeting brief's (prep_prompt.md, prep_schema.json) and the research's instructions,
+                              answer formats and settings
 briefing_reader/live.py       the LIVE view's event stream (no Qt): every step Jarvis takes, in memory only, bounded
 briefing_reader/pictures.py   LIVE's pictures as data (no Qt): an email, what a card sends, a calendar change on its day, the week, a day plan, a page
 briefing_reader/snapshots.py  page pictures' rules (no Qt): which pages may be opened, what the hidden window may load, the per-research cap

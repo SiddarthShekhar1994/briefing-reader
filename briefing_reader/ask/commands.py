@@ -55,7 +55,7 @@ ACTIONS_FILE = "actions.json"   # as ui.ACTIONS_FILE (ui imports Qt; this module
 STAGE_WORDS = {"context": "Reading your calendar...", "planning": "Planning (uses your Claude plan)...",
                "mail": "Reading your mail...", "planning_again": "Planning with your mail (uses your Claude plan)...",
                "research": "Searching the web (uses your Claude plan)...",
-               "day": "Reading the day being planned..."}
+               "day": "Reading the day being planned...", "prep_mail": "Reading the meeting's guests' mail..."}
 PLAN_DRY_RUN_DEFAULT = "plan my day"
 NOT_A_PLAN = 'Not a day plan request: try "plan my day", "plan tomorrow" or "plan my afternoon, gym and reading".'
 MEMORY_ROUTE_WORDS = {ROUTE_MEMORY_SAVE: "Notes are kept in the app (MEMORY tab); nothing was saved.",

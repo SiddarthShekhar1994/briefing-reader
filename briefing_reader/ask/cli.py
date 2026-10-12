@@ -65,10 +65,11 @@ WEB_SEARCH_TOOL, WEB_FETCH_TOOL = "WebSearch", "WebFetch"
 # part of the command line (no tools, no MCP, the deny-all settings, the Ask work folder) is Ask's.
 PLAN_PROMPT_FILE = ASSETS / "plan_prompt.md"
 PLAN_SCHEMA_FILE = ASSETS / "plan_schema.json"
-PREP_PROMPT_FILE = ASSETS / "prep_prompt.md"      # meeting prep (a later build)
+PREP_PROMPT_FILE = ASSETS / "prep_prompt.md"      # meeting prep: a brief before a meeting
+PREP_SCHEMA_FILE = ASSETS / "prep_schema.json"
 NUDGE_PROMPT_FILE = ASSETS / "nudge_prompt.md"    # follow-up drafts (a later build)
-MODE_PROMPTS = {"plan": PLAN_PROMPT_FILE}
-MODE_SCHEMAS = {"plan": PLAN_SCHEMA_FILE}
+MODE_PROMPTS = {"plan": PLAN_PROMPT_FILE, "prep": PREP_PROMPT_FILE}
+MODE_SCHEMAS = {"plan": PLAN_SCHEMA_FILE, "prep": PREP_SCHEMA_FILE}
 
 SOURCE_ENV = "JARVIS_CLAUDE_EXE"
 SOURCE_PATH = "PATH"

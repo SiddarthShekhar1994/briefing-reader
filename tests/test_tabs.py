@@ -389,6 +389,57 @@ class ConversationLogTests(unittest.TestCase):
         settle(6)
         self.assertEqual(bar.value(), bar.maximum())
 
+    def test_a_group_is_followed_from_its_first_entry(self) -> None:
+        """follow_from: a question and its choices posted together are read from the question (never
+        a choice's bare link at the top of the view); the next entry or the owner's scroll ends it."""
+        log = self.log(300, 200)
+        for number in range(4):
+            log.add(hud.ROLE_JARVIS, f"Short entry {number}.", when=WHEN)
+        lead = log.add(hud.ROLE_JARVIS, "Which meeting shall I prepare, sir? Nothing is read until you pick one.",
+                       when=WHEN)
+        choices = [log.add(hud.ROLE_JARVIS, f"Meeting {number} at {number}:00 PM (work)", when=WHEN,
+                           link_text="Prep this one", link_id=f"prep-choice:{number}") for number in (1, 2, 3)]
+        log.follow_from(lead)
+        settle(6)
+        bar = log.verticalScrollBar()
+        first, last = log.entry(lead), log.entry(choices[-1])
+        self.assertGreater(last.y() + last.height() - first.y(), log.viewport().height())   # the group: too tall
+        self.assertEqual(bar.value(), first.y() - 6)                       # the question's header first
+        self.assertTrue(log.following())
+        for number, entry_id in zip((1, 2, 3), choices):                    # each link names its meeting
+            self.assertEqual(log.entry(entry_id).link_button.accessibleName(),
+                             f"Prep this one: Meeting {number} at {number}:00 PM (work)")
+        self.assertEqual(first.link_button.accessibleName(), "")
+        log.resize(300, 260)                                               # a taller view: still from the question
+        settle(6)
+        self.assertEqual(bar.value(), min(bar.maximum(), first.y() - 6))
+        log.add(hud.ROLE_JARVIS, "Done, sir.", when=WHEN)                  # the newest entry alone again
+        settle(6)
+        self.assertEqual(bar.value(), bar.maximum())
+        short = log.add(hud.ROLE_JARVIS, "Is this the meeting you mean, sir?", when=WHEN)
+        log.add(hud.ROLE_JARVIS, "Meeting 4 at 4:00 PM (work)", when=WHEN, link_text="Prep this one", link_id="p:4")
+        log.follow_from(short)                                             # a group that fits: the bottom
+        settle(6)
+        self.assertEqual(bar.value(), bar.maximum())
+        log.follow_from(lead)
+        settle(6)
+        self.assertLess(bar.value(), bar.maximum())
+        bar.triggerAction(bar.SliderAction.SliderToMinimum)                 # the owner's scroll ends it
+        settle()
+        self.assertEqual(log._anchor, 0)
+        log.follow_from(9999)                                              # a gone entry: the newest alone
+        self.assertEqual(log._anchor, 0)
+        # A link's accessible name takes the entry's first line only, capped: a brief's "See every
+        # step" never reads the whole brief again (the entry itself already carries it).
+        brief = log.add(hud.ROLE_JARVIS, "Brief: Meeting 5 - today 5:00-5:30 PM (work)\nWho: Ann (accepted)\n"
+                        "Last threads:\n- Ann - \"Budget\", Oct 5: the numbers. Waiting on you.", when=WHEN,
+                        link_text="See every step", link_id="live:7")
+        name = log.entry(brief).link_button.accessibleName()
+        self.assertEqual(name, "See every step: Brief: Meeting 5 - today 5:00-5:30 PM (work)")
+        self.assertNotIn("\n", name)
+        long_line = log.add(hud.ROLE_JARVIS, "x" * 300 + "\nmore", when=WHEN, link_text="See every step", link_id="l")
+        self.assertEqual(log.entry(long_line).link_button.accessibleName(), "See every step: " + "x" * 120)
+
     def test_tones(self) -> None:
         log = self.log()
         for tone, color in ((hud.TONE_DONE, hud.TEXT_BODY), (hud.TONE_WARN, hud.AMBER), (hud.TONE_ERROR, hud.RED),

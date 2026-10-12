@@ -41,6 +41,13 @@ This module only builds sentences; it never speaks, logs or stores them.
   ``memory_forgotten_speech`` and ``memory_refused_speech`` are all that is
   said aloud (never a note); ``memory_saved_text``, ``memory_refusal_text``,
   ``memory_suggestion_text`` and ``quoted_note`` build the JARVIS entries.
+* The day plan: ``plan_result_speech``, ``plan_question_speech`` and
+  ``plan_no_run_speech`` (counts and times only), ``plan_answer_text`` and
+  ``plan_no_run_text`` (the entries).
+* Meeting prep: ``prep_result_speech`` ("Your brief for the 2 PM meeting is
+  ready, sir."; the meeting's time only, never the brief) and
+  ``prep_no_run_speech``; ``prep_choice_text``, ``prep_choices_text`` and
+  ``prep_no_run_text`` build the entries.
 
 Qt-free; standard library only; ASCII.
 """
@@ -928,3 +935,86 @@ def plan_no_run_speech(reason: str, address: str = "sir", label: str = "today") 
     if reason == "nothing":
         return with_address(f"Nothing on your list needs time {label}, {{sir}}.", address)
     return ""
+
+
+# --------------------------------------------------------------------------
+# Meeting prep (the productivity bundle): entries in the JARVIS tab and the few words said aloud.
+# Spoken sentences are built from the meeting's time only: never its title, a guest, a subject or
+# the brief (the brief is on screen only).
+# --------------------------------------------------------------------------
+
+PREP_NO_MATCH_TEXT = "I don't see a meeting like that today or tomorrow, {sir}."
+PREP_GONE_TEXT = "That meeting is no longer on your calendar, {sir}."
+PREP_ENDED_TEXT = "That meeting has ended, {sir}."
+PREP_NO_CALENDAR_TEXT = "I couldn't read your calendar just now, {sir}; nothing else was read."
+PREP_CONNECT_TEXT = "Meeting prep needs your calendar - click Connect under TODAY."
+PREP_CHOOSE_TEXT = "Which meeting shall I prepare, {sir}? Nothing is read until you pick one."
+PREP_CHOOSE_ONE_TEXT = "Is this the meeting you mean, {sir}? Nothing is read until you click."
+PREP_CHOOSE_SPEECH = "Which meeting, {sir}? The choices are on screen."
+PREP_CHOOSE_ONE_SPEECH = "Is this the meeting you mean, {sir}? It's on screen."
+PREP_READY_STATUS = "Your brief is in the JARVIS tab."
+PREP_NO_RUN_STATUS = "Your brief is in the JARVIS tab (no planner run)."
+PREP_THIS_ONE = "Prep this one"
+# A no-run reason in a few words (ACTIVITY's row, the LIVE task's end): never the raw reason word.
+_PREP_NO_RUN_WORDS = {"no_match": "no such meeting", "gone": "the meeting is gone", "ended": "the meeting has ended",
+                      "no_calendar": "the calendar could not be read", "choices": "which meeting?",
+                      "no_thread": "no recent thread", "mail_off": "mail reading is off",
+                      "unreadable": "mail can't be read now", "caps": "the limits",
+                      "not_ready": "Claude Code not ready"}
+_PREP_NO_RUN_TEXTS = {"no_match": PREP_NO_MATCH_TEXT, "gone": PREP_GONE_TEXT, "ended": PREP_ENDED_TEXT,
+                      "no_calendar": PREP_NO_CALENDAR_TEXT}
+
+
+def prep_no_run_text(kind: str, address: str = "sir", *, connect: bool = False) -> str:
+    """Why a meeting brief did not start: no such meeting today or tomorrow, the meeting is gone or
+    ended, or the calendar could not be read (``connect``: none is signed in; nothing was read from
+    mail; no planner run)."""
+    if kind == "no_calendar" and connect:
+        return PREP_CONNECT_TEXT
+    return with_address(_PREP_NO_RUN_TEXTS.get(kind, PREP_NO_MATCH_TEXT), address)
+
+
+def prep_no_run_words(kind: str) -> str:
+    """"no such meeting", "no recent thread", ... (ACTIVITY and LIVE; never the reason word)."""
+    return _PREP_NO_RUN_WORDS.get(kind, str(kind).replace("_", " "))
+
+
+def prep_no_run_speech(kind: str, address: str = "sir", *, choices: int = 0) -> str:
+    """What is said when a brief did not start: the same title-free sentence as the entry, or for
+    the choices "Which meeting, sir? The choices are on screen." (one: "Is this the meeting you
+    mean, sir? It's on screen.")."""
+    if kind == "choices":
+        return with_address(PREP_CHOOSE_ONE_SPEECH if choices == 1 else PREP_CHOOSE_SPEECH, address)
+    return prep_no_run_text(kind, address)
+
+
+def prep_choices_text(count: int, address: str = "sir") -> str:
+    """The entry above the choices: "Which meeting shall I prepare, sir? ..." (one: "Is this the
+    meeting you mean, sir? ...", R5)."""
+    return with_address(PREP_CHOOSE_ONE_TEXT if count == 1 else PREP_CHOOSE_TEXT, address)
+
+
+def prep_choice_text(title: str, start: datetime, alias: str, *, day: str = "today", hour24: bool = False) -> str:
+    """One choice: "Project sync at 2:00 PM (work)", ", tomorrow" when it is tomorrow (on screen only)."""
+    if hour24:
+        at = f"{start.hour:02d}:{start.minute:02d}"
+    else:
+        at = f"{start.hour % 12 or 12}:{start.minute:02d} {'AM' if start.hour < 12 else 'PM'}"
+    shown = " ".join(str(title or "").split()) or "(No title)"
+    text = f"{shown} at {at} ({alias})" if alias else f"{shown} at {at}"
+    return text + (f", {day}" if day and day != "today" else "")
+
+
+def prep_result_speech(start: datetime | None, address: str = "sir", *, in_jarvis_tab: bool = True,
+                       day: str = "today") -> str:
+    """"Your brief for the 2 PM meeting is ready, sir." (JARVIS current, or the window minimized) /
+    "Your brief for the 2 PM meeting is in the JARVIS tab, sir." (another tab stays current, R33);
+    tomorrow's meeting: "Your brief for tomorrow's 9 AM meeting ...". The time only, never the brief."""
+    if start is None:
+        meeting = "the meeting"
+    elif day == "tomorrow":
+        meeting = f"tomorrow's {spoken_clock(start)} meeting"
+    else:
+        meeting = f"the {spoken_clock(start)} meeting"
+    where = "is ready" if in_jarvis_tab else "is in the JARVIS tab"
+    return with_address(f"Your brief for {meeting} {where}, {{sir}}.", address)

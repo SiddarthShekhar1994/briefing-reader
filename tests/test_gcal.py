@@ -1464,6 +1464,27 @@ class EventBriefTests(GcalTestCase):
                          (False, gcal.WORKING_LOCATION, "", True))
         self.assertEqual((odd.event_type, odd.self_response, odd.free), ("", "", False))
 
+    def test_the_owners_own_answer_for_a_meeting_brief(self) -> None:
+        """Meeting prep: self_response from the attendee with self: true (never one of the guests);
+        "accepted" when he organizes it and no entry says otherwise; the guests unchanged."""
+        self.service.outcomes["events.list"] = [{"items": [
+            _listed("Maybe", "2026-10-05T10:00:00-04:00", "2026-10-05T11:00:00-04:00", uid="evt0006ff",
+                    organizer={"email": "ana@example.edu", "displayName": "Ana Lima"},
+                    attendees=[{"email": "ana@example.edu", "organizer": True, "responseStatus": "accepted"},
+                               {"email": "you@example.edu", "self": True, "responseStatus": "tentative"},
+                               {"email": "ben@example.org", "displayName": "Ben Ode",
+                                "responseStatus": "needsAction"}]),
+            _listed("Mine", "2026-10-05T12:00:00-04:00", "2026-10-05T13:00:00-04:00", uid="evt0007gg",
+                    organizer={"email": "you@example.edu", "self": True},
+                    attendees=[{"email": "ben@example.org", "responseStatus": "accepted"}]),
+        ]}]
+        maybe, mine = sorted(self.signed_in_calendar().list_event_briefs(DAY_START, DAY_END),
+                             key=lambda brief: brief.event_id)
+        self.assertEqual((maybe.self_response, mine.self_response), ("tentative", "accepted"))
+        self.assertEqual([(guest.email, guest.response, guest.organizer) for guest in maybe.guests],
+                         [("ana@example.edu", "accepted", True), ("ben@example.org", "needsAction", False)])
+        self.assertEqual([guest.email for guest in mine.guests], ["ben@example.org"])
+
     def test_brief_of_an_event(self) -> None:
         self.service.outcomes["events.list"] = [{"items": [
             self.briefs_item(),

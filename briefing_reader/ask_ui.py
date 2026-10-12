@@ -46,6 +46,8 @@ goes through the busy and blocked checks and starts a planner mode run: submit_m
 mode's own kind (live.TASK_PLAN) whose first step is "Your request" (live.MODE_REQUEST). Its
 outcome comes through ``outcomeReady`` like an Ask's (AskOutcome.mode set). Only a run typed into
 the bar ever clears the bar's text (R23): a click-started run leaves what the owner was typing.
+A prep route ("prep me for my 2 PM") is a planner mode run the same way (live.TASK_PREP): its words
+only pick the meeting (ModeRequest.target) and never reach Claude.
 
 Web research: a request that starts with "web:" (or "research:") is a WEB task (live.TASK_WEB;
 ``running_kind``) whose "Your request" says nothing is read from the accounts; the command still
@@ -75,10 +77,11 @@ from . import hud
 from .actions import is_web_open, link_host
 from .ask import planner as ask_planner
 from .ask.context import COMMAND_CAP
-from .ask.modes import MODE_PLAN, MODE_TASKS, MODE_TITLES, ORIGIN_TYPED, ModeInputs, ModeRequest
+from .ask.modes import (MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES, ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs,
+                        ModeRequest)
 from .ask.research import forced_question
 from .ask.research_validate import NO_ANSWER, cards_words, source_card_ids
-from .ask.routes import MEMORY_ROUTES, NO_ROUTE, ROUTE_PLAN, RouteFlags, route
+from .ask.routes import MEMORY_ROUTES, NO_ROUTE, ROUTE_PLAN, ROUTE_PREP, RouteFlags, route
 from .ask.stream import CANCELLED, LIMIT, RESEARCH_CAP
 from .config import Config
 from .google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SIGNED_OUT, logged_alias
@@ -115,12 +118,15 @@ STAGE_TEXTS = {
     ask_planner.STAGE_PLANNING_AGAIN: "Planning with your mail...",
     ask_planner.STAGE_RESEARCH: "Searching the web...",
     ask_planner.STAGE_DAY: "Reading your calendar...",
+    ask_planner.STAGE_PREP_MAIL: "Reading your mail...",
 }
 _TIMED_STAGES = (ask_planner.STAGE_PLANNING, ask_planner.STAGE_PLANNING_AGAIN, ask_planner.STAGE_RESEARCH)
 # A planner mode's status while it runs (with the seconds; the meta line says Esc cancels).
-MODE_STATUS = {MODE_PLAN: "Planning your day..."}
+MODE_STATUS = {MODE_PLAN: "Planning your day...", MODE_PREP: "Preparing your brief..."}
 # A click on an offer while a request runs: refused, nothing queued, the link stays (spec 4.1).
 CLICK_BUSY_TEXT = "Jarvis is busy with another request; click the offer again when it's done"
+CHOICE_BUSY_TEXT = "Jarvis is busy with another request; click Prep this one again when it's done"
+NOTICE_S = 4.0       # a refused click's words stay this long before the running request's stage comes back
 RUNNING_META = f"uses your Claude plan {DOT} Esc cancels"
 IDLE_HINT = ("Type a request: Jarvis plans it with your calendar and today's briefing, and every "
              "proposal waits under NEEDS YOUR OK")
@@ -199,6 +205,8 @@ class _Running:
                                         # a planner mode's own task kind (live.TASK_PLAN)
     typed: bool = True                  # typed into the bar: only then is the bar cleared on success (R23)
     mode: str = ""                      # a planner mode's run (ask.modes.MODE_PLAN); "" for an Ask
+    clear_text: str = ""                # a click-started run: the typed words that led to it, cleared on success
+                                        # only while the bar still holds exactly them (R23)
 
 
 class _AskBridge(QObject):
@@ -340,6 +348,7 @@ class AskController(QObject):
         self.mail_needs: list[MailNeed] = []
         self._limit_message = ""               # the Claude plan's own limit, until a run succeeds
         self._answered = False                 # the status line shows an answer (not the idle hint)
+        self._notice_until = 0.0               # monotonic: a refused click's words stay on the status line until then
         self._tick = QTimer(self)
         self._tick.setInterval(_TICK_MS)
         self._tick.timeout.connect(self._show_stage)
@@ -420,6 +429,10 @@ class AskController(QObject):
             self.submit_mode(ModeRequest(MODE_PLAN, ORIGIN_TYPED, typed=found.payload, part=found.part,
                                          typed_route=True), text)
             return
+        if found.kind == ROUTE_PREP:   # the words only pick the meeting: they never reach Claude
+            logger.info("Ask: a typed %s shortcut", found.kind)
+            self.submit_mode(ModeRequest(MODE_PREP, ORIGIN_TYPED, target=found.payload, typed_route=True), text)
+            return
         if self._running is not None:
             self._status(BUSY_TEXT if self._running.cancel_requested else
                          "Jarvis is already planning; wait or Cancel it", hud.TONE_WARN)
@@ -447,17 +460,20 @@ class AskController(QObject):
         self.askStarted.emit(running.seq, text)
         self.bar.set_running(True)
         self.bar.set_meta(RUNNING_META)
+        self._notice_until = 0.0
         self._show_stage()
         self._tick.start()
         # busyChanged(True) waits for the first stage: an Ask the planner refuses (Claude Code
         # missing or signed out, a limit) never pauses the briefing.
 
-    def submit_mode(self, request: ModeRequest, words: str) -> bool:
+    def submit_mode(self, request: ModeRequest, words: str, *, clear_text: str = "") -> bool:
         """A planner mode run (the productivity bundle: a typed "plan my day", or a click on an offer):
         the same stop / busy / blocked guards as an Ask, then planner.plan_mode() on the ask thread.
         ``words``: what the owner typed (or the link's words for a click), shown as "Your request" and
-        in the conversation; never logged. False when it did not start (the status line says why;
-        nothing is queued)."""
+        in the conversation; never logged. ``clear_text``: for a click-started run, the typed words
+        that led to it (a prep's choices): on success the bar is cleared only while it still holds
+        exactly them, so what the owner typed since stays (R23). False when it did not start (the
+        status line says why, and keeps saying so for NOTICE_S seconds; nothing is queued)."""
         if self._stop.is_set():
             return False
         if self._running is not None:
@@ -465,7 +481,8 @@ class AskController(QObject):
                 self._status(BUSY_TEXT if self._running.cancel_requested else
                              "Jarvis is already planning; wait or Cancel it", hud.TONE_WARN)
             else:
-                self._status(CLICK_BUSY_TEXT, hud.TONE_WARN)
+                self._status(CHOICE_BUSY_TEXT if request.origin == ORIGIN_CHOICE else CLICK_BUSY_TEXT, hud.TONE_WARN)
+                self._notice_until = self._monotonic() + NOTICE_S   # the 1 s tick does not overwrite it
             return False
         reason = self._blocked()
         if reason:
@@ -484,7 +501,7 @@ class AskController(QObject):
         kind = MODE_TASKS.get(request.mode, TASK_ASK)
         task = _mode_task(self.live, request, words, kind=kind, memory=self._memory_given())
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind,
-                           typed=request.typed_route, mode=request.mode)
+                           typed=request.typed_route, mode=request.mode, clear_text=clear_text)
         self._running = running
         logger.info("Ask %d started (mode %s, %s)", running.seq, request.mode, request.origin)
         self._worker.put(_ModeJob(running.seq, request, inputs, briefing, tuple(page_ids), running.cancel,
@@ -492,6 +509,7 @@ class AskController(QObject):
         self.askStarted.emit(running.seq, words)
         self.bar.set_running(True)
         self.bar.set_meta(RUNNING_META)
+        self._notice_until = 0.0
         self._show_stage()
         self._tick.start()
         return True
@@ -546,6 +564,8 @@ class AskController(QObject):
         running = self._running
         if running is None or running.cancel_requested:
             return
+        if self._monotonic() < self._notice_until:   # a refused click's words stay a few seconds
+            return
         if running.mode:   # "Planning your day... 9 s" from the click on (the meta line: Esc cancels)
             text = f"{MODE_STATUS.get(running.mode, STARTING_TEXT)} {round(self._monotonic() - running.started)} s"
             self._status(text, hud.TONE_WORKING)
@@ -561,6 +581,7 @@ class AskController(QObject):
             return   # cancelled and replaced, or the app is closing
         self._running = None
         self._tick.stop()
+        self._notice_until = 0.0
         self.bar.set_running(False)
         if outcome.caps is not None:
             self.caps = outcome.caps
@@ -577,11 +598,15 @@ class AskController(QObject):
         if outcome.ok:
             self._limit_message = ""
             keep_link = bool(outcome.mail_needed) and any(need.alias == outcome.mail_needed for need in self.mail_needs)
-            soft = (outcome.question and not outcome.cards) or bool(getattr(outcome, "note_kind", ""))
+            # A mode with no run is amber, but a brief of Jarvis's own is an answer (it stays as done).
+            soft = (outcome.question and not outcome.cards) or (bool(getattr(outcome, "note_kind", ""))
+                                                                and getattr(outcome, "brief", None) is None)
             self._status(self._answer(outcome), hud.TONE_WARN if soft else hud.TONE_DONE, keep_link=keep_link)
-            if running.typed and any(not card.error for card in outcome.cards):
-                # A question back or nothing to propose keeps the draft to edit; a click-started run
-                # (an offer) never touches what the owner may be typing (R23).
+            done = any(not card.error for card in outcome.cards) or getattr(outcome, "brief", None) is not None
+            if done and (running.typed or (running.clear_text and self.bar.text() == running.clear_text)):
+                # A question back, choices or nothing to propose keep the draft to edit; a click-started
+                # run (an offer, a choice) never touches what the owner may be typing (R23): a choice
+                # clears only the very words that led to it, still untouched in the bar.
                 self.bar.clear_input()
         else:
             if outcome.kind == LIMIT:
@@ -627,6 +652,10 @@ class AskController(QObject):
         With nothing to decide the note comes first: it says what to do (and survives a cut). A web
         research's answer keeps its [n] source marks (the JARVIS tab numbers the sources). A planner
         mode that did not run (``note_kind``) shows only Jarvis's own words."""
+        if getattr(outcome, "mode", "") == MODE_PREP and getattr(outcome, "brief", None) is not None:
+            from .persona import PREP_READY_STATUS
+
+            return outcome.message if getattr(outcome, "note_kind", "") else PREP_READY_STATUS
         if getattr(outcome, "note_kind", ""):
             return outcome.message
         parts = [part for part in (outcome.say, outcome.question) if part]
@@ -694,6 +723,8 @@ class AskController(QObject):
             proposals = research_proposals(outcome)
             words = cards_words(len(report.sources), proposals)
             parts.append(f"{words} under ASK" if report.sources or proposals else words)
+        elif outcome is not None and outcome.ok and getattr(outcome, "mode", "") == MODE_PREP:
+            parts += _prep_meta(outcome)
         elif outcome is not None and outcome.ok:
             cards = sum(1 for card in outcome.cards if not card.error)
             noun = "block" if getattr(outcome, "mode", "") == MODE_PLAN else "proposal"
@@ -872,6 +903,8 @@ def _card_words(card: Any, hour24: bool = False) -> str:
         return " - ".join(part for part in ("ASK WEB", link_host(card.link), card.title or card.raw) if part)
     if getattr(card, "mode", "") == MODE_PLAN:
         return " - ".join(["PLAN BLOCK", "personal", *ask_planner.card_details(card, hour24)])
+    if getattr(card, "mode", "") == MODE_PREP:
+        return " - ".join(["PREP REPLY", *ask_planner.card_details(card, hour24)])
     kind = {"rsvp": "RSVP"}.get(card.kind, card.kind.upper())
     return " - ".join([f"ASK {kind}", *ask_planner.card_details(card, hour24)])
 
@@ -903,7 +936,11 @@ def _cards_step(task: LiveTask, outcome: Any, hour24: bool = False) -> None:
             step.item(_card_words(card, hour24), status=STATUS_OK)
     step.field("Answer", "in the JARVIS tab", link="tab:jarvis")
     decidable = sum(1 for card in outcome.cards if not card.error)
-    if getattr(outcome, "note_kind", ""):
+    if getattr(outcome, "mode", "") == MODE_PREP and getattr(outcome, "brief", None) is not None:
+        summary = "a brief" + (f" and {_plural(decidable, 'reply')} under NEEDS YOUR OK" if decidable else "")
+        if getattr(outcome, "note_kind", ""):
+            summary += " (no planner run)"
+    elif getattr(outcome, "note_kind", ""):
         summary = "no planner run"
     elif report is not None and decidable:
         summary = f"{cards_words(len(report.sources), research_proposals(outcome))} under NEEDS YOUR OK"
@@ -955,6 +992,8 @@ def _finish_words(outcome: Any, *, cancelled: bool) -> tuple[str, str]:
         if problems:
             return STATUS_WARN, f"{words}, {', '.join(problems)}"
         return STATUS_OK, words
+    if outcome.ok and getattr(outcome, "mode", "") == MODE_PREP:
+        return _prep_finish_words(outcome)
     if outcome.ok and getattr(outcome, "note_kind", ""):
         from .persona import plan_no_run_words
 
@@ -976,6 +1015,42 @@ def _finish_words(outcome: Any, *, cancelled: bool) -> tuple[str, str]:
     if outcome.kind in _BLOCKED_KINDS:
         return STATUS_BLOCKED, outcome.message or "Ask was refused; nothing was proposed"
     return STATUS_FAILED, outcome.message or "Ask failed; nothing was proposed"
+
+
+def _prep_meta(outcome: Any) -> list[str]:
+    """The meta line after a meeting brief: "brief + 1 reply under ASK", "brief (no planner run)",
+    "no planner run" (choices, no such meeting ...)."""
+    replies = sum(1 for card in outcome.cards if not card.error)
+    if getattr(outcome, "brief", None) is None:
+        return ["no planner run"]
+    words = "brief" + (f" + {_plural(replies, 'reply')} under ASK" if replies else "")
+    return [words + (" (no planner run)" if getattr(outcome, "note_kind", "") else "")]
+
+
+def _prep_finish_words(outcome: Any) -> tuple[str, str]:
+    """A meeting brief's LIVE task end: "brief ready (2 threads read)", "brief without a planner run
+    (no recent thread)", "no planner run (no such meeting)"; CHECK when an item or a reply was left
+    out or refused, or a reply has a recipient you didn't type."""
+    from .persona import prep_no_run_words
+
+    brief = getattr(outcome, "brief", None)
+    kind = getattr(outcome, "note_kind", "")
+    if brief is None:
+        return STATUS_OK, f"no planner run ({prep_no_run_words(kind)})"
+    if kind:
+        return STATUS_OK, f"brief without a planner run ({prep_no_run_words(kind)})"
+    replies = sum(1 for card in outcome.cards if not card.error)
+    words = f"brief ready ({_plural(outcome.mail.threads, 'thread')} read)"
+    if replies:
+        words += f", {_plural(replies, 'reply')}"
+    new = sum(len(card.unverified) for card in outcome.cards if not card.error)
+    problems = [part for part in (f"{brief.dropped} item(s) left out" if brief.dropped else "",
+                                  f"{outcome.refused} refused" if outcome.refused else "",
+                                  f"{outcome.dropped} dropped" if outcome.dropped else "",
+                                  f"{_plural(new, 'recipient')} you didn't type" if new else "") if part]
+    if problems:
+        return STATUS_WARN, f"{words}, {', '.join(problems)}"
+    return STATUS_OK, words
 
 
 def _signed_in(calendar: Any) -> bool:

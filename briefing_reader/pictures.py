@@ -1098,13 +1098,14 @@ def _day_alt(picture: DayPicture, affected: Sequence[tuple[_Spot, str, str]], da
 # --------------------------------------------------------------------------
 
 def plan_picture(events: Mapping[str, Sequence[Any]], blocks: Sequence[Any], *, day: date, now: datetime,
-                 hour24: bool = False, zone: str = "") -> Picture:
+                 hour24: bool = False, zone: str = "", account: str = "personal") -> Picture:
     """A day plan drawn on its day: the events Jarvis just read for it (every account, as
     ROLE_OTHER; a declined one titled "... (declined)", a "show as free" or working-location one
     "... (free)", R21) and the proposed blocks (ROLE_NEW, stamped PROPOSED: nothing is added before
     each block's own click). ``blocks=()`` (or none on that day) draws the day alone, captioned as
-    read and never stamped. ``zone``: the personal calendar's (events of another calendar, and now,
-    are moved into it; gcal.wall_in_zone): the frame of the blocks' times. Kind KIND_DAY, no new role."""
+    read and never stamped (a meeting brief draws its meeting's day that way, on its own calendar:
+    ``account``). ``zone``: the personal calendar's (events of another calendar, and now, are moved
+    into it; gcal.wall_in_zone): the frame of the blocks' times. Kind KIND_DAY, no new role."""
     from .gcal import wall_in_zone
 
     # "now" (and which day is today) in the blocks' frame: the personal calendar's zone, else this PC's.
@@ -1160,7 +1161,7 @@ def plan_picture(events: Mapping[str, Sequence[Any]], blocks: Sequence[Any], *, 
     headline = (f"Day plan for {day_label(day, today)}: {_plural(count, 'block')} proposed" if blocks
                 else f"{day_label(day, today)} as Jarvis read it")
     note = NOTE_PLAN if proposed else NOTE_PLAN_DAY
-    picture = DayPicture(change=CHANGE_PLAN, headline=_line(headline, 200), account="personal",
+    picture = DayPicture(change=CHANGE_PLAN, headline=_line(headline, 200), account=_line(account, 24) or "personal",
                          days=(day_label(day, today),), first_min=first_min, last_min=last_min, blocks=all_blocks,
                          others_shown=True, others_note=note, others_more=more, hour24=bool(hour24),
                          now_min=_minutes(now_wall, today) if now_column == 0 and now_wall is not None else -1,

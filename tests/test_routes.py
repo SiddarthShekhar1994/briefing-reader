@@ -1,4 +1,5 @@
-"""Tests for briefing_reader.ask.routes: the typed shortcuts that are not an Ask (this build: memory).
+"""Tests for briefing_reader.ask.routes: the typed shortcuts that are not an Ask (memory, the day plan
+and the meeting brief).
 
 Every name and note is invented.
 """
@@ -19,6 +20,7 @@ from briefing_reader.ask.routes import (
     ROUTE_MEMORY_SHOW,
     ROUTE_NONE,
     ROUTE_PLAN,
+    ROUTE_PREP,
     Route,
     RouteFlags,
     route,
@@ -133,12 +135,63 @@ class PlanRouteTests(unittest.TestCase):
         self.assertEqual(route("remember that I plan my day at 8", BOTH).kind, ROUTE_MEMORY_SAVE)
         self.assertEqual(repr(route("plan my day, Zq7", BOTH)), "Route(plan)")
 
+    def test_prep_words_never_route_with_plan_alone(self) -> None:
+        self.assertEqual(route("prep me for my 2 PM", PLAN_ON).kind, ROUTE_NONE)
+
     def test_part_words_match_dayplan(self) -> None:
         from briefing_reader.ask import dayplan
 
         self.assertEqual((PART_DAY, PART_MORNING, PART_AFTERNOON, PART_EVENING, PART_TOMORROW),
                          (dayplan.PART_DAY, dayplan.PART_MORNING, dayplan.PART_AFTERNOON, dayplan.PART_EVENING,
                           dayplan.PART_TOMORROW))
+
+
+PREP_ON = RouteFlags(prep=True)
+ALL_ON = RouteFlags(memory=True, plan=True, prep=True)
+
+
+class PrepRouteTests(unittest.TestCase):
+    def test_prep_variants(self) -> None:
+        cases = {
+            "prep me": "", "prepare me": "", "meeting prep": "", "jarvis, prep me!": "", "please prep me.": "",
+            "prep me for my 2 PM": "my 2 PM", "prep me for my 2 PM.": "my 2 PM",
+            "prepare me for Project sync": "Project sync", "prep me on the budget review": "the budget review",
+            "prep me for my call with Ben": "my call with Ben", "brief me on my next meeting": "my next meeting",
+            "brief me for the call": "the call", "brief me on my 2 pm": "my 2 pm",
+            "brief me on my 14:00 meeting": "my 14:00 meeting", "Brief me on the next call": "the next call",
+            "PREP ME FOR TOMORROW'S SYNC": "TOMORROW'S SYNC",
+        }
+        for text, target in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(route(text, PREP_ON), Route(ROUTE_PREP, target))
+                self.assertEqual(route(text, ALL_ON).kind, ROUTE_PREP)
+
+    def test_never_a_prep(self) -> None:
+        for text in ("prepare the report", "brief me on the news", "prep the slides", "prepare me a coffee",
+                     "brief me", "brief me about Ana", "can you prep me", "web: prep me", "prep me?",
+                     "meeting prep notes", "prep", "preparation for the meeting"):
+            with self.subTest(text=text):
+                self.assertEqual(route(text, PREP_ON).kind, ROUTE_NONE)
+
+    def test_the_spec_must_not_match_list(self) -> None:
+        for text in ("remember to call Ana", "remember when we met?", "remember what Ana said",
+                     "remember that meeting we had?", "web: remember that x", "planet news",
+                     "plan my day and email Ana", "prepare the report", "brief me on the news", "forget it"):
+            with self.subTest(text=text):
+                self.assertEqual(route(text, ALL_ON).kind, ROUTE_NONE)
+
+    def test_the_flag_turns_it_off(self) -> None:
+        self.assertEqual(route("prep me", BOTH).kind, ROUTE_NONE)              # memory and plan only
+        self.assertEqual(route("prep me", RouteFlags()).kind, ROUTE_NONE)
+
+    def test_memory_and_plan_keep_their_words(self) -> None:
+        self.assertEqual(route("remember that I prep me notes on Fridays", ALL_ON).kind, ROUTE_MEMORY_SAVE)
+        self.assertEqual(route("plan my day, prep me for nothing", ALL_ON), Route(ROUTE_PLAN, "prep me for nothing",
+                                                                                  PART_DAY))
+
+    def test_repr_has_no_words(self) -> None:
+        found = route("prep me for Zq7 Sync", PREP_ON)
+        self.assertEqual(repr(found), "Route(prep)")
 
 
 if __name__ == "__main__":

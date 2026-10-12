@@ -1,7 +1,8 @@
 """The productivity bundle's planner modes: what each run is told and from what (spec 5.2, 7).
 
 A mode is a planner run of its own (ClaudeEngine.run_mode): its own system prompt and schema, no
-tools, no mail search, no web research, no second run. This build has the day plan:
+tools, no mail search, no web research, no second run. This build has the day plan and the meeting
+brief:
 
     ModeRequest(mode, origin, typed=, part=, ...)   what started it (typed, an offer, a click); the
                                      owner's own words only in ``typed``
@@ -15,9 +16,13 @@ tools, no mail search, no web research, no second run. This build has the day pl
     build_plan_prompt(...)           PlanPrompt: the plan's stdin (7.2), the ContextIndex of what it
                                      showed and the <todos> row ids it showed (a block serves only those)
     index_of(ctx, shown)             context's index of an AskContext and the events shown
+    build_prep_prompt(...)           a meeting brief's stdin (7.3): the meeting's account, the meeting,
+                                     <people> (ask.prep.people_block), the threads Jarvis read with its
+                                     guests, the notes, the fixed command (never the owner's words)
 
-Every data field goes through context.data(), the stdin is at most MAX_PLAN_STDIN characters and
-<command> is last and once. Pure; nothing here is logged (the reprs name kinds only).
+Every data field goes through context.data(), a plan's stdin is at most MAX_PLAN_STDIN characters
+(a brief's at most an Ask's, context.MAX_STDIN_CHARS) and <command> is last and once. Pure;
+nothing here is logged (the reprs name kinds only).
 """
 
 from __future__ import annotations
@@ -32,23 +37,29 @@ from ..actions import CALENDAR, REPLY, TODO, ProposedAction
 from ..gcal import EventBrief
 from . import usage
 from .context import (
+    MAX_STDIN_CHARS,
     AccountInfo,
     AskContext,
     BriefingContext,
     ContextIndex,
     _ADDRESS_RE,
+    _event_row,
     _index,
+    _mail_block,
+    account_row,
     data,
+    fit_mail,
     memory_block,
     memory_notes_shown,
     now_line,
 )
+from .mail import MailThread, trim_threads
 
 MODE_PLAN, MODE_PREP, MODE_NUDGE = "plan", "prep", "nudge"
 ORIGIN_OFFER, ORIGIN_TYPED, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_BRIEF = "offer", "typed", "choice", "list", "brief"
 MODE_KINDS = {MODE_PLAN: frozenset({CALENDAR}), MODE_PREP: frozenset({REPLY}), MODE_NUDGE: frozenset({REPLY})}
 MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1}
-MODE_TASKS = {MODE_PLAN: live.TASK_PLAN}
+MODE_TASKS = {MODE_PLAN: live.TASK_PLAN, MODE_PREP: live.TASK_PREP}
 MODE_USAGE = {MODE_PLAN: usage.KIND_PLAN_DAY, MODE_PREP: usage.KIND_PREP, MODE_NUDGE: usage.KIND_NUDGE}
 MODE_TITLES = {MODE_PLAN: "Plan", MODE_PREP: "Prep", MODE_NUDGE: "Nudge"}
 FIXED_COMMANDS: dict[Any, str] = {
@@ -369,6 +380,48 @@ def build_plan_prompt(now: datetime, zone: str, owner: str, window: Any, events:
                      events={alias: tuple(brief for name, brief in bare if name == alias) for alias, _b in bare},
                      memory=notes, owner=owner)
     return PlanPrompt(text, index_of(ctx, bare), frozenset(row_id for row_id, _text in all_rows[:keep_todos]))
+
+
+# --------------------------------------------------------------------------
+# A meeting brief's stdin (spec 7.3)
+# --------------------------------------------------------------------------
+
+def build_prep_prompt(now: datetime, owner: str, account: AccountInfo, meeting_alias: str, meeting: EventBrief,
+                      people_rows: str, threads: Sequence[MailThread], memory: Sequence[str],
+                      request: ModeRequest, *, accounts: Sequence[AccountInfo] = (), zone: str = "",
+                      redact: bool = False) -> tuple[str, ContextIndex]:
+    """A meeting brief's stdin (spec 7.3): <now> <owner> <accounts> (the meeting's account only)
+    <meeting> (context's event row: title, times, organizer, the first 10 guests) <people> (Jarvis's
+    lookups, ask.prep.people_block) <mail> (the threads read, ask.mail.trim_threads at most 3, then
+    context.fit_mail; only when there are any) [<memory>] <command> (the fixed words: a brief never
+    carries the owner's typed words, which only picked the meeting). The ContextIndex: the meeting
+    with its guests (SOURCE_GUEST), the threads as shown with their messages' ids and people
+    (SOURCE_MAIL), the notes' addresses (SOURCE_MEMORY) and every account's alias and address
+    (``accounts``: a Reply from another account is refused by name, not as unknown). ``redact``:
+    each email's text and each note as its size."""
+    from .dayplan import to_wall
+
+    wall = to_wall(now, zone) if zone else now
+    command = command_text(replace(request, typed=""))
+    mail = fit_mail(tuple(trim_threads(list(threads), max_threads=3)), redact=redact)
+    notes = tuple(memory)
+    memory_text = memory_block(notes, redact=redact) if memory_notes_shown(notes) else ""
+    blocks = [f"<now>\n{now_line(wall, zone)}\n</now>", f"<owner>{data(owner, 20)}</owner>",
+              f"<accounts>\n{account_row(account)}\n</accounts>",
+              f"<meeting>\n{_event_row(meeting_alias, meeting)}\n</meeting>",
+              f"<people>\n{people_rows or _NONE}\n</people>"]
+    if mail:
+        blocks.append(f"<mail>\n{_mail_block(mail, redact=redact)}\n</mail>")
+    if memory_text:
+        blocks.append(memory_text)
+    blocks.append(f"<command>\n{command}\n</command>")   # Jarvis's fixed words only
+    text = "\n".join(blocks) + "\n"
+    if len(text) > MAX_STDIN_CHARS and mail:   # never expected (every part is capped): no mail rather than more
+        return build_prep_prompt(now, owner, account, meeting_alias, meeting, people_rows, (), memory, request,
+                                 accounts=accounts, zone=zone, redact=redact)
+    ctx = AskContext(now=wall, time_zone=zone, command=command, accounts=tuple(accounts) or (account,),
+                     events={meeting_alias: (meeting,)}, mail=mail, memory=notes, owner=owner)
+    return text, index_of(ctx, [(meeting_alias, meeting)])
 
 
 # --------------------------------------------------------------------------

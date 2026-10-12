@@ -628,14 +628,22 @@ class ModeArgvTests(unittest.TestCase):
         for hardened in (False, True):
             ask = cli.build_argv(self.EXE, model="sonnet", max_turns=4, schema=cli.schema_text(allow_search=True),
                                  hardened=hardened)
-            mode = cli.build_argv(self.EXE, model="sonnet", max_turns=4, schema=cli.mode_schema_text("plan"),
-                                  hardened=hardened, prompt_file=cli.MODE_PROMPTS["plan"])
-            self.assertEqual(len(ask), len(mode))
-            differ = [ask[number - 1] for number, (one, other) in enumerate(zip(ask, mode)) if one != other]
-            self.assertEqual(differ, ["--system-prompt-file", "--json-schema"])
-            self.assertEqual(mode[mode.index("--system-prompt-file") + 1], str(cli.PLAN_PROMPT_FILE))
-            self.assertFalse(set(mode) & set(cli.FORBIDDEN_FLAGS))
-            self.assertEqual(mode[mode.index("--tools") + 1], "")
+            for name, prompt in (("plan", cli.PLAN_PROMPT_FILE), ("prep", cli.PREP_PROMPT_FILE)):
+                with self.subTest(mode=name, hardened=hardened):
+                    mode = cli.build_argv(self.EXE, model="sonnet", max_turns=4, schema=cli.mode_schema_text(name),
+                                          hardened=hardened, prompt_file=cli.MODE_PROMPTS[name])
+                    self.assertEqual(len(ask), len(mode))
+                    differ = [ask[number - 1] for number, (one, other) in enumerate(zip(ask, mode)) if one != other]
+                    self.assertEqual(differ, ["--system-prompt-file", "--json-schema"])
+                    self.assertEqual(mode[mode.index("--system-prompt-file") + 1], str(prompt))
+                    self.assertFalse(set(mode) & set(cli.FORBIDDEN_FLAGS))
+                    self.assertEqual(mode[mode.index("--tools") + 1], "")
+
+    def test_the_prep_schema_text(self) -> None:
+        self.assertEqual(cli.mode_schema_text("prep"), cli.compact_json(json.loads(
+            cli.PREP_SCHEMA_FILE.read_text(encoding="utf-8"))))
+        self.assertEqual(set(cli.MODE_PROMPTS), {"plan", "prep"})
+        self.assertEqual(set(cli.MODE_SCHEMAS), {"plan", "prep"})
 
     def test_mode_schema_text(self) -> None:
         plain = json.loads(cli.mode_schema_text("plan"))

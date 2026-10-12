@@ -860,5 +860,47 @@ class PlanSpeechTests(unittest.TestCase):
         self.assertEqual(refused, ["I tried.", "No block fitted (see the cards)."])
 
 
+class PrepSpeechTests(unittest.TestCase):
+    """The meeting brief's words: spoken sentences carry the meeting's time only (never its title, a
+    guest, a subject or the brief), every one checked against claims_done."""
+
+    def test_spoken_sentences(self) -> None:
+        two = datetime(2026, 10, 7, 14, 0)
+        cases = [
+            (persona.prep_result_speech(two), "Your brief for the 2 PM meeting is ready, sir."),
+            (persona.prep_result_speech(two, in_jarvis_tab=False),
+             "Your brief for the 2 PM meeting is in the JARVIS tab, sir."),
+            (persona.prep_result_speech(two.replace(hour=9, minute=30), "", day="tomorrow"),
+             "Your brief for tomorrow's 9:30 AM meeting is ready."),
+            (persona.prep_result_speech(None), "Your brief for the meeting is ready, sir."),
+            (persona.prep_no_run_speech("no_match"), "I don't see a meeting like that today or tomorrow, sir."),
+            (persona.prep_no_run_speech("gone"), "That meeting is no longer on your calendar, sir."),
+            (persona.prep_no_run_speech("ended", "boss"), "That meeting has ended, boss."),
+            (persona.prep_no_run_speech("choices", choices=2), "Which meeting, sir? The choices are on screen."),
+            (persona.prep_no_run_speech("choices", choices=1), "Is this the meeting you mean, sir? It's on screen."),
+        ]
+        for said, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(said, expected)
+                self.assertFalse(persona.claims_done(said))
+                self.assertTrue(said.isascii())
+
+    def test_entry_texts(self) -> None:
+        two = datetime(2026, 10, 7, 14, 0)
+        self.assertEqual(persona.prep_choice_text("Project sync", two, "work"), "Project sync at 2:00 PM (work)")
+        self.assertEqual(persona.prep_choice_text("Project sync", two, "work", day="tomorrow", hour24=True),
+                         "Project sync at 14:00 (work), tomorrow")
+        self.assertEqual(persona.prep_choices_text(2), "Which meeting shall I prepare, sir? Nothing is read until you "
+                                                       "pick one.")
+        self.assertEqual(persona.prep_choices_text(1, ""), "Is this the meeting you mean? Nothing is read until you "
+                                                           "click.")
+        self.assertEqual(persona.prep_no_run_text("no_calendar"),
+                         "I couldn't read your calendar just now, sir; nothing else was read.")
+        self.assertEqual(persona.prep_no_run_text("no_calendar", connect=True),
+                         "Meeting prep needs your calendar - click Connect under TODAY.")
+        self.assertEqual(persona.prep_no_run_words("no_thread"), "no recent thread")
+        self.assertEqual(persona.prep_no_run_words("odd_kind"), "odd kind")
+
+
 if __name__ == "__main__":
     unittest.main()

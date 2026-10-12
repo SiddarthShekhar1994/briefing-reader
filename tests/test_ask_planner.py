@@ -2583,6 +2583,598 @@ class PlanModeTests(PlannerTestCase):
                       text)
 
 
+# --------------------------------------------------------------------------
+# The productivity bundle's meeting brief (planner.plan_mode with MODE_PREP, spec 3.3, 7.3, 8.2)
+# --------------------------------------------------------------------------
+
+PREP_CONFIG = CONFIG + "\n[productivity]\nenabled = true\n"
+TODAY_2PM = NOW.replace(hour=14, minute=0)
+ANA_QUERY = '{from:"ana@example.edu" to:"ana@example.edu" cc:"ana@example.edu"} newer_than:14d'
+BEN_QUERY = '{from:"ben@example.org" to:"ben@example.org" cc:"ben@example.org"} newer_than:14d'
+CY_QUERY = '{from:"cy@example.edu" to:"cy@example.edu" cc:"cy@example.edu"} newer_than:14d'
+
+
+def prep_meeting(start=TODAY_2PM, minutes: int = 30, *, event_id: str = "evtprep0001",  # type: ignore[no-untyped-def]
+                 title: str = "Project sync", guests=None, organizer=("Ana Lima", "ana@example.edu")):
+    """A Wednesday meeting (NOW is 9:30 AM) organized by Ana with Ben (accepted) and Cy (no answer)."""
+    from briefing_reader.gcal import EventBrief, Guest
+
+    if guests is None:
+        guests = (Guest("ana@example.edu", "Ana Lima", "accepted", organizer=True),
+                  Guest("cy@example.edu", "Cy Park", "needsAction"), Guest("ben@example.org", "Ben Ode", "accepted"))
+    return EventBrief(event_id, "primary", title, start=start, end=start + timedelta(minutes=minutes),
+                      organizer_name=organizer[0], organizer_email=organizer[1], guests=tuple(guests),
+                      self_response="accepted")
+
+
+def prep_request(target: str = "", event=None):  # type: ignore[no-untyped-def]
+    from briefing_reader.ask.modes import MODE_PREP, ORIGIN_CHOICE, ORIGIN_TYPED, ModeRequest
+
+    if event is not None:
+        return ModeRequest(MODE_PREP, ORIGIN_CHOICE, event=event)
+    return ModeRequest(MODE_PREP, ORIGIN_TYPED, target=target, typed_route=True)
+
+
+def a_thread(thread_id: str, sender: str, subject: str, msgid: str) -> dict:
+    return gmail_thread(thread_id, [gmail_message(
+        f"m{thread_id[3:]}", sender=sender, to="you@example.edu", subject=subject, body="Can we talk on Wednesday?",
+        msgid=msgid, at_ms=1791200000000)])
+
+
+class PrepModeTests(PlannerTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_config(PREP_CONFIG)
+        self.reader = FakeReader("work", {"thr0000777": budget_thread()}, found_for={"ana@example.edu": ["thr0000777"]})
+        self.sources.readers = {"work": self.reader}
+        self.sources.briefs = {"work": [prep_meeting()]}
+        self.sources.accounts_list = [AccountInfo("personal", "you@example.com", "yes", True, "no (not set up)",
+                                                  "America/Los_Angeles"),
+                                      AccountInfo("work", "you@example.edu", "yes", True, "yes",
+                                                  "America/Los_Angeles")]
+
+    def prep(self, ask: AskPlanner, target: str = "", event=None, **kwargs):  # type: ignore[no-untyped-def]
+        self.stream = live.LiveStream()
+        task = self.stream.task(live.TASK_PREP, "prep me")
+        return ask.plan_mode(prep_request(target, event), live=task, **kwargs)
+
+    def steps(self) -> list:
+        return list(self.stream.snapshot()[0].steps)
+
+    def ref(self, start=TODAY_2PM, event_id: str = "evtprep0001"):  # type: ignore[no-untyped-def]
+        from briefing_reader.ask.modes import EventRef
+
+        return EventRef("work", "primary", event_id, start)
+
+    def test_a_brief_end_to_end(self) -> None:
+        from briefing_reader.ask import prep
+        from briefing_reader.ask.modes import FIXED_COMMANDS, MODE_PREP
+
+        ask = self.make(stream("prep_ok"))
+        stages: list[str] = []
+        outcome = self.prep(ask, "my 2 PM", on_stage=stages.append)
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual((outcome.mode, outcome.runs, outcome.note_kind), (MODE_PREP, 1, ""))
+        self.assertEqual(len(self.runner.started), 1)                              # exactly one run
+        self.assertEqual(stages, [planner.STAGE_CONTEXT, planner.STAGE_PREP_MAIL, planner.STAGE_PLANNING])
+        # Jarvis's own searches, in guest order: the organizer first; one thread read.
+        self.assertEqual(self.reader.searches, [ANA_QUERY, BEN_QUERY, CY_QUERY])
+        self.assertEqual(self.reader.reads, ["thr0000777"])
+        stdin = self.stdin()
+        self.assertIn("<accounts>\nwork | address=you@example.edu | calendar=yes | send_mail=yes | read_mail=yes | "
+                      "time_zone=America/Los_Angeles\n</accounts>\n<meeting>\nwork | event=evtprep0001 | cal=primary | "
+                      "Project sync | 2026-10-07 14:00-14:30 | organizer=other: Ana Lima (ana@example.edu) | guests: "
+                      "Ana Lima (ana@example.edu, accepted); Cy Park (cy@example.edu, needsAction); Ben Ode "
+                      "(ben@example.org, accepted) | single\n</meeting>\n<people>\n", stdin)
+        self.assertIn("Ana Lima (ana@example.edu) | organizer | accepted | thread found: yes (work, last mail "
+                      "2026-10-05)\nBen Ode (ben@example.org) | guest | accepted | thread found: no (no email in the "
+                      "last 14 days)\nCy Park (cy@example.edu) | guest | no answer yet | thread found: no (no email in "
+                      "the last 14 days)\n</people>\n<mail>\n", stdin)
+        self.assertIn("thread | acct=work | thread=thr0000777 | subject=Budget review", stdin)
+        self.assertTrue(stdin.endswith(f"<command>\n{FIXED_COMMANDS[MODE_PREP]}\n</command>\n"))
+        self.assertNotIn("my 2 PM", stdin)                                        # typed words only pick the meeting
+        self.assertNotIn("Calendar and Todo lines", stdin)
+        started = self.runner.started[0]
+        self.assertEqual(started.argv[started.argv.index("--system-prompt-file") + 1],
+                         str(planner.cli.PREP_PROMPT_FILE))
+        schema = self.schema()
+        self.assertEqual(schema["title"], "JarvisPrepBrief")
+        self.assertNotIn("gmail_search", schema["properties"])
+        self.assertNotIn("remember", schema["properties"])                          # a run with mail never suggests
+        brief = outcome.brief
+        self.assertEqual(brief.threads, (("Ana Lima", '"Budget review", Oct 5',
+                                          "Ana asked you to confirm the Q4 budget by Friday.", "owner"),))
+        self.assertEqual(brief.missing, (("Ben Ode", "no email in the last 14 days"),
+                                         ("Cy Park", "no email in the last 14 days")))
+        self.assertEqual(brief.open, ("Confirm the Q4 budget.", "Agree the date for the demo."))
+        self.assertEqual(brief.points, ("Ask Ben about the lab schedule.",))
+        self.assertEqual((brief.ran, brief.dropped, brief.day, brief.alias), (True, 0, "today", "work"))
+        self.assertEqual(brief.who, (("Ana Lima", "organizer, accepted"), ("Ben Ode", "accepted"),
+                                     ("Cy Park", "no answer yet")))
+        card, = outcome.cards
+        self.assertEqual((card.kind, card.mode, card.account, card.error), (REPLY, MODE_PREP, "work", ""))
+        self.assertEqual(card.unverified, frozenset({"ana@example.edu"}))           # a fixed command: never typed
+        self.assertEqual(self.usage.counts(NOW, kind="prep"), (1, 1))             # counted as a bundle run
+        self.assertEqual((outcome.mail.threads, outcome.say), (1, "Ana is waiting on the Q4 budget."))
+        summary = outcome.summary()
+        self.assertIn("mode prep, brief threads 1 / open 2 / points 1, 0 dropped", summary)
+        self.assertNotIn("Budget", summary)
+        self.assertIsNotNone(outcome.calendar_read)
+        text = prep.brief_text(brief)
+        self.assertTrue(text.startswith("Brief: Project sync - today 2:00-2:30 PM (work)\nWho: Ana Lima (organizer, "
+                                        "accepted) \u00b7 Ben Ode (accepted) \u00b7 Cy Park (no answer yet)\n"
+                                        "Last threads:\n- Ana Lima - \"Budget review\", Oct 5: Ana asked you to "
+                                        "confirm the Q4 budget by Friday. Waiting on you.\n"), text)
+
+    def test_the_prep_child_is_an_asks_but_for_its_prompt_and_schema(self) -> None:
+        ask = self.make(stream("prep_ok"), plan_stream({"say": SAY, "question": "", "lines": []}))
+        self.assertTrue(self.prep(ask, "Project sync").ok)
+        self.assertTrue(ask.plan("what's on today?").ok)
+        prep_child, ask_child = self.runner.started
+        self.assertEqual((prep_child.env, prep_child.cwd), (ask_child.env, ask_child.cwd))
+        self.assertEqual(len(prep_child.argv), len(ask_child.argv))
+        differ = [prep_child.argv[number - 1] for number, (mine, theirs)
+                  in enumerate(zip(prep_child.argv, ask_child.argv)) if mine != theirs]
+        self.assertEqual(differ, ["--system-prompt-file", "--json-schema"])
+
+    def test_the_live_steps_of_a_brief(self) -> None:
+        ask = self.make(stream("prep_ok"))
+        self.prep(ask)
+        kinds = [step.kind for step in self.steps()]
+        self.assertEqual(kinds, [live.ASK_CHECKS, live.PREP_MEETING, live.PREP_PEOPLE, live.MAIL_SEARCH,
+                                 live.MAIL_SEARCH, live.MAIL_SEARCH, live.MAIL_THREAD, live.PLANNER_RUN,
+                                 live.PREP_VALIDATE])
+        steps = self.steps()
+        meeting = steps[1]
+        fields = {field.label: field.value for field in meeting.fields}
+        self.assertEqual(fields["When"], "today 2:00-2:30 PM (work)")
+        self.assertIsNotNone(meeting.picture)                                      # the meeting's day as read
+        self.assertEqual(meeting.picture.day.account, "work")                      # its own calendar's label
+        people = {field.label: field.value for field in steps[2].fields}
+        self.assertEqual(people["Bundle runs left today"], "20 of 20")              # checked right before (R12)
+        self.assertEqual([item.status_text for item in steps[2].items], ["", "NO MAIL", "NO MAIL"])
+        search = {field.label: field.value for field in steps[3].fields}
+        self.assertEqual(search["Gmail query (exact)"], ANA_QUERY)
+        self.assertIn("Jarvis's own search", search["Why"])
+        self.assertIsNotNone(steps[6].picture)                                      # the email picture
+        run = {field.label: field.value for field in steps[7].fields}
+        self.assertIn("prep_prompt.md", run["Command line"])
+        self.assertEqual(steps[7].title, "Planner run (meeting brief)")
+
+    def test_no_thread_gives_a_brief_of_jarviss_own(self) -> None:
+        """G4: no thread with any guest -> no run, nothing counted, a brief without a planner run."""
+        from briefing_reader.ask import prep
+
+        self.reader.found_for = {}
+        ask = self.make()
+        pending = (parse_action_line(BRIEFING_REPLY),)
+        with self.assertLogs("briefing_reader.ask.planner", level="INFO") as logs:
+            outcome = self.prep(ask, briefing=BriefingContext(pending=pending))
+        self.assertIn("INFO:briefing_reader.ask.planner:Prep: brief without a planner run (no_thread)", logs.output)
+        self.assertEqual((outcome.ok, outcome.runs, outcome.note_kind), (True, 0, "no_thread"))
+        self.assertEqual(self.runner.started, [])
+        self.assertEqual(self.reader.reads, [])
+        self.assertEqual(len(self.reader.searches), 3)
+        self.assertEqual(self.usage.counts(NOW), (0, 0))
+        brief = outcome.brief
+        self.assertFalse(brief.ran)
+        self.assertEqual(brief.missing, tuple((name, "no email in the last 14 days")
+                                              for name in ("Ana Lima", "Ben Ode", "Cy Park")))
+        self.assertEqual(brief.open, ("Re: Budget review (waiting under NEEDS YOUR OK)",))   # Ana is a guest
+        self.assertIn("Ana Lima - no email in the last 14 days.", prep.brief_text(brief))
+        self.assertEqual(self.steps()[-1].kind, live.PLANNER_RUN)
+        self.assertEqual(self.steps()[-1].summary, "No planner run: no recent thread")
+
+    def test_the_hourly_cap_gives_the_brief_without_reading(self) -> None:
+        """R12: the caps refuse right before the first search: a brief with the caps note, 0 searches,
+        0 reads, 0 runs (never a bare refusal)."""
+        self.write_config(PREP_CONFIG.replace("max_per_hour = 20", "max_per_hour = 1"))
+        ask = self.make()
+        self.usage = UsageLog(self.config.data_dir / "ask_usage.json", max_per_hour=1, max_per_day=60,
+                              clock=lambda: NOW)
+        ask.usage = self.usage
+        self.usage.finish(self.usage.start(), outcome="ok")
+        outcome = self.prep(ask)
+        self.assertEqual((outcome.ok, outcome.note_kind, outcome.runs), (True, "caps", 0))
+        self.assertTrue(outcome.brief.note.startswith("I didn't read mail: "), outcome.brief.note)
+        self.assertEqual((self.reader.searches, self.reader.reads, self.runner.started), ([], [], []))
+        self.assertEqual(outcome.brief.missing[0], ("Ana Lima", "not searched (mail not read for this brief)"))
+
+    def test_the_bundle_cap_and_the_ask_reserve_give_the_brief_without_reading(self) -> None:
+        """R12 / 3.3 step 5: usage.check(runs=1, bundle=1, reserve): the Ask runs kept for typed
+        Asks and the bundle's daily limit each refuse right before the first search."""
+        self.write_config(PREP_CONFIG.replace("max_per_hour = 20", "max_per_hour = 4"))
+        ask = self.make()
+        self.usage = UsageLog(self.config.data_dir / "ask_usage.json", max_per_hour=4, max_per_day=60,
+                              clock=lambda: NOW)
+        ask.usage = self.usage
+        self.usage.finish(self.usage.start(), outcome="ok")                        # 3 left: the reserve
+        with self.assertLogs("briefing_reader.ask.planner", level="INFO") as logs:
+            reserved = self.prep(ask)
+        self.assertIn("INFO:briefing_reader.ask.planner:Prep: brief without a planner run (caps)", logs.output)
+        self.assertEqual((reserved.ok, reserved.note_kind, reserved.runs), (True, "caps", 0))
+        self.assertTrue(reserved.brief.note.startswith("I didn't read mail: Jarvis keeps 3 Ask runs this hour"),
+                        reserved.brief.note)
+        self.assertEqual((self.reader.searches, self.reader.reads, self.runner.started), ([], [], []))
+        self.write_config(PREP_CONFIG + "max_runs_per_day = 1\n")
+        capped_planner = AskPlanner(self.config, self.engine, self.sources, clock=lambda: NOW, monotonic=self.clock)
+        capped_planner.usage.finish(capped_planner.usage.start(kind="prep"), outcome="ok")
+        capped = self.prep(capped_planner)
+        self.assertEqual((capped.note_kind, capped.runs), ("caps", 0))
+        self.assertTrue(capped.brief.note.startswith("I didn't read mail: Today's limit for plans, briefs and drafts"),
+                        capped.brief.note)
+        self.assertEqual((self.reader.searches, self.reader.reads, self.runner.started), ([], [], []))
+        self.assertEqual(capped.brief.missing[0], ("Ana Lima", "not searched (mail not read for this brief)"))
+
+    def test_claude_code_not_ready_gives_the_brief_without_reading(self) -> None:
+        ask = self.make(auth=json.dumps({"loggedIn": False}))
+        outcome = self.prep(ask)
+        self.assertEqual((outcome.ok, outcome.note_kind, outcome.runs), (True, "not_ready", 0))
+        self.assertTrue(outcome.brief.note.startswith("I didn't read mail: "))
+        self.assertEqual((self.reader.searches, self.reader.reads, self.runner.started), ([], [], []))
+
+    def test_mail_off_or_unreadable_gives_the_brief_without_reading(self) -> None:
+        self.write_config(PREP_CONFIG.replace("[ask]\n", "[ask]\nread_mail = false\n"))
+        ask = self.make()
+        off = self.prep(ask)
+        self.assertEqual((off.note_kind, off.runs), ("mail_off", 0))
+        self.assertIn("reading mail is off", off.brief.note)
+        self.write_config(PREP_CONFIG)
+        ask = self.make()
+        self.sources.accounts_list[1] = AccountInfo("work", "you@example.edu", "yes", True,
+                                                    "no (needs a Google sign-in)", "America/Los_Angeles")
+        unreadable = self.prep(ask)
+        self.assertEqual(unreadable.note_kind, "unreadable")
+        self.assertEqual((self.reader.searches, self.runner.started), ([], []))
+
+    def test_a_moved_meeting_uses_its_new_time(self) -> None:
+        """R20: found again by its calendar and id, anywhere today or tomorrow."""
+        later = TODAY_2PM + timedelta(hours=2)
+        self.sources.briefs = {"work": [prep_meeting(later)]}
+        ask = self.make(stream("prep_ok"))
+        outcome = self.prep(ask, event=self.ref())
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual((outcome.brief.start.hour, outcome.brief.day), (16, "today"))
+        meeting = next(step for step in self.steps() if step.kind == live.PREP_MEETING)
+        self.assertEqual({field.label: field.value for field in meeting.fields}["Moved"], "moved to 4:00 PM")
+        tomorrow = NOW.replace(hour=9, minute=0) + timedelta(days=1)
+        self.sources.briefs = {"work": [prep_meeting(tomorrow)]}
+        ask = self.make(stream("prep_ok"))
+        moved = self.prep(ask, event=self.ref())
+        self.assertEqual((moved.brief.start.hour, moved.brief.day), (9, "tomorrow"))
+        meeting = next(step for step in self.steps() if step.kind == live.PREP_MEETING)
+        self.assertEqual({field.label: field.value for field in meeting.fields}["Moved"], "moved to tomorrow 9:00 AM")
+
+    def test_gone_or_ended_reads_no_mail(self) -> None:
+        ask = self.make()
+        gone = self.prep(ask, event=self.ref(event_id="evtgone0001"))
+        self.assertEqual((gone.ok, gone.note_kind, gone.message, gone.runs),
+                         (True, "gone", "That meeting is no longer on your calendar, sir.", 0))
+        self.sources.briefs = {"work": [prep_meeting(NOW.replace(hour=8, minute=0))]}
+        ended = self.prep(ask, event=self.ref(NOW.replace(hour=8, minute=0)))
+        self.assertEqual((ended.note_kind, ended.message), ("ended", "That meeting has ended, sir."))
+        self.sources.failing = {"work": "error"}
+        unread = self.prep(ask, event=self.ref())
+        self.assertEqual((unread.note_kind, unread.message),
+                         ("no_calendar", "I couldn't read your calendar just now, sir; nothing else was read."))
+        self.sources.failing = {"work": "not signed in"}
+        signed_out = self.prep(ask, event=self.ref())
+        self.assertEqual(signed_out.message, "Meeting prep needs your calendar - click Connect under TODAY.")
+        self.sources.accounts_list = [AccountInfo(account.alias, account.address, "not signed in")
+                                      for account in self.sources.accounts_list]
+        typed = self.prep(ask, "my 2 PM")
+        self.assertEqual((typed.note_kind, typed.message),
+                         ("no_calendar", "Meeting prep needs your calendar - click Connect under TODAY."))
+        self.assertEqual((self.reader.searches, self.reader.reads, self.runner.started), ([], [], []))
+
+    def test_typed_words_that_match_none_or_several(self) -> None:
+        tomorrow = TODAY_2PM + timedelta(days=1)
+        self.sources.briefs = {"work": [prep_meeting(), prep_meeting(tomorrow, event_id="evtprep0002")]}
+        ask = self.make()
+        none = self.prep(ask, "the Zebra review")
+        self.assertEqual((none.note_kind, none.message),
+                         ("no_match", "I don't see a meeting like that today or tomorrow, sir."))
+        several = self.prep(ask, "Project sync")
+        self.assertEqual((several.note_kind, len(several.choices)), ("choices", 2))
+        self.assertEqual([choice.day for choice in several.choices], ["today", "tomorrow"])
+        self.assertEqual(several.message, "Which meeting shall I prepare, sir? Nothing is read until you pick one.")
+        self.assertEqual((self.reader.searches, self.reader.reads, self.runner.started), ([], [], []))
+        self.assertEqual(repr(several.choices[0]), "PrepChoice(work)")
+
+    def test_one_meeting_found_by_some_title_words_asks_first(self) -> None:
+        """R5: "prep me for my call with Ben" and only "Call with Dana" today: one choice, no read."""
+        from briefing_reader.gcal import Guest
+
+        self.sources.briefs = {"work": [prep_meeting(title="Call with Dana",
+                                                     guests=(Guest("dana@example.edu", "Dana Example", "accepted"),),
+                                                     organizer=("", ""))]}
+        ask = self.make()
+        outcome = self.prep(ask, "my call with Ben")
+        self.assertEqual((outcome.note_kind, len(outcome.choices)), ("choices", 1))
+        self.assertEqual(outcome.message, "Is this the meeting you mean, sir? Nothing is read until you click.")
+        self.assertEqual((self.reader.searches, self.runner.started), ([], []))
+
+    def test_every_typed_title_word_goes_straight_on(self) -> None:
+        """R5: "the Project sync" (stopwords out) runs; "the Project sync meeting" has a typed word
+        ("meeting") the title lacks, so even its single match asks first and reads nothing."""
+        ask = self.make(stream("prep_ok"))
+        asked = self.prep(ask, "the Project sync meeting")
+        self.assertEqual((asked.ok, asked.runs, asked.note_kind, len(asked.choices)), (True, 0, "choices", 1))
+        self.assertEqual((self.reader.searches, self.reader.reads, self.runner.started), ([], [], []))
+        outcome = self.prep(ask, "the Project sync")
+        self.assertEqual((outcome.ok, outcome.runs, outcome.note_kind), (True, 1, ""))
+
+    def test_a_garbled_answer_is_a_failed_run(self) -> None:
+        """A run whose answer does not fit the brief's shape: no brief, no card, the run counted."""
+        ask = self.make(plan_stream({"say": "Ana waits.", "threads": "not a list", "open": [], "points": [],
+                                     "lines": []}))
+        outcome = self.prep(ask)
+        self.assertFalse(outcome.ok)
+        self.assertEqual((outcome.kind, outcome.runs, outcome.cards, outcome.brief), ("garbled", 1, (), None))
+        self.assertEqual(outcome.message, "The planner's answer could not be read; nothing was proposed")
+        self.assertEqual(self.reader.reads, ["thr0000777"])                        # read before the run
+        self.assertEqual(len(self.runner.started), 1)
+        self.assertEqual(self.usage.counts(NOW, kind="prep"), (1, 1))             # a failed run still counts
+        kinds = [step.kind for step in self.steps()]
+        self.assertEqual(kinds[-1], live.PLANNER_RUN)                               # no "Checking the brief"
+        run = self.steps()[-1]
+        self.assertEqual((run.status, run.summary), (live.STATUS_FAILED, outcome.message))
+
+    def test_cancel_while_searching_mail(self) -> None:
+        """Cancel clicked while Gmail answers the first search: the other guests are not searched, the
+        thread found is not read; no run, nothing counted."""
+        cancel = threading.Event()
+        original = self.reader.search
+
+        def searching(query: str, **kwargs):  # type: ignore[no-untyped-def]
+            cancel.set()
+            return original(query, **kwargs)
+
+        self.reader.search = searching   # type: ignore[method-assign]
+        outcome = self.prep(self.make(stream("prep_ok")), cancel=cancel)
+        self.assertEqual((outcome.ok, outcome.kind, outcome.runs, outcome.cards), (False, "cancelled", 0, ()))
+        self.assertEqual(outcome.message, "Cancelled; nothing was proposed")
+        self.assertEqual((self.reader.searches, self.reader.reads, outcome.mail.threads), ([ANA_QUERY], [], 0))
+        self.assertEqual((self.runner.started, self.usage.counts(NOW)), ([], (0, 0)))
+        steps = self.steps()
+        self.assertEqual([step.kind for step in steps][-2:], [live.PREP_PEOPLE, live.MAIL_SEARCH])
+        self.assertEqual([item.status_text for item in steps[2].items], ["SKIPPED", "SKIPPED", "SKIPPED"])
+        self.assertTrue(all(item.note == "not searched (cancelled)" for item in steps[2].items), steps[2].items)
+
+    def test_cancel_while_reading_mail(self) -> None:
+        """Cancel clicked while Gmail answers the read: the thread in hand is read, nothing more; no
+        run, nothing counted."""
+        cancel = threading.Event()
+        original = self.reader.thread
+
+        def reading(thread_id: str) -> dict:
+            cancel.set()
+            return original(thread_id)
+
+        self.reader.thread = reading   # type: ignore[method-assign]
+        outcome = self.prep(self.make(stream("prep_ok")), cancel=cancel)
+        self.assertEqual((outcome.ok, outcome.kind, outcome.runs, outcome.cards), (False, "cancelled", 0, ()))
+        self.assertEqual((self.reader.reads, outcome.mail.threads), (["thr0000777"], 1))
+        self.assertEqual((self.runner.started, self.usage.counts(NOW)), ([], (0, 0)))
+        self.assertNotIn(live.PLANNER_RUN, [step.kind for step in self.steps()])
+
+    def test_planner_items_are_checked_against_what_jarvis_read(self) -> None:
+        """8.2: a thread Jarvis did not read, a repeat and an open item of a foreign thread are left
+        out; a Reply from another account (on a thread read for the meeting's account: validate's
+        unknown thread comes first) or adding someone not in the thread is refused."""
+        from briefing_reader.ask.validate import UNKNOWN_THREAD
+        from briefing_reader.ask import prep
+
+        ask = self.make(stream("prep_injection"))
+        outcome = self.prep(ask)
+        brief = outcome.brief
+        self.assertEqual(brief.dropped, 3)
+        self.assertEqual([row[2] for row in brief.threads], ["Ana wants the Q4 budget confirmed."])
+        self.assertEqual(brief.open, ("Confirm the Q4 budget.",))
+        self.assertEqual([card.error for card in outcome.cards], [UNKNOWN_THREAD, prep.EXTRA_PEOPLE])
+        self.assertEqual(outcome.refused, 2)
+        self.assertNotIn("m@evil.example", prep.brief_text(brief))
+
+    def test_a_draft_repeating_a_note_is_held_back(self) -> None:
+        """R7: prep has no owner's words, so a draft repeating a note is information only."""
+        from briefing_reader.ask import prep
+
+        ask = self.make(stream("prep_note_leak"))
+        ask.memory = lambda: ("Zq7memo the launch moves to March", "Ana Lima is my project lead")
+        with self.assertLogs("briefing_reader.ask.planner", level="INFO") as logs:
+            outcome = self.prep(ask)
+        self.assertIn("INFO:briefing_reader.ask.planner:Prep: a draft held back (note)", logs.output)
+        self.assertEqual([card.error for card in outcome.cards], [prep.NOTE_LEAK])
+        self.assertIn("<memory>", self.stdin())
+        self.assertEqual(outcome.brief.notes, ("Ana Lima is my project lead",))    # a note naming a guest
+
+    def test_a_security_sender_guest_is_never_looked_up(self) -> None:
+        """R2: guest_allowed (check_query and is_security_sender with no own domains) refuses before
+        any search; the brief says so."""
+        from briefing_reader.ask import prep
+        from briefing_reader.gcal import Guest
+
+        guests = (Guest("ana@example.edu", "Ana Lima", "accepted"), Guest("colleague@google.com", "Gee Example",
+                                                                          "accepted"),
+                  Guest("security@example.edu", "Sec Desk", "accepted"))
+        self.sources.briefs = {"work": [prep_meeting(guests=guests)]}
+        ask = self.make(stream("prep_ok"))
+        outcome = self.prep(ask)
+        self.assertEqual(self.reader.searches, [ANA_QUERY])
+        self.assertIn(("Gee Example", f"not searched ({prep.REFUSED_WHY})"), outcome.brief.missing)
+        self.assertIn(("Sec Desk", f"not searched ({prep.REFUSED_WHY})"), outcome.brief.missing)
+        self.assertIn("Gee Example (colleague@google.com) | guest | accepted | not searched (Jarvis doesn't search "
+                      "that address)", self.stdin())
+        people = next(step for step in self.steps() if step.kind == live.PREP_PEOPLE)
+        self.assertEqual([item.status for item in people.items][1:], [live.STATUS_BLOCKED, live.STATUS_BLOCKED])
+
+    def test_a_guest_address_with_search_syntax_is_never_searched(self) -> None:
+        """An attendee address with "{" / "}" (RFC atext, so the calendar and actions.email_address
+        take it) could close the one-guest group and turn the search into anyone's newest mail:
+        guest_allowed refuses it before any search, like a security sender (R2)."""
+        from briefing_reader.ask import prep
+        from briefing_reader.gcal import Guest
+
+        guests = (Guest("ana@example.edu", "Ana Lima", "accepted"),
+                  Guest("chase}OR{owner@example.edu", "Odd Example", "accepted"),
+                  Guest("{ben}@example.org", "Ben Ode", "accepted"))
+        self.sources.briefs = {"work": [prep_meeting(guests=guests)]}
+        ask = self.make(stream("prep_ok"))
+        with self.assertLogs("briefing_reader.ask.planner", level="INFO") as logs:
+            outcome = self.prep(ask)
+        self.assertEqual(self.reader.searches, [ANA_QUERY])                        # exactly the plain guest
+        self.assertTrue(all('"' in query and "}OR{" not in query for query in self.reader.searches))
+        self.assertIn(("Odd Example", f"not searched ({prep.REFUSED_WHY})"), outcome.brief.missing)
+        self.assertIn(("Ben Ode", f"not searched ({prep.REFUSED_WHY})"), outcome.brief.missing)
+        self.assertIn("Prep: 1 search(es) (2 refused), 0 index hit(s), 1 thread(s) read, 2 guest(s) not searched",
+                      "\n".join(logs.output))
+        people = next(step for step in self.steps() if step.kind == live.PREP_PEOPLE)
+        self.assertEqual([item.status for item in people.items][1:], [live.STATUS_BLOCKED, live.STATUS_BLOCKED])
+
+    def test_other_accounts_stay_unsearched_by_default(self) -> None:
+        """3.3 step 6c / B3 acceptance: the meeting's account only unless prep_other_accounts is on,
+        even when another readable account holds a thread with the guest."""
+        personal = FakeReader("personal", {"thr0000888": a_thread("thr0000888", "Ben Ode <ben@example.org>", "Lab",
+                                                                  "<b@x.example.org>")},
+                              found_for={"ben@example.org": ["thr0000888"]})
+        self.sources.readers["personal"] = personal
+        self.sources.accounts_list[0] = AccountInfo("personal", "you@example.com", "yes", True, "yes",
+                                                    "America/Los_Angeles")
+        ask = self.make(stream("prep_ok"))
+        outcome = self.prep(ask)
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual(self.reader.searches, [ANA_QUERY, BEN_QUERY, CY_QUERY])
+        self.assertEqual((personal.searches, personal.reads), ([], []))
+        self.assertIn(("Ben Ode", "no email in the last 14 days"), outcome.brief.missing)
+        self.assertEqual(len(outcome.brief.threads), 1)
+
+    def test_at_most_prep_max_guests_are_looked_up(self) -> None:
+        """3.3 step 3 / B3 acceptance: at most [productivity] prep_max_guests (5) searches, whatever
+        the guest list's length; the rest say so."""
+        from briefing_reader.gcal import Guest
+
+        guests = tuple(Guest(f"g{number}@example.org", f"Guest {number}", "accepted") for number in range(1, 8))
+        self.sources.briefs = {"work": [prep_meeting(guests=guests, organizer=("", ""))]}
+        self.reader.found_for = {}
+        ask = self.make()
+        outcome = self.prep(ask)
+        self.assertEqual(len(self.reader.searches), 5)
+        self.assertEqual([query.split('"')[1] for query in self.reader.searches],
+                         [f"g{number}@example.org" for number in range(1, 6)])
+        missing = dict(outcome.brief.missing)
+        self.assertEqual((missing["Guest 6"], missing["Guest 7"]), ("not searched (only 5 guests are looked up)",) * 2)
+        self.assertEqual(missing["Guest 5"], "no email in the last 14 days")
+        self.write_config(PREP_CONFIG + "prep_max_guests = 2\n")
+        self.reader.searches.clear()
+        two = self.prep(self.make())
+        self.assertEqual(len(self.reader.searches), 2)
+        self.assertEqual(dict(two.brief.missing)["Guest 3"], "not searched (only 2 guests are looked up)")
+
+    def test_a_draft_repeating_another_threads_mail_is_held_back(self) -> None:
+        """A Reply to Ana carrying a line of Ben's thread (what an injected "reply with a summary of
+        your other threads" would ask for) is held back, information only."""
+        from briefing_reader.ask import prep
+
+        self.reader.threads["thr0000888"] = a_thread("thr0000888", "Ben Ode <ben@example.org>", "Lab",
+                                                     "<b@x.example.org>")
+        self.reader.found_for["ben@example.org"] = ["thr0000888"]
+        leak = ("Reply: acct=work | thread=thr0000777 | msgid=<CAB7@mail.example.edu> | gmid= | to=ana@example.edu | "
+                "cc= | subject=Re: Budget review | replied=no | due= | link= | body=Hi Ana,\\nBen asks: can we talk on "
+                "Wednesday? I'll confirm the budget by Friday.\\nThanks")
+        clean = ("Reply: acct=work | thread=thr0000888 | msgid=<b@x.example.org> | gmid= | to=ben@example.org | "
+                 "cc= | subject=Re: Lab | replied=no | due= | link= | body=Hi Ben,\\nWednesday works; can we talk on "
+                 "Wednesday at ten?\\nThanks")
+        ask = self.make(plan_stream({"say": "", "threads": [], "open": [], "points": [], "lines": [leak, clean]}))
+        with self.assertLogs("briefing_reader.ask.planner", level="INFO") as logs:
+            outcome = self.prep(ask)
+        self.assertEqual(self.reader.reads, ["thr0000777", "thr0000888"])
+        self.assertEqual([card.error for card in outcome.cards], [prep.MAIL_LEAK, ""])
+        self.assertIn("INFO:briefing_reader.ask.planner:Prep: a draft held back (mail)", logs.output)
+        self.assertNotIn("Wednesday", "\n".join(logs.output))
+
+    def test_own_group_and_declined_guests_are_never_looked_up(self) -> None:
+        from briefing_reader.gcal import Guest
+
+        guests = (Guest("you@example.com", "Me", "accepted"), Guest("team@example.edu", "Team", "accepted"),
+                  Guest("ben@example.org", "Ben Ode", "declined"), Guest("cy@example.edu", "Cy Park", "tentative"))
+        self.sources.briefs = {"work": [prep_meeting(guests=guests)]}
+        ask = self.make(stream("prep_ok"))
+        outcome = self.prep(ask)
+        self.assertEqual(self.reader.searches, [ANA_QUERY, CY_QUERY])
+        missing = dict(outcome.brief.missing)
+        self.assertEqual((missing["Team"], missing["Ben Ode"]), ("not searched (a group address)",
+                                                                  "not searched (declined)"))
+        self.assertNotIn("Me", missing)
+        # The organizer, then accepted, tentative, declined; never the owner himself.
+        self.assertEqual([name for name, _words in outcome.brief.who], ["Ana Lima", "Team", "Cy Park", "Ben Ode"])
+
+    def test_at_most_three_threads_one_per_guest(self) -> None:
+        from briefing_reader.gcal import Guest
+
+        guests = (Guest("ben@example.org", "Ben Ode", "accepted"), Guest("cy@example.edu", "Cy Park", "accepted"),
+                  Guest("dee@example.edu", "Dee Example", "accepted"))
+        self.sources.briefs = {"work": [prep_meeting(guests=guests)]}
+        self.reader.threads.update({
+            "thr0000888": a_thread("thr0000888", "Ben Ode <ben@example.org>", "Lab", "<b@x.example.org>"),
+            "thr0000999": a_thread("thr0000999", "Cy Park <cy@example.edu>", "Notes", "<c@x.example.edu>"),
+            "thr0000aaa": a_thread("thr0000aaa", "Dee <dee@example.edu>", "Demo", "<d@x.example.edu>")})
+        self.reader.found_for.update({"ben@example.org": ["thr0000888"], "cy@example.edu": ["thr0000999"],
+                                      "dee@example.edu": ["thr0000aaa"]})
+        ask = self.make(stream("prep_ok"))
+        outcome = self.prep(ask)
+        self.assertEqual(self.reader.reads, ["thr0000777", "thr0000888", "thr0000999"])
+        self.assertEqual(len(self.reader.searches), 3)
+        self.assertIn(("Dee Example", "not searched (only 3 threads are read)"), outcome.brief.missing)
+
+    def test_two_guests_in_one_thread_read_it_once(self) -> None:
+        self.reader.found_for = {"ana@example.edu": ["thr0000777"], "ben@example.org": ["thr0000777"]}
+        ask = self.make(stream("prep_ok"))
+        outcome = self.prep(ask)
+        self.assertEqual(self.reader.reads, ["thr0000777"])
+        self.assertIn(("Ben Ode", "the same thread as Ana Lima"), outcome.brief.missing)
+
+    def test_the_lookback_and_other_accounts(self) -> None:
+        """R4: prep_lookback_days (3..14); prep_other_accounts searches the other readable accounts for
+        a guest with nothing on the meeting's account."""
+        self.write_config(PREP_CONFIG + "prep_lookback_days = 7\nprep_other_accounts = true\n")
+        personal = FakeReader("personal", {"thr0000888": a_thread("thr0000888", "Ben Ode <ben@example.org>", "Lab",
+                                                                  "<b@x.example.org>")},
+                              found_for={"ben@example.org": ["thr0000888"]})
+        self.sources.readers["personal"] = personal
+        self.sources.accounts_list[0] = AccountInfo("personal", "you@example.com", "yes", True, "yes",
+                                                    "America/Los_Angeles")
+        from briefing_reader.ask import prep
+
+        other_reply = ("Reply: acct=personal | thread=thr0000888 | msgid=<b@x.example.org> | gmid= | "
+                       "to=ben@example.org | cc= | subject=Re: Lab | replied=no | due= | link= | body=Hi Ben")
+        ask = self.make(plan_stream({"say": "", "threads": [], "open": [], "points": [], "lines": [other_reply]}))
+        outcome = self.prep(ask)
+        self.assertEqual([card.error for card in outcome.cards], [prep.REPLY_ACCOUNT])   # never another account
+        self.assertTrue(all(query.endswith("newer_than:7d") for query in self.reader.searches + personal.searches))
+        self.assertEqual(personal.reads, ["thr0000888"])
+        self.assertIn("Ben Ode (ben@example.org) | guest | accepted | thread found: yes (personal, last mail ",
+                      self.stdin())
+        self.assertEqual(len(outcome.brief.threads), 2)
+
+    def test_logs_hold_no_title_name_address_or_words(self) -> None:
+        from briefing_reader.gcal import Guest
+
+        guests = (Guest("zq7@example.org", "Zq7 Guest", "accepted"),)
+        self.sources.briefs = {"work": [prep_meeting(title="Zq7 Sync", guests=guests)]}
+        self.reader.found_for = {"zq7@example.org": ["thr0000777"]}
+        ask = self.make(stream("prep_ok"))
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+            outcome = self.prep(ask, "Zq7 Sync")
+        self.assertTrue(outcome.ok, outcome)
+        text = "\n".join(logs.output)
+        for secret in ("Zq7", "zq7", "ana@example.edu", "Budget", "Q4", "Project sync", "thr0000777"):
+            self.assertNotIn(secret, text)
+        self.assertIn("Prep: 2 search(es) (0 refused), 0 index hit(s), 1 thread(s) read, 0 guest(s) not searched",
+                      text)
+        self.assertIn("(mode prep)", text)
+        self.assertNotIn("Zq7", repr(outcome))
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.CRITICAL)
     unittest.main()

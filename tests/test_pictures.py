@@ -863,6 +863,10 @@ class PlanPictureTests(unittest.TestCase):
         self.assertEqual(picture.day.others_note, pictures.NOTE_PLAN_DAY)
         for status in (live.STATUS_OK, live.STATUS_WARN, live.STATUS_RUNNING):
             self.assertEqual(pictures.stamp(picture, status, ""), ("", ""))
+        self.assertEqual(picture.day.account, "personal")
+        # A meeting brief draws its meeting's day on that meeting's own calendar.
+        work = pictures.plan_picture(self.events(), (), day=date(2026, 10, 9), now=NOW, account="work")
+        self.assertEqual((work.day.account, work.caption), ("work", "Your day as read"))
         tomorrow = pictures.plan_picture(self.events(), self.blocks(), day=date(2026, 10, 10), now=NOW)
         self.assertEqual(tomorrow.day.now_column, -1)
         self.assertEqual([block.title for block in tomorrow.day.blocks], ["Gym"])
