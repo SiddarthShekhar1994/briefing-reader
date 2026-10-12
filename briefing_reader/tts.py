@@ -9,6 +9,14 @@ When it fails, Windows SAPI via pyttsx3 produces a WAV and the marks are
 estimated from character positions. After an edge failure the synthesizer
 stays on SAPI for a cooldown period before trying edge again.
 
+Microsoft serves the online voice at two addresses: the library's own
+("usual") and the newer api.msedgeservices.com one ("newer"); regions move
+from one to the other and the old one then refuses the connection. When the
+service refuses an attempt, :data:`edge_address` (one selector shared by every
+synthesizer in the process) switches edge_tts to the other address and the
+same segment is retried there once; only when both refuse does the cooldown
+and SAPI fallback apply. The address is not part of the audio cache key.
+
 This module is Qt-free. :class:`TtsWorker` runs synthesis on a background
 thread and reports results through a plain callback.
 """
@@ -31,7 +39,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import aiohttp
 import edge_tts
+from edge_tts import communicate as edge_communicate
+from edge_tts import constants as edge_constants
 from edge_tts.exceptions import NoAudioReceived
 
 from .models import ITEM_PAUSE, AudioSegment, Section, SectionAudio
@@ -40,6 +51,10 @@ logger = logging.getLogger(__name__)
 
 EDGE = "edge"
 SAPI = "sapi"
+
+USUAL = "usual"                 # edge-tts's own service address, as installed
+NEWER = "newer"                 # Microsoft's newer Read Aloud address
+_NEWER_BASE_URL = "api.msedgeservices.com/tts/cognitiveservices"
 
 _EDGE_CONNECT_TIMEOUT_S = 6
 _EDGE_RECEIVE_TIMEOUT_S = 30
@@ -218,11 +233,32 @@ def _sapi_volume_level(volume: str) -> float:
 
 def _describe_error(exc: BaseException) -> str:
     """Exception type plus a short message, with URL query strings removed."""
-    message = _URL_QUERY_RE.sub(r"\1", str(exc)).strip()
+    try:
+        text = str(exc)
+    except Exception:  # noqa: BLE001 - a broken __str__ must not hide the error itself
+        text = ""
+    message = _URL_QUERY_RE.sub(r"\1", text).strip()
     if len(message) > 200:
         message = message[:200] + "..."
     name = type(exc).__name__
     return f"{name}: {message}" if message else name
+
+
+def _refusal(exc: BaseException) -> aiohttp.ClientResponseError | None:
+    """The aiohttp response error behind ``exc`` (itself or a cause), or None.
+
+    A refused address answers the WebSocket handshake with an HTTP status
+    (WSServerHandshakeError, a ClientResponseError); edge-tts may wrap a 403
+    in its own error with the response as the cause.
+    """
+    current: BaseException | None = exc
+    for _ in range(4):
+        if current is None:
+            break
+        if isinstance(current, (aiohttp.WSServerHandshakeError, aiohttp.ClientResponseError)):
+            return current
+        current = current.__cause__
+    return None
 
 
 def _part_path(path: Path) -> Path:
@@ -241,6 +277,123 @@ def _wav_duration_ms(path: Path) -> int:
         rate = wav.getframerate()
         frames = wav.getnframes()
     return round(frames * 1000 / rate) if rate > 0 else 0
+
+
+# --------------------------------------------------------------------------
+# Online voice address
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _EdgeAddress:
+    """One set of edge-tts service URLs, known by a short name ("usual" or "newer")."""
+
+    name: str
+    base_url: str
+    wss_url: str
+    voice_list: str
+
+
+def _usual_address() -> _EdgeAddress:
+    """The library's own address, read from edge_tts.constants once at import (never hard-coded)."""
+    return _EdgeAddress(USUAL, edge_constants.BASE_URL, edge_constants.WSS_URL, edge_constants.VOICE_LIST)
+
+
+def _newer_address() -> _EdgeAddress:
+    """Microsoft's newer Read Aloud address, with the library's own client token."""
+    token = edge_constants.TRUSTED_CLIENT_TOKEN
+    return _EdgeAddress(
+        NEWER, _NEWER_BASE_URL,
+        f"wss://{_NEWER_BASE_URL}/websocket/v1?Ocp-Apim-Subscription-Key={token}",
+        f"https://{_NEWER_BASE_URL}/voices/list?Ocp-Apim-Subscription-Key={token}")
+
+
+class EdgeAddressSelector:
+    """Which address edge-tts connects to: one choice for the whole process.
+
+    Every SpeechSynthesizer (the app runs two, on the "tts-worker" and "tts-say"
+    threads) shares it, so a refusal seen by one moves both. ``apply`` writes
+    edge_tts.constants.BASE_URL / WSS_URL / VOICE_LIST and
+    edge_tts.communicate.WSS_URL together under a lock (communicate.py imports
+    the name at load and reads its own module global at connect time) and is
+    idempotent. Nothing is written at import: "usual" is what the library has.
+    """
+
+    def __init__(self, addresses: Sequence[_EdgeAddress], start: str = USUAL) -> None:
+        self._addresses = {address.name: address for address in addresses}
+        self._lock = threading.Lock()
+        self._current = start
+        self._confirmed: str | None = start   # the address whose success was last announced
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(self._addresses)
+
+    @property
+    def current(self) -> str:
+        """Name of the address edge-tts is pointed at."""
+        with self._lock:
+            return self._current
+
+    def urls(self, name: str) -> tuple[str, str, str]:
+        """(BASE_URL, WSS_URL, VOICE_LIST) of the address called ``name``."""
+        address = self._addresses[name]
+        return address.base_url, address.wss_url, address.voice_list
+
+    def apply(self, name: str) -> None:
+        """Point edge_tts at the address called ``name`` (idempotent; safe from any thread)."""
+        with self._lock:
+            self._apply_locked(name)
+
+    def reset(self) -> None:
+        """Back to the library's own address with nothing left to announce (tests)."""
+        with self._lock:
+            self._apply_locked(USUAL)
+            self._confirmed = USUAL
+
+    def switch_from(self, seen: str) -> str:
+        """After a refusal at ``seen``: move to the other address, unless another thread already did.
+
+        Returns the name to retry at. Never moves twice for one refusal, so two
+        synthesizers refused at the same time cannot swap the address back and forth.
+        """
+        with self._lock:
+            if self._current == seen:
+                self._apply_locked(self._other(seen))
+            return self._current
+
+    def confirm(self) -> str | None:
+        """Record a success at the current address; its name the first time since the address moved, else None.
+
+        The selector names the address, not the caller: edge-tts reads the URL at connect time, so
+        a thread that looked before another thread's switch still connected at the new address.
+        """
+        with self._lock:
+            if self._confirmed == self._current:
+                return None
+            self._confirmed = self._current
+            return self._current
+
+    def snapshot(self) -> tuple[str, str, str, str, str]:
+        """(current, BASE_URL, WSS_URL, VOICE_LIST, communicate.WSS_URL), read together under the lock."""
+        with self._lock:
+            return (self._current, edge_constants.BASE_URL, edge_constants.WSS_URL,
+                    edge_constants.VOICE_LIST, edge_communicate.WSS_URL)
+
+    def _other(self, name: str) -> str:
+        return next(other for other in self._addresses if other != name)
+
+    def _apply_locked(self, name: str) -> None:
+        address = self._addresses[name]
+        if name != self._current:
+            self._confirmed = None
+        edge_constants.BASE_URL = address.base_url
+        edge_constants.WSS_URL = address.wss_url
+        edge_constants.VOICE_LIST = address.voice_list
+        edge_communicate.WSS_URL = address.wss_url
+        self._current = name
+
+
+edge_address = EdgeAddressSelector((_usual_address(), _newer_address()))
 
 
 # --------------------------------------------------------------------------
@@ -340,19 +493,46 @@ class SpeechSynthesizer:
     def _try_edge(self, text: str) -> _Clip | None:
         key = self._cache_key(EDGE, text)
         path = self._path_for(key, ".mp3")
+        address = edge_address.current
         try:
-            duration_ms, words = self._edge_to_file(text, path)
-            if not path.is_file():
-                raise TtsError("edge-tts did not produce a file")
+            duration_ms, words = self._edge_attempt(text, path)
         except Exception as exc:  # noqa: BLE001 - any edge failure means "fall back"
-            self._on_edge_failure(exc)
-            return None
+            retry_at = self._address_after_refusal(address, exc)
+            if retry_at is None:
+                self._on_edge_failure(exc)
+                return None
+            try:   # the same segment once more, at the other address; never a second switch
+                duration_ms, words = self._edge_attempt(text, path)
+            except Exception as retry_exc:  # noqa: BLE001 - both addresses failed: cooldown + SAPI
+                self._on_edge_failure(retry_exc)
+                return None
+        announced = edge_address.confirm()
+        if announced:
+            logger.info("edge-tts: using the %s address", announced)
         if self._edge_failed_at is not None:
             logger.info("edge-tts is working again; leaving the offline voice")
             self._edge_failed_at = None
         clip = _Clip(path, max(0, int(duration_ms)), tuple(words), EDGE)
         self._cache[key] = clip
         return clip
+
+    def _edge_attempt(self, text: str, path: Path) -> tuple[int, tuple[tuple[int, str], ...]]:
+        duration_ms, words = self._edge_to_file(text, path)
+        if not path.is_file():
+            raise TtsError("edge-tts did not produce a file")
+        return duration_ms, words
+
+    @staticmethod
+    def _address_after_refusal(address: str, exc: BaseException) -> str | None:
+        """The address to retry at when the service refused ``address``; None for any other failure."""
+        refusal = _refusal(exc)
+        if refusal is None:
+            return None
+        retry_at = edge_address.switch_from(address)
+        status = refusal.status if refusal.status is not None else "?"
+        logger.warning("edge-tts refused at the %s address (%s: %s); trying the %s address",
+                       address, type(refusal).__name__, status, retry_at)
+        return retry_at
 
     def _on_edge_failure(self, exc: BaseException) -> None:
         if isinstance(exc, NoAudioReceived):

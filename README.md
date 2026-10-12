@@ -2598,6 +2598,14 @@ offline voice for 2 minutes, then tries edge-tts again. With the offline voice
 the highlight is estimated from the text length instead of word timings, so it
 is less exact.
 
+Microsoft sometimes moves or refuses the online voice's address (the service is
+moving to a newer one region by region). Jarvis then tries his newer address by
+himself, the log says `edge-tts refused at the usual address
+(WSServerHandshakeError: 403); trying the newer address` and then `edge-tts:
+using the newer address` (or the same two lines the other way round), and only
+when both addresses refuse does the Windows voice fill in, for 2 minutes at a
+time.
+
 ## Logs and saved files
 
 The folders and the log file keep the project's first name, briefing-reader
@@ -2927,6 +2935,13 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 - **No sound**: check the Windows default output device and its volume; the app
   plays on the default device and follows it when it changes. Look in the log for
   playback or speech errors.
+- **The Windows voice speaks although you are online** (amber voice chip, "Audio
+  ready (offline voice)"): Microsoft sometimes moves or refuses the online
+  voice's address. Jarvis then tries his newer address by himself (log:
+  `edge-tts refused at the usual address (...); trying the newer address`, then
+  `edge-tts: using the newer address`), and only when both addresses refuse
+  does the Windows voice fill in for 2 minutes at a time (log: `edge-tts failed
+  (...); using Windows SAPI and retrying edge-tts in 120 s`).
 - **Jarvis is silent** (the briefing plays, but he says nothing on his own):
   the header's speaker button is struck through in amber (muted; click it or
   press Ctrl+M), or `config.toml` has `[assistant] speak = false` (no speaker
