@@ -170,6 +170,16 @@ class PageCameraProbeTests(unittest.TestCase):
         self.assertEqual(report["decided_main_frames"], ["data"])
         self.assertGreaterEqual(report["hooks"].get("permissions", 0), 2)   # geolocation + notifications
         self.assertGreaterEqual(report["hooks"].get("downloads", 0), 1)
+        # The refused download was meant for the profile's private temporary folder, never the owner's
+        # Downloads; it stayed empty and was gone once the process exited.
+        folder = Path(report["download_folder"])
+        self.assertTrue(folder.name.startswith("jarvis-snapshots-"), folder)
+        self.assertNotIn((Path.home() / "Downloads").resolve(), folder.resolve().parents)
+        self.assertTrue(report["download_dirs"])
+        for directory in report["download_dirs"]:
+            self.assertEqual(Path(directory).resolve(), folder.resolve())
+        self.assertEqual(report["download_folder_entries"], [])
+        self.assertFalse(folder.exists())
         for box, colour in report["boxes"].items():
             with self.subTest(box=box):
                 self.assertTrue(_close(colour, GREEN), f"{box}: {colour}")
@@ -295,7 +305,13 @@ class PageCameraProbeTests(unittest.TestCase):
     def test_nothing_is_written_to_disk(self) -> None:
         report = self.report("disk")
         self.assertTrue(report["result"]["ok"], report["result"])
-        self.assertEqual(report["new_in_env_folders"], {"LOCALAPPDATA": [], "APPDATA": [], "TEMP": [], "TMP": []})
+        # Only the private download folder (empty; deleted when the process exits) is new.
+        folder = Path(report["download_folder"])
+        self.assertEqual(report["download_folder_entries"], [])
+        self.assertFalse(folder.exists())
+        new = {name: [entry for entry in entries if entry != folder.name]
+               for name, entries in report["new_in_env_folders"].items()}
+        self.assertEqual(new, {"LOCALAPPDATA": [], "APPDATA": [], "TEMP": [], "TMP": []})
         self.assertEqual(report["app_folders_made"], [False, False, False])
         self.assertFalse(report["app_named_folder_in_generic_cache"])
 

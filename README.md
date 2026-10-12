@@ -1293,7 +1293,9 @@ most 15 seconds each. Jarvis opens the page on this PC (once
 more, for a page the research read) in a private window you never see: none
 of your browsers' sign-ins or cookies, nothing saved, no pop-ups, downloads,
 camera, microphone, location, notifications, clipboard or Windows Hello,
-sound off. Every connection of
+sound off (a download a page starts is refused before it is written, and is
+pointed at an empty private temporary folder deleted when Jarvis closes, never
+at your Downloads). Every connection of
 that window goes through a small gate inside Jarvis that lets it reach only
 public IPv4 addresses on the https port, checked on the address a name
 actually leads to (never an IPv6 address: one may be this PC's own or a
