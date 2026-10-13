@@ -1018,3 +1018,125 @@ def prep_result_speech(start: datetime | None, address: str = "sir", *, in_jarvi
         meeting = f"the {spoken_clock(start)} meeting"
     where = "is ready" if in_jarvis_tab else "is in the JARVIS tab"
     return with_address(f"Your brief for {meeting} {where}, {{sir}}.", address)
+
+
+# --------------------------------------------------------------------------
+# Offers (the productivity bundle, spec 4 and 9.3): the plan offer after the AM briefing and the prep
+# offer before a meeting with guests. Each is one entry with one link and at most one spoken
+# sentence built from times and counts only: never a title, a guest or anything read.
+# --------------------------------------------------------------------------
+
+DOT = "\u00b7"                 # the middle dot of the entries' sub lines (shown; the source stays ASCII)
+PLAN_OFFER_LINK = "Plan my day"
+PREP_OFFER_LINK = "Prepare brief"
+PLAN_OFFER_TEXT = ("Shall I plan your day, {sir}? I'd line up time blocks around your meetings for your to-dos "
+                   "and deadlines. Nothing goes on your calendar until you approve each block.")
+PLAN_OFFER_SPEECH = "Shall I plan your day, {sir}?"
+PLAN_OFFER_WORDS = "Plan my day (offered after the AM briefing)"   # "You clicked" in LIVE and the YOU entry
+PREP_OFFER_TAIL = "Shall I prepare a brief? I'd read your latest thread with each guest and send them to your Claude."
+PREP_OFFER_SPEECH = "Your meeting at {at} starts in about {minutes}, {sir}. Shall I prepare a brief?"
+PREP_OFFERS_SPEECH = "You have meetings at {ats}, {sir}. Shall I prepare briefs?"
+PLAN_COST_SUB = "1 planner run"
+PREP_COST_SUB = "1 planner run (none without recent mail)"
+PROD_HINT_TEXT = ("Prep offers and follow-ups work while I'm open or minimized, {sir} - minimize instead of Done to "
+                  "keep them.")
+DONE_PREP_TOOLTIP = "Closes Jarvis - meeting prep offers stop until you open him again"
+
+
+def clock_text(moment: datetime, hour24: bool = False) -> str:
+    """"2:00 PM" (or "14:00" with the 24-hour clock) for the entries on screen."""
+    if hour24:
+        return f"{moment.hour:02d}:{moment.minute:02d}"
+    return f"{moment.hour % 12 or 12}:{moment.minute:02d} {'AM' if moment.hour < 12 else 'PM'}"
+
+
+def _minutes_words(minutes: int) -> str:
+    """"one minute", "two minutes", "15 minutes" (number words up to ten)."""
+    count = max(1, int(minutes))
+    number = _NUMBER_WORDS[count] if count <= 10 else str(count)
+    return f"{number} minute{'' if count == 1 else 's'}"
+
+
+def _joined(parts: Sequence[str]) -> str:
+    items = list(parts)
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + f" and {items[-1]}"
+
+
+def plan_offer_text(address: str = "sir") -> str:
+    """The plan offer's entry (spec 9.3)."""
+    return with_address(PLAN_OFFER_TEXT, address)
+
+
+def plan_offer_speech(address: str = "sir") -> str:
+    """"Shall I plan your day, sir?" (said once the AM briefing was heard or viewed, R26)."""
+    return with_address(PLAN_OFFER_SPEECH, address)
+
+
+def plan_offer_expired_text(posted_at: datetime, hour24: bool = False) -> str:
+    """'Offered at 10:14 AM - expired. Type "plan my day" any time.'"""
+    return f'Offered at {clock_text(posted_at, hour24)} - expired. Type "plan my day" any time.'
+
+
+def plan_offer_planned_text(at: datetime, hour24: bool = False) -> str:
+    """"You planned your day at 10:31 AM." (the offer retired by a plan)."""
+    return f"You planned your day at {clock_text(at, hour24)}."
+
+
+def prep_offer_text(title: str, start: datetime, alias: str, minutes: int, guests: int, address: str = "sir",
+                    *, hour24: bool = False) -> str:
+    """"Project sync at 2:00 PM (work) starts in 15 minutes, with 3 guests. Shall I prepare a brief? I'd
+    read your latest thread with each guest and send them to your Claude." (on screen only)."""
+    shown = " ".join(str(title or "").split()) or "(No title)"
+    where = f" ({alias})" if alias else ""
+    count = max(0, int(guests))
+    left = int(minutes)   # digits on screen (number words are for speech only)
+    starts = f"starts in {left} minute{'' if left == 1 else 's'}" if left > 0 else "starts now"
+    return (f"{shown} at {clock_text(start, hour24)}{where} {starts}, with {count} guest{'' if count == 1 else 's'}. "
+            + with_address(PREP_OFFER_TAIL, address))
+
+
+def prep_offer_speech(start: datetime, minutes: int, address: str = "sir") -> str:
+    """"Your meeting at 2 PM starts in about 15 minutes, sir. Shall I prepare a brief?" (time only)."""
+    text = PREP_OFFER_SPEECH.replace("{at}", spoken_clock(start)).replace("{minutes}", _minutes_words(minutes))
+    return with_address(text, address)
+
+
+def prep_offers_speech(starts: Sequence[datetime], address: str = "sir") -> str:
+    """"You have meetings at 1 PM and 2 PM, sir. Shall I prepare briefs?" (two or three back-to-back
+    meetings offered together, R51)."""
+    times = [spoken_clock(start) for start in starts]
+    if len(times) <= 1:
+        return prep_offer_speech(starts[0], 15, address) if times else ""
+    return with_address(PREP_OFFERS_SPEECH.replace("{ats}", _joined(times)), address)
+
+
+def prep_offer_ended_text(title: str, start: datetime, hour24: bool = False) -> str:
+    """"Project sync at 2:00 PM has ended." (the offer's link is gone)."""
+    shown = " ".join(str(title or "").split()) or "(No title)"
+    return f"{shown} at {clock_text(start, hour24)} has ended."
+
+
+def brief_ready_text(at: datetime, hour24: bool = False) -> str:
+    """"Brief ready below (1:47 PM)." (a prep offer after its brief, R50)."""
+    return f"Brief ready below ({clock_text(at, hour24)})."
+
+
+def offer_cost_sub(left_bundle: int, max_runs: int, left_day: int, *, prep: bool = False, as_of: str = "") -> str:
+    """The offer's sub line (R49): "1 planner run . 17 of 20 left today"; when the Ask day count is
+    the tighter limit "1 planner run . 12 Ask runs left today"; a prep offer says "(none without
+    recent mail)" and "as of 1:40 PM" (the schedule's read time)."""
+    parts = [PREP_COST_SUB if prep else PLAN_COST_SUB]
+    if left_day < left_bundle:
+        parts.append(f"{max(0, int(left_day))} Ask run{'' if left_day == 1 else 's'} left today")
+    else:
+        parts.append(f"{max(0, int(left_bundle))} of {int(max_runs)} left today")
+    if as_of:
+        parts.append(f"as of {as_of}")
+    return f" {DOT} ".join(parts)
+
+
+def prod_hint_text(address: str = "sir") -> str:
+    """The one-time "minimize instead of Done" entry (R34; never spoken)."""
+    return with_address(PROD_HINT_TEXT, address)

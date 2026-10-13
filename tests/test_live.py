@@ -734,6 +734,32 @@ class MemoryTaskTests(unittest.TestCase):
         self.assertEqual(stream.running(), 0)
 
 
+class OwnReadsTaskTests(unittest.TestCase):
+    """The productivity bundle's own reads and offers: a rolling compact task of its own (R6)."""
+
+    def test_own_reads_task_and_step_kinds_are_known(self) -> None:
+        self.assertIn(live.TASK_OWN_READS, live.TASK_KINDS)
+        for kind in (live.CALENDAR_DAY, live.OFFER_MADE):
+            self.assertIn(kind, live.STEP_KINDS)
+        self.assertEqual(live.TASK_TAGS[live.TASK_OWN_READS], "READS")
+        self.assertNotIn(live.TASK_OWN_READS, live.ATTENTION_KINDS)   # never opens LIVE by itself
+        self.assertIn(live.TASK_OWN_READS, live.COMPACT_KINDS)
+        stream, _clock = make()
+        reads = stream.task(live.TASK_OWN_READS, live.OWN_READS_TITLE, key=live.OWN_READS_KEY)
+        again = stream.task(live.TASK_OWN_READS, live.OWN_READS_TITLE, key=live.OWN_READS_KEY)
+        self.assertEqual(reads.id, again.id)
+        day = reads.step(live.CALENDAR_DAY, "Today's events with guests, for prep offers (read only)", key="day")
+        reads.step(live.OFFER_MADE, "Offered: plan my day - nothing read or run until you click", key="plan-offer",
+                   status=STATUS_OK)
+        day.done(STATUS_OK, summary="personal 4; work 3; read only")
+        again.step(live.CALENDAR_DAY, "Today's events again", key="day", status=STATUS_OK)   # in place
+        view = stream.snapshot()[0]
+        self.assertEqual((view.kind, view.tag, view.title, view.compact, view.pinned),
+                         (live.TASK_OWN_READS, "READS", "Jarvis's own reads and offers (this PC)", True, True))
+        self.assertEqual([step.kind for step in view.steps], [live.CALENDAR_DAY, live.OFFER_MADE])
+        self.assertEqual(stream.running(), 0)
+
+
 
 class PlanTaskTests(unittest.TestCase):
     """The productivity bundle's day plan: its own attention task and its steps."""

@@ -146,6 +146,25 @@ class RoundTripTests(PrefsTestCase):
                 self.assertIsNone(state.live_window)
                 self.assertFalse(state.live_popped_out)                           # only a real true
 
+    def test_prod_hint_shown_round_trip(self) -> None:
+        """The productivity bundle's one-time "minimize instead of Done" entry (R34): written only once
+        it was shown, kept by the other writes; a boolean, never text."""
+        state = AssistantPrefs(self.path)
+        self.assertFalse(state.prod_hint_shown)
+        state.set_muted(True)
+        self.assertNotIn("prod_hint_shown", self.saved())                         # absent until shown
+        self.assertTrue(state.set_prod_hint_shown())
+        self.assertIs(self.saved()["prod_hint_shown"], True)
+        again = AssistantPrefs(self.path)
+        self.assertTrue(again.prod_hint_shown)
+        again.remember_greeting("m2")
+        self.assertTrue(AssistantPrefs(self.path).prod_hint_shown)                # kept by other writes
+        self.write_raw(json.dumps({"prod_hint_shown": "yes"}))
+        self.assertFalse(AssistantPrefs(self.path).prod_hint_shown)               # only a real true
+        self.write_raw("{not json")
+        with self.assertLogs(LOGGER, level="WARNING"):
+            self.assertFalse(AssistantPrefs(self.path).prod_hint_shown)
+
     def test_file_is_lf_and_ascii(self) -> None:
         AssistantPrefs(self.path).remember_greeting("n3")
         raw = self.path.read_bytes()

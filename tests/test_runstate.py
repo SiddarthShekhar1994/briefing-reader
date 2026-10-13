@@ -549,6 +549,54 @@ class AnnouncedViewedTests(RunStateTestCase):
         self.assertTrue(state.is_announced("2026-10-05 AM"))
 
 
+class PlanOfferMarksTests(RunStateTestCase):
+    """The productivity bundle's plan offer: when it was posted and when the day was planned (4.3,
+    3.2 step 9, R29), set once, merged across processes and kept by the prune."""
+
+    def test_offered_and_planned_are_set_once_and_saved(self) -> None:
+        state = self.state()
+        self.assertFalse(state.plan_offered("2026-10-05 AM"))
+        self.assertFalse(state.planned("2026-10-05 AM"))
+        self.assertTrue(state.mark_plan_offered("2026-10-05 AM"))
+        self.clock.now += timedelta(minutes=5)
+        self.assertFalse(state.mark_plan_offered("2026-10-05 AM"))
+        self.assertTrue(state.mark_planned("2026-10-05 AM"))
+        self.assertFalse(state.mark_planned("2026-10-05 AM"))
+        self.assertEqual(self.saved(), {"2026-10-05 AM": {"plan_offered_at": "2026-10-05T00:30:00-07:00",
+                                                          "planned_at": "2026-10-05T00:35:00-07:00"}})
+        again = self.state()                                   # a restart (or the catch-up process)
+        self.assertTrue(again.plan_offered("2026-10-05 AM"))
+        self.assertTrue(again.planned("2026-10-05 AM"))
+        self.assertFalse(again.is_handled("2026-10-05 AM"))    # an offer never settles the slot
+        with self.assertRaises(ValueError):
+            state.mark_planned("tomorrow")
+
+    def test_merged_across_processes_and_kept_by_clean_entry(self) -> None:
+        first, second = self.state(), self.state()
+        first.mark_announced("2026-10-05 AM")
+        second.mark_plan_offered("2026-10-05 AM")
+        first.mark_viewed("2026-10-05 AM")
+        self.assertEqual(set(self.saved()["2026-10-05 AM"]), {"announced_at", "plan_offered_at", "viewed_at"})
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({"2026-10-05 AM": {"plan_offered_at": 3, "planned_at": "2026-10-05T10:31:00"
+                                                           "-07:00"}}), encoding="utf-8")
+        loaded = self.state()
+        self.assertFalse(loaded.plan_offered("2026-10-05 AM"))   # a malformed field is dropped
+        self.assertTrue(loaded.planned("2026-10-05 AM"))
+
+    def test_tomorrows_slot_from_an_evening_plan_survives_the_prune(self) -> None:
+        self.clock.now = datetime(2026, 10, 5, 20, 0, tzinfo=PDT)
+        state = self.state()
+        with self.assertLogs(LOGGER, level="INFO") as captured:
+            self.assertTrue(state.record_planned("2026-10-06 AM"))    # "plan tomorrow" at 8 PM (R29)
+            self.assertTrue(state.record_plan_offered("2026-10-05 AM"))
+        self.assertIn("2026-10-06 AM", "\n".join(captured.output))
+        self.assertEqual(state.prune(), 0)
+        self.assertTrue(self.state().planned("2026-10-06 AM"))
+        with self.assertLogs(LOGGER, level="WARNING"):
+            self.assertFalse(state.record_planned("not a key"))
+
+
 class ModuleHygieneTests(unittest.TestCase):
     def test_qt_free(self) -> None:
         code = ("import sys, briefing_reader.runstate, briefing_reader.hotkey, briefing_reader.config; "

@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import queue
 import threading
 import time
@@ -345,6 +346,7 @@ class AskController(QObject):
         self._running: _Running | None = None
         self.ready: Any = None                 # planner.Readiness of the last check (None before it)
         self.caps: Any = None                  # usage.CapCheck after the last check or Ask
+        self.caps_at = -math.inf               # monotonic time of the last ``caps`` (offers re-check stale ones, R13)
         self.mail_needs: list[MailNeed] = []
         self._limit_message = ""               # the Claude plan's own limit, until a run succeeds
         self._answered = False                 # the status line shows an answer (not the idle hint)
@@ -395,6 +397,10 @@ class AskController(QObject):
     def task_id(self) -> int:
         """The running Ask's LIVE view task id (0 when idle or without the LIVE view)."""
         return self._running.task.id if self._running is not None else 0
+
+    def caps_age(self) -> float:
+        """Seconds since ``caps`` was last updated (infinite before the first check; R13)."""
+        return self._monotonic() - self.caps_at if self.caps is not None else math.inf
 
     @property
     def running_kind(self) -> str:
@@ -585,6 +591,7 @@ class AskController(QObject):
         self.bar.set_running(False)
         if outcome.caps is not None:
             self.caps = outcome.caps
+            self.caps_at = self._monotonic()
         if running.cancel_requested or outcome.kind == CANCELLED:
             logger.info("Ask %d: cancelled; nothing was proposed", seq)
             self._finish_task(running.task, outcome, cancelled=True)
@@ -679,6 +686,8 @@ class AskController(QObject):
         if ready is not None:
             self.ready = ready
         self.caps, self.mail_needs = caps, list(needs or [])
+        if caps is not None:
+            self.caps_at = self._monotonic()
         self._update_chip()
         self._update_link()
         if self._running is None and not self._answered:

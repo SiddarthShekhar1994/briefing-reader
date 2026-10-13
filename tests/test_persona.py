@@ -902,5 +902,62 @@ class PrepSpeechTests(unittest.TestCase):
         self.assertEqual(persona.prep_no_run_words("odd_kind"), "odd kind")
 
 
+class OfferSpeechTests(unittest.TestCase):
+    """The offers' words (spec 4, 9.3, 11): one sentence from times and counts only, never a title,
+    guest or anything read; every one checked against claims_done; the entries and sub lines."""
+
+    def test_spoken_sentences(self) -> None:
+        one, two = datetime(2026, 10, 7, 13, 0), datetime(2026, 10, 7, 14, 0)
+        cases = [
+            (persona.plan_offer_speech(), "Shall I plan your day, sir?"),
+            (persona.plan_offer_speech(""), "Shall I plan your day?"),
+            (persona.prep_offer_speech(two, 15), "Your meeting at 2 PM starts in about 15 minutes, sir. Shall I "
+                                                 "prepare a brief?"),
+            (persona.prep_offer_speech(two.replace(minute=30), 7, "boss"),
+             "Your meeting at 2:30 PM starts in about seven minutes, boss. Shall I prepare a brief?"),
+            (persona.prep_offer_speech(two, 1, ""), "Your meeting at 2 PM starts in about one minute. Shall I prepare "
+                                                    "a brief?"),
+            (persona.prep_offers_speech([one, two]),
+             "You have meetings at 1 PM and 2 PM, sir. Shall I prepare briefs?"),
+            (persona.prep_offers_speech([one, two, two.replace(hour=15, minute=30)], ""),
+             "You have meetings at 1 PM, 2 PM and 3:30 PM. Shall I prepare briefs?"),
+        ]
+        for said, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(said, expected)
+                self.assertFalse(persona.claims_done(said))
+                self.assertTrue(said.isascii())
+
+    def test_entry_texts_and_sub_lines(self) -> None:
+        two = datetime(2026, 10, 7, 14, 0)
+        dot = chr(0xB7)
+        self.assertEqual(persona.plan_offer_text(), "Shall I plan your day, sir? I'd line up time blocks around your "
+                         "meetings for your to-dos and deadlines. Nothing goes on your calendar until you approve "
+                         "each block.")
+        self.assertEqual(persona.prep_offer_text("Project sync", two, "work", 15, 3),
+                         "Project sync at 2:00 PM (work) starts in 15 minutes, with 3 guests. Shall I prepare a "
+                         "brief? I'd read your latest thread with each guest and send them to your Claude.")
+        self.assertTrue(persona.prep_offer_text("", two, "", 1, 1, hour24=True).startswith(
+            "(No title) at 14:00 starts in 1 minute, with 1 guest."))
+        # Digits on screen even for ten minutes or less (number words are for speech only, spec 9.3 / 11).
+        self.assertTrue(persona.prep_offer_text("Project sync", two, "work", 5, 3).startswith(
+            "Project sync at 2:00 PM (work) starts in 5 minutes, with 3 guests."))
+        self.assertIn("starts in 10 minutes,", persona.prep_offer_text("Project sync", two, "work", 10, 3))
+        self.assertEqual(persona.plan_offer_expired_text(datetime(2026, 10, 7, 10, 14)),
+                         'Offered at 10:14 AM - expired. Type "plan my day" any time.')
+        self.assertEqual(persona.plan_offer_planned_text(datetime(2026, 10, 7, 10, 31)),
+                         "You planned your day at 10:31 AM.")
+        self.assertEqual(persona.prep_offer_ended_text("Project sync", two), "Project sync at 2:00 PM has ended.")
+        self.assertEqual(persona.brief_ready_text(datetime(2026, 10, 7, 13, 47)), "Brief ready below (1:47 PM).")
+        self.assertEqual(persona.offer_cost_sub(17, 20, 40), f"1 planner run {dot} 17 of 20 left today")
+        self.assertEqual(persona.offer_cost_sub(17, 20, 12), f"1 planner run {dot} 12 Ask runs left today")
+        self.assertEqual(persona.offer_cost_sub(17, 20, 40, prep=True, as_of="1:40 PM"),
+                         f"1 planner run (none without recent mail) {dot} 17 of 20 left today {dot} as of 1:40 PM")
+        self.assertEqual(persona.prod_hint_text(), "Prep offers and follow-ups work while I'm open or minimized, "
+                                                   "sir - minimize instead of Done to keep them.")
+        self.assertEqual(persona.DONE_PREP_TOOLTIP,
+                         "Closes Jarvis - meeting prep offers stop until you open him again")
+
+
 if __name__ == "__main__":
     unittest.main()

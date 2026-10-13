@@ -1502,8 +1502,13 @@ class EventBriefTests(GcalTestCase):
                             end=datetime(2026, 10, 5, 15, 0, tzinfo=timezone(timedelta(hours=-4))),
                             organizer_self=True, organizer_email="you@example.edu",
                             guests=(gcal.Guest("ana@example.edu", "Ana Lima", "needsAction"),), recurring=True,
-                            self_response="accepted"),   # he organizes it (the field came with the day plan)
+                            self_response="accepted",    # he organizes it (the field came with the day plan)
+                            series_id="series01"),       # its repeating series (the offers' ignored count, R38)
         ])
+        # The series id is one token as Google gives it; anything else is no series (R38).
+        self.assertEqual(gcal._series_id(" abc_123-x@google.com "), "abc_123-x@google.com")
+        for bad in (None, 42, "", "two words", "x" * 129, "id/with/slashes"):
+            self.assertEqual(gcal._series_id(bad), "")
         self.assertTrue(briefs[0].all_day)
         self.assertNotIn("SECRET", repr(briefs))
         self.assertNotIn("meet", repr(briefs))

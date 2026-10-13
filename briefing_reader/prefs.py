@@ -6,8 +6,10 @@ greetings, so the next one differs; ``"answers_adopted": true`` once the
 answers of an older version in runstate.json were taken as viewed (once, at
 the first start after the update); ``"live_window": {"x", "y", "w", "h"}`` and
 ``"live_popped_out"``: where the LIVE pop-out window was and whether it was open
-when Jarvis quit (written once the pop-out has been used). Ids, numbers and
-booleans only: never any text (the LIVE view's steps are never saved).
+when Jarvis quit (written once the pop-out has been used); ``"prod_hint_shown":
+true`` once the productivity bundle's one-time "minimize instead of Done" entry
+was shown (R34). Ids, numbers and booleans only: never any text (the LIVE view's
+steps are never saved).
 
 The file is written atomically (temporary file + ``os.replace``); a missing,
 corrupt or unwritable file counts as the defaults and never stops the app
@@ -39,7 +41,8 @@ class AssistantPrefs:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
-        self._muted, self._recent, self._adopted, self._live_window, self._live_popped = _load(self.path)
+        (self._muted, self._recent, self._adopted, self._live_window, self._live_popped,
+         self._prod_hint) = _load(self.path)
 
     @property
     def muted(self) -> bool:
@@ -88,6 +91,18 @@ class AssistantPrefs:
             self._live_popped = bool(popped_out)
             return self._save_locked()
 
+    @property
+    def prod_hint_shown(self) -> bool:
+        """The productivity bundle's one-time "minimize instead of Done" entry was shown (R34)."""
+        with self._lock:
+            return self._prod_hint
+
+    def set_prod_hint_shown(self) -> bool:
+        """Remember that the hint was shown (it is shown once)."""
+        with self._lock:
+            self._prod_hint = True
+            return self._save_locked()
+
     def remember_greeting(self, greeting_id: str) -> bool:
         """Add ``greeting_id`` as the most recent greeting (the oldest beyond 5 is forgotten)."""
         if not isinstance(greeting_id, str) or not _GREETING_ID_RE.fullmatch(greeting_id):
@@ -107,6 +122,8 @@ class AssistantPrefs:
             values["live_window"] = {"x": x, "y": y, "w": width, "h": height}
         if self._live_window is not None or self._live_popped:
             values["live_popped_out"] = self._live_popped
+        if self._prod_hint:
+            values["prod_hint_shown"] = True
         return _write_atomic(self.path, json.dumps(values, indent=2) + "\n")
 
 
@@ -127,29 +144,33 @@ def _live_rect(value: object) -> tuple[int, int, int, int] | None:
 
 
 
-def _load(path: Path) -> tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool]:
+_Loaded = tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool, bool]
+_DEFAULTS: _Loaded = (False, [], False, None, False, False)
+
+
+def _load(path: Path) -> _Loaded:
     try:
         text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
-        return False, [], False, None, False
+        return _DEFAULTS
     except (OSError, UnicodeError) as exc:
         logger.warning("Could not read %s (%s); using the defaults", path, type(exc).__name__)
-        return False, [], False, None, False
+        return _DEFAULTS
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
         logger.warning("%s is not valid JSON; using the defaults", path)
-        return False, [], False, None, False
+        return _DEFAULTS
     if not isinstance(data, dict):
         logger.warning("%s is not a table of settings; using the defaults", path)
-        return False, [], False, None, False
+        return _DEFAULTS
     muted = data.get("muted") is True
     raw = data.get("recent_greetings")
     recent = [item for item in raw if isinstance(item, str) and _GREETING_ID_RE.fullmatch(item)] \
         if isinstance(raw, list) else []
     return (muted, recent[-RECENT_GREETINGS_MAX:], data.get("answers_adopted") is True,
             _live_rect(window) if isinstance(window := data.get("live_window"), dict) else None,
-            data.get("live_popped_out") is True)
+            data.get("live_popped_out") is True, data.get("prod_hint_shown") is True)
 
 
 def _write_atomic(path: Path, data: str) -> bool:

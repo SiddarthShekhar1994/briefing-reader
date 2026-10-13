@@ -12,8 +12,10 @@ runs offscreen.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
+import math
 import threading
 import unittest
 from unittest import mock
@@ -107,6 +109,22 @@ class AskControllerTests(unittest.TestCase):
         self.assertFalse(app.factory.runner.started)                # no model request
         bar = self.bar(app)
         self.assertEqual((bar.status(), bar.tone()), (ask_ui.IDLE_HINT, hud.TONE_IDLE))
+
+    def test_the_cached_caps_carry_their_age(self) -> None:
+        """R13: every check and every answer stamps ``caps_at`` (monotonic); ``caps_age()`` is infinite
+        before the first check, and a default check fills the bundle's runs left today."""
+        app = AppHarness(self)
+        self.assertEqual(app.c.ask.caps_age(), math.inf)
+        app.reading()
+        app.c.ask.start()
+        self.assertTrue(wait_for(lambda: app.c.ask.caps is not None), "checked")
+        self.assertLess(app.c.ask.caps_age(), 60.0)
+        self.assertEqual(app.c.ask.caps.left_bundle_day, 20)
+        stamped = app.c.ask.caps_at
+        app.c.ask._monotonic = itertools.count(stamped + 1000.0, 10.0).__next__   # every later stamp is new
+        submit(app.c)
+        self.assertTrue(wait_for(lambda: not app.c.ask.busy))
+        self.assertGreaterEqual(app.c.ask.caps_at, stamped + 1000.0)              # the answer stamped it again
 
     def test_an_ask_shows_its_cards_under_ask(self) -> None:
         gate = threading.Event()

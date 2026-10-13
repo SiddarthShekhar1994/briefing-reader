@@ -5,6 +5,7 @@ Every name, address, title and id is invented (example.com / example.org / examp
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -462,6 +463,11 @@ class CheckTests(unittest.TestCase):
         seven = prep.deterministic_brief(self.meeting, lookups, (), (), "I didn't read mail: the limit", days=7)
         self.assertEqual(seven.missing[0][1], "no email in the last 7 days")
         self.assertIn("I didn't read mail: the limit.", prep.brief_text(seven))
+        self.assertEqual(brief.series_id, "")                      # a single meeting
+        weekly = prep.meeting_of("work", dataclasses.replace(meeting(), series_id="weekly01"), NOW, ZONE)
+        again = prep.deterministic_brief(weekly, lookups, (), ())
+        self.assertEqual(again.series_id, "weekly01")              # a brief resets the series' count (R38)
+        self.assertNotIn("weekly01", repr(again))
 
     def test_brief_text(self) -> None:
         """9.3's example."""

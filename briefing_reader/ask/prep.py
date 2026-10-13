@@ -236,6 +236,9 @@ class PrepBrief:
     dropped: int = 0
     ran: bool = False
     note: str = field(default="", repr=False)                                       # why no mail was read
+    # The meeting's repeating series (EventBrief.series_id; "" for a single event): a brief starts the
+    # series' count of ignored prep offers afresh (R38). Memory only, never shown or logged.
+    series_id: str = field(default="", repr=False)
 
     def __repr__(self) -> str:
         return (f"PrepBrief({len(self.threads)} thread(s), {len(self.open)} open, {len(self.points)} point(s), "
@@ -809,7 +812,7 @@ def guest_notes(notes: Sequence[str], lookups: Sequence[GuestLookup]) -> tuple[s
 def _base(meeting: PrepMeeting, lookups: Sequence[GuestLookup], memory: Sequence[str]) -> dict[str, Any]:
     return {"meeting": meeting.ref, "title": data(meeting.brief.title, 120) or "(No title)", "alias": meeting.alias,
             "start": meeting.start, "end": meeting.end, "day": meeting.day, "who": _who(lookups),
-            "notes": guest_notes(memory, lookups)}
+            "notes": guest_notes(memory, lookups), "series_id": getattr(meeting.brief, "series_id", "")}
 
 
 def check_prep(answer: PrepAnswer, meeting: PrepMeeting, lookups: Sequence[GuestLookup],

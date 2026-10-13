@@ -11,8 +11,11 @@ after midnight. The scheduled tasks pass the slot times with
 * :func:`briefing_key` is the slot a fetched briefing belongs to (by its
   "Updated:" time and run), so "announced" and "viewed" stick to that briefing.
 * :class:`RunState` remembers per slot when its prompt was first shown, when
-  and how it was answered ("read", "dismissed", "done"), and when its
-  briefing was first announced ("ready to view") and first viewed, for 14 days.
+  and how it was answered ("read", "dismissed", "done"), when its
+  briefing was first announced ("ready to view") and first viewed, and (the
+  productivity bundle) when a plan offer was posted for it and when its day
+  was planned, for 14 days (a slot dated in the future, such as tomorrow's
+  after an evening "plan tomorrow", is kept too).
 
 The file is written atomically (temporary file + ``os.replace``); a missing,
 corrupt or unreadable file counts as empty and never stops the app. Times
@@ -46,7 +49,7 @@ CATCH_UP_MAX_AGE = timedelta(hours=3)   # a slot older than this is not caught u
 ANSWER_MAX_AGE = timedelta(hours=18)    # an answer this long after a slot still settles it
 BRIEFING_SLOT_WINDOW = timedelta(hours=12)   # a briefing belongs to a slot this close to its update
 KEEP_DAYS = 14
-ENTRY_FIELDS = ("shown_at", "handled_at", "how", "announced_at", "viewed_at")
+ENTRY_FIELDS = ("shown_at", "handled_at", "how", "announced_at", "viewed_at", "plan_offered_at", "planned_at")
 
 _TIME_RE = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])")
 _KEY_RE = re.compile(r"(\d{4}-\d{2}-\d{2}) (AM|PM)")
@@ -313,6 +316,38 @@ class RunState:
     def record_viewed(self, slot_key: str) -> bool:
         """``mark_viewed`` that never raises (a failure is logged); True when recorded now."""
         return self._record(slot_key, self.mark_viewed, "viewed")
+
+    # ---- the productivity bundle's plan offer (spec 4.3, 3.2 step 9) ----------------------------
+
+    def plan_offered(self, slot_key: str) -> bool:
+        """A plan offer was posted for ``slot_key`` (also by another process, or before a restart)."""
+        return bool((self.get(slot_key) or {}).get("plan_offered_at"))
+
+    def planned(self, slot_key: str) -> bool:
+        """The day of ``slot_key`` was planned (a plan with at least one block; an evening "plan
+        tomorrow" marks tomorrow's AM slot, R29)."""
+        return bool((self.get(slot_key) or {}).get("planned_at"))
+
+    def mark_plan_offered(self, slot_key: str) -> bool:
+        """Remember when the plan offer for ``slot_key`` was first posted; True when that was now."""
+        _check_key(slot_key)
+        stamp = self._stamp()
+        return self._update(slot_key, lambda entry: _set_once(entry, {"plan_offered_at": stamp}))
+
+    def mark_planned(self, slot_key: str) -> bool:
+        """Remember when the day of ``slot_key`` was first planned; True when that was now. Any
+        valid slot key is accepted, tomorrow's too."""
+        _check_key(slot_key)
+        stamp = self._stamp()
+        return self._update(slot_key, lambda entry: _set_once(entry, {"planned_at": stamp}))
+
+    def record_plan_offered(self, slot_key: str) -> bool:
+        """``mark_plan_offered`` that never raises (a failure is logged); True when recorded now."""
+        return self._record(slot_key, self.mark_plan_offered, "followed by a plan offer")
+
+    def record_planned(self, slot_key: str) -> bool:
+        """``mark_planned`` that never raises (a failure is logged); True when recorded now."""
+        return self._record(slot_key, self.mark_planned, "planned")
 
     def _record(self, slot_key: str, mark: Callable[[str], bool], what: str) -> bool:
         try:

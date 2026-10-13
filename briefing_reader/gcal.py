@@ -290,7 +290,9 @@ class EventBrief:
     ``transparent``: marked "show as free" (transparency "transparent"); ``event_type``: Google's
     eventType as a plain word ("workingLocation", "outOfOffice", "focusTime"; "" for a default
     event); ``self_response``: the owner's own answer (the attendee entry with self: true, which is
-    never one of the guests; "accepted" when he organizes it; "" when Google lists none for him).
+    never one of the guests; "accepted" when he organizes it; "" when Google lists none for him);
+    ``series_id``: the repeating event's id (``recurringEventId``) for an occurrence of one, so the
+    productivity bundle can count a series' ignored prep offers (as a hash; R38), "" otherwise.
     """
 
     event_id: str
@@ -308,6 +310,7 @@ class EventBrief:
     transparent: bool = False
     event_type: str = ""
     self_response: str = ""
+    series_id: str = ""
 
     @property
     def all_day(self) -> bool:
@@ -1410,10 +1413,18 @@ def _brief_from(item: dict, calendar_id: str) -> EventBrief | None:
         organizer_self=organizer.get("self") is True, organizer_email=organizer_email.strip(),
         organizer_name=" ".join(str(organizer.get("displayName") or "").split()), guests=tuple(guests),
         recurring=bool(item.get("recurringEventId")), transparent=item.get("transparency") == "transparent",
-        event_type=_type_word(item.get("eventType")), self_response=self_response)
+        event_type=_type_word(item.get("eventType")), self_response=self_response,
+        series_id=_series_id(item.get("recurringEventId")))
 
 
 _RESPONSE_WORDS = frozenset({"needsAction", "accepted", "declined", "tentative"})
+_SERIES_ID_RE = re.compile(r"[A-Za-z0-9_@.-]{1,128}")
+
+
+def _series_id(value: Any) -> str:
+    """The repeating event's id as Google gives it (one token; anything else is "")."""
+    text = value.strip() if isinstance(value, str) else ""
+    return text if text and _SERIES_ID_RE.fullmatch(text) else ""
 _EVENT_TYPE_RE = re.compile(r"[A-Za-z]{1,40}")
 
 

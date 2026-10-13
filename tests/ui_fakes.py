@@ -2,7 +2,9 @@
 AppController offscreen with a player that only keeps its state, Google calendars and senders
 that never touch the network, Ask's real planner over tests.ask_fakes' runner (claude.exe is
 never started), and a page snapshotter that opens no page (FakeSnapshotter: no web engine).
-Every name, address, id and text is invented.
+AppHarness takes a steppable clock (HarnessClock: the app's, the planner's and the productivity
+bundle's time, stepped without real waits) and a productivity switch (the bundle on, its reads on
+the GUI thread). Every name, address, id and text is invented.
 """
 
 from __future__ import annotations
@@ -203,6 +205,10 @@ class FakeCalendar:
         self.footers: list[str] = []
         self.on_sign_in = None
         self.lock = threading.Lock()
+        # EventBriefs as given (list_event_briefs then returns those that start inside the window;
+        # None: built from ``events`` and ``guests`` as before). ``brief_error``: raised by a read.
+        self.briefs: list[EventBrief] | None = None
+        self.brief_error: Exception | None = None
 
     def _note(self, *call: Any) -> None:
         with self.lock:
@@ -242,6 +248,11 @@ class FakeCalendar:
 
     def list_event_briefs(self, start, end, calendar_ids=("primary",)):
         self._note("briefs")
+        if self.brief_error is not None:
+            raise self.brief_error
+        if self.briefs is not None:
+            return [brief for brief in self.briefs
+                    if brief.start is None or (brief.start < end and (brief.end or brief.start) > start)]
         return [EventBrief(e.event_id, "primary", e.title, start=e.start, end=e.end, organizer_self=e.organizer_self,
                            guests=self.guests.get(e.event_id, ())) for e in self.events.values()]
 
@@ -301,13 +312,14 @@ class AskFactory:
     (fake) calendars and senders through GoogleSources, and ``readers``."""
 
     def __init__(self, root: Path, *runs: Any, auth: str | None = None, readers: dict | None = None,
-                 max_per_hour: int = 20, clock: Any = None) -> None:
+                 max_per_hour: int = 20, clock: Any = None, planner_clock: Any = None) -> None:
         self.root = root
         self.runs = list(runs)
         self.auth = auth
         self.readers = dict(readers or {})
         self.max_per_hour = max_per_hour
         self.clock = clock
+        self.planner_clock = planner_clock or (lambda: NOW)   # the planner's and the usage log's time
         self.runner: FakeRunner | None = None
         self.planner: AskPlanner | None = None
         self.quick_threads: list[str] = []
@@ -333,8 +345,8 @@ class AskFactory:
                               locate=lambda _env: ask_planner.cli.ClaudeExe(exe, "standalone install"), **engine_kwargs)
         sources = GoogleSources(config, calendars, senders, self.readers)
         usage = UsageLog(config.data_dir / "ask_usage.json", max_per_hour=self.max_per_hour,
-                         max_per_day=config.ask.max_per_day, clock=lambda: NOW)
-        self.planner = AskPlanner(config, engine, sources, usage=usage, clock=lambda: NOW)
+                         max_per_day=config.ask.max_per_day, clock=self.planner_clock)
+        self.planner = AskPlanner(config, engine, sources, usage=usage, clock=self.planner_clock)
         return self.planner
 
 
@@ -459,20 +471,52 @@ def page_fixture(root: Path, lines: Sequence[str]) -> Path:
     return path
 
 
+class HarnessClock:
+    """A wall clock a test steps by hand (R24): ``now()`` is what the app, the planner and the
+    productivity bundle see; ``advance(minutes)`` moves it on; ``set(moment)`` puts it anywhere."""
+
+    def __init__(self, start: datetime = NOW) -> None:
+        self.at = start
+
+    def now(self) -> datetime:
+        return self.at
+
+    def advance(self, minutes: float = 0, *, seconds: float = 0) -> datetime:
+        self.at = self.at + timedelta(minutes=minutes, seconds=seconds)
+        return self.at
+
+    def set(self, moment: datetime) -> datetime:
+        self.at = moment
+        return self.at
+
+
+PRODUCTIVITY_ON = "\n[productivity]\nenabled = true\n"
+
+
 class AppHarness:
     """One AppController (offscreen, nothing real reached) and what it was built with.
 
     Page pictures: ``snapshots`` is a FakeSnapshotter the controller gets (while [live]
     page_snapshots is on) - no web engine, no page; ``snapshot_factory`` replaces it (a harness
-    passes the real snapshotter with local HTML)."""
+    passes the real snapshotter with local HTML).
+
+    ``clock``: a HarnessClock (default: fixed at NOW) for the app, the planner and the bundle.
+    ``productivity``: the bundle on ([productivity] enabled plus ``prod_extra`` keys, unless
+    ``config_extra`` has the table already); ``prod_inline``: its reads run on the GUI thread
+    (deterministic tests). close() stops the bundle's timer and thread."""
 
     def __init__(self, test: Any, *, ask: bool = True, runs: Sequence[Any] = (), auth: str | None = None,
                  readers: dict | None = None, ask_mode: bool = False, run_state: Any = None,
                  lines: Sequence[str] = (B_CALENDAR, B_TODO), engine_clock: Any = None,
-                 max_per_hour: int = 20, config_extra: str = "", snapshot_factory: Any = None) -> None:
+                 max_per_hour: int = 20, config_extra: str = "", snapshot_factory: Any = None,
+                 clock: HarnessClock | None = None, productivity: bool = False, prod_extra: str = "",
+                 prod_inline: bool = True) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
+        self.clock = clock or HarnessClock()
+        if productivity and "[productivity]" not in config_extra:
+            config_extra = PRODUCTIVITY_ON + prod_extra + config_extra
         (root / "config.toml").write_text(CONFIG.format(enabled="true" if ask else "false") + config_extra,
                                           encoding="utf-8")
         base = load_config(root, environ={"LOCALAPPDATA": str(root / "local")})
@@ -487,15 +531,15 @@ class AppHarness:
         self.senders = {"personal": FakeSender("personal", "me@example.com"),
                         "work": FakeSender("work", "me@example.edu")}
         self.factory = AskFactory(root, *runs, auth=auth, readers=readers, clock=engine_clock,
-                                  max_per_hour=max_per_hour)
+                                  max_per_hour=max_per_hour, planner_clock=self.clock.now)
         self.store = ActionStore(root / "actions.json")
         self.voice = RecordingVoice()   # Jarvis's own voice: recorded, never synthesized
         live_config = self.config.live
         self.snapshots = FakeSnapshotter(keep_text=live_config.text,
                                          max_per_run=max(0, min(4, self.config.research.max_fetches)))
-        with mock.patch.object(ui, "BriefingPlayer", FakePlayer):
+        with mock.patch.object(ui, "BriefingPlayer", FakePlayer), mock.patch.object(ui, "PROD_INLINE", prod_inline):
             self.c = ui.AppController(self.config, self.client, expected_run="AM", now_mode=False, volume=0.0,
-                                      now_func=lambda: NOW, calendar_factory=lambda _cfg: self.calendars,
+                                      now_func=self.clock.now, calendar_factory=lambda _cfg: self.calendars,
                                       sender_factory=lambda _cfg: self.senders, action_store=self.store,
                                       click_clock=_StepClock(), ask_factory=self.factory, ask_mode=ask_mode,
                                       run_state=run_state, voice_factory=lambda _controller: self.voice,
@@ -515,12 +559,18 @@ class AppHarness:
         settle()
 
     def close(self) -> None:
+        if getattr(self, "_closed", False):
+            return   # closed already (a test may close early; the cleanup comes back here)
+        self._closed = True
         c = self.c
         c.live.set_listener(None)   # the LIVE feed hears nothing more
         c._live_feed.stop()
         if c.ask is not None:
             c.ask.shutdown()
             c.ask.join(5)
+        if getattr(c, "productivity", None) is not None:
+            c.productivity.shutdown()   # its timer stops and its thread ends (R24)
+            c.productivity.join(5)
         if c._snapshots is not None:
             c._snapshots.shutdown()   # a real snapshotter (a harness's) closes its hidden view
         for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._countdown_timer, c._agenda_timer):

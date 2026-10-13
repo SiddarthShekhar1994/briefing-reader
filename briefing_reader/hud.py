@@ -8132,7 +8132,7 @@ LIVE_CUT_TEXT = "[{cut} more characters not shown]"
 LIVE_TAG_COLORS = {
     live_events.TASK_ASK: PINK, live_events.TASK_ACTION: AMBER, live_events.TASK_BRIEFING: TEXT_MUTED,
     live_events.TASK_BACKGROUND: TEXT_DIM, live_events.TASK_WEB: ACCENT, live_events.TASK_MEMORY: GREEN,
-    live_events.TASK_PLAN: LAVENDER, live_events.TASK_PREP: PEACH,
+    live_events.TASK_PLAN: LAVENDER, live_events.TASK_PREP: PEACH, live_events.TASK_OWN_READS: TEXT_DIM,
 }
 _LIVE_BORDERS = {
     live_events.STATUS_RUNNING: rgba(ACCENT, 0.45), live_events.STATUS_OK: rgba(ACCENT, 0.18),

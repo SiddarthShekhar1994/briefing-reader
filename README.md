@@ -76,10 +76,12 @@ your own scheduled routine (see
 - **Plan my day.** Type "plan my day" (or "plan tomorrow", "plan my
   afternoon, gym and reading") and your Claude Code lines up time blocks for
   your to-dos and deadlines in the free time around your meetings: at most 5
-  **Add block** cards, each naming the to-do it serves. It only proposes:
-  nothing goes on your calendar until your click on a block. Part of the
-  productivity bundle (`[productivity]`), off until you turn it on. See
-  [Plan my day](#plan-my-day).
+  **Add block** cards, each naming the to-do it serves. After the morning
+  briefing he may offer it himself ("Shall I plan your day, sir?"): offers
+  only, it runs on your click. It only proposes: nothing goes on your calendar
+  until your click on a block. Part of the productivity bundle
+  (`[productivity]`), off until you turn it on. See [Plan my day](#plan-my-day)
+  and [Offers](#offers-plan-my-day-and-prepare-brief).
 - **Meeting prep.** Type "prep me for my 2 PM" (or "prep me", "brief me on my
   next meeting", "prepare me for Project sync") and Jarvis finds that meeting
   in today's and tomorrow's calendar, looks up your latest thread of the last
@@ -88,8 +90,11 @@ your own scheduled routine (see
   JARVIS tab: who is coming, where each thread stands, what is still open,
   points worth raising, and at most 2 reply drafts you approve one by one.
   With no recent thread there is no Claude run at all: Jarvis's own brief of
-  who is coming. Part of the productivity bundle (`[productivity]`), off until
-  you turn it on. See [Meeting prep](#meeting-prep).
+  who is coming. About 15 minutes before a meeting with guests he offers a
+  brief (**Prepare brief**): offers only, nothing is read until your click.
+  Part of the productivity bundle (`[productivity]`), off until you turn it
+  on. See [Meeting prep](#meeting-prep) and
+  [Offers](#offers-plan-my-day-and-prepare-brief).
 - **Memory.** Tell Jarvis "remember that Ana is my project lead" (or add it in
   the **MEMORY** tab) and he keeps that note on this PC, in `memory.json`, and
   gives your notes to your Claude Code with every Ask, day plan and meeting
@@ -139,6 +144,14 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
   (once more) and each source a search listed that it cites without reading
   it (a visit from your PC made only for the picture) ([Pictures in
   LIVE](#pictures-in-live); `[live] page_snapshots = false` turns that off).
+- **Offers never act.** "Shall I plan your day?" and "Shall I prepare a
+  brief?" are one entry in the JARVIS tab with one link and at most one short
+  sentence built from times and counts. Until you click the link nothing is
+  read from your mail, no Claude request runs and nothing is sent or added;
+  the click then runs the plan or the brief like a typed request, and every
+  block or draft still waits for its own click and undo. Jarvis's own reads
+  for the offers are of your calendar only (titles, times and guests, on this
+  PC, kept in memory) and are shown in LIVE.
 - **A mail search Jarvis builds himself uses only a guest's address from your
   calendar, and only after your click** (or your typed "prep me ..."): one
   read-only search per guest of that meeting, the last 14 days, at most one
@@ -300,18 +313,15 @@ not of this list.
 
 Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
 **Memory** - see [Memory (the MEMORY tab)](#memory-the-memory-tab);
-**Plan my day** (typed) - see [Plan my day](#plan-my-day);
-**Meeting prep** (typed) - see [Meeting prep](#meeting-prep).
+**Plan my day** - see [Plan my day](#plan-my-day);
+**Meeting prep** - see [Meeting prep](#meeting-prep);
+**Plan and prep offers** - see [Offers](#offers-plan-my-day-and-prepare-brief).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (proposals, your click, every step visible in LIVE):
 
 - **A live browser Jarvis drives**: he opens and fills in pages in a browser
   you can watch, and every submit waits for your click.
-- **A plan offer**: "Shall I plan your day?" after the morning briefing (today
-  you type "plan my day").
-- **Prep offers**: "Shall I prepare a brief?" 15 minutes before a meeting with
-  guests (today you type "prep me").
 - **Follow-up nudges**: threads that wait on your answer, or on an answer you
   are owed.
 - **Radar**: internships, hackathons, deadlines and subscriptions (renewals,
@@ -1098,6 +1108,17 @@ voice when the online one cannot be reached), politely and to the point:
   a guest, a subject or the brief, which stays on screen. An approved prep
   reply's result is said **without its subject**: "Sent, sir - your reply is
   on its way."
+- **Offers** (see [Offers](#offers-plan-my-day-and-prepare-brief)): "Shall I
+  plan your day, sir?" (only once you have heard or viewed the AM briefing),
+  "Your meeting at 2 PM starts in about 15 minutes, sir. Shall I prepare a
+  brief?" and, for back-to-back meetings, "You have meetings at 1 PM and 2 PM,
+  sir. Shall I prepare briefs?". Times and counts only: never a meeting's
+  title, a guest or anything read. At most one sentence per offer, never two
+  offers within 5 minutes, never from 22:00 to 08:00 (`[productivity]
+  quiet_from` / `quiet_until`), never while muted, during a meeting with
+  guests (prep offers), while the briefing plays, during an undo countdown or
+  while Jarvis plans or speaks: some of those wait for a quieter moment,
+  others leave the offer as text only (the table under Offers says which).
 
 Everything he says is also written in the JARVIS tab. While he speaks the orb
 reads SPEAKING and the large line next to it shows his words. He never talks
@@ -1166,6 +1187,18 @@ card, newest at the bottom:
 - **A briefing fetch** from Notion, and one compact **Background reads** row
   (the agenda, the cards' event checks, sign-ins, Claude Code checks; `[live]
   background = false` leaves it out).
+- **Jarvis's own reads and offers** (with the productivity bundle on): one
+  compact **READS** row, shown even with `[live] background = false` (only
+  `[live] enabled = false` hides it): each read of today's events for prep
+  offers ("personal 4; work 3; read only", the range, the calendars and that
+  only titles, times and guests are read), the one read of a meeting's hour
+  before an offer while minimized ("Checked the 1:00 PM-3:00 PM hours of work
+  before an offer (minimized)"), and every offer decision: "Offered: plan my
+  day - nothing read or run until you click", "Offered a prep brief: 2:00 PM,
+  3 guests, from the read at 1:40 PM", "Offered together: 1:00 PM and 2:00 PM",
+  "Not offered yet: plan my day (caps)" (retried each minute), "Not offered: a
+  prep brief (ignored 3 times - type "prep me" for this one)", and whether
+  its sentence was spoken ("yes", "no (playing)", "text only (muted)").
 - **Memory** (with the productivity bundle's memory on): one compact
   **MEMORY** row with a step for each note saved, changed, removed or
   restored, a suggestion kept, dismissed or not offered (and why), a note not
@@ -1537,6 +1570,120 @@ spoken, saved or logged.
   `reserve_ask_runs` (3) Ask runs of an hour; a brief without a run costs
   nothing.
 
+### Offers: plan my day and prepare brief
+
+Part of the productivity bundle (see [Plan my day](#plan-my-day) and [Meeting
+prep](#meeting-prep) for what a click then does). **Offers never act**: an
+offer is one JARVIS entry with one link, a sub line with its cost ("1 planner
+run · 17 of 20 left today", or "· 12 Ask runs left today" when the Ask day
+count is the tighter limit) and at most one short sentence. Nothing is read
+from your mail and no Claude request runs until you click; the click checks
+everything again (the meeting read fresh, the limits, Claude Code) before
+anything is read. A click while Jarvis is busy with another request says
+"Jarvis is busy with another request; click the offer again when it's done"
+and the link stays. An offer is never posted while the limits would refuse a
+run, Claude Code is not ready, the window is hidden (a scheduled run still
+waiting) or the classic prompt shows, and posting one never raises, restores
+or focuses the window.
+
+- **The plan offer** (`[productivity] plan_offer`): after the AM briefing is
+  announced (or the first time the assistant screen shows on a day whose AM
+  briefing was announced or viewed), before `plan_offer_until` (13:30) and
+  from `day_start` (08:00), once per AM briefing (also across restarts: it is
+  remembered in `runstate.json`), only when today has at least
+  `plan_min_free_minutes` (60) free minutes and something needs time (a to-do
+  with no block, a deadline within 7 days). "Shall I plan your day, sir? I'd
+  line up time blocks around your meetings for your to-dos and deadlines.
+  Nothing goes on your calendar until you approve each block." with **Plan my
+  day**. It is posted as text when the briefing is announced and **spoken only
+  after you've heard or viewed the briefing**: playback reached the end, or you
+  viewed it and then came back to the JARVIS tab, or 20 minutes passed with no
+  playback. A plan with at least one block retires it ("You planned your day at
+  10:31 AM."), also an evening "plan tomorrow" for the next morning's offer; at
+  13:30 it reads "Offered at 10:14 AM - expired. Type "plan my day" any time."
+  (a click after 13:30 says so at once and runs nothing). When Claude Code,
+  the limits or the day's calendar are not ready yet, the offer is tried again
+  each minute until 13:30 (LIVE says "Not offered yet").
+- **Prep offers** (`prep_offers`): `prep_lead_minutes` (15) before a timed
+  meeting of at most 4 hours with 1 to `prep_max_offer_guests` (8) other
+  guests that you have not declined and whose title has no `prep_skip_words`
+  word (focus, lunch, commute, gym, break, hold, ooo, out of office), never
+  later than 3 minutes before it starts (a PC that slept through that time
+  gets no late offer), at most `prep_offers_per_day` (8) a day and one group
+  every 10 minutes. "Project sync at 2:00 PM (work) starts in 15 minutes, with
+  3 guests. Shall I prepare a brief? I'd read your latest thread with each
+  guest and send them to your Claude." with **Prepare brief** and the sub line
+  "1 planner run (none without recent mail) · 17 of 20 left today · as of 1:40
+  PM" (when the schedule was read). Meetings back to back (one starting during
+  another or less than the lead time after it ends, at most 3) are offered
+  together: an entry each, one sentence. The link works until the meeting
+  ends ("Project sync at 2:00 PM has ended."; a click after it ended gets
+  "That meeting has ended, sir." and reads nothing); after its brief the
+  entry reads "Brief ready below (1:47 PM)." and loses its link (a second
+  brief: type `prep me for my 2 PM`). A repeating meeting whose offer you let
+  end unclicked 3 times in a row is no longer offered (`prep_series.json`; LIVE
+  says so); clicking **Prepare brief** or typing `prep me` for it starts the
+  count afresh.
+- **Where Jarvis gets the schedule**: his own read of today's events on every
+  signed-in calendar (titles, times and guests only, never descriptions,
+  places or links), when the assistant screen shows and every 10 minutes while
+  it is visible (with `prep_offers = false`, only once that day's AM briefing
+  was announced or viewed, and only until the plan offer is posted or settled,
+  at the latest 13:30), on a thread of its own, kept in memory only. While the
+  window is minimized nothing is read, except one read of a meeting's hour (an
+  hour before to an hour after its start) right before its offer when the
+  schedule is older than 30 minutes (`minimized_check`, on by default, at most
+  one per meeting and `prep_offers_per_day` such reads a day), so a moved or
+  cancelled meeting is never announced: only meetings that read found again
+  are offered (back to back ones included). When that hour cannot be read, the
+  meeting is not offered and not read again until the window is visible. With
+  `minimized_check = false` such an offer appears as text only. A meeting
+  created after you minimized is seen only once the window is visible again.
+  A prep sentence is never said from a read older than 30 minutes, and back
+  on screen nothing is offered from one: the offers wait for the fresh read.
+  A sentence still waiting is never said once a read finds its meeting moved
+  or cancelled (the entry stays; a click reads everything again before
+  anything runs).
+
+When the offer's sentence is said (held: said at a later quiet moment within
+the offer's time; text only: never said, even after the reason ends):
+
+| Situation | Plan offer | Prep offer |
+|---|---|---|
+| Visible, nothing else going on | entry, then the sentence (once the briefing was heard or viewed) | entry and the sentence |
+| AM briefing announced, not yet heard or viewed | entry; sentence held | - |
+| Briefing playing | entry; sentence after playback finished (or a later quiet minute once heard) | entry; sentence at the next quiet minute (until 3 minutes before the start) |
+| Undo countdown, Jarvis planning or speaking | entry; sentence held | entry; sentence held |
+| In a meeting with guests | entry; sentence held until it ends | entry only (text only, no flash) |
+| Quiet hours (22:00-08:00) or muted | entry only (text only) | entry only (text only) |
+| Session locked | entry; sentence after you unlock | entry; sentence after you unlock (up to 3 minutes before the start) |
+| Minimized | entry; sentence after you restore the window | entry, the taskbar button flashes and the sentence (time only; `prep_speak_minimized`) |
+| Hidden (a scheduled run waiting) or the prompt | nothing | nothing |
+| Jarvis closed | nothing | nothing |
+
+A held plan sentence may still be said up to 2 hours after the offer and before
+13:30. Minimized, a prep sentence is said only while the read behind it is at
+most 30 minutes old (later: text only). A sentence about to be said when you
+minimize (one that may not be said minimized), lock the PC or leave the
+reading screen is taken back and waits for the restore, the unlock or the
+reading screen's return. Two offers' sentences due at once are said 5 minutes
+apart, the meeting's first. Muting (Ctrl+M) while a sentence waits makes it
+text only; unmuting or the end of quiet hours never brings a late "Shall I
+...?". No Windows notification is ever used (it would stay in the notification
+history).
+
+**Prep offers work only while Jarvis is open, on screen or minimized -
+minimize instead of Done to keep them.** Done (and the X) closes him; the first
+time the bundle is on, the JARVIS tab says so once ("Prep offers and follow-ups
+work while I'm open or minimized, sir - minimize instead of Done to keep
+them.", never spoken), and while a meeting with other guests remains today the
+Done button's tooltip reads "Closes Jarvis - meeting prep offers stop until you
+open him again".
+
+**Cost**: an offer, the day read and an unclicked offer cost nothing; a click
+costs what a typed `plan my day` or `prep me` costs (one planner run, none for
+a brief without recent mail). An unattended day costs zero runs.
+
 ### Memory (the MEMORY tab)
 
 Part of the productivity bundle: off in the public `config.toml`, on for this
@@ -1620,7 +1767,15 @@ are ("5 BLOCKS"). Reading the calendar never opens the Google sign-in, and it
 runs on the same background worker as approvals, one call at a time. Privacy:
 once Google Calendar is connected, simply opening the reading screen reads
 today's (or tomorrow's) events and those of the next 14 days from Google (see
-[Privacy and cost](#privacy-and-cost)). What TODAY says instead of rows:
+[Privacy and cost](#privacy-and-cost)). With the productivity bundle's offers
+on, Jarvis also reads today's events with their guests for the offers, on a
+thread of its own (never the approvals' worker): when the reading screen shows
+and every 10 minutes while it is visible (with `prep_offers = false`, only
+once the day's AM briefing was announced or viewed, and until the plan offer
+is posted or settled, at the latest 13:30), and, while minimized, one read of
+a meeting's hour right before its offer (`[productivity] minimized_check`, on
+by default; see [Offers](#offers-plan-my-day-and-prepare-brief)). TODAY itself
+never reads while hidden or minimized. What TODAY says instead of rows:
 
 | Line | Meaning |
 |---|---|
@@ -2895,11 +3050,11 @@ log. Changes apply the next time the app starts.
 | `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY, STATUS and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
 | `[live] enabled` | `true` | The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)): every step Jarvis takes for an Ask or a card you approved, on screen only. `false`: no LIVE tab, nothing recorded. |
 | `[live] auto_open` | `"tab"` | When Jarvis starts on an Ask or an approved card: `"tab"` brings up the LIVE tab (not while the briefing plays, not when the window is hidden or minimized), `"window"` shows the LIVE pop-out window without taking the focus, `"off"` never switches. `true` / `false` mean `"tab"` / `"off"`. |
-| `[live] background` | `true` | Also show the reads Jarvis does on his own (agenda, event checks, sign-ins, Claude Code checks) in one compact LIVE row. |
+| `[live] background` | `true` | Also show the reads Jarvis does on his own (agenda, event checks, sign-ins, Claude Code checks) in one compact LIVE row. The productivity bundle's own reads and offers have a row of their own that is always shown. |
 | `[live] text` | `true` | Show the texts Jarvis read and sent in LIVE (email threads, the planner's input and reply, the outgoing message). `false`: only their sizes (also of the message text in the planner's proposal lines); subjects, names, addresses, event titles and Jarvis's answer still show. `false` also takes no page pictures and leaves the email texts out of the pictures (their headers still show). |
 | `[live] pictures` | `true` | Email, calendar and search pictures in LIVE ([Pictures in LIVE](#pictures-in-live)), drawn by Jarvis on this PC from the text he already has: no email HTML, no images from the web, no page opened for them. `false`: none. |
 | `[live] page_snapshots` | `true` | Page pictures ([Pictures in LIVE](#pictures-in-live)): each public https page a web research read or a checked source its answer cites, opened on this PC in a private window (no sign-ins, nothing saved). The site sees your IP address (for a source not read: only for the picture). `false`: no page is opened. |
-| `[productivity] enabled` | `false` | The productivity bundle (this version: [Memory](#memory-the-memory-tab), [Plan my day](#plan-my-day) and [Meeting prep](#meeting-prep)); it also needs `[ask] enabled = true`. Turn it on for this PC with `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (it overrides this key both ways). |
+| `[productivity] enabled` | `false` | The productivity bundle (this version: [Memory](#memory-the-memory-tab), [Plan my day](#plan-my-day), [Meeting prep](#meeting-prep) and their [offers](#offers-plan-my-day-and-prepare-brief)); it also needs `[ask] enabled = true`. Turn it on for this PC with `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` (it overrides this key both ways). |
 | `[productivity] memory` | `true` | The MEMORY tab, `remember that ...` / `forget that ...` and the notes given to the planner. |
 | `[productivity] memory_suggestions` | `true` | Jarvis may suggest a note after an Ask that read no mail; it is kept only when you click. |
 | `[productivity] max_memory` | `100` | Notes kept (10-200); more are refused ("Your memory is full"). |
@@ -2911,7 +3066,17 @@ log. Changes apply the next time the app starts.
 | `[productivity] prep_max_guests` | `5` | Guests of a meeting a brief looks up (1-10), the organizer first; the rest are "not searched". |
 | `[productivity] prep_lookback_days` | `14` | How far back a brief's search for each guest's latest thread looks (3-14 days; never more than `scan_days`). |
 | `[productivity] prep_other_accounts` | `false` | `true`: a guest with no thread on the meeting's account is also searched on your other readable accounts. |
-| `[productivity]` other keys | see `config.toml` | `plan_offer`, `plan_offer_until`, `prep_offers`, `prep_lead_minutes`, `prep_offers_per_day`, `prep_max_offer_guests`, `prep_skip_words`, `prep_speak_minimized`, `minimized_check`, `followups`, `scan_...`, `waiting_after_hours`, `owed_after_days`, `followups_shown`, `quiet_from` and `quiet_until` are read and checked (a bad value falls back with a warning) but not used yet: they belong to the plan and prep offers and to follow-ups, which later versions add. |
+| `[productivity] plan_offer` | `true` | "Shall I plan your day, sir?" after the AM briefing ([Offers](#offers-plan-my-day-and-prepare-brief)). |
+| `[productivity] plan_offer_until` | `"13:30"` | No plan offer after this time; an open one expires then. |
+| `[productivity] prep_offers` | `true` | Offer a brief before a meeting with guests. |
+| `[productivity] prep_lead_minutes` | `15` | How long before the meeting (5-60). |
+| `[productivity] prep_offers_per_day` | `8` | Prep offers a day (0-20); also the most minimized hour reads a day. |
+| `[productivity] prep_max_offer_guests` | `8` | Offers only for meetings with 1 to this many other guests (1-50; a typed `prep me` works for any). |
+| `[productivity] prep_skip_words` | focus, lunch, ... | No offer for a meeting whose title has one of these words. |
+| `[productivity] prep_speak_minimized` | `true` | Say a prep offer (its time only) while Jarvis is minimized. |
+| `[productivity] minimized_check` | `true` | While minimized: one read of a meeting's hour of your calendar before its offer; `false`: nothing is read while minimized and such an offer is text only. |
+| `[productivity] quiet_from`, `quiet_until` | `"22:00"`, `"08:00"` | No spoken offers between these times (the offers still appear as text). |
+| `[productivity]` other keys | see `config.toml` | `followups`, `scan_...`, `waiting_after_hours`, `owed_after_days` and `followups_shown` are read and checked (a bad value falls back with a warning) but not used yet: they belong to follow-ups, which a later version adds. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -3095,6 +3260,24 @@ dropped" and "Prep: 1 card(s) shown under ASK (0 refused)". Never the
 meeting, a guest's name or address, a Gmail query Jarvis built, a subject, a
 thread id, the brief or your words.
 
+The offers log "Productivity: on (plan offer on, prep offers on, follow-ups
+on)", "Day read: 7 event(s) on 2 account(s) in 0.4 s" (and "Day read: work not
+signed in" per account not read), "Plan offer: posted for 2026-10-05 AM
+(held:not_heard)" (spoken, held:<reason> or text only:<reason>), "Plan offer:
+skipped for 2026-10-05 AM (busy_day)" (once per final reason), "Plan offer:
+spoken (finished)" (finished, viewed, after_20_min, restore, unlock, tick),
+"Plan offer: speech dropped; held again", "Plan offer: text only (muted)"
+(after Ctrl+M), "Plan offer: retired (expired)"
+(expired, planned), "Prep offer: posted (3 guest(s), lead 15 min, spoken,
+taskbar flash)", "Prep offers: posted together (2)", "Prep offer: skipped
+(ignored)" (gone, ignored, skip_word, long, guests, unreadable, ...), "Prep
+offer: retired (ended)" (ended, used), "Prep series: an offer was ignored (2 in
+a row)", "Prep series: reset", "Offer link: used" (used, busy, expired, gone),
+"Productivity: the Done hint was shown" and, for a failed read on its thread,
+"Productivity: day job failed (ValueError)": the job's kind and the error's
+type only, never its message. Never a title, a guest, an address, a meeting's
+id or anything Jarvis says.
+
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
 | File | What it is |
@@ -3106,8 +3289,9 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome (web research runs carry `"kind": "research"` and count against both the Ask caps and the research caps; day plans carry `"kind": "plan_day"`, meeting briefs `"prep"` and drafts `"nudge"`, and count against both the Ask caps and `[productivity] max_runs_per_day`); and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
-| `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), and when and how a classic prompt was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
-| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open. Never any text. Safe to delete. |
+| `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
+| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown. Never any text. Safe to delete. |
+| `prep_series.json` | The productivity bundle's repeating meetings whose prep offers ended unclicked: per series a 32-character hash (of the account name, the calendar and Google's series id, never in clear), how many times in a row (3 stops its offers) and the day of the last change; entries untouched for 60 days are dropped. No title, id or address. Safe to delete (the offers come back). |
 | `memory.json` | The productivity bundle's memory ([Memory](#memory-the-memory-tab)): **the only file with your own text** - your notes, typed or suggestions you kept, each with an id, TOLD or SUGGESTED and when it was made or changed; and, for suggestions you dismissed, a short hash of each word (not the sentence; a common word or a name could be guessed from its hash). Written only by the app (the command line reads it without changing it). Delete it (also while Jarvis runs: the next Ask, MEMORY and any change take the file as it is), or delete the notes in MEMORY, to forget everything. If it can't be read, Jarvis never overwrites it (MEMORY says so). |
 
 Generated audio goes to `%TEMP%\briefing-reader\session-<process id>` (Jarvis's own
@@ -3128,7 +3312,8 @@ The app talks to these services, all free:
   approved plan block's result, and what he says about a day plan, carry only
   times and counts, never a title; what he says about a meeting brief, and an
   approved prep reply's result, carry only the meeting's time, never a title,
-  a guest, a subject or the brief). They are
+  a guest, a subject or the brief; an offer's sentence carries only times and
+  counts). They are
   never logged or saved after the app closes; muting him (the speaker button,
   Ctrl+M) or `[assistant] speak = false` stops sending them;
 - the Google Calendar API, and only for an account you signed in with a click
@@ -3140,7 +3325,13 @@ The app talks to these services, all free:
   **Move** or **Cancel event** and its undo countdown does Jarvis send your
   answer (and its note), the new times, or the cancellation. Nothing is sent to
   Google before you sign in, and no event is changed or deleted without that
-  click on its own card;
+  click on its own card. With the productivity bundle's offers on, Jarvis also
+  reads today's events (titles, times and guests) of every signed-in calendar
+  while the reading screen is visible, every 10 minutes (with `prep_offers =
+  false`, only once the day's AM briefing was announced or viewed, and until
+  the plan offer is posted or settled, at the latest 13:30), and while
+  minimized one hour around a meeting right before its offer (read only, kept
+  in memory, never sent anywhere);
 - the Gmail API, only for an account set up for it (step 8b) and only to send:
   after your **Send** on a card and its undo countdown, the one message that
   card shows (From, To, Cc, subject, text, and the thread headers of a reply).
@@ -3315,6 +3506,25 @@ prompts, persona and LIVE tests) play invented brief runs
 a fake Gmail reader that answers each guest's search, and check that no
 meeting, guest, subject or brief ever reaches a log or anything spoken.
 
+The offer tests (`test_offers.py` for the rules: quiet hours, every reason a
+sentence waits or stays text only, the briefing heard, the cached limits, the
+plan offer's reasons and which are tried again, the prep offer's rules and
+back-to-back groups; `test_prepseries.py` for `prep_series.json`;
+`test_productivity_ui.py` for the timer, the day read on its own thread, the
+minimized hour read, an unlock seen by a tick, a failing read that logs only
+its error type, a waiting sentence never said for a meeting a later read found
+moved or cancelled or from a read older than 30 minutes, and two sentences 5
+minutes apart; `test_offers_app.py` for the app with a clock the test steps by
+hand: the plan offer posted at the announcement and said only once heard, the
+click, the expiry, prep offers with their flash and sentence, back-to-back
+meetings, a busy click, a waiting sentence taken back when the window hides or
+is minimized or the prompt replaces the reading screen, the Done hint and
+tooltip; and offer cases in the
+runstate, prefs, persona, calendar and LIVE tests) use fake calendars and
+voices only and check that an offer never reads mail, runs Claude or sends
+anything before a click, and that no title or guest reaches a log or the
+voice.
+
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
 and release it within seconds; they never start the app. The catch-up tests run
@@ -3371,6 +3581,20 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 - **A draft says it repeats one of your notes**: a prep reply that copies one
   of your memory notes is held back (information only); write the reply
   yourself, or ask again.
+- **No prep offers**: Jarvis was closed with Done (offers work only while he is
+  open or minimized), the meeting has no other guest, a `prep_skip_words` word
+  in its title, more than `prep_max_offer_guests` guests or lasts over 4
+  hours, you declined it, the window was hidden (a scheduled run still
+  waiting), the day's 8 offers were used, Claude Code was not ready or the
+  limits would refuse a run, or it is a repeating meeting you let pass 3 times
+  in a row (type "prep me" once to bring it back). While minimized, a meeting
+  created after you minimized is found only when the window is visible again.
+  LIVE's READS row says why for each meeting with guests.
+- **A plan offer is silent until you've heard or viewed the briefing**: by
+  design; it is said after playback finishes, after you viewed the briefing
+  and came back to the JARVIS tab, or 20 minutes after the announcement with no
+  playback. Muted, quiet hours (22:00-08:00) or a minimized window leave it as
+  text (minimized: until you restore the window).
 - **Ask: "Claude Code not found"**: install it (Ask's setup step 1), or put
   `JARVIS_CLAUDE_EXE=<path to claude.exe>` in `.env`. A `claude.cmd` from npm is
   not used (only a `claude.exe`). `--ask-check` shows which one Jarvis found.
@@ -3708,6 +3932,8 @@ briefing_reader/activation.py "come forward" messages between launches (Qt local
 briefing_reader/runstate.py   scheduled slots, briefing keys, which briefings were answered, announced or viewed (runstate.json), the catch-up window
 briefing_reader/prefs.py      Jarvis's small preferences (assistant.json): mute, the last greetings' ids
 briefing_reader/memory.py     the productivity bundle's memory (memory.json; no Qt): notes, refusals, duplicates, dismissed suggestions as hashes, the suggestion and note-leak checks
+briefing_reader/prepseries.py the productivity bundle's ignored repeating meetings (prep_series.json; hashes, counts and dates only; no Qt)
+briefing_reader/productivity_ui.py  the productivity bundle in the app: Jarvis's own day read (its "prod" thread), the offers' timer, the plan and prep offers
 briefing_reader/persona.py    what Jarvis says on his own: the greetings, "ready to view", the one safe fact, Ask's spoken answer, "Done, sir - ..." after a result, speech scrubbing (no Qt)
 briefing_reader/speech.py     Jarvis's voice: utterance kinds, the Voice interface, the silent default, the queue rules and the "tts-say" worker (no Qt)
 briefing_reader/voice_ui.py   Jarvis's voice in the app: his own player and the voice the controller speaks through (pauses and resumes the briefing, mute, countdown hold)
@@ -3730,7 +3956,8 @@ briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (c
                               and its LIVE steps (research_live), the typed shortcuts such as "remember that ...",
                               "plan my day" and "prep me" (routes), the productivity bundle's planner modes: their
                               requests and inputs (modes), the day plan's hours, free time and block checks
-                              (dayplan) and the meeting brief's meeting, guests, searches and checks (prep);
+                              (dayplan), the meeting brief's meeting, guests, searches and checks (prep) and
+                              the offers' rules: when one is due and when its sentence may be said (offers);
                               ask/assets: the planner's, the day plan's (plan_prompt.md, plan_schema.json), the
                               meeting brief's (prep_prompt.md, prep_schema.json) and the research's instructions,
                               answer formats and settings

@@ -175,8 +175,9 @@ from .agenda import (
     extract_deadlines,
     merge_deadlines,
 )
-from .ask.dayplan import hours_text
-from .ask.modes import MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_CHOICE, ModeInputs, ModeRequest, block_line, todo_facts
+from .ask.dayplan import PART_DAY, hours_text
+from .ask.modes import (MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_CHOICE, ORIGIN_OFFER, ModeInputs, ModeRequest,
+                        block_line, todo_facts)
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import DEFAULT_ACCOUNT, AgendaConfig, Config
@@ -268,9 +269,13 @@ from .notion_client import (
     poll_for_briefing,
 )
 from .persona import (
+    DONE_PREP_TOOLTIP,
     OUTCOME_ERROR,
     OUTCOME_GOOD,
     OUTCOME_WARN,
+    PLAN_OFFER_LINK,
+    PLAN_OFFER_WORDS,
+    PREP_OFFER_LINK,
     SPOKEN_REFUSALS,
     Greeting,
     announcement,
@@ -278,6 +283,7 @@ from .persona import (
     ask_failure_speech,
     ask_reply_note_speech,
     ask_reply_speech,
+    brief_ready_text,
     compose_opening,
     memory_forgotten_speech,
     memory_forgotten_text,
@@ -295,13 +301,20 @@ from .persona import (
     plan_answer_text,
     plan_no_run_speech,
     plan_no_run_words,
+    plan_offer_expired_text,
+    plan_offer_planned_text,
+    plan_offer_text,
     plan_question_speech,
     plan_result_speech,
     prep_choice_text,
     prep_choices_text,
     prep_no_run_speech,
+    prep_no_run_text,
     prep_no_run_words,
+    prep_offer_ended_text,
+    prep_offer_text,
     prep_result_speech,
+    prod_hint_text,
     quoted_note,
     research_reply_speech,
     salutation,
@@ -314,7 +327,8 @@ from .recipients import NEW as RECIPIENT_NEW_KIND
 from .recipients import OWN as RECIPIENT_OWN_KIND
 from .recipients import classify
 from .runstate import ANSWER_MAX_AGE, RunState, briefing_key, handled_slot_key, slot_for
-from .speech import KIND_ACK, KIND_ANNOUNCE, KIND_GREETING, KIND_REPLY, KIND_RESULT, SayWorker, SilentVoice, Voice
+from .speech import (KIND_ACK, KIND_ANNOUNCE, KIND_GREETING, KIND_NOTICE, KIND_REPLY, KIND_RESULT, SayWorker,
+                     SilentVoice, Voice)
 from .text_prep import ACTIONS_KEY, build_script, describe_updated, format_time, updated_label
 from .tts import SAPI, SpeechSynthesizer, TtsWorker
 
@@ -1509,6 +1523,14 @@ class ReadingView(QWidget):
     def ask_available(self) -> bool:
         return not self._command_holder.isHidden()
 
+    def set_done_tooltip(self, text: str) -> None:
+        """The Done button's tooltip (the productivity bundle: while a meeting with guests remains
+        today, Done says that prep offers stop; R34). "" restores the default (none)."""
+        self.done_button.setToolTip(text or DONE_TOOLTIP)
+
+    def done_tooltip(self) -> str:
+        return self.done_button.toolTip()
+
     def set_sections(self, rows: Sequence[hud.SectionRowInfo], meta: str, current: int | None = None) -> None:
         """Section rows; the list scrolls to ``current`` when it changes (not on every update)."""
         rows = tuple(rows)
@@ -2406,6 +2428,11 @@ _MODE_TITLES = MODE_TITLES
 PLAN_BLOCK_PASSED_NOTE = "This block's time has passed - plan again"
 PREP_CHOICE_LINK = "prep-choice:"       # + an opaque counter: Prep this one (a meeting to brief)
 PREP_THIS_ONE_TEXT = "Prep this one"
+# Offers (the productivity bundle): "Plan my day" / "Prepare brief" links (an opaque counter), the Done
+# button's tooltip while a meeting with guests remains today (R34; DONE_TOOLTIP is the default: none).
+OFFER_LINK = "offer:"
+DONE_TOOLTIP = ""
+PROD_INLINE = False                    # tests and harnesses: the bundle's reads run on the GUI thread
 PLANNED_NOTE = "Planned {hours} {day} (day plan)"   # on a Todo card a created plan block serves (R28)
 _PLAN_FOCUS_GUARD_S = 1.0              # a key press this soon after Jarvis moved the focus never approves (R1)
 ALREADY_LISTED_TEXT = ALREADY_LISTED   # an Ask card the briefing also proposes (information only)
@@ -3409,6 +3436,7 @@ class AppController(QObject):
         self._init_memory_state()
         self.ask: Any = self._create_ask(ask_factory)   # ask_ui.AskController, or None while [ask] is off
         self._create_memory()                           # the productivity bundle's memory (needs Ask)
+        self.productivity: Any = self._create_productivity()   # the bundle's day read and offers (needs Ask)
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
         self.voice: Voice = voice_factory(self) if voice_factory is not None else SilentVoice()
@@ -5834,6 +5862,7 @@ class AppController(QObject):
         card_id = self._connect_card
         self._connect_alias, self._connect_card = None, ""
         self._refresh_ask()   # a sign-in may have allowed (or not) reading this account's mail
+        self._prod_call("on_signed_in", alias)   # the offers' day read may read that calendar now
         if stage == _CONNECT_KEPT:
             self._connect_mail = False
             self._account_kept(alias, message, card_id)
@@ -6293,6 +6322,7 @@ class AppController(QObject):
             self._snapshots_call("cancel_task", task_id)
 
     def _on_ask_cancelled(self, _seq: int) -> None:
+        self._offer_running = 0
         if self._ask_task_id:
             self._snapshots_call("cancel_task", self._ask_task_id)   # its queued and running pictures stop
         if self.state == STATE_QUITTING:
@@ -6387,11 +6417,14 @@ class AppController(QObject):
             return
         self._remember_ask_read(outcome)
         if getattr(outcome, "mode", "") == MODE_PLAN:
+            self._offer_running = 0
             self._on_plan_outcome(outcome)
             return
         if getattr(outcome, "mode", "") == MODE_PREP:
             self._on_prep_outcome(outcome)
+            self._offer_outcome(outcome)
             return
+        self._offer_running = 0
         self._converse_ask(outcome)
         if outcome.ok and getattr(outcome, "suggestion", ""):
             self._offer_memory_suggestion(outcome.suggestion)
@@ -6458,6 +6491,7 @@ class AppController(QObject):
             self._take_ask_cards(list(outcome.cards), replace_mode=MODE_PLAN if valid else "",
                                  window=outcome.window if valid else None)
             if valid:
+                self._record_planned(outcome)   # the plan offer of that day retires (3.2 step 9, R29)
                 message = f"Plan: {_plural(valid, 'block')} proposed"
             else:
                 message = "Plan: a question back" if outcome.question else "Plan: no block proposed"
@@ -6708,6 +6742,297 @@ class AppController(QObject):
             from .ask.planner import DISABLED_MESSAGE
 
             self._flash_note(DISABLED_MESSAGE)
+
+    # ---- offers (the productivity bundle) ----------------------------------------------------------
+
+    def _create_productivity(self) -> Any:
+        """Jarvis's own day read and his offers (productivity_ui.ProductivityController): only while
+        the bundle is on and Ask exists; None otherwise (nothing is read, offered or timed). An offer
+        never acts: its link starts the plan or the brief, as a click-started run."""
+        self._offer_running = 0            # the offer whose click started the running plan or brief
+        self._offer_entries: dict[int, int] = {}   # offer id -> its JARVIS entry (memory only)
+        self._prod_hint_checked = False    # assistant.json's prod_hint_shown was looked at (R34)
+        productivity = getattr(self.config, "productivity", None)
+        if self.ask is None or not getattr(productivity, "enabled", False):
+            return None
+        from .prepseries import SERIES_FILE, SeriesStore
+        from .productivity_ui import ProductivityController
+
+        sources = getattr(getattr(self.ask, "planner", None), "sources", None)
+        if sources is None:
+            from .ask.planner import GoogleSources
+
+            sources = GoogleSources(self.config, self._calendars, self._senders)
+        try:
+            series: Any = SeriesStore(self.config.data_dir / SERIES_FILE)
+        except Exception as exc:  # noqa: BLE001 - offers come without the ignored-series counts
+            logger.warning("Could not read the ignored meeting series (%s)", type(exc).__name__)
+            series = None
+        try:
+            controller = ProductivityController(
+                self.config, sources=sources, live=self.live, now=self._now, activity=self._prod_activity,
+                facts=self._prod_facts, ask_state=self._prod_ask_state, inputs=self._mode_inputs,
+                series=series, refresh_caps=self._prod_refresh_caps,
+                signing_in=self._signing_in, run_state=self.run_state, caps=lambda: getattr(self.ask, "caps", None),
+                parent=self, inline=PROD_INLINE)
+        except Exception as exc:  # noqa: BLE001 - the app works without the offers
+            logger.warning("Could not set up the productivity offers (%s)", type(exc).__name__)
+            return None
+        controller.offerPosted.connect(self._on_offer_posted)
+        controller.offerSpeak.connect(self._on_offer_speak)
+        controller.offerRetired.connect(self._on_offer_retired)
+        controller.offerChanged.connect(self._on_offer_changed)
+        controller.offerUnsaid.connect(self._on_offer_unsaid)
+        controller.dayChanged.connect(self._update_done_tooltip)
+        controller.ticked.connect(self._on_prod_ticked)
+        self.window.visibilityChanged.connect(self._prod_sync)
+        return controller
+
+    def _prod_call(self, name: str, *args: Any) -> None:
+        """One hook on the bundle's controller (when there is one); it never stops the app."""
+        controller = getattr(self, "productivity", None)
+        if controller is None or self.state == STATE_QUITTING:
+            return
+        try:
+            getattr(controller, name)(*args)
+        except Exception as exc:  # noqa: BLE001 - the offers are optional
+            logger.warning("Productivity: a %s hook failed (%s)", name, type(exc).__name__)
+
+    def _prod_sync(self) -> None:
+        """The bundle's timer follows the reading screen: visible, minimized or off (spec 15). When the
+        reading screen goes away (hidden WAITING, the prompt) or is minimized, an offer's sentence still
+        queued that may not be said there is taken back (offerUnsaid, 4.1 / 4.2); it is held and may be
+        said once the screen is back, in its window."""
+        controller = getattr(self, "productivity", None)
+        if controller is None:
+            return
+        self._prod_call("sync")
+        self._update_done_tooltip()
+
+    def _prod_activity(self) -> str:
+        """"visible": the reading screen is up and in sight; "minimized": the reading screen minimized;
+        "off": anything else (hidden WAITING, the prompt, quitting)."""
+        window = self.window
+        if self.state != STATE_READING or self._shut_down or not window.isVisible():
+            return "off"
+        if window.isMinimized():
+            return "minimized"
+        return "visible" if window.is_reading_view() else "off"
+
+    def _prod_facts(self) -> Any:
+        """What the offers' quiet rules need at a tick (memory only; the lock is polled, R18)."""
+        from .ask.offers import QuietFacts
+
+        assistant = self.config.assistant
+        try:
+            muted = bool(self.voice.muted)
+            speaking = bool(self.voice.speaking)
+        except Exception:  # noqa: BLE001 - unknown: as if muted
+            muted, speaking = True, False
+        playing = self.state == STATE_READING and self.player.state in (PLAYING, WAITING)
+        busy = bool(self.ask is not None and self.ask.busy) or speaking or bool(self._utterance)
+        return QuietFacts(activity=self._prod_activity(), locked=self._locked_now(),
+                          speak_ok=bool(assistant.speak and assistant.speak_replies) and not muted, playing=playing,
+                          countdown=self._countdown is not None or bool(self._jobs), busy=busy)
+
+    def _prod_ask_state(self) -> tuple[bool, bool, float]:
+        """(Claude Code ready, the cached caps allow a bundle run, the caps' age in seconds): memory
+        only, never a file or a request (R13)."""
+        from .ask.offers import caps_ok
+
+        ask = self.ask
+        if ask is None:
+            return False, False, math.inf
+        ready = bool(getattr(getattr(ask, "ready", None), "ok", False))
+        return ready, caps_ok(getattr(ask, "caps", None), self._prod_reserve()), float(ask.caps_age())
+
+    def _prod_reserve(self) -> int:
+        """[productivity] reserve_ask_runs as a bundle run keeps it (usage.reserve_kept: never so many
+        that [ask] max_per_hour has no room for the run itself), so an offer is posted exactly when
+        its click could run (pure arithmetic; no file)."""
+        reserve = int(getattr(self.config.productivity, "reserve_ask_runs", 3))
+        usage = getattr(getattr(self.ask, "planner", None), "usage", None)
+        kept = getattr(usage, "reserve_kept", None)
+        if callable(kept):
+            try:
+                return int(kept(reserve))
+            except Exception:  # noqa: BLE001 - the config's own limit below
+                pass
+        return max(0, min(reserve, int(self.config.ask.max_per_hour) - 1))
+
+    def _prod_refresh_caps(self) -> None:
+        """An old cached CapCheck is asked for again on the ask thread (no model request)."""
+        if self.ask is not None:
+            self.ask.refresh(full=False)
+
+    def _offer_wall(self, moment: datetime | None) -> datetime:
+        """``moment`` (now when None) as a wall time in the zone of the bundle's last day read."""
+        moment = moment or self._now()
+        zone = self.productivity.day_zone() if self.productivity is not None else ""
+        return wall_in_zone(moment, zone) if zone else moment.replace(tzinfo=None)
+
+    def _offer_entry_text(self, offer: Any) -> str:
+        address = self.config.assistant.address
+        if offer.kind != "prep" or offer.start is None:
+            return plan_offer_text(address)
+        minutes = max(0, int(round((offer.start - offer.posted_at).total_seconds() / 60)))
+        return prep_offer_text(offer.event_title, self._offer_wall(offer.start), offer.alias, minutes, offer.guests,
+                               address, hour24=self.config.display.hour24)
+
+    def _on_offer_posted(self, offer: Any) -> None:
+        """An offer: one JARVIS entry with its one link and its cost (never raised, restored or
+        focused); a minimized prep offer flashes the taskbar button. Nothing is read or run."""
+        if self.state == STATE_QUITTING:
+            return
+        self._show_prod_hint()   # the one-time hint first, so the offer is the newest entry
+        link_text = PREP_OFFER_LINK if offer.kind == "prep" else PLAN_OFFER_LINK
+        entry = self._jarvis(self._offer_entry_text(offer), tone=hud.TONE_IDLE, sub=offer.sub,
+                             link=(link_text, f"{OFFER_LINK}{offer.id}"))
+        self._prod_call("set_entry", offer.id, entry)
+        self._offer_entries[offer.id] = entry
+        while len(self._offer_entries) > 64:   # memory only: the oldest go
+            self._offer_entries.pop(next(iter(self._offer_entries)))
+        if offer.group and offer.id != offer.group[0] and offer.group[0] in self._offer_entries:
+            # Back-to-back meetings offered together: read from the first one (R51).
+            self.window.reading.conversation.follow_from(self._offer_entries[offer.group[0]])
+        if offer.flash:
+            try:
+                QApplication.alert(self.window, 0)   # the taskbar button flashes; the window stays where it is
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("No taskbar flash (%s)", type(exc).__name__)
+
+    def _on_offer_speak(self, offer: Any) -> None:
+        """The offer's one sentence (times and counts only; KIND_NOTICE, key offer:<id>). It counts as
+        spoken only when the voice starts it (_on_voice_speaking, R26)."""
+        if not self._say(KIND_NOTICE, offer.speech, key=f"{OFFER_LINK}{offer.id}"):
+            self._prod_call("speech_failed", offer.id)
+
+    def _on_offer_retired(self, offer: Any, how: str) -> None:
+        """The offer's entry loses its link: expired, planned, ended, or its brief is below (R50)."""
+        self._voice_call("cancel_key", f"{OFFER_LINK}{offer.id}")
+        if self.state == STATE_QUITTING or not offer.entry_id:
+            return
+        hour24 = self.config.display.hour24
+        if how == "planned":
+            text = plan_offer_planned_text(self._offer_wall(None), hour24)
+        elif how == "expired":
+            text = plan_offer_expired_text(self._offer_wall(offer.posted_at), hour24)
+        elif how == "used":
+            text = brief_ready_text(self._offer_wall(offer.read_at), hour24)
+        else:
+            text = prep_offer_ended_text(offer.event_title, self._offer_wall(offer.start), hour24)
+        conversation = self.window.reading.conversation
+        if how in ("planned", "used"):   # the owner just acted: the conversation follows as for any answer
+            conversation.update(offer.entry_id, text=text, sub="", link_text="", link_id="")
+            return
+        entry = conversation.entry(offer.entry_id)   # a timer's change: an owner reading above stays there
+        if entry is not None:
+            entry.set_content(text=text, sub="", link_text="", link_id="")
+
+    def _on_offer_unsaid(self, offer: Any) -> None:
+        """The offer's queued sentence is taken from the voice before it started: the reading screen
+        went away, the window was minimized or the session locked (it is held), or a later read found
+        its meeting moved or cancelled (text only)."""
+        self._voice_call("cancel_key", f"{OFFER_LINK}{offer.id}")
+
+    def _on_offer_changed(self, offer: Any) -> None:
+        """The offer's sub line, re-validated on a tick (R49); the view stays where the owner is."""
+        if offer.entry_id and self.state != STATE_QUITTING:
+            entry = self.window.reading.conversation.entry(offer.entry_id)
+            if entry is not None:
+                entry.set_content(sub=offer.sub)
+
+    def _offer_link(self, number_text: str) -> None:
+        """"Plan my day" / "Prepare brief": the plan or the brief as a click-started run (the bar's
+        text stays, R23). Everything is checked again inside the run before anything is read. A gone
+        link does nothing; one that expired since the last tick says so at once (its entry changes;
+        a prep offer's meeting that ended: "That meeting has ended, sir."), with no read; a click
+        while busy is refused and the link stays (4.1)."""
+        try:
+            number = int(number_text)
+        except ValueError:
+            return
+        controller = self.productivity
+        if controller is None or self.ask is None or self.state == STATE_QUITTING:
+            logger.info("Offer link: gone")
+            return
+        offer, state = controller.link(number)
+        if state == "ended":
+            text = prep_no_run_text("ended", self.config.assistant.address)
+            self._jarvis(text, tone=hud.TONE_WARN, sub="nothing was read")
+            self._prep_say(text)
+            return
+        if offer is None or state:
+            return
+        if offer.kind == "prep" and offer.event is not None and offer.start is not None:
+            when = format_time(self._offer_wall(offer.start), hour24=self.config.display.hour24)
+            words = f"{PREP_OFFER_LINK}: {offer.event_title or '(No title)'} at {when} ({offer.alias})"
+            request = ModeRequest(MODE_PREP, ORIGIN_OFFER, event=offer.event, offer_id=offer.id)
+        else:
+            words = PLAN_OFFER_WORDS
+            request = ModeRequest(MODE_PLAN, ORIGIN_OFFER, part=PART_DAY, offer_id=offer.id)
+        if not self.ask.submit_mode(request, words):
+            logger.info("Offer link: busy")
+            return
+        controller.use_offer(offer.id)
+        self._voice_call("cancel_key", f"{OFFER_LINK}{offer.id}")
+        self._offer_running = offer.id
+
+    def _record_planned(self, outcome: Any) -> None:
+        """A plan with at least one valid block: its day's AM slot counts as planned (today's, or
+        tomorrow's for an evening "plan tomorrow", R29); an open plan offer for it is retired."""
+        day = getattr(outcome, "plan_for", None)
+        if day is None:
+            return
+        key = f"{day:%Y-%m-%d} AM"
+        if self.productivity is not None:
+            self._prod_call("planned", key)
+        elif self.run_state is not None:
+            self.run_state.record_planned(key)
+
+    def _offer_outcome(self, outcome: Any) -> None:
+        """A plan or brief ended: a brief started from a prep offer turns that offer's entry into
+        "Brief ready below" (R50); any brief starts its recurring series' count afresh (R38)."""
+        offer_id, self._offer_running = self._offer_running, 0
+        brief = getattr(outcome, "brief", None) if outcome.ok else None
+        if brief is None:
+            return
+        self._prod_call("on_brief", brief)
+        if offer_id:
+            self._prod_call("brief_ready", offer_id, self._now())
+
+    def _update_done_tooltip(self) -> None:
+        """Done says prep offers stop while a meeting with other guests remains today (R34)."""
+        controller = getattr(self, "productivity", None)
+        settings = getattr(self.config, "productivity", None)
+        text = ""
+        if controller is not None and getattr(settings, "prep_offers", False) and self.state == STATE_READING:
+            try:
+                if controller.guest_meeting_left_today(self._now()):
+                    text = DONE_PREP_TOOLTIP
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Done tooltip unchanged (%s)", type(exc).__name__)
+        self.window.reading.set_done_tooltip(text)
+
+    def _on_prod_ticked(self) -> None:
+        self._update_done_tooltip()
+        self._show_prod_hint()
+
+    def _show_prod_hint(self) -> None:
+        """Once (assistant.json prod_hint_shown): offers and follow-ups work while Jarvis is open or
+        minimized, so minimize instead of Done (R34; never spoken)."""
+        if self._prod_hint_checked or self._prod_activity() != "visible":
+            return
+        settings = getattr(self.config, "productivity", None)
+        if not (getattr(settings, "prep_offers", False) or getattr(settings, "followups", False)):
+            return
+        self._prod_hint_checked = True
+        prefs = self._prefs_store()
+        if prefs.prod_hint_shown:
+            return
+        self._jarvis(prod_hint_text(self.config.assistant.address), tone=hud.TONE_IDLE)
+        prefs.set_prod_hint_shown()
+        logger.info("Productivity: the Done hint was shown")
 
     # ---- Memory (the productivity bundle) -------------------------------------------------------
 
@@ -7279,11 +7604,14 @@ class AppController(QObject):
         once (his queue goes) and never resumes the briefing on his own; the owner's action wins."""
         self._voice_call("owner_acted")
         self._voice_call("stop")
+        self._prod_call("on_speech_dropped")   # a queued offer sentence that never started is held again
 
     def _on_voice_speaking(self, text: str) -> None:
         """Jarvis started saying ``text`` (the orb says SPEAKING and the speech line shows his words)
         or finished (""; the briefing's own state and line come back)."""
         self._utterance = text or ""
+        if text:
+            self._prod_call("on_speaking", text)   # an offer's sentence counts as spoken from now (R26)
         if self.state != STATE_READING:
             return
         self.window.reading.set_speech(self._utterance or self._briefing_speech)
@@ -7300,6 +7628,8 @@ class AppController(QObject):
         """The header's speaker button (or Ctrl+M): Jarvis's own voice off or on (remembered in
         assistant.json); the briefing still plays when you press Play."""
         self._voice_call("set_muted", bool(muted))
+        if muted:
+            self._prod_call("on_muted")   # an offer not said yet stays text only: unmuting never says it (R37)
         self._sync_speaker()
 
     def _sync_speaker(self) -> None:
@@ -7380,6 +7710,8 @@ class AppController(QObject):
             self.window.reading.set_tab(hud.TAB_MEMORY)
         elif link_id.startswith(PREP_CHOICE_LINK):
             self._prep_choice_link(link_id[len(PREP_CHOICE_LINK):])
+        elif link_id.startswith(OFFER_LINK):
+            self._offer_link(link_id[len(OFFER_LINK):])
 
     # ---- the LIVE view -----------------------------------------------------------------------
 
@@ -7682,6 +8014,7 @@ class AppController(QObject):
             self._memory_refresh()   # MEMORY shows what memory.json holds now
         self._sync_live_dot()
         self._mark_viewed_if_seen()
+        self._prod_call("on_tab_changed", index)
 
     def _on_window_active(self, active: bool) -> None:
         if active:
@@ -7721,6 +8054,7 @@ class AppController(QObject):
             self._held_timer.stop()
         self._announce_when_shown = False
         self._sync_new_indicators()
+        self._prod_call("on_viewed", key)
 
     def _sync_new_indicators(self) -> None:
         """NEW everywhere or nowhere: the BRIEFING tab's badge, the speech line while idle, STATUS
@@ -7872,6 +8206,7 @@ class AppController(QObject):
         if self.run_state is not None:
             self.run_state.record_announced(key, how)
         logger.info("Announced the %s briefing (%s)", key, how)
+        self._prod_call("on_announced", key)   # the AM one may bring the plan offer (4.3)
 
     def _on_held_timer(self) -> None:
         """An announcement held while the session was locked: said after the unlock, if the
@@ -8357,6 +8692,7 @@ class AppController(QObject):
         self._render_agenda()
         self._request_agenda()
         self._sync_agenda_timer()
+        self._prod_sync()
         self._restore_live_window()
         if self.startup_error:
             self._show_reading_error(self.startup_error, can_retry=False)
@@ -8721,6 +9057,10 @@ class AppController(QObject):
 
     def _on_player_state(self, state: str) -> None:
         self._pump_voice()
+        if state == PLAYING and self.state == STATE_READING:
+            self._prod_call("on_playback_started", self._shown_key() or "")
+        elif state == FINISHED and self.state == STATE_READING:
+            self._prod_call("on_playback_finished", self._shown_key() or "")
         if state == FINISHED and self.state == STATE_READING and self._last_section is not None:
             self._last_section = None
             self._activity(hud.TAG_DONE, "Finished the briefing",
@@ -9054,6 +9394,7 @@ class AppController(QObject):
         self.state = STATE_PROMPT
         self._switch_expected_run(run)
         self.show_prompt(take_focus=take_focus)
+        self._prod_sync()   # the offers stop here: no timer, no sentence over the prompt
 
     def quit(self) -> None:
         self.shutdown()
@@ -9089,6 +9430,8 @@ class AppController(QObject):
             _live_countdown_end(countdown, _live.STATUS_CANCELLED, "", "Jarvis closed - nothing was sent")
         if self.ask is not None:
             self.ask.shutdown()   # a running Ask is cancelled: nothing is proposed
+        if self.productivity is not None:
+            self.productivity.shutdown()   # its timer and the prod thread stop; nothing more is offered
         self._snapshots_call("shutdown")   # no page is opened any more; the hidden view goes
         self._close_live_window()
         if self._dialog is not None:
