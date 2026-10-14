@@ -260,6 +260,92 @@ def gmail_thread(thread_id: str, messages: Sequence[dict[str, Any]]) -> dict[str
     return {"id": thread_id, "messages": [dict(message, threadId=thread_id) for message in messages]}
 
 
+def gmail_meta_message(gmail_id: str, *, sender: str, to: str, subject: str, at: datetime, labels: Sequence[str] = (
+        "INBOX",), cc: str = "", reply_to: str = "", headers: Mapping[str, str] | None = None,
+                       msgid: str = "") -> dict[str, Any]:
+    """One message as users.threads.get(format="metadata") answers it: ids, labels, date and the
+    named headers only (no body, no snippet). ``headers``: List-Id, Auto-Submitted, Precedence ..."""
+    items = [("From", sender), ("To", to), ("Subject", subject)]
+    if cc:
+        items.append(("Cc", cc))
+    if reply_to:
+        items.append(("Reply-To", reply_to))
+    if msgid:
+        items.append(("Message-ID", msgid))
+    items += list((headers or {}).items())
+    return {"id": gmail_id, "labelIds": list(labels), "internalDate": str(int(at.timestamp() * 1000)),
+            "payload": {"headers": [{"name": name, "value": value} for name, value in items]}}
+
+
+def gmail_meta_thread(thread_id: str, messages: Sequence[dict[str, Any]], history: str = "") -> dict[str, Any]:
+    """A users.threads.get(format="metadata") answer; ``history`` defaults to the newest message's date."""
+    newest = max((int(message.get("internalDate") or 0) for message in messages), default=0)
+    return {"id": thread_id, "historyId": history or str(newest // 1000), "messages": list(messages)}
+
+
+class FakeScanReader(FakeReader):
+    """FakeReader with the follow-up scan's methods (gmail.GmailReader's): ``meta`` maps thread id ->
+    metadata JSON (listed under a label when one of its messages has it; newest first), ``confirmed`` the
+    confirmed bound address ("" = not scanned, ``problem_word`` says why), ``own`` the send-as addresses,
+    ``errors`` thread id (or "list:<label>", or "own" for the own-address read) -> an exception raised
+    once. Every request is recorded."""
+
+    def __init__(self, alias: str, threads: Mapping[str, dict] | None = None, *, meta: Mapping[str, dict] | None = None,
+                 confirmed: str = "me@example.edu", problem_word: str = "", own: Sequence[str] = (),
+                 identity: str = "100000000000000000001|me@example.edu", errors: Mapping[str, Exception] | None = None,
+                 problem: tuple[str, str] = ("", "")) -> None:
+        super().__init__(alias, threads, problem=problem)
+        self.meta = dict(meta or {})
+        self.confirmed = confirmed
+        self.problem_word = problem_word
+        self.own = tuple(own)
+        self.identity = identity
+        self.errors = dict(errors or {})
+        self.lists: list[tuple[str, int, int]] = []
+        self.gets: list[str] = []
+        self.own_calls = 0
+        self.log_name = f"Gmail reading ({alias})"
+
+    def scan_ids(self, *, label: str, days: int, max_threads: int) -> list[tuple[str, str]]:
+        self.lists.append((label, days, max_threads))
+        error = self.errors.pop(f"list:{label}", None)
+        if error is not None:
+            raise error
+        found = []
+        for thread_id, data in self.meta.items():
+            messages = data.get("messages") or []
+            if any(label in (message.get("labelIds") or []) for message in messages):
+                newest = max(int(message.get("internalDate") or 0) for message in messages)
+                found.append((newest, thread_id, str(data.get("historyId", ""))))
+        found.sort(reverse=True)
+        return [(thread_id, history) for _newest, thread_id, history in found[:max_threads]]
+
+    def thread_metadata(self, thread_id: str) -> dict:
+        self.gets.append(thread_id)
+        error = self.errors.pop(thread_id, None)
+        if error is not None:
+            raise error
+        if thread_id not in self.meta:
+            raise MailReadError("Gmail has no such thread", status=404)
+        return self.meta[thread_id]
+
+    def own_addresses(self) -> tuple[str, ...]:
+        self.own_calls += 1
+        error = self.errors.pop("own", None)
+        if error is not None:
+            raise error
+        return self.own
+
+    def confirmed_address(self) -> str:
+        return self.confirmed
+
+    def scan_problem(self) -> str:
+        return self.problem_word if not self.confirmed else ""
+
+    def identity_key(self) -> str:
+        return self.identity
+
+
 Clock = Callable[[], datetime]
 
 

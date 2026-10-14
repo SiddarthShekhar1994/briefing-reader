@@ -23,6 +23,8 @@
         memoryRequested(object, str) a typed memory shortcut (ask.routes: "remember that ...", "forget
                                      that ...", "what do you remember?") and the words as typed: the app
                                      handles it at once - no planner run, no caps, no askStarted
+        followupsRequested(str)      a typed "any follow-ups?" (ask.routes FOLLOWUPS) and the words as
+                                     typed: the app answers from its follow-up list at once (no run)
 
 The planner only proposes: its cards reach the app through ``outcomeReady`` and then go through the
 same click, undo countdown and executor.run_action path as the briefing's. ``live`` (the app's
@@ -47,7 +49,9 @@ mode's own kind (live.TASK_PLAN) whose first step is "Your request" (live.MODE_R
 outcome comes through ``outcomeReady`` like an Ask's (AskOutcome.mode set). Only a run typed into
 the bar ever clears the bar's text (R23): a click-started run leaves what the owner was typing.
 A prep route ("prep me for my 2 PM") is a planner mode run the same way (live.TASK_PREP): its words
-only pick the meeting (ModeRequest.target) and never reach Claude.
+only pick the meeting (ModeRequest.target) and never reach Claude. A follow-up draft (live.TASK_NUDGE)
+is only ever click-started (a FOLLOW-UPS row, a brief's "Draft a nudge", "Tell Jarvis what to say"):
+submit_mode with ModeRequest(MODE_NUDGE, ...), so it never clears the bar.
 
 Web research: a request that starts with "web:" (or "research:") is a WEB task (live.TASK_WEB;
 ``running_kind``) whose "Your request" says nothing is read from the accounts; the command still
@@ -78,11 +82,11 @@ from . import hud
 from .actions import is_web_open, link_host
 from .ask import planner as ask_planner
 from .ask.context import COMMAND_CAP
-from .ask.modes import (MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES, ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs,
-                        ModeRequest)
+from .ask.modes import (MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES, ORIGIN_CHOICE, ORIGIN_TYPED,
+                        ModeInputs, ModeRequest)
 from .ask.research import forced_question
 from .ask.research_validate import NO_ANSWER, cards_words, source_card_ids
-from .ask.routes import MEMORY_ROUTES, NO_ROUTE, ROUTE_PLAN, ROUTE_PREP, RouteFlags, route
+from .ask.routes import MEMORY_ROUTES, NO_ROUTE, ROUTE_FOLLOWUPS, ROUTE_PLAN, ROUTE_PREP, RouteFlags, route
 from .ask.stream import CANCELLED, LIMIT, RESEARCH_CAP
 from .config import Config
 from .google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SIGNED_OUT, logged_alias
@@ -120,10 +124,12 @@ STAGE_TEXTS = {
     ask_planner.STAGE_RESEARCH: "Searching the web...",
     ask_planner.STAGE_DAY: "Reading your calendar...",
     ask_planner.STAGE_PREP_MAIL: "Reading your mail...",
+    ask_planner.STAGE_THREAD: "Reading the thread...",
 }
 _TIMED_STAGES = (ask_planner.STAGE_PLANNING, ask_planner.STAGE_PLANNING_AGAIN, ask_planner.STAGE_RESEARCH)
 # A planner mode's status while it runs (with the seconds; the meta line says Esc cancels).
-MODE_STATUS = {MODE_PLAN: "Planning your day...", MODE_PREP: "Preparing your brief..."}
+MODE_STATUS = {MODE_PLAN: "Planning your day...", MODE_PREP: "Preparing your brief...",
+               MODE_NUDGE: "Drafting a reply..."}
 # A click on an offer while a request runs: refused, nothing queued, the link stays (spec 4.1).
 CLICK_BUSY_TEXT = "Jarvis is busy with another request; click the offer again when it's done"
 CHOICE_BUSY_TEXT = "Jarvis is busy with another request; click Prep this one again when it's done"
@@ -309,6 +315,7 @@ class AskController(QObject):
     chipChanged = Signal(str, str)
     mailSignInRequested = Signal(str)
     memoryRequested = Signal(object, str)
+    followupsRequested = Signal(str)
 
     def __init__(self, config: Config, planner: Any, bar: hud.CommandBar, *,
                  context: Callable[[], tuple[Any, Sequence[str]]],
@@ -429,6 +436,10 @@ class AskController(QObject):
             if found.kind in MEMORY_ROUTES:
                 logger.info("Ask: a typed %s shortcut (no planner run)", found.kind)
                 self.memoryRequested.emit(found, text)
+                return
+            if found.kind == ROUTE_FOLLOWUPS:
+                logger.info("Ask: a typed %s shortcut (no planner run)", found.kind)
+                self.followupsRequested.emit(text)
                 return
         if found.kind == ROUTE_PLAN:
             logger.info("Ask: a typed %s shortcut", found.kind)
@@ -914,6 +925,8 @@ def _card_words(card: Any, hour24: bool = False) -> str:
         return " - ".join(["PLAN BLOCK", "personal", *ask_planner.card_details(card, hour24)])
     if getattr(card, "mode", "") == MODE_PREP:
         return " - ".join(["PREP REPLY", *ask_planner.card_details(card, hour24)])
+    if getattr(card, "mode", "") == MODE_NUDGE:
+        return " - ".join(["NUDGE REPLY", *ask_planner.card_details(card, hour24)])
     kind = {"rsvp": "RSVP"}.get(card.kind, card.kind.upper())
     return " - ".join([f"ASK {kind}", *ask_planner.card_details(card, hour24)])
 
@@ -1003,6 +1016,10 @@ def _finish_words(outcome: Any, *, cancelled: bool) -> tuple[str, str]:
         return STATUS_OK, words
     if outcome.ok and getattr(outcome, "mode", "") == MODE_PREP:
         return _prep_finish_words(outcome)
+    if outcome.ok and getattr(outcome, "mode", "") == MODE_NUDGE and getattr(outcome, "note_kind", ""):
+        from .persona import nudge_no_run_words
+
+        return STATUS_OK, f"no planner run ({nudge_no_run_words(outcome.note_kind)})"
     if outcome.ok and getattr(outcome, "note_kind", ""):
         from .persona import plan_no_run_words
 

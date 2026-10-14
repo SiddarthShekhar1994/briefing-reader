@@ -110,7 +110,12 @@ trusted_domains = []
 # about (read only: never used to send, and nothing it reads is saved or
 # logged; it is only used while [ask] is enabled, but the account's sign-in
 # asks Google for it whether Ask is on or off: remove "gmail_read" from both
-# accounts if you do not use Ask). Adding a feature means one
+# accounts if you do not use Ask). With [productivity] on, "gmail_read" also
+# covers the follow-up list's header scan (while Jarvis is on screen, every 30
+# minutes, sender / recipients / subject / date only, the last 14 days, never
+# the text), meeting prep reads (after your click: at most one thread per
+# guest, 3 in all, last 14 days) and nudge drafts (after your click: that one
+# thread). Adding a feature means one
 # new Google sign-in for that account, which asks for all of them; if you
 # untick reading email, the rest still works. If its administrator blocks the
 # sign-in (admin_policy_enforced), remove "gmail_read" first, then

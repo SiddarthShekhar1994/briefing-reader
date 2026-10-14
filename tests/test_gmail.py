@@ -15,6 +15,7 @@ import json
 import logging
 import socket
 import tempfile
+import threading
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -995,6 +996,183 @@ class MailViewTests(unittest.TestCase):
         for mail in (reply(to=()), reply(subject="=?utf-8?b?SGk=?="), reply(to=(ME,)), reply(body=" ")):
             with self.subTest(mail=mail.subject), self.assertRaises(MessageRefused):
                 gmail.mail_view(mail)
+
+
+# --------------------------------------------------------------------------
+# The follow-up list's header scan (B5): metadata only, fixed requests
+# --------------------------------------------------------------------------
+
+class FakeGmailScan(FakeGmailRead):
+    """threads().list / get plus getProfile and settings().sendAs().list (all read only)."""
+
+    def getProfile(self, **kwargs: Any) -> FakeReadRequest:  # noqa: N802 - the API's name
+        return FakeReadRequest(self, "getProfile", kwargs)
+
+    def settings(self) -> FakeGmailScan:
+        return self
+
+    def sendAs(self) -> FakeGmailScan:  # noqa: N802 - the API's name
+        return self
+
+    def list(self, **kwargs: Any) -> FakeReadRequest:
+        name = "sendAs.list" if "labelIds" not in kwargs and "q" not in kwargs else "threads.list"
+        return FakeReadRequest(self, name, kwargs)
+
+
+class ScanReaderTests(SenderTestCase):
+    def reader(self) -> gmail.GmailReader:
+        self.read_service = FakeGmailScan()
+        account = GoogleAccount("work", client_secret_path=self.secret_path, data_dir=self.data_dir,
+                                features=("calendar", "gmail_send", "gmail_read"), bindings=self.bindings,
+                                flow_factory=lambda path, scopes: self, refresh=lambda creds: None)
+        return gmail.GmailReader(account, service_factory=lambda creds: self.read_service)
+
+    def ready(self, *, confirmed: bool = True) -> gmail.GmailReader:
+        self.write_token(scopes=SCOPES + [READ_SCOPE], asked=SCOPES + [READ_SCOPE])
+        self.bind(confirmed=confirmed)
+        return self.reader()
+
+    def test_scan_ids_send_exactly_the_fixed_requests(self) -> None:
+        reader = self.ready()
+        self.read_service.outcomes = [
+            {"threads": [{"id": "18c0ffee00000001", "historyId": "901"}, {"id": "bad id!", "historyId": "1"},
+                         {"id": "18c0ffee00000002", "historyId": "x9"}], "nextPageToken": "page2"},
+            {"threads": [{"id": "18c0ffee00000003", "historyId": 903}, {"id": "18c0ffee00000001"}]},
+            {"threads": [{"id": "18c0ffee00000004", "historyId": "904"}]}]
+        with self.assertLogs(GMAIL_LOGGER, level="INFO") as logs:
+            sent = reader.scan_ids(label="SENT", days=14, max_threads=50)
+            inbox = reader.scan_ids(label="INBOX", days=30, max_threads=100)
+        self.assertEqual(sent, [("18c0ffee00000001", "901"), ("18c0ffee00000002", ""), ("18c0ffee00000003", "903")])
+        self.assertEqual(inbox, [("18c0ffee00000004", "904")])
+        (_n1, first, retries), (_n2, second, _r2), (_n3, third, _r3) = self.read_service.calls
+        self.assertEqual(first, {"userId": "me", "labelIds": ["SENT"], "q": "newer_than:14d", "maxResults": 50,
+                                 "includeSpamTrash": False, "fields": "threads(id,historyId),nextPageToken"})
+        self.assertEqual(retries, gmail.READ_RETRIES)
+        self.assertEqual((second["pageToken"], second["maxResults"]), ("page2", 48))
+        self.assertEqual(third["q"], "newer_than:14d -category:promotions -category:social -category:forums")
+        self.assertEqual(third["labelIds"], ["INBOX"])   # days clamped to 14
+        for _name, kwargs, _retries in self.read_service.calls:
+            self.assertNotIn("snippet", kwargs["fields"])
+        text = "\n".join(logs.output)
+        self.assertIn("Gmail reading (work): a scan listed 3 thread(s)", text)
+        self.assertNotIn("18c0ffee", text)
+        self.assertNotIn("newer_than", text)
+        with self.assertRaises(ValueError):
+            reader.scan_ids(label="SPAM", days=14, max_threads=10)
+
+    def test_paging_stops_at_the_cap_and_the_page_limit(self) -> None:
+        reader = self.ready()
+        page = {"threads": [{"id": f"18c0ffee{n:08d}", "historyId": str(n)} for n in range(100)],
+                "nextPageToken": "more"}
+        self.read_service.outcomes = [page, page, page]
+        with self.assertLogs(GMAIL_LOGGER, level="INFO"):
+            found = reader.scan_ids(label="INBOX", days=14, max_threads=300)
+        self.assertEqual(len(self.read_service.calls), gmail.SCAN_MAX_PAGES)
+        self.assertEqual(len(found), 100)   # the same ids twice: kept once
+        self.read_service.calls.clear()
+        self.read_service.outcomes = [page]
+        with self.assertLogs(GMAIL_LOGGER, level="INFO"):
+            self.assertEqual(len(reader.scan_ids(label="INBOX", days=14, max_threads=20)), 20)
+        self.assertEqual(len(self.read_service.calls), 1)
+
+    def test_thread_metadata_never_asks_for_a_body_or_a_snippet(self) -> None:
+        reader = self.ready()
+        self.read_service.outcomes = [{"id": "18c0ffee00000001", "historyId": "9", "messages": []}]
+        self.assertEqual(reader.thread_metadata("18c0ffee00000001")["historyId"], "9")
+        name, kwargs, _retries = self.read_service.calls[0]
+        self.assertEqual((name, kwargs["format"], kwargs["metadataHeaders"], kwargs["fields"]),
+                         ("threads.get", "metadata", list(gmail.SCAN_HEADERS),
+                          "id,historyId,messages(id,labelIds,internalDate,payload/headers)"))
+        for word in ("snippet", "sizeEstimate", "body", "parts", "raw"):
+            self.assertNotIn(word, kwargs["fields"])
+        with self.assertRaises(gmail.MailReadError):
+            reader.thread_metadata("not an id")
+        self.read_service.outcomes = [http_error(404, "Not Found", "notFound")]
+        with self.assertLogs(GMAIL_LOGGER, level="INFO"), self.assertRaises(gmail.MailReadError) as caught:
+            reader.thread_metadata("18c0ffee00000002")
+        self.assertEqual(caught.exception.status, 404)
+
+    def test_own_addresses_once_per_identity(self) -> None:
+        reader = self.ready()
+        self.read_service.outcomes = [{"emailAddress": "You@Example.edu"},
+                                      {"sendAs": [{"sendAsEmail": "you@example.edu"},
+                                                  {"sendAsEmail": "lab@example.org"},
+                                                  {"sendAsEmail": "not an address"}]}]
+        with self.assertLogs(GMAIL_LOGGER, level="INFO") as logs:
+            own = reader.own_addresses()
+        self.assertEqual(own, ("you@example.edu", "lab@example.org"))
+        (first, profile, _r1), (second, send_as, _r2) = self.read_service.calls
+        self.assertEqual((first, profile), ("getProfile", {"userId": "me", "fields": "emailAddress"}))
+        self.assertEqual((second, send_as), ("sendAs.list", {"userId": "me", "fields": "sendAs(sendAsEmail)"}))
+        self.assertEqual(reader.own_addresses(), own)   # cached for this identity: no second request
+        self.assertEqual(len(self.read_service.calls), 2)
+        text = "\n".join(logs.output)
+        self.assertIn("Gmail reading (work): 2 own address(es)", text)
+        self.assertNotIn("example", text)
+        other = self.ready()
+        self.read_service.outcomes = [http_error(500, "Backend Error")]
+        with self.assertLogs(GMAIL_LOGGER, level="INFO"):
+            self.assertEqual(other.own_addresses(), ())
+
+    def test_confirmed_address_scan_problem_and_identity(self) -> None:
+        unbound = self.reader()
+        self.assertEqual((unbound.confirmed_address(), unbound.scan_problem(), unbound.identity_key()),
+                         ("", gmail.SCAN_IDENTITY, ""))
+        reader = self.ready(confirmed=False)
+        self.assertEqual((reader.confirmed_address(), reader.scan_problem()), ("", gmail.SCAN_UNCONFIRMED))
+        self.assertTrue(self.bindings.confirm("work", ME))
+        self.assertEqual((reader.confirmed_address(), reader.scan_problem()), (ME, ""))
+        self.assertEqual(reader.identity_key(), f"{SUB}|{ME}")
+        self.write_token(scopes=SCOPES + [READ_SCOPE], sub="100000000000000000999")   # another Google account
+        self.assertEqual((reader.confirmed_address(), reader.scan_problem()), ("", gmail.SCAN_IDENTITY))
+        self.assertEqual(self.read_service.calls, [])   # files only
+
+    def test_is_rate_limited(self) -> None:
+        self.assertTrue(gmail.is_rate_limited(gmail.MailReadError("slow", status=429)))
+        self.assertTrue(gmail.is_rate_limited(gmail.MailReadError("slow", status=403)))
+        self.assertFalse(gmail.is_rate_limited(gmail.MailReadError("no", status=403, problem=PROBLEM_FAILED)))
+        self.assertFalse(gmail.is_rate_limited(gmail.MailReadError("no", status=401, problem=PROBLEM_EXPIRED)))
+        self.assertFalse(gmail.is_rate_limited(gmail.MailReadError("down", status=500)))
+        self.assertFalse(gmail.is_rate_limited(ValueError("x")))
+        reader = self.ready()
+        self.read_service.outcomes = [http_error(403, "Rate", "userRateLimitExceeded")]
+        with self.assertLogs(GMAIL_LOGGER, level="INFO"), self.assertRaises(gmail.MailReadError) as caught:
+            reader.scan_ids(label="INBOX", days=14, max_threads=10)
+        self.assertTrue(gmail.is_rate_limited(caught.exception))
+        self.assertEqual(reader.available(), ("", ""))   # a rate limit never turns reading off
+
+    def test_a_refused_own_address_read_stops_the_scan_until_the_next_sign_in(self) -> None:
+        from briefing_reader.config import ProductivityConfig
+        from briefing_reader.followups import PROBLEM_REFUSED, PROBLEM_STOPPED, MailScanner
+
+        reader = self.ready()
+        scanner = MailScanner(sleep=lambda _s: None)
+        settings = ProductivityConfig(enabled=True)
+
+        def scan(counter: int) -> Any:
+            return scanner.scan("work", reader, now=datetime.now(timezone.utc), settings=settings,
+                                known=lambda _a: False, hidden=lambda _k: False, cancel=threading.Event(),
+                                stop_key=f"{reader.identity_key()}|{counter}")
+
+        self.read_service.outcomes = [http_error(403, "Forbidden")]     # e.g. a Workspace admin's block
+        with self.assertLogs(level="INFO"):
+            first = scan(0)
+        self.assertEqual((first.report.problem, first.report.partial), (PROBLEM_REFUSED, True))
+        self.assertTrue(scanner.stopped("work"))
+        self.assertEqual([name for name, _kwargs, _r in self.read_service.calls], ["getProfile"])
+        for _refresh in range(2):
+            reader._account.generation += 1                               # a token refresh (hourly)
+            self.assertEqual(scan(0).report.problem, PROBLEM_STOPPED)
+        self.assertEqual(len(self.read_service.calls), 1)                # the refused read is never asked again
+        self.read_service.outcomes = [{"emailAddress": ME}, {"sendAs": []}, {"threads": []}, {"threads": []}]
+        with self.assertLogs(level="INFO"):
+            after = scan(1)                                               # a new sign-in for the account
+        self.assertEqual((after.report.problem, after.report.partial), ("", False))
+        self.assertFalse(scanner.stopped("work"))
+        other = self.ready()
+        self.read_service.outcomes = [http_error(403, "Rate", "userRateLimitExceeded")]
+        with self.assertLogs(GMAIL_LOGGER, level="INFO"):
+            self.assertEqual(other.own_addresses(), ())                   # a rate limit is not a refusal
 
 
 if __name__ == "__main__":

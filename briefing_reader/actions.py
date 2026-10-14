@@ -2589,6 +2589,19 @@ class ActionStore:
         entry = self.get(action_id)
         return entry is not None and entry["status"] in DECIDED_STATUSES
 
+    def reopen(self, action_id: str) -> bool:
+        """Forget a stored decision, only when it is "denied" (a follow-up draft the owner clicked
+        Draft again for, R15): True when it was removed. Any other status (sent, unknown, failed,
+        done, created, ...) is never reopened: False and nothing changes. The caller logs it."""
+        with self._lock:
+            entry = self._entries.get(action_id)
+            if entry is None or entry.get("status") != STATUS_DENIED:
+                return False
+            del self._entries[action_id]
+            if _write_entries(self.path, self._entries):
+                self._dirty = False
+        return True
+
     def prune(self, max_age_days: int = 60) -> None:
         """Forget decisions older than ``max_age_days`` (and ones without a readable time).
 

@@ -1,6 +1,6 @@
 """Typed shortcuts in the command bar that are not an Ask: "remember that ...", "forget that ...",
 "what do you remember?" (the productivity bundle's memory), "plan my day" (its day plan) and "prep
-me for my 2 PM" (its meeting prep; a later build adds follow-ups).
+me for my 2 PM" (its meeting prep) and "any follow-ups?" (its follow-up list).
 
     route(text, flags) -> Route     ROUTE_NONE (a normal Ask) or the shortcut and its words
 
@@ -21,6 +21,10 @@ meeting" / "brief me for the call" / "brief me on my 2 PM (meeting)": Route.payl
 words ("" for the next meeting). They only pick the meeting (ask.prep.resolve_meeting) and are never
 sent to Claude. "prepare the report" and "brief me on the news" stay Asks; a prep route never falls
 through to an Ask.
+
+FOLLOWUPS: "follow-ups", "my follow-ups", "show me my follow-ups", "any follow-ups?", "what's waiting
+on me?", "what am I waiting on / for?", "who owes me (a reply / an answer)?": the app answers from its
+follow-up list at once (no planner run, nothing read).
 
 Pure; nothing is logged (Route's repr names its kind only).
 """
@@ -76,6 +80,9 @@ _PREP_RE = _pattern(r"(?:prep|prepare)\s+me(?:\s+(?:for|on)\s+(?P<target>\S.*))?
                     r"|brief\s+me\s+(?:for|on)\s+(?P<target2>(?:my|the)\s+(?:next\s+)?(?:meeting|call)"
                     r"|my\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s+(?:meeting|call))?)"
                     r"|meeting\s+prep")
+_FOLLOWUPS_RE = _pattern(r"(?:show\s+(?:me\s+)?)?(?:my\s+)?follow[- ]?ups?\??|any\s+follow[- ]?ups\??"
+                         r"|what(?:'s|\s+is)\s+waiting\s+on\s+me\??|what\s+am\s+i\s+waiting\s+(?:on|for)\??"
+                         r"|who\s+owes\s+me(?:\s+(?:a\s+reply|an\s+answer))?\??")
 
 
 def _plan_part(what: str) -> str:
@@ -107,6 +114,8 @@ def route(text: str, flags: RouteFlags) -> Route:
         if match:
             target = (match.group("target") or match.group("target2") or "").strip()
             return Route(ROUTE_PREP, target.rstrip(".!?").strip())
+    if flags.followups and _FOLLOWUPS_RE.fullmatch(text):
+        return Route(ROUTE_FOLLOWUPS)
     return NO_ROUTE
 
 

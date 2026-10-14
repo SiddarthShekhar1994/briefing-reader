@@ -19,6 +19,10 @@
                                      their sizes), its free stretches and its command line; no run,
                                      nothing counted. Default "plan my day"; "plan tomorrow", "plan my
                                      afternoon, gym" ... as typed in the app
+    --followups-check                the follow-up list's header scan once, for real, on every account
+                                     with "gmail_read" (read only: headers of the last 14 days, never the
+                                     text); prints counts per account only - never a subject, a name, an
+                                     address or an id. No Claude request
 
 With the productivity bundle's memory on ([productivity] enabled and memory), --ask-text gives the
 planner the owner's notes like the app does, from memory.json opened read-only (the dry run shows
@@ -55,7 +59,8 @@ ACTIONS_FILE = "actions.json"   # as ui.ACTIONS_FILE (ui imports Qt; this module
 STAGE_WORDS = {"context": "Reading your calendar...", "planning": "Planning (uses your Claude plan)...",
                "mail": "Reading your mail...", "planning_again": "Planning with your mail (uses your Claude plan)...",
                "research": "Searching the web (uses your Claude plan)...",
-               "day": "Reading the day being planned...", "prep_mail": "Reading the meeting's guests' mail..."}
+               "day": "Reading the day being planned...", "prep_mail": "Reading the meeting's guests' mail...",
+               "thread": "Reading the thread..."}
 PLAN_DRY_RUN_DEFAULT = "plan my day"
 NOT_A_PLAN = 'Not a day plan request: try "plan my day", "plan tomorrow" or "plan my afternoon, gym and reading".'
 MEMORY_ROUTE_WORDS = {ROUTE_MEMORY_SAVE: "Notes are kept in the app (MEMORY tab); nothing was saved.",
@@ -375,8 +380,45 @@ def ask_once(text: str, config: Config, out: TextIO, *, briefing: BriefingContex
     return 0
 
 
+def followups_check(config: Config, out: TextIO, *, sources: Any = None, now: datetime | None = None) -> int:
+    """--followups-check: one real header scan of each account with "gmail_read" (followups.MailScanner;
+    metadata only, read only), printed as counts per account. Never a subject, a name, an address or
+    an id; nothing is saved but what the app keeps anyway (nothing: followups.json is only read)."""
+    import threading
+
+    from ..executor import recipient_history
+    from ..followups import FOLLOWUPS_FILE, HiddenStore, MailScanner, problem_words
+
+    if not config.ask.read_mail:
+        out.write("Reading mail is off ([ask] read_mail = false); nothing was scanned.\n")
+        return 0
+    sources = sources if sources is not None else google_sources(config)
+    readers = dict(getattr(sources, "readers", {}) or {})
+    if not readers:
+        out.write('No account has "gmail_read" in config.toml; nothing was scanned.\n')
+        return 0
+    settings = config.productivity
+    now = now or datetime.now().astimezone()
+    hidden = HiddenStore(config.data_dir / FOLLOWUPS_FILE)
+    history = recipient_history(config)
+    scanner = MailScanner()
+    out.write(f"Follow-up header scan (read only: headers of the last {settings.scan_days} days, never the text)\n")
+    for alias in sorted(readers):
+        result = scanner.scan(alias, readers[alias], now=now, settings=settings, known=history.knows,
+                              hidden=lambda key: hidden.hidden(key, now), cancel=threading.Event(), stop_key="cli")
+        report = result.report
+        if not report.scanned:
+            out.write(f"  {alias}: {problem_words(report.problem)}\n")
+            continue
+        skipped = ", ".join(f"{word.replace('_', ' ')} {count}" for word, count in sorted(report.skipped.items()))
+        out.write(f"  {alias}: listed {report.listed}, read {report.fetched} header set(s); {report.waiting} waiting "
+                  f"on you, {report.owed} owed to you; skipped: {skipped or 'none'}"
+                  + (f" ({problem_words(report.problem)})" if report.partial else "") + "\n")
+    return 0
+
+
 def run(args: Any, config: Config, out: TextIO | None) -> int:
-    """The __main__ entry for --ask-check / --ask-text [--ask-dry-run] / --plan-dry-run."""
+    """The __main__ entry for --ask-check / --ask-text [--ask-dry-run] / --plan-dry-run / --followups-check."""
     stream: Any = out if out is not None else _NullOut()
     reconfigure = getattr(stream, "reconfigure", None)
     if callable(reconfigure):
@@ -386,6 +428,8 @@ def run(args: Any, config: Config, out: TextIO | None) -> int:
             pass
     if args.ask_check:
         return ask_check(config, stream)
+    if getattr(args, "followups_check", False):
+        return followups_check(config, stream)
     plan_text = getattr(args, "plan_dry_run", None)
     if plan_text is not None:
         now = datetime.now().astimezone()

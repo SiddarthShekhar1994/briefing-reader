@@ -1331,5 +1331,213 @@ class ProdThreadOfferTests(ControllerCase):
         self.assertEqual({thread for *_rest, thread in self.sources.reads}, {"prod"})
 
 
+class FollowupControllerTests(ControllerCase):
+    """B5: the header scan only while the reading screen is visible, the first 20 s after it came up,
+    then every scan_every_minutes; R6 (its own-reads step), R8 (a failing scan job logs kind and type
+    only), R19 (a sign-in cancels a running scan; a refusal waits for the next sign-in); hide, unhide,
+    turn off; the counts and the participants index; one thread again (R47)."""
+
+    def scan_setup(self, *threads, **reader_kwargs):  # type: ignore[no-untyped-def]
+        from briefing_reader.followups import HiddenStore
+        from tests.ask_fakes import FakeScanReader, gmail_meta_message, gmail_meta_thread
+
+        c = self.make()
+        meta = {}
+        for number, (sender, to, labels, days) in enumerate(threads or (
+                ("Zq7 Ana <zq7ana@example.edu>", "me@example.edu", ("INBOX",), 3),
+                ("me@example.edu", "Ben Example <ben@example.org>", ("SENT",), 5))):
+            thread_id = f"thr000000{number}"
+            meta[thread_id] = gmail_meta_thread(thread_id, [gmail_meta_message(
+                f"msg000000{number}", sender=sender, to=to, subject="Zq7subj numbers", labels=labels,
+                at=self.clock.now() - timedelta(days=days))])
+        self.reader = FakeScanReader("work", meta=meta, confirmed="me@example.edu", **reader_kwargs)
+        self.sources.readers = {"work": self.reader}
+        c.config.ask.read_mail = True
+        self.prefs = SimpleNamespace(followups_off=False)
+        self.prefs.set_followups_off = lambda off: setattr(self.prefs, "followups_off", off)
+        c._prefs = self.prefs
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(folder.cleanup)
+        c._hidden = HiddenStore(Path(folder.name) / "followups.json", clock=self.clock.now)
+        self.views: list = []
+        c.followupsChanged.connect(self.views.append)
+        return c
+
+    def second(self, seconds: float) -> None:
+        self.clock.advance(seconds / 60)
+        self.c.tick()
+
+    def test_the_scan_waits_20_seconds_then_runs_every_interval_only_while_visible(self) -> None:
+        c = self.scan_setup()
+        c.sync()
+        self.assertEqual(self.reader.lists, [])                    # not at once
+        self.second(10)
+        self.assertEqual(self.reader.lists, [])
+        self.second(15)
+        self.assertEqual([label for label, _days, _cap in self.reader.lists], ["SENT", "INBOX"])
+        view = c.followups()
+        self.assertEqual((len(view.waiting), len(view.owed), view.scanning), (1, 1, False))
+        self.assertEqual(c.followup_counts(), (1, 1))
+        self.assertIn("zq7ana@example.edu", c.participants())
+        self.tick(29)
+        self.assertEqual(len(self.reader.lists), 2)
+        self.act = "minimized"
+        self.tick(5)
+        self.assertEqual(len(self.reader.lists), 2)                # never while minimized
+        self.act = "visible"
+        c.sync()
+        self.tick(1)
+        self.assertEqual(len(self.reader.lists), 4)                # back: due, after 20 s of the screen
+        steps = [step for step in self.own_steps() if step.kind == live.MAIL_SCAN]
+        self.assertTrue(steps and steps[-1].status == live.STATUS_OK)   # R6: its own-reads step
+        self.assertTrue(any(item.text.startswith("WAITING ON YOU") for item in steps[-1].items))
+
+    def test_a_failing_scan_job_logs_its_kind_and_type_only(self) -> None:
+        c = self.scan_setup()
+        self.reader.errors = {"thr0000000": ValueError("zq7subj Budget")}
+        with self.assertLogs(LOGGER, level="DEBUG") as logs:
+            self.assertTrue(c.request_scan("test"))
+        self.assertIn("ERROR:briefing_reader.productivity_ui:Productivity: scan job failed (ValueError)", logs.output)
+        self.assertEqual(self.failed, ["scan"])
+        for record in logs.records:
+            self.assertNotIn("zq7", record.getMessage())
+            self.assertIsNone(record.exc_info)
+        self.assertFalse(c.followups().scanning)
+        self.assertTrue(c.request_scan("again"))                   # the thread goes on
+
+    def test_a_sign_in_cancels_a_running_scan_and_a_refusal_waits_for_it(self) -> None:
+        from briefing_reader.gmail import MailReadError
+
+        c = self.scan_setup()
+        original = self.reader.thread_metadata
+
+        def read(thread_id: str) -> dict:
+            found = original(thread_id)
+            c.cancel_scan()                                        # a Google sign-in opened meanwhile
+            return found
+
+        self.reader.thread_metadata = read
+        c.request_scan("test")
+        report, = c.followups().reports
+        self.assertEqual((report.partial, report.problem, len(self.reader.gets)), (True, "cancelled", 1))
+        self.reader.thread_metadata = original
+        self.reader.errors = {"list:SENT": MailReadError("no", status=403, problem="failed")}
+        c.request_scan("test")
+        self.assertEqual(c.followups().notes, (("work", "refused"),))
+        lists = len(self.reader.lists)
+        c.request_scan("test")                                     # a token refresh would not restart it
+        self.assertEqual(len(self.reader.lists), lists)
+        self.assertEqual(c.followups().notes, (("work", "stopped"),))
+        c.on_signed_in("work")
+        c.request_scan("test")
+        self.assertGreater(len(self.reader.lists), lists)
+        self.assertEqual(c.followups().notes, ())
+
+    def test_the_tick_sees_a_sign_in_cancels_the_scan_and_it_is_due_again_after(self) -> None:
+        c = self.scan_setup()
+        signing = [False]
+        c._signing_in = lambda: signing[0]
+        original = self.reader.thread_metadata
+
+        def read(thread_id: str) -> dict:
+            found = original(thread_id)
+            signing[0] = True                                      # a Google sign-in opened in the browser
+            c.tick()                                               # the next tick sees it (R19)
+            return found
+
+        self.reader.thread_metadata = read
+        c.sync()
+        self.second(25)
+        report, = c.followups().reports
+        self.assertEqual((report.partial, report.problem, len(self.reader.gets)), (True, "cancelled", 1))
+        self.reader.thread_metadata = original
+        lists = len(self.reader.lists)
+        self.assertFalse(c.request_scan("test"))                   # never during a sign-in
+        self.tick(1)
+        self.assertEqual(len(self.reader.lists), lists)
+        signing[0] = False
+        self.tick(1)
+        self.assertEqual(len(self.reader.lists), lists + 2)        # due again once it is over
+
+    def test_off_a_stopped_account_or_a_sign_in_never_reads_a_thread_again(self) -> None:
+        from briefing_reader.gmail import MailReadError
+
+        c = self.scan_setup()
+        original = self.reader.thread_metadata
+
+        def read(thread_id: str) -> dict:
+            c.set_off(True)                                        # turned off while the scan runs
+            return original(thread_id)
+
+        self.reader.thread_metadata = read
+        c.request_scan("test")
+        view = c.followups()
+        self.assertEqual((view.waiting, view.owed, c.participants()), ((), (), {}))   # nothing of it kept
+        self.reader.thread_metadata = original
+        c.set_off(False)                                           # visible: scanned again at once
+        row = c.followups().waiting[0]
+        self.assertTrue(c.participants())
+        c.set_off(True)
+        self.assertEqual((c.item(row.row_id), c.participants()), (None, {}))
+        gets = len(self.reader.gets)
+        self.assertFalse(c.refetch_thread("work", row.thread_id, "sent"))   # a prep or nudge reply sent there
+        self.assertFalse(c.refetch(row.row_id, "guard"))
+        self.act = "minimized"
+        c.set_off(False)                                           # on again while minimized: no scan yet
+        self.assertEqual((c.followup_counts(), c.followups().scanned_at), (None, None))   # never "0 and 0"
+        self.act = "visible"
+        self.assertTrue(c.request_scan("test"))
+        gets = len(self.reader.gets)
+        row = c.followups().waiting[0]
+        c.config.ask.read_mail = False                             # [ask] read_mail off: no index, no read
+        self.assertEqual(c.participants(), {})
+        self.assertFalse(c.refetch(row.row_id, "sent"))
+        c.config.ask.read_mail = True
+        signing = [True]
+        c._signing_in = lambda: signing[0]
+        self.assertFalse(c.refetch(row.row_id, "sent"))            # a Google sign-in is open (spec 17)
+        signing[0] = False
+        self.reader.errors = {"list:SENT": MailReadError("no", status=401, problem="expired")}
+        c.request_scan("test")
+        self.assertTrue(c._scanner.stopped("work"))
+        row = c.followups().waiting[0]                             # a refused account keeps its last rows
+        self.assertFalse(c.refetch(row.row_id, "sent"))            # refused until the next sign-in (R19)
+        self.assertEqual(len(self.reader.gets), gets)
+        c.on_signed_in("work")
+        c.request_scan("test")
+        self.assertTrue(c.refetch(c.followups().waiting[0].row_id, "sent"))
+
+    def test_hide_unhide_turn_off_and_refetch(self) -> None:
+        from tests.ask_fakes import gmail_meta_message, gmail_meta_thread
+
+        c = self.scan_setup()
+        c.request_scan("test")
+        row = c.followups().waiting[0]
+        with self.assertLogs(LOGGER, level="INFO") as logs:
+            self.assertTrue(c.hide(row.row_id, days=3))
+        self.assertIn("Follow-ups: a row hidden (3_days)", "\n".join(logs.output))
+        self.assertEqual((c.followups().waiting, len(c.followups().hidden)), ((), 1))
+        c.request_scan("test")
+        self.assertEqual(len(c.followups().hidden), 1)            # still hidden after a rescan
+        self.assertTrue(c.unhide(row.row_id))
+        self.assertEqual(len(c.followups().waiting), 1)
+        self.assertFalse(c.hide("gone-row", days=None))
+        # One thread again: the owner replied; the row goes when its headers land (R47).
+        self.reader.meta[row.thread_id] = gmail_meta_thread(row.thread_id, [
+            *self.reader.meta[row.thread_id]["messages"],
+            gmail_meta_message("msg0000099", sender="me@example.edu", to="zq7ana@example.edu", subject="Re: x",
+                               labels=("SENT",), at=self.clock.now())])
+        self.assertTrue(c.refetch(row.row_id, "sent"))
+        self.assertEqual(c.followups().waiting, ())
+        self.assertFalse(c.checking(row.row_id))
+        self.assertFalse(c.refetch_thread("work", "thr9999999", "sent"))   # not listed: nothing read
+        c.set_off(True)
+        self.assertTrue(c.followups().off)
+        self.assertIsNone(c.followup_counts())
+        self.assertFalse(c.request_scan("test"))
+        c.set_off(False)
+        self.assertFalse(c.followups().off)
+
+
 if __name__ == "__main__":
     unittest.main()

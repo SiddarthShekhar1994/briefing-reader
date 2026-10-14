@@ -16,8 +16,11 @@ checked, and the brief the owner sees.
                                      and whether it may run (a plain address with no search syntax,
                                      ask.mail.check_query and is_security_sender, no own domains, R2)
     index_lookup(participants, address, alias, other_accounts=)   the header list's newest thread
-                                     with that guest on the meeting's account (R3; a later build
-                                     uses it, always after guest_allowed)
+                                     with that guest on the meeting's account (R3; the planner uses it
+                                     only after guest_allowed, R2)
+    brief_nudges(answer, threads, alias, own, zone=)   a brief's "owes you an answer" targets (R32):
+                                     a thread the planner marked as waiting on them where Jarvis's own
+                                     headers agree that the owner wrote last (at most 2)
     people_block(lookups, days, alias)   the <people> rows
     read_prep_result(event, init)    the run's answer: PrepAnswer, or AskFailure (stream's checks)
     PrepCheck(alias, threads, notes, own=)   validate.to_cards' ``extra`` for the brief's Reply lines
@@ -68,6 +71,8 @@ GROUP = "group"                     # a group address (team@, class@ ...): never
 DECLINED = "declined"               # declined the meeting: never looked up
 NOT_SEARCHED = "not_searched"       # not looked up (``why`` says why)
 OWN = "own"                         # one of the owner's own mailboxes: never listed or looked up
+VIA_INDEX = "index"                 # GuestLookup.via: found in the follow-up scan's participants index
+MAX_NUDGES = 2                      # "owes you an answer" entries under one brief
 STATUSES = (PENDING, FOUND, NONE, SAME, REFUSED, GROUP, DECLINED, NOT_SEARCHED, OWN)
 
 MATCH_TIME, MATCH_NEXT, MATCH_TITLE_ALL, MATCH_TITLE_SOME = "time", "next", "title_all", "title_some"
@@ -147,6 +152,7 @@ class GuestLookup:
     thread_id: str = ""
     last_at: datetime | None = None      # the thread's newest message (once read)
     why: str = ""                        # NOT_SEARCHED: Jarvis's own words; SAME: whose thread it is
+    via: str = ""                        # VIA_INDEX: from the header list (no search)
 
     def __repr__(self) -> str:
         return f"GuestLookup({self.status})"
@@ -239,6 +245,9 @@ class PrepBrief:
     # The meeting's repeating series (EventBrief.series_id; "" for a single event): a brief starts the
     # series' count of ignored prep offers afresh (R38). Memory only, never shown or logged.
     series_id: str = field(default="", repr=False)
+    # "Owes you an answer" (R32): (who, subject, date words, ask.modes.ThreadTarget) of a read thread the
+    # owner wrote last in; each becomes an entry with "Draft a nudge" under the brief. Memory only.
+    nudges: tuple[tuple[str, str, str, Any], ...] = field(default=(), repr=False)
 
     def __repr__(self) -> str:
         return (f"PrepBrief({len(self.threads)} thread(s), {len(self.open)} open, {len(self.points)} point(s), "
@@ -517,11 +526,13 @@ def guest_allowed(address: str, days: int) -> bool:
 
 
 def index_lookup(participants: Mapping[str, Sequence[ThreadRef]], address: str, alias: str, *,
-                 other_accounts: bool) -> ThreadRef | None:
+                 other_accounts: bool, since: datetime | None = None) -> ThreadRef | None:
     """The header list's newest thread with this guest's mailbox on the meeting's account ``alias``;
-    with ``other_accounts`` the newest on any account when there is none there (R3). Call it only
-    after guest_allowed: the index is a shortcut, never a permission."""
-    refs = list(participants.get(mailbox_key(address), ()) or ())
+    with ``other_accounts`` the newest on any account when there is none there (R3). ``since``: the
+    prep lookback's start (R4: the list covers scan_days, which may be longer); an older thread is
+    not a hit. Call it only after guest_allowed: the index is a shortcut, never a permission."""
+    refs = [ref for ref in participants.get(mailbox_key(address), ()) or ()
+            if since is None or ref.last_at >= since]
     mine = [ref for ref in refs if ref.alias == alias]
     pool = mine or (refs if other_accounts else [])
     if not pool:
@@ -851,6 +862,35 @@ def check_prep(answer: PrepAnswer, meeting: PrepMeeting, lookups: Sequence[Guest
     return PrepBrief(**_base(meeting, lookups, memory), threads=tuple(rows),
                      missing=_missing(lookups, days, meeting.alias, read), open=tuple(open_items),
                      points=tuple(points), dropped=dropped, ran=True)
+
+
+def brief_nudges(answer: PrepAnswer, threads: Sequence[MailThread], alias: str, own: Collection[str], *,
+                 zone: str = "") -> tuple[tuple[str, str, str, Any], ...]:
+    """The brief's "owes you an answer" entries (R32): each read thread the planner marked
+    ``waiting_on == "them"`` (at most MAX_NUDGES) and only when Jarvis's own headers agree that the
+    owner wrote last (ask.modes.owed_target): (who, subject, "Oct 8", ThreadTarget). Who is the first
+    person the owner wrote to (the name the header gave, else the address); all from Jarvis's headers."""
+    from .modes import owed_target
+
+    them = [_thread_key(thread_id) for thread_id, _summary, waiting in answer.threads if waiting == "them"]
+    found: list[tuple[str, str, str, Any]] = []
+    for thread in threads:
+        if len(found) >= MAX_NUDGES:
+            break
+        if thread.thread_id not in them or any(item[3].thread_id == thread.thread_id for item in found):
+            continue
+        target = owed_target(thread, thread.account or alias, own)   # the thread's own account (R3, R32)
+        if target is None:
+            continue
+        message = next((item for item in thread.messages if item.gmail_id == target.last_gmail_id), None)
+        person = next((person for person in (message.to if message is not None else ())
+                       if person.email and not _is_own(person.email, own)), None)
+        if person is None:
+            continue
+        who = data(person.name, 60) or person.email
+        found.append((who, data(thread.subject, 120) or "(no subject)",
+                      _short_date(message.sent_at if message is not None else None, zone), target))
+    return tuple(found)
 
 
 def deterministic_brief(meeting: PrepMeeting, lookups: Sequence[GuestLookup],

@@ -67,9 +67,10 @@ PLAN_PROMPT_FILE = ASSETS / "plan_prompt.md"
 PLAN_SCHEMA_FILE = ASSETS / "plan_schema.json"
 PREP_PROMPT_FILE = ASSETS / "prep_prompt.md"      # meeting prep: a brief before a meeting
 PREP_SCHEMA_FILE = ASSETS / "prep_schema.json"
-NUDGE_PROMPT_FILE = ASSETS / "nudge_prompt.md"    # follow-up drafts (a later build)
-MODE_PROMPTS = {"plan": PLAN_PROMPT_FILE, "prep": PREP_PROMPT_FILE}
-MODE_SCHEMAS = {"plan": PLAN_SCHEMA_FILE, "prep": PREP_SCHEMA_FILE}
+NUDGE_PROMPT_FILE = ASSETS / "nudge_prompt.md"    # follow-ups: a drafted reply or nudge in one thread
+NUDGE_SCHEMA_FILE = ASSETS / "nudge_schema.json"
+MODE_PROMPTS = {"plan": PLAN_PROMPT_FILE, "prep": PREP_PROMPT_FILE, "nudge": NUDGE_PROMPT_FILE}
+MODE_SCHEMAS = {"plan": PLAN_SCHEMA_FILE, "prep": PREP_SCHEMA_FILE, "nudge": NUDGE_SCHEMA_FILE}
 
 SOURCE_ENV = "JARVIS_CLAUDE_EXE"
 SOURCE_PATH = "PATH"

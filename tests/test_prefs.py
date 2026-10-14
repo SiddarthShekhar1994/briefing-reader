@@ -184,5 +184,26 @@ class ModuleHygieneTests(unittest.TestCase):
         self.assertTrue(Path(prefs.__file__).read_bytes().isascii())
 
 
+class FollowupsOffTests(unittest.TestCase):
+    def test_followups_off_round_trip(self) -> None:
+        """B5: "Turn off on this PC" is a boolean written only while it is true; never text."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "assistant.json"
+            state = AssistantPrefs(path)
+            self.assertFalse(state.followups_off)
+            state.set_muted(True)
+            self.assertNotIn("followups_off", json.loads(path.read_text(encoding="utf-8")))
+            self.assertTrue(state.set_followups_off(True))
+            self.assertIs(json.loads(path.read_text(encoding="utf-8"))["followups_off"], True)
+            again = AssistantPrefs(path)
+            self.assertTrue(again.followups_off)
+            again.remember_greeting("m2")
+            self.assertTrue(AssistantPrefs(path).followups_off)                 # kept by other writes
+            again.set_followups_off(False)
+            self.assertNotIn("followups_off", json.loads(path.read_text(encoding="utf-8")))
+            path.write_text(json.dumps({"followups_off": "yes"}), encoding="utf-8")
+            self.assertFalse(AssistantPrefs(path).followups_off)                 # only a real true
+
+
 if __name__ == "__main__":
     unittest.main()

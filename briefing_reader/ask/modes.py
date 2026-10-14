@@ -1,8 +1,8 @@
 """The productivity bundle's planner modes: what each run is told and from what (spec 5.2, 7).
 
 A mode is a planner run of its own (ClaudeEngine.run_mode): its own system prompt and schema, no
-tools, no mail search, no web research, no second run. This build has the day plan and the meeting
-brief:
+tools, no mail search, no web research, no second run: the day plan, the meeting brief and the
+drafted reply or nudge of a follow-up:
 
     ModeRequest(mode, origin, typed=, part=, ...)   what started it (typed, an offer, a click); the
                                      owner's own words only in ``typed``
@@ -19,6 +19,16 @@ brief:
     build_prep_prompt(...)           a meeting brief's stdin (7.3): the meeting's account, the meeting,
                                      <people> (ask.prep.people_block), the threads Jarvis read with its
                                      guests, the notes, the fixed command (never the owner's words)
+    build_nudge_prompt(...)          a drafted reply or nudge's stdin (7.4): the thread's account,
+                                     <followup> (kind, who wrote last, days, account, thread), the one
+                                     thread read, the notes, the fixed command for its kind and only the
+                                     owner's own words from "Tell Jarvis what to say"
+    nudge_guard(thread, target, own) "" or why no draft is made: the owner replied since (waiting),
+                                     they answered since (owed), or anything else changed (R47)
+    owed_target(thread, alias, own)  a brief's "owes you an answer" (R32): the thread as a ThreadTarget
+                                     when the owner wrote last (followups' deciding-message rules)
+    NudgeCheck(target, thread, notes, owner_words=, own=)   validate.to_cards' ``extra`` for the
+                                     draft (8.3): that thread, that message, only its people, never a note
 
 Every data field goes through context.data(), a plan's stdin is at most MAX_PLAN_STDIN characters
 (a brief's at most an Ask's, context.MAX_STDIN_CHARS) and <command> is last and once. Pure;
@@ -27,7 +37,7 @@ nothing here is logged (the reprs name kinds only).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from typing import Any, NamedTuple
@@ -59,7 +69,7 @@ MODE_PLAN, MODE_PREP, MODE_NUDGE = "plan", "prep", "nudge"
 ORIGIN_OFFER, ORIGIN_TYPED, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_BRIEF = "offer", "typed", "choice", "list", "brief"
 MODE_KINDS = {MODE_PLAN: frozenset({CALENDAR}), MODE_PREP: frozenset({REPLY}), MODE_NUDGE: frozenset({REPLY})}
 MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1}
-MODE_TASKS = {MODE_PLAN: live.TASK_PLAN, MODE_PREP: live.TASK_PREP}
+MODE_TASKS = {MODE_PLAN: live.TASK_PLAN, MODE_PREP: live.TASK_PREP, MODE_NUDGE: live.TASK_NUDGE}
 MODE_USAGE = {MODE_PLAN: usage.KIND_PLAN_DAY, MODE_PREP: usage.KIND_PREP, MODE_NUDGE: usage.KIND_NUDGE}
 MODE_TITLES = {MODE_PLAN: "Plan", MODE_PREP: "Prep", MODE_NUDGE: "Nudge"}
 FIXED_COMMANDS: dict[Any, str] = {
@@ -422,6 +432,169 @@ def build_prep_prompt(now: datetime, owner: str, account: AccountInfo, meeting_a
     ctx = AskContext(now=wall, time_zone=zone, command=command, accounts=tuple(accounts) or (account,),
                      events={meeting_alias: (meeting,)}, mail=mail, memory=notes, owner=owner)
     return text, index_of(ctx, [(meeting_alias, meeting)])
+
+
+# --------------------------------------------------------------------------
+# A drafted reply or nudge (spec 3.4, 7.4, 8.3)
+# --------------------------------------------------------------------------
+
+KIND_WAITING, KIND_OWED = "waiting", "owed"
+FOLLOWUP_WORDS = {KIND_WAITING: "waiting on you", KIND_OWED: "owed to you"}
+GUARD_REPLIED, GUARD_ANSWERED, GUARD_CHANGED = "replied_since", "answered_since", "changed"
+NUDGE_OTHER_THREAD = "This draft answers another thread"
+NUDGE_WRONG_MESSAGE = "This draft answers the wrong message"
+NUDGE_EXTRA_PEOPLE = "This draft adds people who aren't in the thread"
+NUDGE_OWN_ADDRESS = "This draft would go to your own address"
+NUDGE_NOTE_LEAK = "This draft repeats one of your private notes, so Jarvis holds it back"
+NUDGE_ONLY_REPLY = "A follow-up draft is one reply"
+
+
+def _human(_address: str) -> bool:
+    """The guard and a brief's "owes you an answer" count mail in Updates as a person's (stopping is
+    the safe side)."""
+    return True
+
+
+def deciding_of(thread: MailThread, own: Collection[str]) -> tuple[Any | None, frozenset[str]]:
+    """A read thread's deciding message and the automated ones newer than it (followups' rules)."""
+    from ..followups import deciding_message
+
+    return deciding_message(thread.messages, own, _human)
+
+
+def followup_line(target: ThreadTarget, thread: MailThread, now: datetime) -> str:
+    """"kind=waiting on you | last from=them | days=3 | acct=work | thread=18c2..." (Jarvis's own words)."""
+    message = next((item for item in thread.messages if item.gmail_id == target.last_gmail_id), None)
+    days = 0
+    if message is not None and message.sent_at is not None:
+        reference = now if now.tzinfo is not None else now.astimezone()
+        days = max(0, int((reference - message.sent_at).total_seconds() // 86400))
+    last = "owner" if target.kind == KIND_OWED else "them"
+    return (f"kind={FOLLOWUP_WORDS.get(target.kind, 'waiting on you')} | last from={last} | days={days} | "
+            f"acct={data(target.alias, 24)} | thread={data(target.thread_id, 64)}")
+
+
+def build_nudge_prompt(now: datetime, owner: str, account: AccountInfo, thread: MailThread, target: ThreadTarget,
+                       memory: Sequence[str], request: ModeRequest, *, accounts: Sequence[AccountInfo] = (),
+                       zone: str = "", redact: bool = False) -> tuple[str, ContextIndex]:
+    """A drafted reply or nudge's stdin (spec 7.4): <now> <owner> <accounts> (the thread's account only)
+    <followup> <mail> (the one thread read) [<memory>] <command> (the fixed words for its kind, then
+    "The owner's words: ..." only when the owner typed some in "Tell Jarvis what to say": an address
+    there is the owner's own, SOURCE_OWNER). The ContextIndex: the thread as shown with its messages'
+    ids and people (SOURCE_MAIL), the notes' addresses and every account (``accounts``). ``redact``:
+    the email text and the notes as their sizes. Follow-up data reaches the run only here, for the
+    one thread the owner clicked."""
+    from .dayplan import to_wall
+
+    wall = to_wall(now, zone) if zone else now
+    command = command_text(request, target.kind)
+    mail = fit_mail(tuple(trim_threads([thread], max_threads=1)), redact=redact)
+    notes = tuple(memory)
+    memory_text = memory_block(notes, redact=redact) if memory_notes_shown(notes) else ""
+    blocks = [f"<now>\n{now_line(wall, zone)}\n</now>", f"<owner>{data(owner, 20)}</owner>",
+              f"<accounts>\n{account_row(account)}\n</accounts>",
+              f"<followup>{followup_line(target, thread, now)}</followup>"]
+    if mail:
+        blocks.append(f"<mail>\n{_mail_block(mail, redact=redact)}\n</mail>")
+    if memory_text:
+        blocks.append(memory_text)
+    blocks.append(f"<command>\n{command}\n</command>")   # Jarvis's fixed words; the owner's through data()
+    text = "\n".join(blocks) + "\n"
+    ctx = AskContext(now=wall, time_zone=zone, command=command, accounts=tuple(accounts) or (account,), mail=mail,
+                     memory=notes, owner=owner)
+    return text, index_of(ctx, [])
+
+
+def nudge_guard(thread: MailThread, target: ThreadTarget, own: Collection[str]) -> str:
+    """Before a draft (3.4 step 3, G7): the deciding message must still be in the thread; then the
+    messages newer than it that are not automated (and not among ``target.auto_ids``) decide: one from
+    the owner on a waiting thread -> GUARD_REPLIED; one from someone else on an owed thread ->
+    GUARD_ANSWERED; any other change, or the deciding message gone -> GUARD_CHANGED; "" when nothing
+    changed."""
+    from ..followups import automated, from_owner, owner_automated
+
+    messages = list(thread.messages)   # oldest first (ask.mail.thread_from_api)
+    ids = [message.gmail_id for message in messages]
+    if target.last_gmail_id not in ids:
+        return GUARD_CHANGED
+    newer = []
+    for message in messages[ids.index(target.last_gmail_id) + 1:]:
+        if message.gmail_id in target.auto_ids:
+            continue
+        mine = from_owner(message, own)
+        if (mine and owner_automated(message)) or (not mine and automated(message, _human)):
+            continue
+        newer.append((message, mine))
+    if not newer:
+        return ""
+    if target.kind == KIND_WAITING and any(mine for _message, mine in newer):
+        return GUARD_REPLIED
+    if target.kind == KIND_OWED and any(not mine for _message, mine in newer):
+        return GUARD_ANSWERED
+    return GUARD_CHANGED
+
+
+def owed_target(thread: MailThread, alias: str, own: Collection[str]) -> ThreadTarget | None:
+    """A read thread the owner wrote last in (followups' deciding-message rules; R32), to someone else
+    directly: a ThreadTarget(kind owed) for "Draft a nudge"; None otherwise."""
+    from ..followups import from_owner, is_own
+
+    deciding, auto_ids = deciding_of(thread, own)
+    if deciding is None or not from_owner(deciding, own):
+        return None
+    if not any(person.email and not is_own(person.email, own) for person in deciding.to):
+        return None
+    return ThreadTarget(alias, thread.thread_id, KIND_OWED, deciding.gmail_id, auto_ids)
+
+
+class NudgeCheck:
+    """validate.to_cards' ``extra`` for the one Reply of a nudge run (spec 8.3): in the clicked thread
+    (account and thread exactly), answering its deciding message (waiting: their newest; owed: the
+    owner's last), only to that message's people (sender, Reply-To, To, Cc) and never the owner's own
+    address, and never repeating one of the owner's notes unless his words in "Tell Jarvis what to
+    say" have them (memory.note_leak, R7)."""
+
+    def __init__(self, target: ThreadTarget, thread: MailThread | None, notes: Sequence[str] = (), *,
+                 owner_words: str = "", own: Collection[str] = ()) -> None:
+        self.target = target
+        self.message = None
+        if thread is not None:
+            self.message = next((item for item in thread.messages if item.gmail_id == target.last_gmail_id), None)
+        self.notes = tuple(notes)
+        self.owner_words = owner_words
+        self.own = tuple(own)
+
+    def __call__(self, card: ProposedAction) -> str:
+        from ..followups import is_own
+
+        if card.kind != REPLY:
+            return NUDGE_ONLY_REPLY
+        if card.account != self.target.alias or card.field("thread") != self.target.thread_id:
+            return NUDGE_OTHER_THREAD
+        message = self.message
+        if message is None:
+            return NUDGE_WRONG_MESSAGE
+        msgid, gmid = card.field("msgid").strip().strip("<>"), card.field("gmid").strip()
+        if (not msgid and not gmid) or (msgid and msgid != message.message_id) or (gmid and gmid != message.gmail_id):
+            return NUDGE_WRONG_MESSAGE
+        recipients = card.mail_recipients()
+        if any(is_own(address, self.own) for address in recipients):
+            return NUDGE_OWN_ADDRESS
+        people = {person.email.casefold() for person in message.people() if person.email}
+        if not recipients or any(address.casefold() not in people for address in recipients):
+            return NUDGE_EXTRA_PEOPLE
+        if self.notes:
+            from ..memory import note_leak
+
+            if any(note_leak(text, self.notes, self.owner_words) for text in (card.field("subject"), card.body)):
+                return NUDGE_NOTE_LEAK
+        return ""
+
+
+def check_nudge(card: ProposedAction, target: ThreadTarget, thread: MailThread | None, notes: Sequence[str] = (), *,
+                owner_words: str = "", own: Collection[str] = ()) -> str:
+    """NudgeCheck for one card: "" or the reason it is information only."""
+    return NudgeCheck(target, thread, notes, owner_words=owner_words, own=own)(card)
 
 
 # --------------------------------------------------------------------------

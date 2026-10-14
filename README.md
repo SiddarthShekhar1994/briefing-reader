@@ -95,10 +95,21 @@ your own scheduled routine (see
   Part of the productivity bundle (`[productivity]`), off until you turn it
   on. See [Meeting prep](#meeting-prep) and
   [Offers](#offers-plan-my-day-and-prepare-brief).
+- **Follow-ups.** A **FOLLOW-UPS** list under DEADLINES shows the threads that
+  wait on your answer (amber: someone wrote to you directly and you have not
+  answered for 20 hours) and the ones you are owed (cyan: you wrote to someone
+  directly 3 days ago and nobody answered), from Jarvis's own read of your
+  mail **headers only** (sender, recipients, subject, date) of the last 14
+  days, while he is on screen. **Draft a reply** / **Draft a nudge** on a row
+  is your click: Jarvis reads that one thread and your Claude Code drafts one
+  reply card you check and send yourself. Offers only: nothing is drafted,
+  sent or given to Claude until you click. Part of the productivity bundle
+  (`[productivity]`), off until you turn it on. See
+  [Follow-ups and nudges](#follow-ups-and-nudges).
 - **Memory.** Tell Jarvis "remember that Ana is my project lead" (or add it in
   the **MEMORY** tab) and he keeps that note on this PC, in `memory.json`, and
-  gives your notes to your Claude Code with every Ask, day plan and meeting
-  brief, never to web research.
+  gives your notes to your Claude Code with every Ask, day plan, meeting brief
+  and draft, never to web research.
   He may offer to remember a fact himself; it is kept only when you click
   **Remember this**. Part of the productivity bundle (`[productivity]`), off
   until you turn it on. See [Memory (the MEMORY tab)](#memory-the-memory-tab).
@@ -152,6 +163,14 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
   block or draft still waits for its own click and undo. Jarvis's own reads
   for the offers are of your calendar only (titles, times and guests, on this
   PC, kept in memory) and are shown in LIVE.
+- **Mail Jarvis reads on his own is headers only (sender, recipients, subject,
+  date), from the last 14 days, on this PC; never the text, never saved, never
+  sent anywhere.** The follow-up list's scan asks Gmail for named headers with a
+  field mask that has no snippet and no body, only for accounts whose Google
+  account you confirmed, and only while the reading screen is visible. A
+  thread's text is read only after your click on **Draft a reply** / **Draft a
+  nudge** (that one thread), and only then does it reach your Claude Code; a day
+  plan gets two counts of the list, nothing else.
 - **A mail search Jarvis builds himself uses only a guest's address from your
   calendar, and only after your click** (or your typed "prep me ..."): one
   read-only search per guest of that meeting, the last 14 days, at most one
@@ -159,7 +178,7 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
   address (a sign-in or billing sender) is never searched.
 - **Memory is kept only on this PC (`memory.json`) and holds only your notes
   or the suggestions you kept; your notes go to your Claude Code with every
-  Ask, day plan and meeting brief, never to web research.** Passwords, codes and account numbers are
+  Ask, day plan, meeting brief and draft, never to web research.** Passwords, codes and account numbers are
   refused; a suggestion you dismiss leaves a short hash of each word, not the
   sentence (a common word or a name could still be guessed from its hash). A
   note is never an instruction: it adds no recipient, action or search, and an
@@ -315,15 +334,14 @@ Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
 **Memory** - see [Memory (the MEMORY tab)](#memory-the-memory-tab);
 **Plan my day** - see [Plan my day](#plan-my-day);
 **Meeting prep** - see [Meeting prep](#meeting-prep);
-**Plan and prep offers** - see [Offers](#offers-plan-my-day-and-prepare-brief).
+**Plan and prep offers** - see [Offers](#offers-plan-my-day-and-prepare-brief);
+**Follow-up nudges** - see [Follow-ups and nudges](#follow-ups-and-nudges).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (proposals, your click, every step visible in LIVE):
 
 - **A live browser Jarvis drives**: he opens and fills in pages in a browser
   you can watch, and every submit waits for your click.
-- **Follow-up nudges**: threads that wait on your answer, or on an answer you
-  are owed.
 - **Radar**: internships, hackathons, deadlines and subscriptions (renewals,
   trials that end) worth your attention.
 - **Push-to-talk voice**: hold a key and say your request.
@@ -722,12 +740,12 @@ cd "<project folder>"
    | `https://www.googleapis.com/auth/calendar.events` | Add the event you approved, and first look for the same event (same title and start) so it is not added twice; read your events of today (or tomorrow) and the next 14 days for TODAY and DEADLINES; read one event by its id for an invitation, move or cancel card. Only after your click on that card and its undo countdown: answer an invitation (only your own answer is sent), move an event you organize (or may change as a guest) or cancel an event you organize, always telling the guests as the card says ("guests notified" by default). It never changes or deletes anything else. |
    | `https://www.googleapis.com/auth/calendar.settings.readonly` | Read your calendar's time zone, so that "15:00" means 15:00 where your calendar is. |
    | `https://www.googleapis.com/auth/gmail.send` | Only for an account with `"gmail_send"` in its features (step 8b). Only after your click on **Send** on that card and its undo countdown: send that one reply or email, exactly as the card shows it. It cannot read, search, change or delete any mail. |
-   | `https://www.googleapis.com/auth/gmail.readonly` | Asked for at every sign-in of an account with `"gmail_read"` in its features (the shipped `config.toml` has it on both accounts), **even while Ask Jarvis is off**; remove `"gmail_read"` if you do not use Ask (step 8c). Used only while Ask Jarvis is on: read the Gmail threads one request is about (at most 3, each read only when you ask Jarvis something); with the productivity bundle on, also a [meeting brief](#meeting-prep)'s reads, only after your typed "prep me ..." or your click: one lookup per guest of that meeting on the meeting's account, from the **last 14 days**, at most one thread per guest and 3 in all. Read only: it cannot send, change or delete any mail; the text is used for that one request and never saved or logged. |
+   | `https://www.googleapis.com/auth/gmail.readonly` | Asked for at every sign-in of an account with `"gmail_read"` in its features (the shipped `config.toml` has it on both accounts), **even while Ask Jarvis is off**; remove `"gmail_read"` if you do not use Ask (step 8c). Used only while Ask Jarvis is on: read the Gmail threads one request is about (at most 3, each read only when you ask Jarvis something); with the productivity bundle on, also a [meeting brief](#meeting-prep)'s reads, only after your typed "prep me ..." or your click: one lookup per guest of that meeting on the meeting's account, from the **last 14 days**, at most one thread per guest and 3 in all; also the [follow-up list](#follow-ups-and-nudges)'s header scan (while the reading screen is visible, every 30 minutes: sender, recipients, subject, date and labels of the **last 14 days**, never the text) and a draft's read (after your click on Draft a reply / Draft a nudge: that one thread). Read only: it cannot send, change or delete any mail; the text is used for that one request and never saved or logged. |
    | `openid`, `https://www.googleapis.com/auth/userinfo.email` | Learn which Google account a sign-in is (its address and account id), to bind the account name to it (see above). Nothing else. |
 
    No other access: Jarvis reads mail only through `gmail.readonly`, for Ask
-   Jarvis (step 8c) and its meeting briefs, and has no access to Drive,
-   contacts or anything else.
+   Jarvis (step 8c), its meeting briefs and the follow-up list (headers only)
+   and its drafts, and has no access to Drive, contacts or anything else.
 
    **Disconnecting.** Right after a name's first sign-in, **No, use another
    account** in the question above does it for you: that name's saved sign-in
@@ -1108,6 +1126,13 @@ voice when the online one cannot be reached), politely and to the point:
   a guest, a subject or the brief, which stays on screen. An approved prep
   reply's result is said **without its subject**: "Sent, sir - your reply is
   on its way."
+- **Follow-ups** (see [Follow-ups and nudges](#follow-ups-and-nudges)): the list
+  is never spoken; a draft gives "I've drafted a reply; it's waiting for your
+  OK, sir.", a thread that changed since it was listed "You've replied since,
+  sir - nothing to draft." (or "They've answered since, sir - see the
+  thread.", "This thread changed since Jarvis listed it, sir."). Never a
+  subject, a name or the draft; a sent draft's result is said without its
+  subject.
 - **Offers** (see [Offers](#offers-plan-my-day-and-prepare-brief)): "Shall I
   plan your day, sir?" (only once you have heard or viewed the AM briefing),
   "Your meeting at 2 PM starts in about 15 minutes, sir. Shall I prepare a
@@ -1198,7 +1223,14 @@ card, newest at the bottom:
   3 guests, from the read at 1:40 PM", "Offered together: 1:00 PM and 2:00 PM",
   "Not offered yet: plan my day (caps)" (retried each minute), "Not offered: a
   prep brief (ignored 3 times - type "prep me" for this one)", and whether
-  its sentence was spoken ("yes", "no (playing)", "text only (muted)").
+  its sentence was spoken ("yes", "no (playing)", "text only (muted)"); with
+  the follow-up list, each account's header scan ("Jarvis's own header scan:
+  work (read only)": the exact labels and queries, "metadata only: sender,
+  recipients, subject, date, labels, list headers - never the text; last 14
+  days", listed per label, headers read and unchanged, kept per kind, skipped
+  by reason, partial or stopped; with `[live] text` one row per listed thread)
+  and "Checked one thread again (headers only)" after a draft found its
+  thread changed or a reply was sent in it.
 - **Memory** (with the productivity bundle's memory on): one compact
   **MEMORY** row with a step for each note saved, changed, removed or
   restored, a suggestion kept, dismissed or not offered (and why), a note not
@@ -1230,6 +1262,13 @@ card, newest at the bottom:
   run: no recent thread" (or the limits, Claude Code not ready, mail off); and
   **Checking the brief** (each thread note and open point kept or left out,
   each reply draft as a card or refused with the reason).
+- **A follow-up draft** (a NUDGE card; see [Follow-ups and
+  nudges](#follow-ups-and-nudges)): what you clicked ("Draft a reply on a
+  WAITING ON YOU row (work)"); the checks (with the plans, briefs and drafts
+  left today); the one thread read (its email picture, and whether it changed
+  since Jarvis listed it); the planner run (the exact text sent); and the check
+  of the draft ("A denied draft for this message was replaced" when you
+  drafted it again).
 
 The panel's strip shows what Jarvis is doing (IDLE, WORKING 0:12, SENDING IN 7
 S), then **Pop out** and **Clear** (in a narrow window Clear is in the pop-out
@@ -1673,8 +1712,8 @@ text only; unmuting or the end of quiet hours never brings a late "Shall I
 ...?". No Windows notification is ever used (it would stay in the notification
 history).
 
-**Prep offers work only while Jarvis is open, on screen or minimized -
-minimize instead of Done to keep them.** Done (and the X) closes him; the first
+**Prep offers and follow-ups work only while Jarvis is open, on screen or
+minimized - minimize instead of Done to keep them.** Done (and the X) closes him; the first
 time the bundle is on, the JARVIS tab says so once ("Prep offers and follow-ups
 work while I'm open or minimized, sir - minimize instead of Done to keep
 them.", never spoken), and while a meeting with other guests remains today the
@@ -1684,6 +1723,97 @@ open him again".
 **Cost**: an offer, the day read and an unclicked offer cost nothing; a click
 costs what a typed `plan my day` or `prep me` costs (one planner run, none for
 a brief without recent mail). An unattended day costs zero runs.
+
+### Follow-ups and nudges
+
+Part of the productivity bundle (`[productivity] enabled`, off in the public
+`config.toml`; `JARVIS_PRODUCTIVITY_ENABLED=true` in `.env` turns it on for this
+PC) with `[productivity] followups = true`, `[ask] read_mail = true` and
+`"gmail_read"` on the account. There is no Start button: turning the bundle on
+is the consent.
+
+**The list.** While the reading screen is visible, 20 seconds after it came up
+and then every 30 minutes (`scan_every_minutes`), Jarvis reads the mail
+**headers** of each account whose Google account you confirmed: first your SENT
+threads of the last 14 days (up to a third of `scan_max_threads`, 150), then the
+inbox (promotions, social and forums left out). Each request names the headers
+it wants (From, To, Cc, Reply-To, Subject, List-Id, List-Unsubscribe,
+Precedence, Auto-Submitted) and a field mask without a snippet or a body; a
+message older than 14 days is dropped before anything is kept. A thread whose
+history did not change is not read again. The list lives in memory only.
+
+- **WAITING ON YOU**: someone else wrote last, to you directly (your address in
+  To, at most 5 addresses), the thread is still in your inbox, at least 20
+  hours ago (`waiting_after_hours`).
+- **OWED TO YOU**: you wrote last, to someone else directly (at most 5 To
+  addresses, no group address such as team@ or class@), at least 3 days ago
+  (`owed_after_days`), and nobody answered.
+
+Automated mail never decides a thread: mailing lists, Auto-Submitted mail
+(out-of-office replies), no-reply senders, invitations and RSVPs (your own
+"Accepted: ..." too), promotions, social and forums, and Updates unless the
+sender is someone you wrote to. A subject that looks like account security
+("verification code", "password", "sign-in attempt", "statement" ...) or an
+account-security sender is counted, never listed, and its subject is not kept
+(a colleague at your own work domain is listed even when it is such a
+provider's). Known misses, fixed with Hide: a closing "thanks" of yours makes a
+thread OWED; Bcc'd mail and mail to a group are not "direct".
+
+**A row's menu** (click or Enter):
+
+- **Draft a reply** (waiting) / **Draft a nudge** (owed): one click, one run.
+  Jarvis reads that one thread in full (the only text he reads for it) and
+  first checks it did not change since he listed it: "You've replied since,
+  sir - nothing to draft.", "They've answered since, sir - see the thread." or
+  "This thread changed since Jarvis listed it, sir. I'm updating the list." (no
+  run; the row's headers are read again at once). Then your Claude Code gets
+  the thread, `<followup>` (its kind, who wrote last, how many days ago) and
+  your notes, and writes one **Reply** card (a "Nudge . reply" under NEEDS YOUR
+  OK) in that thread, to that message's people only: the recipients are NEW
+  RECIPIENTs until you tick them (unless Jarvis sent to them before), and it is
+  sent only after your Send and the undo countdown. When the answer needs your
+  decision, the draft is a short holding reply and a second entry asks the
+  question with **Tell Jarvis what to say**.
+- **Show the draft** replaces Draft while a reply card for that thread waits
+  under NEEDS YOUR OK (from the briefing, an Ask, a brief or a draft; the row
+  says "draft waiting"): the card is scrolled into view, the focus stays where
+  it is.
+- **Tell Jarvis what to say...**: one line (at most 300 characters) that the
+  draft follows; the only way to replace a waiting draft, and only an unedited
+  one that is not counting down. To change a draft yourself, use **Edit**, not
+  Deny; a denied draft can be drafted again from its row.
+- **Open in Gmail**, **Hide for 3 days**, **Hide until something new arrives**
+  (a new message in the thread brings it back).
+
+The section's **...** menu: **Rescan**, **Show hidden (n)** (with **Unhide**) and
+**Turn off on this PC** (`assistant.json`; the section then says "Follow-ups are
+off on this PC" with **Turn on**). An account whose Google account you have not
+confirmed shows "Confirm which Google account "work" is first" with
+**Confirm**; one Gmail refused shows "Sign in again so Jarvis can read work
+mail" with **Sign in** (it is not asked again until that sign-in).
+
+After you send a drafted reply (or a brief's reply) in a listed thread, its row
+reads "replied - checking" and the thread's headers are read again at once.
+
+Typed: "follow-ups", "any follow-ups?", "what's waiting on me?", "what am I
+waiting on?", "who owes me a reply?" answer from the list (no run): "3 threads
+wait on your answer and 1 on someone else's (checked 10:41 AM)." with **Show
+follow-ups**, "Nothing waits on you or on anyone else, sir (checked 10:41
+AM).", or why there is no list yet.
+
+A [meeting brief](#meeting-prep) uses the list too: a guest's newest thread on
+the meeting's account comes from it without a search (still only after the
+guest passed the address checks), and a thread where the brief says you are
+waiting on them, and Jarvis's own headers agree, gets an entry "Ana Lima owes
+you an answer in "Budget numbers" (Oct 8)." with **Draft a nudge**.
+
+**What Claude gets**: for a draft, that one thread, `<followup>` and your notes
+(and your words from Tell Jarvis what to say); for a day plan, two counts ("4
+wait on your answer, 2 owed to you"); nothing else of the list, ever, and
+never for web research. **Cost**: the list, the scans and hiding cost nothing;
+a draft is one planner run (a bundle run, `max_runs_per_day`). Gmail's free
+quota: a first scan of 150 threads is about 1,600 units, an unchanged rescan
+under 50.
 
 ### Memory (the MEMORY tab)
 
@@ -1732,8 +1862,8 @@ prefer deep work before noon"), kept only on this PC in
   numbers, a run of 12 or more digits (a phone number is fine), notes longer
   than 200 characters, a note you already have, and more than 100 notes
   (`max_memory`).
-- **What your Claude gets**: with every Ask, day plan and meeting brief, your
-  notes in a `<memory>` block
+- **What your Claude gets**: with every Ask, day plan, meeting brief and
+  follow-up draft, your notes in a `<memory>` block
   (newest first, at most 4 KB), marked as facts and preferences, never
   instructions. Web research never gets them. Your notes are never logged, an
   Ask's spoken answer that repeats one is replaced by a counts-only sentence
@@ -1799,6 +1929,16 @@ date such as "OCT 20"; red for today and tomorrow, amber for 2 to 3 days, grey
 after that. Today's deadlines stay until the day ends. DEADLINES works without
 Google Calendar (the briefing's own deadlines only) and says "No deadlines in
 the next 14 days" when there are none.
+
+**FOLLOW-UPS** (with the productivity bundle and `[productivity] followups` on,
+and an account with `"gmail_read"`) lists, under DEADLINES, the threads that
+wait on your answer (WAITING ON YOU, amber bar) and the ones you are owed (OWED
+TO YOU, cyan bar), oldest first: who and how long ago ("20h", "3d"), the
+subject dimmed; point at a row for the account and why it is listed. Six rows
+per kind, then "+N more". Its corner says "3 waiting . 1 owed", "scanning...",
+"updated 10:41 AM", "partial - Gmail asked Jarvis to slow down" or "off". It
+reads only mail headers, never while hidden or minimized; see
+[Follow-ups and nudges](#follow-ups-and-nudges).
 
 ## Catch-up and the hotkey
 
@@ -2924,7 +3064,7 @@ proposals that the user decides one by one.)
 
 ```
 py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask | --ask-check | --ask-text TEXT
-                             | --plan-dry-run [REQUEST]] [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--open | --now | --read]
+                             | --plan-dry-run [REQUEST] | --followups-check] [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--open | --now | --read]
                             [--from-file PATH] [--debug] [--version]
 ```
 
@@ -2937,6 +3077,7 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--ask-check` | [Ask Jarvis](#ask-jarvis-optional): print whether Ask is ready (Claude Code found, its version and flags, a claude.ai plan sign-in, the work folder, mail reading per account, usage: the runs of this hour and today, today's runs by kind - "Runs today by kind: Ask 3, web research 1, day plans 1, meeting briefs 0, drafts 0" - and "Plans, briefs and drafts today: 1 of 20 (3 Ask runs an hour kept for your requests)"), then whether [web research](#web-research) is ready (`Web research ready: yes`; it never changes `Ready:` or the exit code). Runs only `claude --version`, `--help` and `auth status`: no Claude request. Exit code 0 when ready. |
 | `--ask-text TEXT` | Ask Jarvis once from the command line, without a window: prints what the planner said, the proposals and how Claude Code started. One request on your Claude plan (two when it reads mail or hands the request to web research). Starting the text with `web:` runs web research only (one run; nothing is read from your accounts). With `--from-file`, the briefing comes from that fixture. With the productivity bundle's memory on, the planner gets your notes as in the app, read from `memory.json` without ever changing it; `remember that ...`, `forget that ...` and `what do you remember?` are the app's (MEMORY tab): the command line says so, saves nothing and exits with code 2. |
 | `--plan-dry-run [REQUEST]` | The productivity bundle's [day plan](#plan-my-day) without a run: reads that day of your calendar now (read only) and prints the exact text its run would get, with event titles, to-dos, briefing lines and notes as their sizes, the free stretches and the command line (only the prompt file and the answer format differ from an Ask's), or why there would be no run ("No planner run: ..."). REQUEST as typed in the app (`"plan tomorrow"`, `"plan my afternoon, gym"`; default `plan my day`); anything else exits with code 2. With `--from-file`, the to-dos, deadlines and briefing come from that fixture. No Claude request, nothing counted. |
+| `--followups-check` | The productivity bundle's [follow-up list](#follow-ups-and-nudges) scan once, for real, on every account with `"gmail_read"`: headers only (read only, the last 14 days, never the text). Prints counts per account only ("work: listed 42, read 42 header set(s); 3 waiting on you, 1 owed to you; skipped: automated 30, ...") - never a subject, a name, an address or an id. No Claude request; nothing saved. |
 | `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text and memory notes as character counts) and the command line, and stop. With `web:`: the exact text the web research would get and its command line. No Claude request, nothing counted. |
 | `--slots am=10:12,pm=23:42` | The scheduled times (24-hour), which tell the app which briefing an answer belongs to. The tasks pass them; without it (or for a run it leaves out) `[schedule]` in `config.toml` applies. A value that cannot be read is logged and ignored. |
 | `--open` | Open Jarvis: the assistant screen in front, on its JARVIS tab, with a greeting (and "Your AM briefing is ready to view." when one is waiting); the briefing waits in its BRIEFING tab and nothing is read until you press Play. The same as starting without options. A running app comes forward. What the Start menu shortcut and the hotkey use. |
@@ -2947,7 +3088,7 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--version` | Print the name and version (such as `Jarvis Assistant 1.2.0`) and exit. |
 
 `--open`, `--now` and `--read` exclude each other, and none of them goes with
-`--catch-up`, `--hotkey-agent`, `--ask-check`, `--ask-text` or `--plan-dry-run`. Without `--run`,
+`--catch-up`, `--hotkey-agent`, `--ask-check`, `--ask-text`, `--plan-dry-run` or `--followups-check`. Without `--run`,
 the app fetches the page once (retrying if Notion cannot be reached) and does
 not wait for a fresh one; a briefing that is not from today still gets the
 spoken stale note when it is read.
@@ -3077,7 +3218,10 @@ log. Changes apply the next time the app starts.
 | `[productivity] prep_speak_minimized` | `true` | Say a prep offer (its time only) while Jarvis is minimized. |
 | `[productivity] minimized_check` | `true` | While minimized: one read of a meeting's hour of your calendar before its offer; `false`: nothing is read while minimized and such an offer is text only. |
 | `[productivity] quiet_from`, `quiet_until` | `"22:00"`, `"08:00"` | No spoken offers between these times (the offers still appear as text). |
-| `[productivity]` other keys | see `config.toml` | `followups`, `scan_...`, `waiting_after_hours`, `owed_after_days` and `followups_shown` are read and checked (a bad value falls back with a warning) but not used yet: they belong to follow-ups, which a later version adds. |
+| `[productivity] followups` | `true` | The [follow-up list](#follow-ups-and-nudges) (headers only; also needs `[ask] read_mail` and `"gmail_read"`). |
+| `[productivity] scan_days`, `scan_every_minutes`, `scan_max_threads` | `14`, `30`, `150` | How far back (3-14 days), how often while visible (15-240 minutes) and how many threads per account (20-300) the header scan reads. |
+| `[productivity] waiting_after_hours`, `owed_after_days` | `20`, `3` | When a thread is listed as waiting on you (1-72 hours) or owed to you (1-13 days). |
+| `[productivity] followups_shown` | `6` | Rows per kind before "+N more" (1-20). |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -3287,6 +3431,21 @@ a row)", "Prep series: reset", "Offer link: used" (used, busy, expired, gone),
 type only, never its message. Never a title, a guest, an address, a meeting's
 id or anything Jarvis says.
 
+The follow-up list logs "Gmail reading (work): a scan listed 42 thread(s)",
+"... read 42 header set(s)", "... 2 own address(es)", "Follow-ups: scan of work
+in 3.2 s (listed 42, fetched 42, cached 0; 3 waiting, 1 owed; skipped automated
+30, cc_only 4, group 3, sensitive 1)", "Follow-ups: work stopped (rate_limit);
+partial" (rate_limit, error, cancelled), "Follow-ups: work not scanned
+(unconfirmed)" (unconfirmed, identity, unreadable, refused, stopped),
+"Follow-ups: a thread checked again (guard)" (guard, sent), "Follow-ups: a row
+hidden (3_days)" (until_new), "Follow-ups: a row shown again", "Follow-ups:
+turned off on this PC", "Productivity: scan job failed (ValueError)"; a draft
+"Ask: context of ... characters (...; mode nudge)", the outcome line with ",
+mode nudge", "Nudge: no run (replied_since)" (answered_since, changed, gone,
+unreadable, draft_waiting), "Nudge: a denied draft was replaced" and "Nudge: a
+draft held back (note)". Never a subject, a name, an address, a thread id, a
+hash, a draft or your words.
+
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
 | File | What it is |
@@ -3299,7 +3458,8 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
-| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown. Never any text. Safe to delete. |
+| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC. Never any text. Safe to delete. |
+| `followups.json` | The follow-up rows you hid: per row a 32-character hash (of the account name, the thread and its newest deciding message, never in clear), when you hid it and until when ("" = until something new arrives); entries older than 30 days are dropped. No subject, name, address or id. Safe to delete (hidden rows come back). |
 | `prep_series.json` | The productivity bundle's repeating meetings whose prep offers ended unclicked: per series a 32-character hash (of the account name, the calendar and Google's series id, never in clear), how many times in a row (3 stops its offers) and the day of the last change; entries untouched for 60 days are dropped. No title, id or address. Safe to delete (the offers come back). |
 | `memory.json` | The productivity bundle's memory ([Memory](#memory-the-memory-tab)): **the only file with your own text** - your notes, typed or suggestions you kept, each with an id, TOLD or SUGGESTED and when it was made or changed; and, for suggestions you dismissed, a short hash of each word (not the sentence; a common word or a name could be guessed from its hash). Written only by the app (the command line reads it without changing it). Delete it (also while Jarvis runs: the next Ask, MEMORY and any change take the file as it is), or delete the notes in MEMORY, to forget everything. If it can't be read, Jarvis never overwrites it (MEMORY says so). |
 
@@ -3322,7 +3482,8 @@ The app talks to these services, all free:
   times and counts, never a title; what he says about a meeting brief, and an
   approved prep reply's result, carry only the meeting's time, never a title,
   a guest, a subject or the brief; an offer's sentence carries only times and
-  counts). They are
+  counts; a follow-up draft's sentence and a sent draft's result carry no
+  subject or name, and the follow-up list is never spoken). They are
   never logged or saved after the app closes; muting him (the speaker button,
   Ctrl+M) or `[assistant] speak = false` stops sending them;
 - the Google Calendar API, and only for an account you signed in with a click
@@ -3534,6 +3695,19 @@ voices only and check that an offer never reads mail, runs Claude or sends
 anything before a click, and that no title or guest reaches a log or the
 voice.
 
+The follow-up tests (`test_followups.py` for the header facts, the 14-day cut,
+every reason a thread is or is not listed, the deciding message, the
+participants index, the scanner's cache, budget, partial and stopped accounts
+and `followups.json`; `test_ask_nudge.py` for a draft's input, the guard, the
+draft's checks, the follow-up parts of a meeting brief and the isolation from
+web research; `test_followups_app.py` for the list in the app: rows, the menu, a
+draft sent and its row checked again, Show the draft, Tell Jarvis what to say,
+a denied draft drafted again, typed "follow-ups", hide, turn off; and follow-up
+cases in the Gmail, prefs, actions, routes, persona, LIVE and productivity
+tests) use fake Gmail readers that answer header and thread reads, and check
+that no list item reaches a log, an ACTIVITY row or anything spoken, and that a
+scan never asks for a snippet or a body.
+
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
 and release it within seconds; they never start the app. The catch-up tests run
@@ -3587,9 +3761,10 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   has a thread with you from the last `prep_lookback_days`, or mail could not
   be read (the brief says why: `[ask] read_mail`, `"gmail_read"`, a sign-in, a
   limit or Claude Code not ready). Nothing was counted.
-- **A draft says it repeats one of your notes**: a prep reply that copies one
-  of your memory notes is held back (information only); write the reply
-  yourself, or ask again.
+- **A draft says it repeats one of your notes**: a prep reply or a follow-up
+  draft that copies one of your memory notes is held back (information only);
+  write the reply yourself, ask again, or for a follow-up use **Tell Jarvis what
+  to say** with the words you want in it.
 - **No prep offers**: Jarvis was closed with Done (offers work only while he is
   open or minimized), the meeting has no other guest, a `prep_skip_words` word
   in its title, more than `prep_max_offer_guests` guests or lasts over 4
@@ -3599,6 +3774,16 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   in a row (type "prep me" once to bring it back). While minimized, a meeting
   created after you minimized is found only when the window is visible again.
   LIVE's READS row says why for each meeting with guests.
+- **FOLLOW-UPS says "Confirm which Google account "work" is first"**: click
+  **Confirm** (or **Sign in** for "Sign in again so Jarvis can read work
+  mail"): Jarvis reads the follow-up headers only of accounts whose Google
+  account you confirmed. "Reading mail is off ([ask] read_mail)": turn it on in
+  `config.toml`. No FOLLOW-UPS at all: the bundle or `followups` is off, or no
+  account has `"gmail_read"`.
+- **A colleague at a security provider's domain is not searched for prep**: by
+  design, a meeting brief never searches an account-security or payment
+  domain's address (your own work domain is listed in FOLLOW-UPS, but prep
+  still never searches it).
 - **A plan offer is silent until you've heard or viewed the briefing**: by
   design; it is said after playback finishes, after you viewed the briefing
   and came back to the JARVIS tab, or 20 minutes after the announcement with no
@@ -3949,7 +4134,8 @@ briefing_reader/runstate.py   scheduled slots, briefing keys, which briefings we
 briefing_reader/prefs.py      Jarvis's small preferences (assistant.json): mute, the last greetings' ids
 briefing_reader/memory.py     the productivity bundle's memory (memory.json; no Qt): notes, refusals, duplicates, dismissed suggestions as hashes, the suggestion and note-leak checks
 briefing_reader/prepseries.py the productivity bundle's ignored repeating meetings (prep_series.json; hashes, counts and dates only; no Qt)
-briefing_reader/productivity_ui.py  the productivity bundle in the app: Jarvis's own day read (its "prod" thread), the offers' timer, the plan and prep offers
+briefing_reader/followups.py  the productivity bundle's follow-up list (no Qt): header facts, the classification, the scanner and its cache, followups.json
+briefing_reader/productivity_ui.py  the productivity bundle in the app: Jarvis's own day read and header scan (its "prod" thread), the offers' timer, the plan and prep offers, the follow-up list
 briefing_reader/persona.py    what Jarvis says on his own: the greetings, "ready to view", the one safe fact, Ask's spoken answer, "Done, sir - ..." after a result, speech scrubbing (no Qt)
 briefing_reader/speech.py     Jarvis's voice: utterance kinds, the Voice interface, the silent default, the queue rules and the "tts-say" worker (no Qt)
 briefing_reader/voice_ui.py   Jarvis's voice in the app: his own player and the voice the controller speaks through (pauses and resumes the briefing, mute, countdown hold)
@@ -3975,7 +4161,8 @@ briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (c
                               (dayplan), the meeting brief's meeting, guests, searches and checks (prep) and
                               the offers' rules: when one is due and when its sentence may be said (offers);
                               ask/assets: the planner's, the day plan's (plan_prompt.md, plan_schema.json), the
-                              meeting brief's (prep_prompt.md, prep_schema.json) and the research's instructions,
+                              meeting brief's (prep_prompt.md, prep_schema.json), the follow-up draft's
+                              (nudge_prompt.md, nudge_schema.json) and the research's instructions,
                               answer formats and settings
 briefing_reader/live.py       the LIVE view's event stream (no Qt): every step Jarvis takes, in memory only, bounded
 briefing_reader/pictures.py   LIVE's pictures as data (no Qt): an email, what a card sends, a calendar change on its day, the week, a day plan, a page

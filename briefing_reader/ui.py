@@ -176,8 +176,8 @@ from .agenda import (
     merge_deadlines,
 )
 from .ask.dayplan import PART_DAY, hours_text
-from .ask.modes import (MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_CHOICE, ORIGIN_OFFER, ModeInputs, ModeRequest,
-                        block_line, todo_facts)
+from .ask.modes import (MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_BRIEF, ORIGIN_CHOICE, ORIGIN_LIST,
+                        ORIGIN_OFFER, ModeInputs, ModeRequest, block_line, todo_facts)
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import DEFAULT_ACCOUNT, AgendaConfig, Config
@@ -270,6 +270,24 @@ from .notion_client import (
 )
 from .persona import (
     DONE_PREP_TOOLTIP,
+    FOLLOWUPS_CHECKING,
+    FOLLOWUPS_CONFIRM_LINK,
+    FOLLOWUPS_DRAFT_WAITING,
+    FOLLOWUPS_EMPTY,
+    FOLLOWUPS_FIX_CONFIRM,
+    FOLLOWUPS_FIX_READ_OFF,
+    FOLLOWUPS_FIX_SIGN_IN,
+    FOLLOWUPS_OFF_LINE,
+    FOLLOWUPS_OFF_META,
+    FOLLOWUPS_OFF_TEXT,
+    FOLLOWUPS_ON_LINK,
+    FOLLOWUPS_OWED_LABEL,
+    FOLLOWUPS_PARTIAL_META,
+    FOLLOWUPS_SCANNING_META,
+    FOLLOWUPS_SHOW_LINK,
+    FOLLOWUPS_WAITING_LABEL,
+    NUDGE_DRAFT_LINK,
+    NUDGE_QUESTION_LINK,
     OUTCOME_ERROR,
     OUTCOME_GOOD,
     OUTCOME_WARN,
@@ -284,6 +302,7 @@ from .persona import (
     ask_reply_note_speech,
     ask_reply_speech,
     brief_ready_text,
+    clock_text,
     compose_opening,
     memory_forgotten_speech,
     memory_forgotten_text,
@@ -294,6 +313,23 @@ from .persona import (
     memory_suggestion_text,
     next_event_sentence,
     not_sent_text,
+    nudge_decided_text,
+    nudge_drafted_text,
+    nudge_held_text,
+    nudge_listed_text,
+    nudge_no_run_words,
+    nudge_question_text,
+    nudge_result_speech,
+    nudge_waiting_text,
+    followups_activity,
+    followups_confirm_text,
+    followups_not_started_text,
+    followups_read_off_text,
+    followups_meta,
+    followups_scanning_text,
+    followups_sign_in_text,
+    followups_text,
+    owes_answer_text,
     outcome_text,
     outcome_tone,
     pick_ack,
@@ -2362,9 +2398,9 @@ MEMORY_NOT_KEPT_TEXT = "Not kept."
 MEMORY_PUSHED_TEXT = "No longer pending - add it in MEMORY."
 MEMORY_NO_MATCH_TEXT = "I have no note about that, {sir}."
 MEMORY_SEVERAL_TEXT = "Which note, {sir}? I've opened MEMORY with the matches."
-# Who gets the notes (drafts join them when they are built).
-MEMORY_GIVEN_TO = "every Ask, plan and brief"
-MEMORY_SENT_WORDS = "Sent with your Asks, plans and briefs; never to web research"
+# Who gets the notes.
+MEMORY_GIVEN_TO = "every Ask, plan, brief and draft"
+MEMORY_SENT_WORDS = "Sent with your Asks, plans, briefs and drafts; never to web research"
 MEMORY_STATUS = ("Kept only on this PC (memory.json). Given to your Claude with {given} - never to web research. "
                  "{count} " + DOT + " {kb:.1f} of {cap} KB sent.")
 MEMORY_STORED_WORDS = "memory.json (on this PC)"
@@ -2432,6 +2468,26 @@ PREP_THIS_ONE_TEXT = "Prep this one"
 # button's tooltip while a meeting with guests remains today (R34; DONE_TOOLTIP is the default: none).
 OFFER_LINK = "offer:"
 DONE_TOOLTIP = ""
+# Follow-ups (the productivity bundle, B5): the conversation's and the FOLLOW-UPS section's links (opaque
+# counters; the targets stay in memory), the row menu's words.
+FOLLOWUPS_SHOW = "followups:show"
+FOLLOWUPS_ON = "followups:on"
+FU_CONFIRM_LINK = "fu-confirm:"         # + an opaque counter: confirm that account's Google account
+FU_SIGN_IN_LINK = "fu-signin:"          # + an opaque counter: sign that account in again
+_FU_SIGN_IN_PROBLEMS = frozenset({"identity", "unreadable", "refused", "stopped"})   # their fix: Sign in
+NUDGE_LINK = "nudge:"                   # + an opaque counter: Draft a nudge (a brief's "owes you an answer")
+NUDGE_WORDS_LINK = "nudge-words:"       # + an opaque counter: Tell Jarvis what to say (a draft's question)
+FOLLOWUP_MENU_DRAFT = {"waiting": "Draft a reply", "owed": "Draft a nudge"}
+FOLLOWUP_MENU_SHOW = "Show the draft"
+FOLLOWUP_MENU_WORDS = "Tell Jarvis what to say..."
+FOLLOWUP_MENU_OPEN = "Open in Gmail"
+FOLLOWUP_MENU_HIDE_DAYS = "Hide for 3 days"
+FOLLOWUP_MENU_HIDE_NEW = "Hide until something new arrives"
+FOLLOWUPS_MENU_RESCAN = "Rescan"
+FOLLOWUPS_MENU_HIDDEN = "Show hidden ({count})"
+FOLLOWUPS_MENU_OFF = "Turn off on this PC"
+FOLLOWUPS_MENU_ON = "Turn on on this PC"
+_NUDGE_GUARD_KINDS = frozenset({"replied_since", "answered_since", "changed"})
 PROD_INLINE = False                    # tests and harnesses: the bundle's reads run on the GUI thread
 PLANNED_NOTE = "Planned {hours} {day} (day plan)"   # on a Todo card a created plan block serves (R28)
 _PLAN_FOCUS_GUARD_S = 1.0              # a key press this soon after Jarvis moved the focus never approves (R1)
@@ -3067,8 +3123,15 @@ def _short_updated(header: BriefingHeader, now: datetime, hour24: bool = False, 
     return day if compact else f"{day} {clock}"
 
 
+_MODE_ACTIVITY_WORDS = {MODE_PLAN: "a plan block", MODE_PREP: "a prep reply", MODE_NUDGE: "a follow-up reply"}
+
+
 def _activity_title(action: ProposedAction) -> str:
-    """``action``'s title for an ACTIVITY row: cut to one line for key=value kinds (Calendar as before)."""
+    """``action``'s title for an ACTIVITY row: cut to one line for key=value kinds (Calendar as before).
+    A planner mode's card (the productivity bundle) is named by its kind only: ACTIVITY never holds a
+    block title or a subject from the bundle (spec 14)."""
+    if action.mode in _MODE_ACTIVITY_WORDS:
+        return _MODE_ACTIVITY_WORDS[action.mode]
     return _short(action.title, _ACTIVITY_TITLE_CHARS) if action.structured else action.title
 
 
@@ -4292,14 +4355,23 @@ class AppController(QObject):
                 merged.append(action)
         return merged + briefing
 
-    def _take_ask_cards(self, cards: Sequence[ProposedAction], replace_mode: str = "", window: Any = None) -> None:
+    def _take_ask_cards(self, cards: Sequence[ProposedAction], replace_mode: str = "", window: Any = None,
+                        thread: tuple[str, str] | None = None) -> None:
         """An Ask's cards, above the earlier Ask cards. A card counting down, queued or on its way
         keeps its content (the same id from the new answer is left out); at most _ASK_CARDS_MAX
         stay, the oldest that is not on its way going first. ``replace_mode`` "plan" with the new
         plan's ``window`` (dayplan.PlanWindow): the earlier plan cards that are still undecided,
         unedited, not counting down or on their way, on that day and overlapping its hours go (R39);
-        every other earlier plan card stays ("plan my morning" then "plan my afternoon" keeps both)."""
+        every other earlier plan card stays ("plan my morning" then "plan my afternoon" keeps both).
+        ``replace_mode`` "nudge" with ``thread`` (account, thread id): a "Tell Jarvis what to say" draft
+        replaces only the unedited, undecided nudge card of that thread (R31)."""
         old = self._source_lists[SOURCE_ASK]
+        if replace_mode == MODE_NUDGE and thread is not None:
+            gone_ids = {action.id for action in old if self._replaceable_nudge_card(action, thread)}
+            for action_id in gone_ids:
+                for kept in (self._edits, self._hints, self._reviewed):
+                    kept.pop(action_id, None)
+            old = [action for action in old if action.id not in gone_ids]
         if replace_mode == MODE_PLAN and window is not None:
             gone = [action for action in old if self._replaceable_plan_card(action, window)]
             if gone:
@@ -4318,6 +4390,15 @@ class AppController(QObject):
                 break
             merged.remove(victim)
         self._set_source(SOURCE_ASK, merged)
+
+    def _replaceable_nudge_card(self, action: ProposedAction, thread: tuple[str, str]) -> bool:
+        """An unedited, undecided nudge card of ``thread`` (account, thread id), not counting down or on its
+        way: what a "Tell Jarvis what to say" draft replaces (R31)."""
+        if action.mode != MODE_NUDGE or (action.account, action.field("thread")) != thread:
+            return False
+        if action.id in self._jobs or self._store.is_decided(action.id) or self._is_edited(action):
+            return False
+        return not (self._countdown is not None and self._countdown.action.id == action.id)
 
     def _replaceable_plan_card(self, action: ProposedAction, window: Any) -> bool:
         """An earlier plan card a new plan of ``window`` replaces (R39): undecided, unedited, not in a
@@ -4750,6 +4831,7 @@ class AppController(QObject):
         self.window.prompt.set_pending(pending)
         self.window.reading.set_pending(pending, total)
         self._update_service_chips()
+        self._render_followups()   # a row whose reply card waits reads "draft waiting" (R31)
 
     def _decision_click_too_soon(self) -> bool:
         """True (and logged) for an Approve / Deny within 1 s of the previous one, on any card.
@@ -4845,7 +4927,7 @@ class AppController(QObject):
         reading = self.window.reading
         if not self.window.isActiveWindow() or QApplication.activeModalWidget() is not None:
             return
-        if self._dialog is not None or self._account_dialog is not None:
+        if self._dialog is not None or self._account_dialog is not None or getattr(self, "_nudge_dialog", None):
             return
         focus = QApplication.focusWidget()
         if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit)):
@@ -5085,7 +5167,7 @@ class AppController(QObject):
         self._show_card_state(action.id)
         self._sync_card_locks()
         if action.kind == CALENDAR:
-            self._activity(hud.TAG_RUN, f"Adding in {seconds} s: {action.title}", "Google Calendar")
+            self._activity(hud.TAG_RUN, f"Adding in {seconds} s: {_activity_title(action)}", "Google Calendar")
         elif action.kind == TODO:
             self._activity(hud.TAG_RUN, f"Adding in {seconds} s: a block for {_activity_title(action)}",
                            "Google Calendar")
@@ -5195,7 +5277,7 @@ class AppController(QObject):
         self._running[action.id] = (action, True)
         self._show_card_state(action.id)
         if action.kind == CALENDAR:
-            self._activity(hud.TAG_RUN, f"Adding {action.title}", "Google Calendar")
+            self._activity(hud.TAG_RUN, f"Adding {_activity_title(action)}", "Google Calendar")
         elif action.kind == TODO:
             self._activity(hud.TAG_RUN, f"Adding a block for {_activity_title(action)}", "Google Calendar")
         else:
@@ -5270,7 +5352,7 @@ class AppController(QObject):
         self._store.set(action_id, STATUS_DENIED, kind=action.kind, account=action.account)
         self._show_card_state(action_id)
         if action.kind == CALENDAR:
-            self._activity(hud.TAG_STOP, f"Denied {action.title}", "nothing was created")
+            self._activity(hud.TAG_STOP, f"Denied {_activity_title(action)}", "nothing was created")
         elif action.kind == TODO:
             self._activity(hud.TAG_STOP, f"Dismissed {_activity_title(action)}", "nothing was created")
         elif action.changes_event:   # Skip: its card reads SKIPPED
@@ -5643,6 +5725,10 @@ class AppController(QObject):
             self._activity(hud.TAG_DONE, f"{text}: {_kind_title(action)}", sub)
             if not mail and account_of(action) == DEFAULT_ACCOUNT:
                 self._request_agenda()   # the agenda may show the change
+            if action.kind == REPLY and action.mode in (MODE_NUDGE, MODE_PREP):
+                # A listed follow-up's thread: its row reads "replied - checking" and its headers are read
+                # again at once (R47); a thread that is not listed triggers no read.
+                self._prod_call("refetch_thread", action.account, action.field("thread"), "sent")
             self._tell_result(action, STATUS_SENT)
             return
         message = (str(error) if error is not None else "") or "unknown error"
@@ -5721,6 +5807,7 @@ class AppController(QObject):
         worker = self._start_calendar()
         if worker is None:
             return
+        self._prod_call("cancel_scan")   # a running header scan stops between two reads (R19)
         self._connect_alias = alias
         self._connect_card = card_id
         self._connect_mail = action is not None
@@ -6239,6 +6326,7 @@ class AppController(QObject):
         controller.chipChanged.connect(self._set_ask_chip)
         controller.mailSignInRequested.connect(self.sign_in_for_mail)
         controller.memoryRequested.connect(self._on_memory_route)
+        controller.followupsRequested.connect(self._on_followups_route)
         reading.command_bar.cancelRequested.connect(self._on_ask_cancel_clicked)   # after the controller's
         reading.set_ask_available(True)
         self._set_ask_chip(*controller.chip())
@@ -6424,6 +6512,9 @@ class AppController(QObject):
             self._on_prep_outcome(outcome)
             self._offer_outcome(outcome)
             return
+        if getattr(outcome, "mode", "") == MODE_NUDGE:
+            self._on_nudge_outcome(outcome)
+            return
         self._offer_running = 0
         self._converse_ask(outcome)
         if outcome.ok and getattr(outcome, "suggestion", ""):
@@ -6471,9 +6562,16 @@ class AppController(QObject):
         pending = [action for action in self._pending_actions() if action.kind == TODO]
         from .ask.planner import deadline_lines
 
+        counts, participants = None, {}
+        controller = getattr(self, "productivity", None)
+        if controller is not None:
+            try:   # the follow-up list: two counts for a plan, the participants index for prep (memory)
+                counts, participants = controller.followup_counts(), controller.participants()
+            except Exception as exc:  # noqa: BLE001 - the run goes on without them
+                logger.warning("Follow-ups: the counts could not be read (%s)", type(exc).__name__)
         return ModeInputs(todos=todo_facts(pending, planned=self._planned_todos),
-                          deadlines=tuple(deadline_lines(self._merged_deadlines)),
-                          evening_from_hour=int(self.config.agenda.evening_from_hour))
+                          deadlines=tuple(deadline_lines(self._merged_deadlines)), followup_counts=counts,
+                          participants=participants, evening_from_hour=int(self.config.agenda.evening_from_hour))
 
     def _on_plan_outcome(self, outcome: Any) -> None:
         """A finished day plan: the entry (the blocks, the planner's say, or why there was no run),
@@ -6632,6 +6730,7 @@ class AppController(QObject):
         task_id = self._ask_task_id
         link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
         self._jarvis(text, tone=hud.TONE_DONE, sub=f" {DOT} ".join(sub), link=link)
+        self._brief_nudge_entries(brief)
         self._plan_gives_way()
         reading = self.window.reading
         in_jarvis = reading.current_tab() == hud.TAB_JARVIS or self.window.isMinimized()
@@ -6751,6 +6850,15 @@ class AppController(QObject):
         never acts: its link starts the plan or the brief, as a click-started run."""
         self._offer_running = 0            # the offer whose click started the running plan or brief
         self._offer_entries: dict[int, int] = {}   # offer id -> its JARVIS entry (memory only)
+        # Follow-ups (memory only): link counters -> (ThreadTarget, subject, row id), the accounts behind
+        # the fix lines' links, the draft running now, the open menus and dialog, the counts last shown.
+        self._nudge_links: dict[int, tuple[Any, str, str]] = {}
+        self._nudge_seq = 0
+        self._fu_aliases: dict[int, str] = {}
+        self._nudge_running: tuple[Any, str, str, str, str] | None = None   # target, row id, subject, words, replaced
+        self._followup_menu: QMenu | None = None
+        self._nudge_dialog: Any = None
+        self._followups_shown: tuple[int, int] | None = None
         self._prod_hint_checked = False    # assistant.json's prod_hint_shown was looked at (R34)
         productivity = getattr(self.config, "productivity", None)
         if self.ask is None or not getattr(productivity, "enabled", False):
@@ -6768,10 +6876,18 @@ class AppController(QObject):
         except Exception as exc:  # noqa: BLE001 - offers come without the ignored-series counts
             logger.warning("Could not read the ignored meeting series (%s)", type(exc).__name__)
             series = None
+        from .followups import FOLLOWUPS_FILE, HiddenStore
+
+        try:
+            hidden: Any = HiddenStore(self.config.data_dir / FOLLOWUPS_FILE)
+        except Exception as exc:  # noqa: BLE001 - nothing is hidden then
+            logger.warning("Could not read the hidden follow-ups (%s)", type(exc).__name__)
+            hidden = None
         try:
             controller = ProductivityController(
                 self.config, sources=sources, live=self.live, now=self._now, activity=self._prod_activity,
                 facts=self._prod_facts, ask_state=self._prod_ask_state, inputs=self._mode_inputs,
+                known_recipient=self._history.knows, prefs=self._prefs_store(), hidden=hidden,
                 series=series, refresh_caps=self._prod_refresh_caps,
                 signing_in=self._signing_in, run_state=self.run_state, caps=lambda: getattr(self.ask, "caps", None),
                 parent=self, inline=PROD_INLINE)
@@ -6785,18 +6901,25 @@ class AppController(QObject):
         controller.offerUnsaid.connect(self._on_offer_unsaid)
         controller.dayChanged.connect(self._update_done_tooltip)
         controller.ticked.connect(self._on_prod_ticked)
+        controller.followupsChanged.connect(self._on_followups_changed)
+        panel = self.window.reading.agenda_panel
+        panel.followupActivated.connect(self._on_followup_activated)
+        panel.followupsLinkClicked.connect(self._on_followups_link)
+        panel.followupsMenuRequested.connect(self._on_followups_menu)
         self.window.visibilityChanged.connect(self._prod_sync)
         return controller
 
-    def _prod_call(self, name: str, *args: Any) -> None:
-        """One hook on the bundle's controller (when there is one); it never stops the app."""
+    def _prod_call(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        """One hook on the bundle's controller (when there is one): its answer, None without one or
+        on an error; it never stops the app."""
         controller = getattr(self, "productivity", None)
         if controller is None or self.state == STATE_QUITTING:
-            return
+            return None
         try:
-            getattr(controller, name)(*args)
+            return getattr(controller, name)(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - the offers are optional
             logger.warning("Productivity: a %s hook failed (%s)", name, type(exc).__name__)
+            return None
 
     def _prod_sync(self) -> None:
         """The bundle's timer follows the reading screen: visible, minimized or off (spec 15). When the
@@ -7034,6 +7157,448 @@ class AppController(QObject):
         prefs.set_prod_hint_shown()
         logger.info("Productivity: the Done hint was shown")
 
+    # ---- Follow-ups and nudges (the productivity bundle, B5) -------------------------------------
+
+    def _followups_section_on(self) -> bool:
+        """FOLLOW-UPS is shown (and "any follow-ups?" answered): the bundle with Ask, [productivity]
+        followups, and an account set up to read mail (gmail_read). Memory and the config only."""
+        controller = getattr(self, "productivity", None)
+        settings = getattr(self.config, "productivity", None)
+        if controller is None or not getattr(settings, "followups", False):
+            return False
+        if controller.scan_aliases():
+            return True
+        accounts = getattr(self.config, "accounts", {}) or {}
+        return not self.config.ask.read_mail and any("gmail_read" in getattr(account, "features", ())
+                                                     for account in accounts.values())
+
+    def _pending_reply(self, alias: str, thread_id: str) -> ProposedAction | None:
+        """An undecided Reply card (any source: the briefing, an Ask, a brief, a draft) for that account
+        and thread, as its card shows it."""
+        for action in self._pending_actions():
+            if (action.kind == REPLY and not action.error and action.account == alias
+                    and action.field("thread") == thread_id):
+                return action
+        return None
+
+    def _followup_alias_link(self, prefix: str, alias: str) -> str:
+        for number, known in self._fu_aliases.items():
+            if known == alias:
+                return f"{prefix}{number}"
+        number = len(self._fu_aliases) + 1
+        self._fu_aliases[number] = alias
+        return f"{prefix}{number}"
+
+    def _render_followups(self) -> None:
+        """FOLLOW-UPS under DEADLINES from the controller's list (memory only): its meta, fix lines, rows
+        (with "draft waiting" / "replied - checking", R31 / R47) or why it is empty; hidden while off."""
+        controller = getattr(self, "productivity", None)
+        panel = self.window.reading.agenda_panel
+        if controller is None or not self._followups_section_on() or self.state == STATE_QUITTING:
+            panel.set_followups(None)
+            return
+        view = controller.followups()
+        settings = self.config.productivity
+        if view.off:
+            panel.set_followups(hud.FollowupsInfo(meta=FOLLOWUPS_OFF_META, notes=(
+                (FOLLOWUPS_OFF_LINE, FOLLOWUPS_ON_LINK, FOLLOWUPS_ON),), shown=int(settings.followups_shown)))
+            return
+        notes: list[tuple[str, str, str]] = []
+        for alias, problem in view.notes:
+            if problem == "read_off":
+                notes.append((FOLLOWUPS_FIX_READ_OFF, "", ""))
+            elif problem == "unconfirmed":
+                notes.append((FOLLOWUPS_FIX_CONFIRM.replace("{alias}", alias), FOLLOWUPS_CONFIRM_LINK,
+                              self._followup_alias_link(FU_CONFIRM_LINK, alias)))
+            else:
+                notes.append((FOLLOWUPS_FIX_SIGN_IN.replace("{alias}", alias), "Sign in",
+                              self._followup_alias_link(FU_SIGN_IN_LINK, alias)))
+        now = self._now()
+        hour24 = self.config.display.hour24
+
+        def row(item: Any) -> hud.FollowupRowInfo:
+            from .followups import age_words
+
+            state, words = "", ""
+            if controller.checking(item.row_id):
+                state, words = hud.FOLLOWUP_CHECKING, FOLLOWUPS_CHECKING
+            elif self._pending_reply(item.alias, item.thread_id) is not None:
+                state, words = hud.FOLLOWUP_DRAFT_WAITING, FOLLOWUPS_DRAFT_WAITING
+            tip = f"{item.alias} {DOT} {item.reason}" + (f"\n{item.subject}" if item.subject else "")
+            return hud.FollowupRowInfo(item.row_id, item.kind, item.who or item.who_address,
+                                       age_words(item.since, now) if item.since is not None else "", item.subject,
+                                       tip, state, words)
+
+        waiting = tuple(row(item) for item in view.waiting)
+        owed = tuple(row(item) for item in view.owed)
+        color = hud.TEXT_DIM
+        if view.scanning:
+            meta = FOLLOWUPS_SCANNING_META
+        elif view.partial:
+            meta, color = FOLLOWUPS_PARTIAL_META, hud.AMBER
+        elif waiting or owed:
+            meta = followups_meta(len(waiting), len(owed))
+        elif view.scanned_at is not None:
+            meta = f"updated {clock_text(self._offer_wall(view.scanned_at), hour24)}"
+        else:
+            meta = ""
+        empty = FOLLOWUPS_EMPTY if view.scanned_at is not None and not view.scanning and not notes else ""
+        panel.set_followups(hud.FollowupsInfo(meta=meta, meta_color=color, waiting=waiting, owed=owed,
+                                              shown=int(settings.followups_shown), notes=tuple(notes),
+                                              empty_text=empty, waiting_label=FOLLOWUPS_WAITING_LABEL,
+                                              owed_label=FOLLOWUPS_OWED_LABEL))
+
+    def _on_followups_changed(self, view: Any) -> None:
+        """A scan or a re-fetch landed, a row was hidden: the section follows; after a scan ACTIVITY gets
+        one row of counts when they changed (never a subject or a name)."""
+        if self.state == STATE_QUITTING:
+            return
+        self._render_followups()
+        if view is None or view.scanning or view.scanned_at is None or view.off:
+            return
+        counts = (len(view.waiting), len(view.owed))
+        if counts != self._followups_shown:
+            self._followups_shown = counts
+            self._activity(hud.TAG_DONE, followups_activity(*counts), "headers only")
+
+    def _on_followup_activated(self, row_id: str) -> None:
+        """A row's menu (click or Enter): Draft a reply / nudge (or Show the draft while one waits),
+        Tell Jarvis what to say..., Open in Gmail, Hide. Off while the row is being checked."""
+        controller = self.productivity
+        item = controller.item(row_id) if controller is not None else None
+        if item is None or self.state == STATE_QUITTING:
+            logger.info("Follow-ups: that row is gone")
+            return
+        if controller.checking(row_id):
+            return
+        panel = self.window.reading.agenda_panel
+        widget = panel.followup_row(row_id)
+        menu = QMenu(self.window)
+        pending = self._pending_reply(item.alias, item.thread_id)
+        if pending is not None:
+            menu.addAction(FOLLOWUP_MENU_SHOW).triggered.connect(
+                lambda _checked=False, action_id=pending.id: self._show_draft(action_id))
+        else:
+            menu.addAction(FOLLOWUP_MENU_DRAFT.get(item.kind, "Draft a reply")).triggered.connect(
+                lambda _checked=False: self._draft_row(row_id))
+        menu.addAction(FOLLOWUP_MENU_WORDS).triggered.connect(lambda _checked=False: self._words_row(row_id))
+        menu.addAction(FOLLOWUP_MENU_OPEN).triggered.connect(lambda _checked=False: self._open_row(row_id))
+        menu.addSeparator()
+        menu.addAction(FOLLOWUP_MENU_HIDE_DAYS).triggered.connect(
+            lambda _checked=False: self._prod_call("hide", row_id, days=3))
+        menu.addAction(FOLLOWUP_MENU_HIDE_NEW).triggered.connect(
+            lambda _checked=False: self._prod_call("hide", row_id, days=None))
+        self._popup(menu, widget)
+
+    def _popup(self, menu: QMenu, anchor: QWidget | None) -> None:
+        old, self._followup_menu = self._followup_menu, menu
+        if old is not None:
+            old.close()
+            old.deleteLater()
+        if anchor is not None:
+            menu.popup(anchor.mapToGlobal(QPoint(0, anchor.height())))
+        else:
+            menu.popup(QCursor.pos())
+
+    def _on_followups_menu(self) -> None:
+        """The section's "...": Rescan, Show hidden (n) with Unhide, Turn off (or on) on this PC."""
+        controller = self.productivity
+        if controller is None or self.state == STATE_QUITTING:
+            return
+        view = controller.followups()
+        menu = QMenu(self.window)
+        rescan = menu.addAction(FOLLOWUPS_MENU_RESCAN)
+        rescan.setEnabled(not view.off and not view.scanning)
+        rescan.triggered.connect(lambda _checked=False: self._prod_call("request_scan", "rescan"))
+        hidden = menu.addMenu(FOLLOWUPS_MENU_HIDDEN.replace("{count}", str(len(view.hidden))))
+        hidden.setEnabled(bool(view.hidden))
+        for item in view.hidden:
+            words = " - ".join(part for part in (item.who or item.who_address, item.subject) if part)
+            hidden.addAction(f"Unhide: {words}").triggered.connect(
+                lambda _checked=False, row_id=item.row_id: self._prod_call("unhide", row_id))
+        if view.off:
+            menu.addAction(FOLLOWUPS_MENU_ON).triggered.connect(
+                lambda _checked=False: self._prod_call("set_off", False))
+        else:
+            menu.addAction(FOLLOWUPS_MENU_OFF).triggered.connect(
+                lambda _checked=False: self._prod_call("set_off", True))
+        self._popup(menu, self.window.reading.agenda_panel.followups_menu_button)
+
+    def _on_followups_link(self, link_id: str) -> None:
+        """A fix line's link (also from the conversation): Turn on, Confirm (that account's Google account)
+        or Sign in (that account's mail)."""
+        if self.state == STATE_QUITTING:
+            return
+        if link_id == FOLLOWUPS_ON:
+            self._prod_call("set_off", False)
+            return
+        for prefix in (FU_CONFIRM_LINK, FU_SIGN_IN_LINK):
+            if not link_id.startswith(prefix):
+                continue
+            try:
+                alias = self._fu_aliases.get(int(link_id[len(prefix):]), "")
+            except ValueError:
+                alias = ""
+            if not alias:
+                return
+            if prefix == FU_CONFIRM_LINK and self._ask_account(alias):
+                return
+            self.sign_in_for_mail(alias)
+            return
+
+    def _show_draft(self, action_id: str) -> None:
+        """Show the draft: its card scrolled into view, its frame flashed; the focus stays (R1, R31)."""
+        self.window.reading.approvals.reveal(action_id)
+
+    def _target_of(self, item: Any) -> Any:
+        from .ask.modes import ThreadTarget
+
+        return ThreadTarget(item.alias, item.thread_id, item.kind, item.last_gmail_id, item.auto_ids)
+
+    def _draft_row(self, row_id: str) -> None:
+        controller = self.productivity
+        item = controller.item(row_id) if controller is not None else None
+        if item is None:
+            logger.info("Follow-ups: that row is gone")
+            return
+        self._start_nudge(self._target_of(item), ORIGIN_LIST, row_id=row_id, subject=item.subject)
+
+    def _words_row(self, row_id: str) -> None:
+        controller = self.productivity
+        item = controller.item(row_id) if controller is not None else None
+        if item is None:
+            logger.info("Follow-ups: that row is gone")
+            return
+        self._open_nudge_words(self._target_of(item), item.subject, row_id)
+
+    def _open_row(self, row_id: str) -> None:
+        from .gmail import thread_link
+
+        controller = self.productivity
+        item = controller.item(row_id) if controller is not None else None
+        if item is None:
+            logger.info("Follow-ups: that row is gone")
+            return
+        sender = self._senders.get(item.alias)
+        try:
+            address = sender.from_address() if sender is not None else ""
+        except Exception:  # noqa: BLE001 - Gmail opens its own default account then
+            address = ""
+        link = thread_link(address, item.thread_id)
+        if link:
+            self.open_action_link(link)
+
+    def _open_nudge_words(self, target: Any, subject: str, row_id: str = "") -> None:
+        """"Tell Jarvis what to say...": one line for this draft; nothing is bound to the command bar."""
+        if self._nudge_dialog is not None or self.state == STATE_QUITTING:
+            return
+        dialog = hud.NudgeWordsDialog(subject, parent=self.window)
+        dialog.words.connect(lambda words: self._start_nudge(target, ORIGIN_LIST if row_id else ORIGIN_BRIEF,
+                                                             row_id=row_id, subject=subject, words=words))
+        dialog.finished.connect(self._on_nudge_dialog_closed)
+        self._nudge_dialog = dialog
+        dialog.open()
+
+    def _on_nudge_dialog_closed(self, _result: int = 0) -> None:
+        dialog, self._nudge_dialog = self._nudge_dialog, None
+        if dialog is not None:
+            dialog.deleteLater()
+
+    def _start_nudge(self, target: Any, origin: str, *, row_id: str = "", subject: str = "", words: str = "") -> None:
+        """A drafted reply or nudge (spec 3.4) as a click-started run. First, on this thread: a Reply card
+        for that thread already waiting under NEEDS YOUR OK -> no run, the card shown (R31); only "Tell
+        Jarvis what to say" replaces an unedited nudge card that is not counting down."""
+        if self.ask is None or self.state == STATE_QUITTING:
+            return
+        pending = self._pending_reply(target.alias, target.thread_id)
+        replaced = ""
+        if pending is not None:
+            page = self._action(pending.id)
+            replaceable = bool(words) and page is not None and self._replaceable_nudge_card(page, (
+                target.alias, target.thread_id))
+            if not replaceable:
+                logger.info("Nudge: no run (draft_waiting)")
+                self._jarvis(nudge_waiting_text(self.config.assistant.address), tone=hud.TONE_WARN,
+                             sub="no planner run")
+                self._show_draft(pending.id)
+                return
+            replaced = pending.id
+        kind_words = "WAITING ON YOU" if target.kind == "waiting" else "OWED TO YOU"
+        if words:
+            label = f"{FOLLOWUP_MENU_WORDS.rstrip('.')}: {words}"
+        elif origin == ORIGIN_BRIEF:
+            label = f"{NUDGE_DRAFT_LINK} under a brief ({target.alias})"
+        else:
+            label = f"{FOLLOWUP_MENU_DRAFT.get(target.kind, 'Draft a reply')} on a {kind_words} row ({target.alias})"
+        request = ModeRequest(MODE_NUDGE, origin, typed=words, thread=target)
+        if not self.ask.submit_mode(request, label):
+            return
+        self._nudge_running = (target, row_id, subject, words, replaced)
+
+    def _nudge_link(self, number_text: str) -> None:
+        """A brief's "Draft a nudge" (R32): the nudge run of that thread (origin brief)."""
+        try:
+            found = self._nudge_links.get(int(number_text))
+        except ValueError:
+            found = None
+        if found is None:
+            logger.info("Nudge: a link that is gone")
+            return
+        target, subject, row_id = found
+        self._start_nudge(target, ORIGIN_LIST if row_id else ORIGIN_BRIEF, row_id=row_id, subject=subject)
+
+    def _nudge_words_link(self, number_text: str) -> None:
+        """A draft's question: "Tell Jarvis what to say" opens the dialog for that thread (R46)."""
+        try:
+            found = self._nudge_links.get(int(number_text))
+        except ValueError:
+            found = None
+        if found is None:
+            logger.info("Nudge: a link that is gone")
+            return
+        target, subject, row_id = found
+        self._open_nudge_words(target, subject, row_id)
+
+    def _nudge_link_id(self, prefix: str, target: Any, subject: str, row_id: str) -> str:
+        self._nudge_seq += 1
+        self._nudge_links[self._nudge_seq] = (target, subject, row_id)
+        while len(self._nudge_links) > 60:   # memory only: the oldest links go
+            self._nudge_links.pop(next(iter(self._nudge_links)))
+        return f"{prefix}{self._nudge_seq}"
+
+    def _brief_nudge_entries(self, brief: Any) -> None:
+        """Under a brief: 'Ana Lima owes you an answer in "Budget numbers" (Oct 8).' with Draft a nudge
+        (R32), when the follow-up list is on; the link maps to the thread in memory only."""
+        if not getattr(brief, "nudges", ()) or not self._followups_section_on():
+            return
+        controller = self.productivity
+        for who, subject, when, target in brief.nudges:
+            listed = controller.row_of(target.alias, target.thread_id) if controller is not None else None
+            link = self._nudge_link_id(NUDGE_LINK, target, subject, "")
+            if listed is not None:   # a listed row: its own row id, so a guard stop re-fetches it (R47)
+                self._nudge_links[self._nudge_seq] = (target, subject, listed.row_id)
+            self._jarvis(owes_answer_text(who, subject, when), tone=hud.TONE_IDLE, link=(NUDGE_DRAFT_LINK, link))
+
+    def _on_nudge_outcome(self, outcome: Any) -> None:
+        """A finished draft: no run (the guard re-fetches the row at once, R47; gone; unreadable), or its
+        Reply card under ASK (a denied draft of the same message reopened, R15; a "Tell Jarvis what to say"
+        draft replacing the unedited one, R31), its entry, a question's "Tell Jarvis what to say" (R46),
+        one spoken sentence without the subject, one ACTIVITY row of counts."""
+        running, self._nudge_running = self._nudge_running, None
+        target = getattr(outcome, "target", None) or (running[0] if running is not None else None)
+        row_id = running[1] if running is not None else ""
+        subject = running[2] if running is not None else ""
+        words = running[3] if running is not None else ""
+        assistant = self.config.assistant
+        address = assistant.address
+        if not outcome.ok:
+            self._converse_ask(outcome)
+            self._plan_gives_way()
+            if outcome.kind not in ("empty", "busy"):
+                self._activity(hud.TAG_STOP, "Nudge: nothing was proposed", _short(outcome.message or outcome.kind))
+            return
+        if outcome.note_kind:
+            self._jarvis(outcome.message, tone=hud.TONE_WARN, sub="no planner run")
+            self._plan_gives_way()
+            self._prep_say(outcome.message)   # Jarvis's own fixed words: no subject, no name
+            if outcome.note_kind in _NUDGE_GUARD_KINDS and row_id:
+                self._prod_call("refetch", row_id, "guard")
+            self._activity(hud.TAG_ASK, f"Nudge: no run ({nudge_no_run_words(outcome.note_kind)})", "no planner run")
+            return
+        cards = list(outcome.cards)
+        valid = [card for card in cards if not card.error]
+        decided = False
+        for card in valid:
+            saved = self._store.get(card.id) or {}
+            if saved.get("status") == STATUS_DENIED and running is not None and self._store.reopen(card.id):
+                for kept in (self._edits, self._hints, self._reviewed, self._checks):
+                    kept.pop(card.id, None)   # the denied card's Edit never carries over to the new draft (R15)
+                logger.info("Nudge: a denied draft was replaced")
+                self._live_nudge_note("A denied draft for this message was replaced")
+            elif saved and self._store.is_decided(card.id):
+                decided = True
+        thread = (target.alias, target.thread_id) if target is not None else None
+        self._take_ask_cards(cards, replace_mode=MODE_NUDGE if words and running is not None and running[4] else "",
+                             thread=thread)
+        alias = target.alias if target is not None else ""
+        if not subject and valid:
+            subject = re.sub(r"^\s*re:\s*", "", valid[0].field("subject") or valid[0].title or "", flags=re.I)
+        task_id = self._ask_task_id
+        link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
+        sub = f" {DOT} ".join([_plural(outcome.runs, "planner run"), f"{outcome.duration_ms / 1000:.1f} s"])
+        if valid and decided:
+            self._jarvis(nudge_decided_text(address), tone=hud.TONE_WARN, sub=sub, link=link)
+        elif valid:
+            self._jarvis(nudge_drafted_text(subject, alias), tone=hud.TONE_DONE, sub=sub, link=link)
+        elif cards and cards[0].error == ALREADY_LISTED:
+            self._jarvis(nudge_listed_text(address), tone=hud.TONE_WARN, sub=sub, link=link)
+        else:
+            self._jarvis(nudge_held_text(subject, alias, address), tone=hud.TONE_WARN, sub=sub, link=link)
+        if outcome.question and target is not None:
+            words_link = self._nudge_link_id(NUDGE_WORDS_LINK, target, subject, row_id)
+            self._jarvis(nudge_question_text(outcome.question), tone=hud.TONE_WARN,
+                         link=(NUDGE_QUESTION_LINK, words_link))
+        self._plan_gives_way()
+        if valid and not decided and assistant.speak_replies:
+            self._say(KIND_REPLY, nudge_result_speech(address))   # never the subject or the draft
+        else:
+            self._voice_call("cancel_key", ASK_ACK_KEY)
+        message = f"Nudge: {_plural(len(valid), 'draft')}" + (f" ({outcome.refused} held back)" if outcome.refused
+                                                               else "")
+        self._activity(hud.TAG_ASK, message, f"{outcome.duration_ms / 1000:.1f} s")
+        logger.info("Nudge: %d card(s) shown under ASK (%d refused)", len(cards), outcome.refused)
+        self._refresh_actions_ui()
+
+    @_live.quiet()
+    def _live_nudge_note(self, text: str) -> None:
+        ask = self.ask
+        task = getattr(ask, "finishing_task", _live.NO_TASK) if ask is not None else _live.NO_TASK
+        step = task.find(_live.ASK_VALIDATE)
+        step.note(text)
+
+    def _on_followups_route(self, text: str) -> None:
+        """A typed "any follow-ups?" (R45): the YOU entry and one JARVIS entry from the list as it is
+        (no run, nothing read; while no scan ran yet it starts one)."""
+        if self.state == STATE_QUITTING:
+            return
+        self._you(text)
+        controller = self.productivity
+        address = self.config.assistant.address
+        link = ("", "")
+        if controller is None:
+            return
+        view = controller.followups()
+        unconfirmed = [alias for alias, problem in view.notes if problem == "unconfirmed"]
+        unreadable = [alias for alias, problem in view.notes if alias and problem in _FU_SIGN_IN_PROBLEMS]
+        scanned = any(report.scanned for report in view.reports)
+        if view.off:
+            answer, link = FOLLOWUPS_OFF_TEXT, (FOLLOWUPS_ON_LINK, FOLLOWUPS_ON)
+        elif ("", "read_off") in view.notes:
+            answer = followups_read_off_text()          # no scan can run: none is asked for
+        elif unconfirmed and not scanned:
+            answer = followups_confirm_text(unconfirmed[0])
+            link = (FOLLOWUPS_CONFIRM_LINK, self._followup_alias_link(FU_CONFIRM_LINK, unconfirmed[0]))
+        elif unreadable and not scanned:                 # nothing was checked: never "nothing waits"
+            answer = followups_sign_in_text(unreadable[0])
+            link = ("Sign in", self._followup_alias_link(FU_SIGN_IN_LINK, unreadable[0]))
+        elif view.scanning or view.scanned_at is None:
+            if view.scanning or self._prod_call("request_scan", "typed") is True:
+                answer = followups_scanning_text(address)
+            elif self._signing_in():
+                answer = ASK_SIGN_IN_FIRST + "."         # the scan waits for the sign-in (R19)
+            else:
+                answer = followups_not_started_text(address)
+        else:
+            partial = any(report.partial and report.problem == "rate_limit" for report in view.reports)
+            answer = followups_text(len(view.waiting), len(view.owed), self._offer_wall(view.scanned_at), address,
+                                    partial=partial, hour24=self.config.display.hour24)
+            if view.waiting or view.owed:
+                link = (FOLLOWUPS_SHOW_LINK, FOLLOWUPS_SHOW)
+        self._jarvis(answer, tone=hud.TONE_DONE, link=link)
+        if self.ask is not None:
+            self.ask.show_note(answer, clear=True)
+        logger.info("Follow-ups: answered a typed request (no run)")
+
     # ---- Memory (the productivity bundle) -------------------------------------------------------
 
     def _init_memory_state(self) -> None:
@@ -7081,8 +7646,9 @@ class AppController(QObject):
 
     def _route_flags(self) -> RouteFlags:
         """The typed shortcuts on now: memory ("remember that ..."), the day plan ("plan my day"),
-        the meeting brief ("prep me for my 2 PM")."""
-        return RouteFlags(memory=self.memory_store is not None, plan=self._plan_on(), prep=self._prep_on())
+        the meeting brief ("prep me for my 2 PM"), the follow-up list ("any follow-ups?")."""
+        return RouteFlags(memory=self.memory_store is not None, plan=self._plan_on(), prep=self._prep_on(),
+                          followups=self._followups_section_on())
 
     def _memory_prompt_notes(self) -> tuple[str, ...]:
         """The notes the planner gets (any thread: the GUI thread swaps the whole tuple)."""
@@ -7712,6 +8278,14 @@ class AppController(QObject):
             self._prep_choice_link(link_id[len(PREP_CHOICE_LINK):])
         elif link_id.startswith(OFFER_LINK):
             self._offer_link(link_id[len(OFFER_LINK):])
+        elif link_id == FOLLOWUPS_SHOW:
+            self.window.reading.agenda_panel.reveal_followups()
+        elif link_id == FOLLOWUPS_ON or link_id.startswith((FU_CONFIRM_LINK, FU_SIGN_IN_LINK)):
+            self._on_followups_link(link_id)
+        elif link_id.startswith(NUDGE_WORDS_LINK):
+            self._nudge_words_link(link_id[len(NUDGE_WORDS_LINK):])
+        elif link_id.startswith(NUDGE_LINK):
+            self._nudge_link(link_id[len(NUDGE_LINK):])
 
     # ---- the LIVE view -----------------------------------------------------------------------
 

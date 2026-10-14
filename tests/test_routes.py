@@ -9,6 +9,7 @@ from __future__ import annotations
 import unittest
 
 from briefing_reader.ask.routes import (
+    ROUTE_FOLLOWUPS,
     MEMORY_ROUTES,
     PART_AFTERNOON,
     PART_DAY,
@@ -192,6 +193,25 @@ class PrepRouteTests(unittest.TestCase):
     def test_repr_has_no_words(self) -> None:
         found = route("prep me for Zq7 Sync", PREP_ON)
         self.assertEqual(repr(found), "Route(prep)")
+
+
+class FollowupsRouteTests(unittest.TestCase):
+    FLAGS = RouteFlags(memory=True, plan=True, prep=True, followups=True)
+
+    def test_followups_variants(self) -> None:
+        for text in ("follow-ups", "followups", "my follow ups", "show me my follow-ups", "any follow-ups?",
+                     "jarvis, any followups.", "what's waiting on me?", "what is waiting on me",
+                     "what am I waiting on?",
+                     "what am i waiting for", "who owes me?", "who owes me a reply?", "who owes me an answer"):
+            with self.subTest(text=text):
+                self.assertEqual(route(text, self.FLAGS).kind, ROUTE_FOLLOWUPS)
+
+    def test_never_a_followups_route(self) -> None:
+        for text in ("follow up with Ana", "remember to follow up", "what's waiting on Ana?", "who owes me money",
+                     "web: any follow-ups?", "plan my day"):
+            with self.subTest(text=text):
+                self.assertNotEqual(route(text, self.FLAGS).kind, ROUTE_FOLLOWUPS)
+        self.assertEqual(route("any follow-ups?", ALL_ON).kind, ROUTE_NONE)    # the flag off: a normal Ask
 
 
 if __name__ == "__main__":

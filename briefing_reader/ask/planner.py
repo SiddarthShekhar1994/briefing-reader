@@ -67,7 +67,18 @@ prep_max_guests) is looked up with Jarvis's own search (ask.prep.prep_query: tha
 last prep_lookback_days days) after ask.prep.guest_allowed (R2), until 3 threads are found, one per
 guest; those are read and given to one run (its own prompt and schema), whose answer is checked
 (ask.prep.check_prep; its Reply lines by validate.to_cards with ask.prep.PrepCheck). No thread
-found: the brief of Jarvis's own (who is coming, what each lookup found), no run.
+found: the brief of Jarvis's own (who is coming, what each lookup found), no run. From the
+follow-ups build a guest's newest thread on the meeting's account may come from the header scan's
+participants index (ModeInputs.participants) instead of a search, always after guest_allowed (R2,
+R3); a thread the planner marks as waiting on them, where Jarvis's own headers agree that the owner
+wrote last, becomes a "Draft a nudge" target of the brief (PrepBrief.nudges, R32).
+
+The drafted reply or nudge (ask.modes.MODE_NUDGE, a click on a FOLLOW-UPS row or under a brief,
+spec 3.4): the Ask caps with the bundle's, Claude Code ready, the thread's account readable; the one
+thread read in full (the only body read of a follow-up); ask.modes.nudge_guard stops with no run when
+the owner replied since, they answered since or anything else changed; else one run with the
+thread, <followup> and only the owner's own words from "Tell Jarvis what to say", and its one Reply
+line checked by validate.to_cards with ask.modes.NudgeCheck.
 """
 
 from __future__ import annotations
@@ -162,7 +173,8 @@ from .stream import CANCELLED, OVERAGE, AskFailure, InitSummary, Plan, RunResult
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
 from .validate import LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, Cards, keep_valid, to_cards
 from . import dayplan, modes, prep
-from .modes import MODE_KINDS, MODE_MAX_LINES, MODE_PLAN, MODE_PREP, MODE_USAGE, ModeInputs, ModeRequest
+from .modes import (MODE_KINDS, MODE_MAX_LINES, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_USAGE, ModeInputs,
+                    ModeRequest)
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +185,7 @@ STAGE_PLANNING_AGAIN = "planning_again"   # the second run, with the mail
 STAGE_RESEARCH = "research"        # the web research run
 STAGE_DAY = "day"                  # a day plan: reading the day being planned
 STAGE_PREP_MAIL = "prep_mail"      # a meeting brief: Jarvis's own searches and reads of the guests' threads
+STAGE_THREAD = "thread"            # a follow-up draft: reading the one thread the owner clicked
 
 # Refusals before any run (AskOutcome.kind), besides stream's failure kinds.
 EMPTY = "empty"
@@ -372,7 +385,7 @@ class ClaudeEngine:
         if cancel is not None and cancel.is_set():
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
-        if mode == MODE_PREP:
+        if mode in (MODE_PREP, MODE_NUDGE):   # a run with <mail> never suggests a note
             allow_remember = False
         argv = self.mode_argv(ready, mode, allow_remember=allow_remember)
         if mode == MODE_PREP:
@@ -727,6 +740,9 @@ class AskOutcome:
     window: Any = field(default=None, repr=False, compare=False)
     slots: int = 0
     blocks_max: int = 0
+    # A follow-up draft's thread (ask.modes.ThreadTarget: memory only; the UI re-fetches its row after a
+    # guard stop and finds the card's thread).
+    target: Any = field(default=None, repr=False, compare=False)
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
@@ -1173,7 +1189,7 @@ class AskPlanner:
                   briefing: BriefingContext | None = None, page_ids: Sequence[str] = (),
                   cancel: threading.Event | None = None, on_stage: Callable[[str], None] = lambda stage: None,
                   live: LiveTask | None = None) -> AskOutcome:
-        """One planner mode run (the day plan, the meeting brief) on the Ask thread: the same
+        """One planner mode run (the day plan, the meeting brief, a follow-up draft) on the Ask thread: the same
         one-at-a-time lock as plan(); never raises; ``live`` gets its steps (the caller finishes the
         task)."""
         task = live or NO_TASK
@@ -1187,6 +1203,8 @@ class AskPlanner:
                 outcome = self._plan_day(request, inputs or ModeInputs(), briefing, page_ids, cancel, on_stage, task)
             elif request.mode == MODE_PREP:
                 outcome = self._prep(request, inputs or ModeInputs(), briefing, page_ids, cancel, on_stage, task)
+            elif request.mode == MODE_NUDGE:
+                outcome = self._nudge(request, inputs or ModeInputs(), page_ids, cancel, on_stage, task)
             else:
                 outcome = AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
         except Exception as exc:  # noqa: BLE001 - a mode run must never take the app down
@@ -1415,13 +1433,15 @@ class AskPlanner:
                                           f"{MAIL_NOT_READ}{ready.message}", days, live, people)
         on_stage(STAGE_PREP_MAIL)
         lookups, searches, refused = self._prep_lookups(meeting, lookups, accounts, days,
-                                                        bool(settings.prep_other_accounts), cancel, live, people)
+                                                        bool(settings.prep_other_accounts), cancel, live, people,
+                                                        participants=inputs.participants)
         shown: dict[tuple[str, str], LiveStep] = {}   # the mail.thread steps (this call's memory only)
         mail_notes: list[str] = []
         threads, lookups = self._prep_reads(lookups, mail_notes, cancel, live, shown)
         unsearched = sum(1 for lookup in lookups if lookup.status not in (prep.FOUND, prep.NONE, prep.SAME, prep.OWN))
+        hits = sum(1 for lookup in lookups if lookup.via == prep.VIA_INDEX)
         logger.info("Prep: %d search(es) (%d refused), %d index hit(s), %d thread(s) read, %d guest(s) not searched",
-                    searches, refused, 0, len(threads), unsearched)
+                    searches, refused, hits, len(threads), unsearched)
         if cancel is not None and cancel.is_set():
             _prep_people_done(people, lookups, days, alias)
             return AskOutcome(False, CANCELLED, "Cancelled; nothing was proposed", mail=report(threads))
@@ -1446,6 +1466,7 @@ class AskPlanner:
                               runs=1 if result.started else 0, init=result.init,
                               stats=(result.stats,) if result.started else (), mail=mail)
         brief = prep.check_prep(answer, meeting, lookups, threads, notes, days=days, zone=zone)
+        brief = replace(brief, nudges=prep.brief_nudges(answer, threads, alias, own | _reader_own(reader), zone=zone))
         cards = to_cards(answer.lines, index, now=now, link_hosts=self.config.actions.link_hosts, page_ids=page_ids,
                          max_cards=MODE_MAX_LINES[MODE_PREP], kinds=MODE_KINDS[MODE_PREP], mode=MODE_PREP,
                          extra=prep.PrepCheck(alias, threads, notes, own=own))
@@ -1568,11 +1589,14 @@ class AskPlanner:
     def _prep_lookups(self, meeting: prep.PrepMeeting, lookups: Sequence[prep.GuestLookup],
                       accounts: Sequence[AccountInfo], days: int, other_accounts: bool,
                       cancel: threading.Event | None, live: LiveTask,
-                      people: LiveStep) -> tuple[list[prep.GuestLookup], int, int]:
+                      people: LiveStep, *, participants: Mapping[str, Sequence[Any]] | None = None
+                      ) -> tuple[list[prep.GuestLookup], int, int]:
         """Each guest still to look up, in order, until 3 threads are found (spec 3.3 step 6):
-        guest_allowed first (R2: refused -> never searched), then Jarvis's own search on the meeting's
+        guest_allowed first (R2: refused -> neither the header list nor a search), then the header
+        scan's participants index (the newest thread with that guest on the meeting's account; another
+        readable account only with prep_other_accounts, R3), else Jarvis's own search on the meeting's
         account (and, with prep_other_accounts, on the other readable ones when that finds nothing).
-        A thread another guest's search already found is not read twice (SAME). (lookups, searches,
+        A thread another guest's lookup already found is not read twice (SAME). (lookups, searches,
         refused)."""
         lookups = list(lookups)
         alias = meeting.alias
@@ -1594,6 +1618,18 @@ class AskPlanner:
             if not prep.guest_allowed(address, days):
                 refused += 1
                 lookups[number] = replace(lookup, status=prep.REFUSED, why=prep.REFUSED_WHY)
+                continue
+            ref = prep.index_lookup(participants or {}, address, alias, other_accounts=other_accounts,
+                                    since=self.clock() - timedelta(days=days))   # the prep lookback (R4)
+            if ref is not None and (ref.alias == alias or ref.alias in others):
+                key = (ref.alias, ref.thread_id)
+                if key in found:
+                    lookups[number] = replace(lookup, status=prep.SAME, alias=ref.alias, thread_id=ref.thread_id,
+                                              why=found[key], via=prep.VIA_INDEX)
+                else:
+                    found[key] = lookup.guest.display
+                    lookups[number] = replace(lookup, status=prep.FOUND, alias=ref.alias, thread_id=ref.thread_id,
+                                              via=prep.VIA_INDEX)
                 continue
             query = check_query(prep.prep_query(address, days), None)
             outcome = replace(lookup, status=prep.NONE)
@@ -1664,6 +1700,89 @@ class AskPlanner:
             if lookup.status == prep.SAME and (lookup.alias, lookup.thread_id) not in read:
                 lookups[number] = replace(lookup, status=prep.NOT_SEARCHED, why=prep.UNREAD_WHY)
         return threads, lookups
+
+    # ---- a follow-up draft (spec 3.4) ---------------------------------------------------------
+
+    def _nudge(self, request: ModeRequest, inputs: ModeInputs, page_ids: Sequence[str],
+               cancel: threading.Event | None, on_stage: Callable[[str], None],
+               live: LiveTask = NO_TASK) -> AskOutcome:
+        """A drafted reply (WAITING) or nudge (OWED) in the one thread the owner clicked: the checks
+        (Ask, the caps with the bundle's, Claude Code), the thread read in full, the guard (no run when
+        it changed since it was listed), one run, its one Reply checked by NudgeCheck."""
+        from ..persona import nudge_no_run_text
+
+        target = request.thread
+        if target is None:
+            return AskOutcome(False, "error", "Jarvis can't tell which thread to draft in; nothing was proposed")
+        refusal = self._refusal(live, bundle=True)
+        if refusal is not None:
+            if refusal.kind != DISABLED:
+                logger.info("Nudge: no run (%s)", CAPS if refusal.kind == CAPS else NOT_READY)
+            return replace(refusal, target=target)
+        accounts = self.sources.accounts()
+        alias = target.alias
+        known = next((account for account in accounts if account.alias == alias), None)
+        reader = self.sources.reader(alias)
+        listed = request.origin == modes.ORIGIN_LIST
+        if not self.config.ask.read_mail or known is None or known.read_mail != "yes" or reader is None:
+            said = replace(known, read_mail=READ_OFF) if known is not None and not self.config.ask.read_mail else known
+            return self._nudge_no_run("unreadable", unreadable_note(alias, said), target)
+        own = frozenset(inputs.own) | frozenset(account.address.casefold() for account in accounts if account.address)
+        own |= _reader_own(reader)
+        on_stage(STAGE_THREAD)
+        shown: dict[tuple[str, str], LiveStep] = {}
+        mail_notes: list[str] = []
+        thread = self._read_thread(alias, target.thread_id, mail_notes, live, WHY_NUDGE, shown)
+        if cancel is not None and cancel.is_set():
+            return AskOutcome(False, CANCELLED, "Cancelled; nothing was proposed", target=target)
+        if thread is None:
+            return self._nudge_no_run("gone", nudge_no_run_text("gone", self._owner()), target)
+        guard = modes.nudge_guard(thread, target, own)
+        _guard_field(shown.get((alias, thread.thread_id), NO_STEP), guard)
+        if guard:
+            return self._nudge_no_run(guard, nudge_no_run_text(guard, self._owner(), listed=listed), target,
+                                      mail=report([thread]))
+        zone = self.sources.time_zone()
+        now = self.clock()
+        notes = self._memory_notes()
+        prompt, index = modes.build_nudge_prompt(now, self._owner(), known, thread, target, notes, request,
+                                                 accounts=accounts, zone=zone)
+        logger.info("Ask: context of %d characters (%s; mode nudge)", len(prompt),
+                    ", ".join(f"{name} {count}" for name, count in index.counts().items()))
+        _threads_given(shown, [thread], prompt)
+        on_stage(STAGE_PLANNING)
+        result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1,
+                           search_words=NUDGE_NO_SEARCH_WORDS, web_words=NUDGE_NO_WEB_WORDS, mode=MODE_NUDGE)
+        del prompt
+        mail = report([thread])
+        plan = result.plan
+        if result.failure is not None or plan is None:
+            failure = result.failure
+            return AskOutcome(False, failure.kind if failure else "error", failure.message if failure else "",
+                              runs=1 if result.started else 0, init=result.init,
+                              stats=(result.stats,) if result.started else (), mail=mail, target=target)
+        check = modes.NudgeCheck(target, thread, notes, owner_words=request.typed, own=own)
+        cards = to_cards(plan.lines, index, now=now, link_hosts=self.config.actions.link_hosts, page_ids=page_ids,
+                         max_cards=MODE_MAX_LINES[MODE_NUDGE], kinds=MODE_KINDS[MODE_NUDGE], mode=MODE_NUDGE,
+                         extra=check)
+        _validated(live, cards, index, MODE_MAX_LINES[MODE_NUDGE], self._hour24())
+        if any(card.error == modes.NUDGE_NOTE_LEAK for card in cards.cards):
+            logger.info("Nudge: a draft held back (note)")
+        message_parts = list(mail_notes)
+        if cards.dropped:
+            message_parts.append(f"{cards.dropped} more draft(s) were left out")
+        if plan.via_fallback:
+            message_parts.append("(read from the planner's plain text)")
+        return AskOutcome(True, "ok", "; ".join(message_parts), say=plan.say, question=plan.question,
+                          cards=cards.cards, dropped=cards.dropped, refused=cards.refused, runs=1, init=result.init,
+                          stats=(result.stats,), mail=mail, mode=MODE_NUDGE, target=target)
+
+    def _nudge_no_run(self, kind: str, text: str, target: Any, *, mail: MailReport | None = None) -> AskOutcome:
+        """No draft and no run: the account can't be read, the thread is gone, or it changed since it
+        was listed (the guard). Nothing counted."""
+        logger.info("Nudge: no run (%s)", kind)
+        return AskOutcome(True, "ok", text, mode=MODE_NUDGE, note_kind=kind, target=target,
+                          mail=mail or MailReport())
 
     def _research_refusal(self, live: LiveTask = NO_TASK) -> AskOutcome | None:
         """The checks of a "web:" request ("Ready to research?"), first refusal wins; no run."""
@@ -2446,7 +2565,7 @@ def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int
 
 NO_MAIL_WORDS = "no - a day plan never reads mail"
 NO_WEB_WORDS = "no - a day plan never uses the web"
-MODE_RUN_WORDS = {MODE_PLAN: "day plan", MODE_PREP: "meeting brief"}
+MODE_RUN_WORDS = {MODE_PLAN: "day plan", MODE_PREP: "meeting brief", MODE_NUDGE: "follow-up draft"}
 FREE_TITLE = "Your free time"
 
 
@@ -2609,6 +2728,32 @@ def _plan_validated(live: LiveTask, cards: Cards, served: Mapping[str, str], tar
 # The meeting brief's own LIVE steps (quiet, like every helper above)
 # --------------------------------------------------------------------------
 
+WHY_NUDGE = "the follow-up thread you clicked (the only email read for this draft)"
+NUDGE_NO_SEARCH_WORDS = "no - a follow-up draft reads only the thread you clicked"
+NUDGE_NO_WEB_WORDS = "no - a follow-up draft never uses the web"
+_GUARD_WORDS = {"": "unchanged since Jarvis listed it - drafting", "replied_since": "you replied since - no draft",
+                "answered_since": "they answered since - no draft",
+                "changed": "it changed since Jarvis listed it - no draft"}
+
+
+def _reader_own(reader: Any) -> frozenset[str]:
+    """The reader's own addresses (cached per account identity; none when it has none)."""
+    getter = getattr(reader, "own_addresses", None)
+    if not callable(getter):
+        return frozenset()
+    try:
+        return frozenset(str(address).casefold() for address in getter() if address)
+    except Exception:  # noqa: BLE001 - the bound addresses still count
+        return frozenset()
+
+
+@_quiet()
+def _guard_field(step: LiveStep, guard: str) -> None:
+    if step is NO_STEP:
+        return
+    step.field("Since Jarvis listed it", _GUARD_WORDS.get(guard, guard))
+
+
 PREP_CHECKS_LATER = "checked right before any mail is read (a brief without mail needs neither)"
 MAIL_NOT_READ = "I didn't read mail: "
 PREP_NO_SEARCH_WORDS = "no - Jarvis searched himself, one guest's address at a time"
@@ -2711,7 +2856,9 @@ def _prep_people_done(step: LiveStep, lookups: Sequence[Any], days: int, alias: 
         guest = lookup.guest
         who = f"{guest.name} <{guest.address}>" if guest.name else guest.address
         status, status_text = _LOOKUP_STATUS.get(lookup.status, (STATUS_WARN, ""))
-        if lookup.status == prep.FOUND:
+        if lookup.status == prep.FOUND and lookup.via == prep.VIA_INDEX:
+            note = f"from Jarvis's header list: {lookup.alias}, newest thread (no search)"
+        elif lookup.status == prep.FOUND:
             note = f"searched: found a thread on {lookup.alias}"
         elif lookup.status == prep.SAME:
             note = f"searched: {prep.lookup_words(lookup, days, alias)}"

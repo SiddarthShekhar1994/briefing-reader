@@ -1,7 +1,7 @@
-"""The planner modes' system prompts and schemas (spec 7.1-7.3): every mode prompt starts with the
+"""The planner modes' system prompts and schemas (spec 7.1-7.4): every mode prompt starts with the
 same shared preamble, byte for byte up to and including "MODE RULES" (the drift test, G9; the note
-rule of R7 included); the brief's Reply grammar line, field rules and drafts rule are the Ask's own,
-byte for byte; prompts and schemas are ASCII; no schema has gmail_search or web_research.
+rule of R7 included); the brief's and the nudge's Reply grammar line, field rules and drafts rule are
+the Ask's own, byte for byte; prompts and schemas are ASCII; no schema has gmail_search or web_research.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def preamble_of(text: str) -> str:
 class ModePromptTests(unittest.TestCase):
     def test_mode_prompts_share_preamble(self) -> None:
         texts = {mode: path.read_text(encoding="ascii") for mode, path in cli.MODE_PROMPTS.items()}
-        self.assertEqual(set(texts), {"plan", "prep"})
+        self.assertEqual(set(texts), {"plan", "prep", "nudge"})
         for mode, text in texts.items():
             with self.subTest(mode=mode):
                 self.assertEqual(preamble_of(text), PREAMBLE)
@@ -115,18 +115,41 @@ class ModePromptTests(unittest.TestCase):
         """7.1: the Reply grammar line, the field rules ("Times are 24-hour ... never with angle
         brackets.") and the drafts rule are planner_prompt.md's own, byte for byte."""
         planner = cli.PROMPT_FILE.read_text(encoding="ascii")
-        prep = cli.PREP_PROMPT_FILE.read_text(encoding="ascii")
         reply = next(line for line in planner.split("\n") if line.startswith("  Reply: "))
-        self.assertIn("\n" + reply + "\n", prep)
 
         def block(text: str, first: str, last: str) -> str:
             start = text.index(first)
             return text[start:text.index(last, start) + len(last)]
 
-        for first, last in (("- Times are 24-hour wall-clock times", "never with angle brackets."),
-                            ("- Drafts are short, friendly and complete", "did not ask to share.")):
-            with self.subTest(rule=first):
-                self.assertEqual(block(prep, first, last), block(planner, first, last))
+        for path in (cli.PREP_PROMPT_FILE, cli.NUDGE_PROMPT_FILE):
+            prompt = path.read_text(encoding="ascii")
+            self.assertIn("\n" + reply + "\n", prompt)
+            for first, last in (("- Times are 24-hour wall-clock times", "never with angle brackets."),
+                                ("- Drafts are short, friendly and complete", "did not ask to share.")):
+                with self.subTest(prompt=path.name, rule=first):
+                    self.assertEqual(block(prompt, first, last), block(planner, first, last))
+
+    def test_the_nudge_schema(self) -> None:
+        """7.4: say and question <= 200, at most one line of <= 12000, nothing else."""
+        schema = json.loads(cli.mode_schema_text("nudge"))
+        self.assertEqual(schema["title"], "JarvisNudge")
+        self.assertEqual(schema["required"], ["say", "lines"])
+        properties = schema["properties"]
+        self.assertEqual(set(properties), {"say", "question", "lines"})
+        self.assertEqual((properties["say"]["maxLength"], properties["question"]["maxLength"]), (200, 200))
+        self.assertEqual((properties["lines"]["maxItems"], properties["lines"]["items"]["maxLength"]), (1, 12000))
+        self.assertFalse(schema["additionalProperties"])
+
+    def test_the_nudge_prompt_rules(self) -> None:
+        text = cli.NUDGE_PROMPT_FILE.read_text(encoding="ascii")
+        for rule in ("Exactly one Reply: line in that thread", "kind=waiting on you", "kind=owed to you",
+                     "Never add people who are not in that message. Never the owner's own address.",
+                     "a short holding reply", "Never copy a <memory> note into a draft unless the owner's words ask",
+                     "never spoken"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, text)
+        self.assertNotIn("gmail_search", text)
+        self.assertNotIn("web_research", text)
 
     def test_the_prep_prompt_rules(self) -> None:
         text = cli.PREP_PROMPT_FILE.read_text(encoding="ascii")

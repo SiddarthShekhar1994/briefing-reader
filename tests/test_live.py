@@ -803,5 +803,13 @@ class PrepTaskTests(unittest.TestCase):
         self.assertEqual([step.kind for step in view.steps], [live.PREP_MEETING, live.PREP_PEOPLE, live.PREP_VALIDATE])
 
 
+class NudgeTaskTests(unittest.TestCase):
+    def test_the_nudge_task_and_the_scan_step_are_known(self) -> None:
+        self.assertIn(live.TASK_NUDGE, live.TASK_KINDS)
+        self.assertEqual(live.TASK_TAGS[live.TASK_NUDGE], "NUDGE")
+        self.assertIn(live.TASK_NUDGE, live.ATTENTION_KINDS)
+        self.assertIn(live.MAIL_SCAN, live.STEP_KINDS)
+
+
 if __name__ == "__main__":
     unittest.main()

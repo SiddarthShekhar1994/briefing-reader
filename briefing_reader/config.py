@@ -77,7 +77,8 @@ CLOCK_24H = "24h"
 # What an account may do (google_auth.FEATURE_SCOPES has the scopes of each): "calendar" answers
 # invitations and moves or cancels events; "gmail_send" sends the replies and emails you approve;
 # "gmail_read" lets Ask Jarvis read the Gmail threads your request is about (read only; never used
-# to send, and nothing it reads is saved or logged).
+# to send, and nothing it reads is saved or logged); with the productivity bundle it also covers the
+# follow-up list's header scan (headers only, last 14 days), meeting prep reads and nudge drafts.
 ACCOUNT_FEATURES = ("calendar", "gmail_send", "gmail_read")
 BACKEND_GOOGLE = "google"
 BACKEND_COMPOSIO = "composio"     # accepted, but not built into this version

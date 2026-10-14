@@ -959,5 +959,39 @@ class OfferSpeechTests(unittest.TestCase):
                          "Closes Jarvis - meeting prep offers stop until you open him again")
 
 
+class FollowupSentenceTests(unittest.TestCase):
+    def test_the_nudge_sentences_say_no_subject_and_claim_nothing(self) -> None:
+        spoken = persona.nudge_result_speech("sir")
+        self.assertEqual(spoken, "I've drafted a reply; it's waiting for your OK, sir.")
+        self.assertFalse(persona.claims_done(spoken))
+        self.assertEqual(persona.nudge_result_speech(""), "I've drafted a reply; it's waiting for your OK.")
+        self.assertEqual(persona.nudge_drafted_text("Budget numbers", "work"),
+                         'I\'ve drafted a reply in "Budget numbers" (work). It waits for your OK under NEEDS YOUR OK.')
+        for kind, text in (("replied_since", "You've replied since, sir - nothing to draft."),
+                           ("answered_since", "They've answered since, sir - see the thread."),
+                           ("changed", "This thread changed since Jarvis listed it, sir.")):
+            with self.subTest(kind=kind):
+                self.assertEqual(persona.nudge_no_run_text(kind, "sir"), text)
+                self.assertEqual(persona.nudge_no_run_text(kind, "sir", listed=True), text + " I'm updating the list.")
+                self.assertFalse(persona.claims_done(text))
+        self.assertEqual(persona.owes_answer_text("Ana Lima", "Budget numbers", "Oct 8"),
+                         'Ana Lima owes you an answer in "Budget numbers" (Oct 8).')
+
+    def test_the_typed_followups_texts(self) -> None:
+        at = datetime(2026, 10, 10, 10, 41)
+        self.assertEqual(persona.followups_text(3, 1, at, "sir"),
+                         "3 threads wait on your answer and 1 on someone else's (checked 10:41 AM).")
+        self.assertEqual(persona.followups_text(1, 0, at, "sir"),
+                         "1 thread waits on your answer and 0 on someone else's (checked 10:41 AM).")
+        self.assertEqual(persona.followups_text(0, 0, at, "sir"),
+                         "Nothing waits on you or on anyone else, sir (checked 10:41 AM).")
+        self.assertEqual(persona.followups_text(0, 0, at, "sir", partial=True),
+                         "Nothing waits on you or on anyone else, sir (checked 10:41 AM) (partial - Gmail asked me "
+                         "to slow down).")
+        self.assertEqual(persona.followups_scanning_text("sir"),
+                         "I'm checking your mail headers now, sir - FOLLOW-UPS fills in shortly.")
+        self.assertEqual(persona.followups_confirm_text("work"), 'Confirm which Google account "work" is first.')
+
+
 if __name__ == "__main__":
     unittest.main()

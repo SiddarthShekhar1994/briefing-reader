@@ -23,6 +23,16 @@
                                  locked) or for a meeting a later read found moved or cancelled
         dayChanged()             the schedule was read again
         ticked()                 a tick ran (the Done tooltip follows the schedule, R34)
+        followupsChanged(view)   the follow-up list changed (followups.FollowupView: a scan or a re-fetch
+                                 landed, a row was hidden or shown again, the list was turned off or on)
+
+The follow-up list (B5, spec 3.4, 5.3): while the reading screen is visible, 20 s after it came up and
+then every scan_every_minutes, a _ScanJob on the prod thread reads each confirmed account's mail
+headers (followups.MailScanner: metadata only, the last 14 days, SENT first); a Google sign-in that
+opens cancels a running scan between two reads (R19) and bumps nothing until it completes
+(on_signed_in bumps the account's sign-in counter, the scanner's stop key). refetch(row_id) reads one
+listed thread's headers again (_RefetchJob, R47). request_scan / hide / unhide / set_off / followups()
+/ participants() / followup_counts() are what the app asks; nothing here reads a body or calls Claude.
 
 An offer never acts: nothing is read from mail and no planner runs until the owner clicks its link
 (the app then starts the B2 plan or the B3 brief as a click-started mode run). The day schedule is
@@ -43,6 +53,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -58,6 +69,8 @@ from .ask.offers import QuietFacts
 from .ask.planner import _day_bounds as day_bounds
 from .ask.prep import find_event, other_guests
 from .config import DEFAULT_ACCOUNT
+from .followups import (NOT_SCANNED, PROBLEM_IDENTITY, PROBLEM_REFUSED, PROBLEM_STOPPED, PROBLEM_UNCONFIRMED,
+                        PROBLEM_UNREADABLE, FollowupItem, FollowupView, MailScanner, ScanReport, make_view)
 from .gcal import EventBrief, wall_in_zone
 from .google_auth import logged_alias
 
@@ -74,7 +87,10 @@ HELD, QUEUED, SPOKEN, TEXT_ONLY = "held", "queued", "spoken", "text_only"
 RETIRE_EXPIRED, RETIRE_PLANNED, RETIRE_ENDED, RETIRE_USED = "expired", "planned", "ended", "used"
 READ_SHOWN, READ_TICK, READ_PLAN, READ_MINIMIZED, READ_SIGN_IN = (
     "shown", "tick", "plan_offer", "minimized_check", "sign_in")
-JOB_DAY = "day"
+JOB_DAY, JOB_SCAN, JOB_REFETCH = "day", "scan", "refetch"
+FIRST_SCAN_AFTER = timedelta(seconds=20)    # the first header scan waits this long after the screen came up
+FIRST_SCAN_MS = 20_500
+READ_OFF_NOTE = "read_off"                  # FollowupView.notes: [ask] read_mail is off
 _LIVE_PLAN_KEY = "plan-offer"
 _LIVE_DAY_KEY = "day"
 LINK_GONE = "gone"                          # a click on a link with no valid offer behind it (used, retired, unknown)
@@ -115,16 +131,49 @@ class DayRead:
         return f"DayRead({len(self.results)} account(s), {events} event(s))"
 
 
+@dataclass(frozen=True)
+class _ScanJob:
+    """One header scan of every account that may be read (B5), on the prod thread."""
+
+    seq: int
+    aliases: tuple[str, ...]
+    cancel: threading.Event = field(repr=False, compare=False)
+    counters: Mapping[str, int] = field(default_factory=dict, repr=False, compare=False)
+    steps: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    reason: str = ""
+
+    def __repr__(self) -> str:
+        return f"_ScanJob({self.seq}, {len(self.aliases)} account(s))"
+
+
+@dataclass(frozen=True)
+class _RefetchJob:
+    """One listed thread's headers read again (R47), on the prod thread."""
+
+    seq: int
+    alias: str
+    thread_id: str = field(repr=False)
+    row_id: str = field(default="", repr=False)
+    reason: str = ""
+    step: Any = field(default=None, repr=False, compare=False)
+
+    def __repr__(self) -> str:
+        return f"_RefetchJob({self.seq}, {self.reason})"
+
+
 class _ProdBridge(QObject):
     """Signals the prod thread emits; connected queued, so the slots run on the GUI thread."""
 
     dayRead = Signal(int, object, object, str)   # seq, DayRead, read_at, personal zone (R16)
-    jobFailed = Signal(int, str)                 # seq, job kind ("day"): a "failed" status (R8)
+    scanned = Signal(int, object)                # seq, {alias: followups.ScanResult} (B5)
+    refetched = Signal(int, object)              # seq, FollowupItem | reason word | None (R47)
+    jobFailed = Signal(int, str)                 # seq, job kind ("day" | "scan" | "refetch"): "failed" (R8)
 
 
 class _ProdWorker:
-    """The daemon thread "prod": day reads, one job at a time (read only; never a planner run, a send
-    or a sign-in). ``inline``: no thread, each job runs when put."""
+    """The daemon thread "prod": day reads, header scans and single-thread re-fetches, one job at a
+    time (read only; never a planner run, a send or a sign-in). ``inline``: no thread, each job runs
+    when put."""
 
     def __init__(self, sources: Any, bridge: _ProdBridge, stop: threading.Event, *, now: Callable[[], datetime],
                  calendars: Sequence[str], inline: bool = False) -> None:
@@ -134,6 +183,11 @@ class _ProdWorker:
         self._now = now
         self.calendars = tuple(calendars)
         self._inline = inline
+        # The header scan's parts (set by the controller; B5).
+        self.scanner: MailScanner | None = None
+        self.settings: Any = None
+        self.known: Callable[[str], bool] = lambda _address: False
+        self.hidden: Callable[[str], bool] = lambda _key: False
         self._jobs: queue.SimpleQueue[Any] | None = None if inline else queue.SimpleQueue()
         self._thread: threading.Thread | None = None
         if not inline:
@@ -168,12 +222,48 @@ class _ProdWorker:
             self._run_job(job)
 
     def _run_job(self, job: Any) -> None:
-        kind = JOB_DAY
+        kind = JOB_SCAN if isinstance(job, _ScanJob) else JOB_REFETCH if isinstance(job, _RefetchJob) else JOB_DAY
         try:
-            self._day(job)
+            if kind == JOB_SCAN:
+                self._scan(job)
+            elif kind == JOB_REFETCH:
+                self._refetch(job)
+            else:
+                self._day(job)
         except Exception as exc:  # noqa: BLE001 - a header or a title could be in the message: the type only (R8)
             logger.error("Productivity: %s job failed (%s)", kind, type(exc).__name__)
             self._emit("jobFailed", getattr(job, "seq", 0), kind)
+
+    def _scan(self, job: _ScanJob) -> None:
+        scanner = self.scanner
+        if scanner is None:
+            return
+        results: dict[str, Any] = {}
+        for alias in job.aliases:
+            if self._stop.is_set():
+                return
+            reader = self._reader(alias)
+            if reader is None or not callable(getattr(reader, "scan_ids", None)):
+                continue   # a reader that cannot list headers (never the app's GmailReader) is not scanned
+            key = f"{_identity(reader)}|{int(job.counters.get(alias, 0))}"
+            results[alias] = scanner.scan(alias, reader, now=self._now(), settings=self.settings, known=self.known,
+                                          hidden=self.hidden, cancel=job.cancel, step=job.steps.get(alias),
+                                          stop_key=key)
+        self._emit("scanned", job.seq, results)
+
+    def _refetch(self, job: _RefetchJob) -> None:
+        scanner = self.scanner
+        reader = self._reader(job.alias)
+        result = None
+        if scanner is not None and reader is not None:
+            result = scanner.refetch(job.alias, job.thread_id, reader, now=self._now(), settings=self.settings,
+                                     known=self.known, hidden=self.hidden, step=job.step)
+        self._emit("refetched", job.seq, result)
+
+    def _reader(self, alias: str) -> Any:
+        """The account's Gmail reader (the Ask's: GoogleSources.readers), else None."""
+        readers = getattr(self._sources, "readers", None)
+        return readers.get(alias) if isinstance(readers, Mapping) else None
 
     def _day(self, job: _DayJob) -> None:
         aliases = job.aliases if job.aliases is not None else self._signed_in_aliases()
@@ -205,6 +295,14 @@ class _ProdWorker:
             getattr(self._bridge, name).emit(*args)
         except RuntimeError:
             pass   # the bridge was deleted during shutdown
+
+
+def _identity(reader: Any) -> str:
+    getter = getattr(reader, "identity_key", None)
+    try:
+        return str(getter()) if callable(getter) else ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _own_addresses(sources: Any) -> frozenset[str]:
@@ -282,6 +380,7 @@ class ProductivityController(QObject):
     offerUnsaid = Signal(object)
     dayChanged = Signal()
     ticked = Signal()
+    followupsChanged = Signal(object)
 
     def __init__(self, config: Any, *, sources: Any, live: Any, now: Callable[[], datetime],
                  activity: Callable[[], str], facts: Callable[[], QuietFacts],
@@ -315,12 +414,18 @@ class ProductivityController(QObject):
         self._bridge = _ProdBridge(self)
         connection = Qt.ConnectionType.DirectConnection if inline else Qt.ConnectionType.QueuedConnection
         self._bridge.dayRead.connect(self._on_day_read, connection)
+        self._bridge.scanned.connect(self._on_scanned, connection)
+        self._bridge.refetched.connect(self._on_refetched, connection)
         self._bridge.jobFailed.connect(self._on_job_failed, connection)
         calendars = tuple(getattr(getattr(config, "ask", None), "calendars", ()) or ("primary",))
         self._worker = _ProdWorker(sources, self._bridge, self._stop, now=now, calendars=calendars, inline=inline)
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
         self._timer.timeout.connect(self.tick)
+        self._first_scan_timer = QTimer(self)
+        self._first_scan_timer.setSingleShot(True)
+        self._first_scan_timer.setInterval(FIRST_SCAN_MS)
+        self._first_scan_timer.timeout.connect(self._first_scan)
         self.ticks = 0
         settings = self.settings
         self._plan_on = bool(getattr(settings, "plan_offer", False))
@@ -369,6 +474,24 @@ class ProductivityController(QObject):
         self._prep_skipped: dict[str, str] = {}
         self._prep_today: tuple[date, int] = (date.min, 0)
         self._last_group_at: datetime | None = None
+        # The follow-up list (B5): memory only, never logged but counts.
+        self._scanner = MailScanner(clock=now, sleep=(lambda _seconds: None) if inline else time.sleep)
+        self._worker.scanner = self._scanner
+        self._worker.settings = settings
+        self._worker.known = self._known
+        self._worker.hidden = self._is_hidden
+        self._scan_seq = 0
+        self._scan_job: _ScanJob | None = None
+        self._scan_requested_at: datetime | None = None
+        self._scanned_at: datetime | None = None
+        self._visible_since: datetime | None = None
+        self._signins: dict[str, int] = {}
+        self._items: dict[str, list[FollowupItem]] = {}
+        self._hidden_items: dict[str, list[FollowupItem]] = {}
+        self._reports: dict[str, ScanReport] = {}
+        self._participants: dict[str, dict[str, tuple[Any, ...]]] = {}
+        self._checking: set[str] = set()
+        self._refetches: dict[int, _RefetchJob] = {}
         logger.info("Productivity: on (plan offer %s, prep offers %s, follow-ups %s)",
                     "on" if self._plan_on else "off", "on" if self._prep_on else "off",
                     "on" if getattr(settings, "followups", False) else "off")
@@ -388,9 +511,18 @@ class ProductivityController(QObject):
         self._take_back(act)
         if act == ACT_OFF:
             self._timer.stop()
+            self._visible_since = None
+            self._first_scan_timer.stop()
             return
         if not self._timer.isActive():
             self._timer.start()
+        if act != ACT_VISIBLE:
+            self._visible_since = None
+            self._first_scan_timer.stop()
+        elif was != ACT_VISIBLE or self._visible_since is None:
+            self._visible_since = self._now()
+            if self.scan_on():
+                self._first_scan_timer.start()   # the first scan 20 s after the screen came up (15)
         if act == ACT_VISIBLE:
             if not self._shown_once:
                 self._shown_once = True
@@ -407,6 +539,9 @@ class ProductivityController(QObject):
         self._closed = True
         self._stop.set()
         self._timer.stop()
+        self._first_scan_timer.stop()
+        if self._scan_job is not None:
+            self._scan_job.cancel.set()
         self._worker.stop()
 
     def join(self, timeout: float) -> None:
@@ -436,11 +571,15 @@ class ProductivityController(QObject):
         act = self._safe_activity()
         self._last_activity = act
         self._take_back(act, locked=locked)
+        if self._scan_job is not None and self._safe_signing_in():
+            self.cancel_scan()   # a Google sign-in opened: the running scan stops between two reads (R19)
         if act == ACT_OFF:
             self._timer.stop()
             return
         if act == ACT_VISIBLE and self._day_read_due(now):
             self.request_day(READ_TICK)
+        if act == ACT_VISIBLE and self._scan_due(now):
+            self.request_scan(READ_TICK)
         self._evaluate_prep_offers(now, act)
         self._evaluate_plan_offer(now, "tick")
         self._refresh_sub_lines()
@@ -558,10 +697,11 @@ class ProductivityController(QObject):
         self._retry_held("unlock")
 
     def on_signed_in(self, alias: str) -> None:
-        """A Google sign-in for ``alias`` completed: the schedule is read again when visible (the scan
-        of a later build bumps its counter here)."""
+        """A Google sign-in for ``alias`` completed: the schedule is read again when visible, and the
+        account's sign-in counter goes up, so a scan its refusal stopped runs again (R19)."""
         if self._closed:
             return
+        self._signins[alias] = self._signins.get(alias, 0) + 1   # a stopped account is scanned again (R19)
         self._day_read_at = None
         self._day_requested_at = None
         if self._safe_activity() == ACT_VISIBLE:
@@ -709,6 +849,323 @@ class ProductivityController(QObject):
     def plan_offer_open(self) -> Offer | None:
         return self._plan_offer
 
+    # ---- the follow-up list (B5) -------------------------------------------------------------------
+
+    def scan_on(self) -> bool:
+        """The header scan may run: [productivity] followups, [ask] read_mail, an account whose mail may
+        be read (gmail_read) and not turned off on this PC. Memory and the config only."""
+        if self._closed or not bool(getattr(self.settings, "followups", False)) or self.followups_off():
+            return False
+        return self._read_mail_on() and bool(self.scan_aliases())
+
+    def followups_off(self) -> bool:
+        prefs = self._prefs
+        try:
+            return bool(getattr(prefs, "followups_off", False))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _read_mail_on(self) -> bool:
+        return bool(getattr(getattr(self.config, "ask", None), "read_mail", False))
+
+    def scan_aliases(self) -> tuple[str, ...]:
+        """The accounts whose headers the scan reads: the Ask readers ("gmail_read" with [ask] read_mail);
+        attributes only, no file or request."""
+        readers = getattr(self.sources, "readers", None)
+        if not isinstance(readers, Mapping):
+            return ()
+        return tuple(sorted(alias for alias, reader in readers.items()
+                            if callable(getattr(reader, "scan_ids", None))))
+
+    def _scan_due(self, now: datetime) -> bool:
+        if self._scan_job is not None or not self.scan_on() or self._safe_signing_in():
+            return False
+        since = self._visible_since
+        if since is None or now - since < FIRST_SCAN_AFTER:
+            return False
+        last = self._scan_requested_at
+        every = timedelta(minutes=int(getattr(self.settings, "scan_every_minutes", 30)))
+        return last is None or now - last >= every
+
+    def _first_scan(self) -> None:
+        """20 s after the reading screen came up: the scan, when one is due."""
+        if self._closed or self._safe_activity() != ACT_VISIBLE:
+            return
+        now = self._now()
+        if self._scan_due(now):
+            self.request_scan(READ_SHOWN)
+
+    def request_scan(self, reason: str) -> bool:
+        """Read every readable account's mail headers on the prod thread (never during a sign-in,
+        never twice at once). False when it did not start."""
+        if self._closed or self._scan_job is not None or not self.scan_on() or self._safe_signing_in():
+            return False
+        aliases = self.scan_aliases()
+        self._scan_seq += 1
+        self._scan_requested_at = self._now()
+        steps = {alias: self._live_scan_step(alias) for alias in aliases}
+        job = _ScanJob(self._scan_seq, aliases, threading.Event(), dict(self._signins), steps, reason)
+        self._scan_job = job
+        self._changed()                      # "scanning..."
+        self._worker.put(job)
+        return True
+
+    def cancel_scan(self) -> None:
+        """A Google sign-in opened in the browser: a running scan stops between two reads (R19)."""
+        job = self._scan_job
+        if job is not None and not job.cancel.is_set():
+            job.cancel.set()
+
+    def _on_scanned(self, seq: int, results: Any) -> None:
+        if self._closed:
+            return
+        job = self._scan_job
+        if job is None or job.seq != seq:
+            return
+        self._scan_job = None
+        if self.followups_off():          # turned off while it ran: nothing of it is kept
+            self._changed()
+            return
+        readable = set(self.scan_aliases())
+        for alias in set(self._items) | set(self._reports):
+            if alias not in readable:
+                self._drop_alias(alias)
+        for alias, result in dict(results or {}).items():
+            report = getattr(result, "report", None)
+            if report is None:
+                continue
+            self._reports[alias] = report
+            if report.problem in (PROBLEM_UNCONFIRMED, PROBLEM_IDENTITY, PROBLEM_UNREADABLE):
+                self._drop_alias(alias, keep_report=True)   # not this account's rows until it is fixed
+            elif report.problem not in NOT_SCANNED:
+                self._items[alias] = list(result.items)
+                self._hidden_items[alias] = list(result.hidden)
+                self._participants[alias] = dict(result.participants)
+            self._live_rows(job.steps.get(alias), result.items)
+            if report.problem == "cancelled":
+                self._scan_requested_at = None   # stopped for a sign-in: due again once it is over
+        self._scanned_at = self._now()
+        self._changed()
+
+    def _drop_alias(self, alias: str, *, keep_report: bool = False) -> None:
+        self._items.pop(alias, None)
+        self._hidden_items.pop(alias, None)
+        self._participants.pop(alias, None)
+        if not keep_report:
+            self._reports.pop(alias, None)
+
+    def followups(self) -> FollowupView:
+        """The list as the app shows it (memory only)."""
+        items = [item for alias in sorted(self._items) for item in self._items[alias]]
+        hidden = [item for alias in sorted(self._hidden_items) for item in self._hidden_items[alias]]
+        notes: list[tuple[str, str]] = []
+        if not self._read_mail_on():
+            notes.append(("", READ_OFF_NOTE))
+        for alias in sorted(self._reports):
+            problem = self._reports[alias].problem
+            if problem in (PROBLEM_UNCONFIRMED, PROBLEM_IDENTITY, PROBLEM_UNREADABLE, PROBLEM_REFUSED,
+                           PROBLEM_STOPPED):
+                notes.append((alias, problem))
+        return make_view(items, hidden, reports=tuple(self._reports[alias] for alias in sorted(self._reports)),
+                         notes=notes, scanned_at=self._scanned_at, scanning=self._scan_job is not None,
+                         off=self.followups_off())
+
+    def followup_counts(self) -> tuple[int, int] | None:
+        """(waiting, owed) over every account once a scan ran (the plan's <todos> "emails" row), else
+        None. Counts only: the only follow-up data a run ever gets."""
+        if self._scanned_at is None or self.followups_off():
+            return None
+        items = [item for rows in self._items.values() for item in rows]
+        return (sum(1 for item in items if item.kind == "waiting"), sum(1 for item in items if item.kind == "owed"))
+
+    def participants(self) -> dict[str, tuple[Any, ...]]:
+        """mailbox -> the scan's newest threads with that person, every account together (prep's index:
+        it keeps the meeting's account's unless prep_other_accounts, R3); {} while the list is off."""
+        if self.followups_off() or not self.scan_on():
+            return {}
+        merged: dict[str, list[Any]] = {}
+        for index in self._participants.values():
+            for key, refs in index.items():
+                merged.setdefault(key, []).extend(refs)
+        return {key: tuple(sorted(refs, key=lambda ref: ref.last_at, reverse=True)) for key, refs in merged.items()}
+
+    def item(self, row_id: str) -> FollowupItem | None:
+        """The row behind an opaque row id (None: rescanned away, 8.5)."""
+        for rows in (*self._items.values(), *self._hidden_items.values()):
+            for item in rows:
+                if item.row_id == row_id:
+                    return item
+        return None
+
+    def checking(self, row_id: str) -> bool:
+        """The row's headers are being read again (its menu is off meanwhile)."""
+        return row_id in self._checking
+
+    def hide(self, row_id: str, *, days: int | None) -> bool:
+        """Hide a row for ``days`` days, or (None) until something new arrives (5.6)."""
+        item = self.item(row_id)
+        store = self._hidden
+        if item is None or store is None or self._is_hidden(item.key):
+            if item is None:
+                logger.info("Follow-ups: that row is gone")
+            return False
+        until = self._now() + timedelta(days=days) if days is not None else None
+        try:
+            store.hide(item.key, until=until)
+        except Exception as exc:  # noqa: BLE001 - hidden for this run only
+            logger.warning("Follow-ups: could not save the hidden row (%s)", type(exc).__name__)
+        rows = self._items.get(item.alias, [])
+        if item in rows:
+            rows.remove(item)
+            self._hidden_items.setdefault(item.alias, []).append(item)
+        logger.info("Follow-ups: a row hidden (%s)", "3_days" if days is not None else "until_new")
+        self._changed()
+        return True
+
+    def unhide(self, row_id: str) -> bool:
+        item = self.item(row_id)
+        store = self._hidden
+        if item is None:
+            logger.info("Follow-ups: that row is gone")
+            return False
+        if store is not None:
+            try:
+                store.unhide(item.key)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Follow-ups: could not save the shown row (%s)", type(exc).__name__)
+        rows = self._hidden_items.get(item.alias, [])
+        if item in rows:
+            rows.remove(item)
+            self._items.setdefault(item.alias, []).append(item)
+        logger.info("Follow-ups: a row shown again")
+        self._changed()
+        return True
+
+    def set_off(self, off: bool) -> None:
+        """Turn the list off (or on again) on this PC (assistant.json followups_off)."""
+        prefs = self._prefs
+        setter = getattr(prefs, "set_followups_off", None)
+        if callable(setter):
+            try:
+                setter(bool(off))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Follow-ups: could not save the switch (%s)", type(exc).__name__)
+        logger.info("Follow-ups: turned %s on this PC", "off" if off else "on")
+        if off:
+            self.cancel_scan()
+            # Nothing listed is kept (no refetch, no prep index from it); the reports stay for the notes.
+            for table in (self._items, self._hidden_items, self._participants, self._checking, self._refetches):
+                table.clear()
+            self._scanned_at = self._scan_requested_at = None   # never "nothing waits" from the emptied list
+        elif self._safe_activity() == ACT_VISIBLE:
+            self.request_scan("turned_on")
+        self._changed()
+
+    def refetch(self, row_id: str, reason: str) -> bool:
+        """One listed thread's headers again at once (R47: a guard stop, a sent reply); the row reads
+        "replied - checking" until it lands. False for a gone row."""
+        item = self.item(row_id)
+        if item is None or self._closed or row_id in self._checking:
+            if item is None:
+                logger.info("Follow-ups: that row is gone")
+            return False
+        scanner = self._scanner
+        if not self.scan_on() or scanner.stopped(item.alias) or self._safe_signing_in():
+            return False      # off, refused until the next sign-in, or a sign-in is open: no read (R19)
+        self._scan_seq += 1
+        job = _RefetchJob(self._scan_seq, item.alias, item.thread_id, row_id, reason,
+                          self._live_refetch_step(item.alias, reason))
+        self._refetches[job.seq] = job
+        self._checking.add(row_id)
+        logger.info("Follow-ups: a thread checked again (%s)", reason)
+        self._changed()
+        self._worker.put(job)
+        return True
+
+    def refetch_thread(self, alias: str, thread_id: str, reason: str) -> bool:
+        """refetch() for the listed row of that thread (a reply sent there); nothing for a thread that is
+        not listed (no read)."""
+        for rows in self._items.values():
+            for item in rows:
+                if item.alias == alias and item.thread_id == thread_id:
+                    return self.refetch(item.row_id, reason)
+        return False
+
+    def row_of(self, alias: str, thread_id: str) -> FollowupItem | None:
+        for rows in self._items.values():
+            for item in rows:
+                if item.alias == alias and item.thread_id == thread_id:
+                    return item
+        return None
+
+    def _on_refetched(self, seq: int, result: Any) -> None:
+        job = self._refetches.pop(seq, None)
+        if job is None or self._closed:
+            return
+        self._checking.discard(job.row_id)
+        rows = self._items.get(job.alias, [])
+        old = next((item for item in rows if item.row_id == job.row_id), None)
+        if isinstance(result, FollowupItem):
+            if old is not None:
+                rows[rows.index(old)] = result
+            else:
+                rows.append(result)
+            self._items[job.alias] = rows
+        elif isinstance(result, str) and old is not None:   # not listed any more (answered, hidden, gone ...)
+            rows.remove(old)
+        self._changed()
+
+    def _changed(self) -> None:
+        if not self._closed:
+            self.followupsChanged.emit(self.followups())
+
+    def _known(self, address: str) -> bool:
+        known = self._known_recipient
+        try:
+            return bool(known(address)) if known is not None else False
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _is_hidden(self, key: str) -> bool:
+        store = self._hidden
+        if store is None:
+            return False
+        try:
+            return bool(store.hidden(key, self._now()))
+        except Exception:  # noqa: BLE001
+            return False
+
+    @_live.quiet(_live.NO_STEP)
+    def _live_scan_step(self, alias: str) -> Any:
+        return self._own_task().step(_live.MAIL_SCAN, f"Jarvis's own header scan: {alias} (read only)",
+                                     key=f"scan:{alias}", fields=[("Account", alias)])
+
+    @_live.quiet(_live.NO_STEP)
+    def _live_refetch_step(self, alias: str, reason: str) -> Any:
+        why = "a reply was sent in it" if reason == "sent" else "a draft found it changed"
+        return self._own_task().step(_live.MAIL_SCAN, "Checked one thread again (headers only)",
+                                     key=f"refetch:{alias}", fields=[("Account", alias), ("Why", why),
+                                                                    ("Reads", "that thread's headers only")])
+
+    @_live.quiet()
+    def _live_step_failed(self, step: Any) -> None:
+        if step is not None:
+            step.done(_live.STATUS_FAILED, summary="failed")
+
+    @_live.quiet()
+    def _live_rows(self, step: Any, items: Sequence[FollowupItem]) -> None:
+        """With [live] text: one row per listed thread ("WAITING ON YOU . <subject> . <who> . 3d")."""
+        live = self._live
+        if step is None or live is None or not getattr(live, "keep_text", False):
+            return
+        now = self._now()
+        from .followups import age_words
+
+        for item in sorted(items, key=lambda one: (one.kind, one.since or now))[:40]:
+            label = "WAITING ON YOU" if item.kind == "waiting" else "OWED TO YOU"
+            age = age_words(item.since, now) if item.since is not None else ""
+            step.item(f" {_DOT} ".join(part for part in (label, item.subject, item.who, age) if part))
+
     # ---- the day read -----------------------------------------------------------------------------
 
     def _reads_on(self, now: datetime | None = None) -> bool:
@@ -772,7 +1229,22 @@ class ProductivityController(QObject):
         self._evaluate_plan_offer(now, "day")
         self._evaluate_prep_offers(now, act)
 
-    def _on_job_failed(self, seq: int, _kind: str) -> None:
+    def _on_job_failed(self, seq: int, kind: str) -> None:
+        if kind == JOB_SCAN:
+            job = self._scan_job
+            if job is not None and job.seq == seq:
+                self._scan_job = None
+                for step in job.steps.values():
+                    self._live_step_failed(step)
+                self._changed()
+            return
+        if kind == JOB_REFETCH:
+            refetch = self._refetches.pop(seq, None)
+            if refetch is not None:
+                self._checking.discard(refetch.row_id)
+                self._live_step_failed(refetch.step)
+                self._changed()
+            return
         found = self._jobs.pop(seq, None)
         job = found[0] if found is not None else None
         if job is not None and job.reason == READ_MINIMIZED:
@@ -1558,6 +2030,9 @@ class ProductivityController(QObject):
     def _live_spoken(self, offer: Offer, words: str) -> None:
         if offer.live_key:
             self._own_task().find(_live.OFFER_MADE, offer.live_key).field("Spoken", words)
+
+
+_DOT = "\u00b7"
 
 
 def _kind_word(offer: Offer) -> str:

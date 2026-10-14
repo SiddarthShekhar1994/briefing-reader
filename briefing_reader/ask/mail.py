@@ -147,6 +147,13 @@ class MailMessage:
     cut: bool = False                      # text shortened (CUT_MARK at its end)
     to_more: int = 0                       # To addresses beyond MAX_PEOPLE (never shown or indexed)
     cc_more: int = 0
+    # What the follow-up rules need (the productivity bundle's nudge guard and a brief's "owes you an
+    # answer"): the message's Gmail labels, an Auto-Submitted header other than "no" (an auto-reply, an
+    # RSVP Gmail sent), a mailing-list header (List-Id, List-Unsubscribe, Precedence bulk / list /
+    # junk). Never shown or sent.
+    labels: frozenset[str] = field(default=frozenset(), repr=False, compare=False)
+    auto: bool = field(default=False, repr=False, compare=False)
+    listy: bool = field(default=False, repr=False, compare=False)
 
     def people(self) -> tuple[MailPerson, ...]:
         found = ((self.sender,) if self.sender else ()) + self.reply_to + self.to + self.cc
@@ -569,6 +576,20 @@ def clean_line(text: Any, cap: int) -> str:
     return text if len(text) <= cap else text[:cap - 3] + "..."
 
 
+def auto_submitted(value: str) -> bool:
+    """An Auto-Submitted header that is present and not "no" (RFC 3834: an auto-reply, an RSVP Gmail
+    sent from an invitation, a notification)."""
+    word = str(value or "").strip().split(";", 1)[0].strip().casefold()
+    return bool(word) and word != "no"
+
+
+def list_mail(list_id: str, unsubscribe: str, precedence: str) -> bool:
+    """Mailing-list or bulk mail: a List-Id or List-Unsubscribe header, or Precedence bulk, list or junk."""
+    if str(list_id or "").strip() or str(unsubscribe or "").strip():
+        return True
+    return str(precedence or "").strip().casefold() in ("bulk", "list", "junk")
+
+
 def thread_from_api(data: Any, account: str) -> MailThread | None:
     """A users.threads.get answer (format=full) -> MailThread (messages oldest first), None when it
     is not one. Only From, To, Cc, Reply-To, Subject and Message-ID headers are kept."""
@@ -602,11 +623,15 @@ def thread_from_api(data: Any, account: str) -> MailThread | None:
         to, to_more = _people(_header(headers, "to"))
         cc, cc_more = _people(_header(headers, "cc"))
         reply_to, _ = _people(_header(headers, "reply-to"), MAX_REPLY_TO)
+        labels = item.get("labelIds") if isinstance(item.get("labelIds"), list) else []
         messages.append(MailMessage(
             gmail_id=item["id"], message_id=msgid.strip("<>") if match else "",
             sender=senders[0] if senders else None, to=to, cc=cc, reply_to=reply_to, sent_at=sent_at,
             subject=clean_line(_header(headers, "subject"), 200), text=message_text(payload),
-            to_more=to_more, cc_more=cc_more))
+            to_more=to_more, cc_more=cc_more, labels=frozenset(label for label in labels if isinstance(label, str)),
+            auto=auto_submitted(_header(headers, "auto-submitted")),
+            listy=list_mail(_header(headers, "list-id"), _header(headers, "list-unsubscribe"),
+                            _header(headers, "precedence"))))
     subject = next((message.subject for message in reversed(messages) if message.subject), "")
     return MailThread(account, data["id"], subject, tuple(messages), left_out=left_out)
 

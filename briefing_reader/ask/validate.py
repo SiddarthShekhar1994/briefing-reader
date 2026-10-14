@@ -69,7 +69,8 @@ PAST_MOVE = "The new time is in the past"
 FAR_MOVE = f"The new time is more than {FAR_DAYS} days away - check the date"
 # A planner mode's refusal of a kind it may not propose (else restrict's "Ask can't propose ...").
 MODE_KIND_REFUSALS = {"plan": "A day plan only adds time blocks",
-                      "prep": "A meeting brief only drafts replies"}
+                      "prep": "A meeting brief only drafts replies",
+                      "nudge": "A follow-up draft is one reply"}
 
 
 LINE_CARD = "card"            # the line became a card Jarvis can carry out

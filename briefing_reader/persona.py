@@ -1140,3 +1140,153 @@ def offer_cost_sub(left_bundle: int, max_runs: int, left_day: int, *, prep: bool
 def prod_hint_text(address: str = "sir") -> str:
     """The one-time "minimize instead of Done" entry (R34; never spoken)."""
     return with_address(PROD_HINT_TEXT, address)
+
+
+# --------------------------------------------------------------------------
+# Follow-ups and nudges (the productivity bundle, spec 3.4 and 9.3-9.4): entries and the one spoken
+# sentence of a draft. Built from counts and times only: never a subject, a name or a draft.
+# --------------------------------------------------------------------------
+
+NUDGE_DRAFTED_TEXT = 'I\'ve drafted a reply in "{subject}" ({alias}). It waits for your OK under NEEDS YOUR OK.'
+NUDGE_HELD_TEXT = 'I couldn\'t line up a reply in "{subject}" ({alias}), {sir} - the card says why.'
+NUDGE_SPEECH = "I've drafted a reply; it's waiting for your OK, {sir}."
+NUDGE_WAITING_TEXT = "A reply to this thread is already waiting under NEEDS YOUR OK, {sir}."
+NUDGE_DECIDED_TEXT = "You already decided a reply to this message, {sir} - see NEEDS YOUR OK."
+NUDGE_LISTED_TEXT = "A reply to this message is already under BRIEFING, {sir} - change it with Edit there."
+NUDGE_QUESTION_LINK = "Tell Jarvis what to say"
+NUDGE_DRAFT_LINK = "Draft a nudge"
+NUDGE_UPDATING = " I'm updating the list."
+_NUDGE_NO_RUN_TEXTS = {"replied_since": "You've replied since, {sir} - nothing to draft.",
+                       "answered_since": "They've answered since, {sir} - see the thread.",
+                       "changed": "This thread changed since Jarvis listed it, {sir}.",
+                       "gone": "That thread is gone from your mail, {sir}."}
+_NUDGE_NO_RUN_WORDS = {"replied_since": "you replied since", "answered_since": "they answered since",
+                       "changed": "the thread changed", "gone": "the thread is gone",
+                       "unreadable": "mail can't be read now", "draft_waiting": "a draft is waiting",
+                       "caps": "the limits", "not_ready": "Claude Code not ready"}
+FOLLOWUPS_SCANNING_TEXT = "I'm checking your mail headers now, {sir} - FOLLOW-UPS fills in shortly."
+FOLLOWUPS_OFF_TEXT = "Follow-ups are off on this PC."
+FOLLOWUPS_NONE_TEXT = "Nothing waits on you or on anyone else, {sir} (checked {at})"
+FOLLOWUPS_CONFIRM_TEXT = 'Confirm which Google account "{alias}" is first.'
+FOLLOWUPS_NOT_STARTED_TEXT = "I couldn't start checking your mail headers just now, {sir}."
+FOLLOWUPS_PARTIAL = " (partial - Gmail asked me to slow down)"
+FOLLOWUPS_SHOW_LINK = "Show follow-ups"
+FOLLOWUPS_ON_LINK = "Turn on"
+FOLLOWUPS_CONFIRM_LINK = "Confirm"
+# The FOLLOW-UPS section (9.4).
+FOLLOWUPS_TITLE = "FOLLOW-UPS"
+FOLLOWUPS_EMPTY = "Nothing waits on you"
+FOLLOWUPS_SCANNING_META = "scanning..."
+FOLLOWUPS_PARTIAL_META = "partial - Gmail asked Jarvis to slow down"
+FOLLOWUPS_OFF_META = "off"
+FOLLOWUPS_OFF_LINE = "Follow-ups are off on this PC"
+FOLLOWUPS_FIX_CONFIRM = 'Confirm which Google account "{alias}" is first'
+FOLLOWUPS_FIX_SIGN_IN = "Sign in again so Jarvis can read {alias} mail"
+FOLLOWUPS_FIX_READ_OFF = "Reading mail is off ([ask] read_mail)"
+FOLLOWUPS_DRAFT_WAITING = "draft waiting"
+FOLLOWUPS_CHECKING = "replied - checking"
+FOLLOWUPS_WAITING_LABEL = "WAITING ON YOU"
+FOLLOWUPS_OWED_LABEL = "OWED TO YOU"
+
+
+def nudge_drafted_text(subject: str, alias: str) -> str:
+    """'I've drafted a reply in "Budget numbers" (work). It waits for your OK under NEEDS YOUR OK.' (on
+    screen only)."""
+    shown = " ".join(str(subject or "").split()) or "(no subject)"
+    return NUDGE_DRAFTED_TEXT.replace("{subject}", shown).replace("{alias}", str(alias or ""))
+
+
+def nudge_held_text(subject: str, alias: str, address: str = "sir") -> str:
+    shown = " ".join(str(subject or "").split()) or "(no subject)"
+    return with_address(NUDGE_HELD_TEXT.replace("{subject}", shown).replace("{alias}", str(alias or "")), address)
+
+
+def nudge_result_speech(address: str = "sir") -> str:
+    """"I've drafted a reply; it's waiting for your OK, sir." (never the subject or the draft)."""
+    return with_address(NUDGE_SPEECH, address)
+
+
+def nudge_question_text(question: str) -> str:
+    """"Question: <question>" (the planner's, on screen only; its link opens Tell Jarvis what to say)."""
+    return "Question: " + " ".join(str(question or "").split())
+
+
+def nudge_no_run_text(kind: str, address: str = "sir", *, listed: bool = False) -> str:
+    """Why no draft was made (the guard, R47; a gone thread): "You've replied since, sir - nothing to
+    draft." ... with " I'm updating the list." when the thread is a listed row (its headers are read
+    again at once)."""
+    text = with_address(_NUDGE_NO_RUN_TEXTS.get(kind, _NUDGE_NO_RUN_TEXTS["changed"]), address)
+    return text + (NUDGE_UPDATING if listed and kind in ("replied_since", "answered_since", "changed") else "")
+
+
+def nudge_no_run_words(kind: str) -> str:
+    return _NUDGE_NO_RUN_WORDS.get(kind, str(kind).replace("_", " "))
+
+
+def nudge_waiting_text(address: str = "sir") -> str:
+    return with_address(NUDGE_WAITING_TEXT, address)
+
+
+def nudge_decided_text(address: str = "sir") -> str:
+    return with_address(NUDGE_DECIDED_TEXT, address)
+
+
+def nudge_listed_text(address: str = "sir") -> str:
+    return with_address(NUDGE_LISTED_TEXT, address)
+
+
+def owes_answer_text(who: str, subject: str, when: str) -> str:
+    """'Ana Lima owes you an answer in "Budget numbers" (Oct 8).' (a brief's nudge entry, R32)."""
+    shown = " ".join(str(subject or "").split()) or "(no subject)"
+    date = f" ({when})" if when else ""
+    return f'{" ".join(str(who or "").split()) or "Someone"} owes you an answer in "{shown}"{date}.'
+
+
+def _threads(count: int) -> str:
+    return f"{count} thread{'' if count == 1 else 's'}"
+
+
+def followups_text(waiting: int, owed: int, at: datetime | None, address: str = "sir", *, partial: bool = False,
+                   hour24: bool = False) -> str:
+    """A typed "follow-ups" with a list (R45): "3 threads wait on your answer and 1 on someone else's
+    (checked 10:41 AM)." / "Nothing waits on you or on anyone else, sir (checked 10:41 AM)."; a
+    partial scan adds "(partial - Gmail asked me to slow down)"."""
+    checked = clock_text(at, hour24) if at is not None else "just now"
+    if waiting or owed:
+        verb = "waits" if waiting == 1 else "wait"
+        text = f"{_threads(waiting)} {verb} on your answer and {owed} on someone else's (checked {checked})"
+    else:
+        text = with_address(FOLLOWUPS_NONE_TEXT.replace("{at}", checked), address)
+    return text + (FOLLOWUPS_PARTIAL if partial else "") + "."
+
+
+def followups_scanning_text(address: str = "sir") -> str:
+    return with_address(FOLLOWUPS_SCANNING_TEXT, address)
+
+
+def followups_confirm_text(alias: str) -> str:
+    return FOLLOWUPS_CONFIRM_TEXT.replace("{alias}", str(alias or ""))
+
+
+def followups_read_off_text() -> str:
+    """A typed "follow-ups" while [ask] read_mail is off (no scan can run; the section's fix line)."""
+    return FOLLOWUPS_FIX_READ_OFF + "."
+
+
+def followups_sign_in_text(alias: str) -> str:
+    """A typed "follow-ups" when no account could be read (its sign-in, a refusal; the fix line)."""
+    return FOLLOWUPS_FIX_SIGN_IN.replace("{alias}", str(alias or "")) + "."
+
+
+def followups_not_started_text(address: str = "sir") -> str:
+    return with_address(FOLLOWUPS_NOT_STARTED_TEXT, address)
+
+
+def followups_meta(waiting: int, owed: int) -> str:
+    """"3 waiting . 1 owed" (the section's meta; counts only)."""
+    return f"{waiting} waiting {DOT} {owed} owed"
+
+
+def followups_activity(waiting: int, owed: int) -> str:
+    """ACTIVITY's row after a scan: "Follow-ups: 3 waiting, 1 owed" (counts only)."""
+    return f"Follow-ups: {waiting} waiting, {owed} owed"

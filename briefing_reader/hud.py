@@ -3352,6 +3352,155 @@ class DeadlineRow(QWidget):
                              _elide(source_metrics, source, width))
 
 
+FOLLOWUP_WAITING, FOLLOWUP_OWED = "waiting", "owed"
+FOLLOWUP_DRAFT_WAITING = "draft_waiting"   # a Reply card for its thread waits under NEEDS YOUR OK (R31)
+FOLLOWUP_CHECKING = "checking"             # its headers are read again after a reply was sent (R47)
+_FOLLOWUP_BARS = {FOLLOWUP_WAITING: AMBER, FOLLOWUP_OWED: ACCENT}
+
+
+@dataclass(frozen=True)
+class FollowupRowInfo:
+    """One FOLLOW-UPS row: who (a name, else the address's local part), the age ("20h", "3d"), the
+    subject (dim, elided), the tooltip and a state ("" | FOLLOWUP_DRAFT_WAITING | FOLLOWUP_CHECKING with
+    its words). ``row_id`` is opaque (followups.FollowupItem.row_id). Text from mail: plain text only."""
+
+    row_id: str
+    kind: str
+    who: str
+    age: str = ""
+    subject: str = ""
+    tooltip: str = ""
+    state: str = ""
+    state_text: str = ""
+
+
+@dataclass(frozen=True)
+class FollowupsInfo:
+    """What the FOLLOW-UPS section shows: its meta, the rows of each kind (the first ``shown`` of each,
+    the rest behind "+N more"), the fix lines ((text, link text, link id)) and the empty line."""
+
+    meta: str = ""
+    meta_color: str = TEXT_DIM
+    waiting: tuple[FollowupRowInfo, ...] = ()
+    owed: tuple[FollowupRowInfo, ...] = ()
+    shown: int = 6
+    notes: tuple[tuple[str, str, str], ...] = ()
+    empty_text: str = ""
+    waiting_label: str = "WAITING ON YOU"
+    owed_label: str = "OWED TO YOU"
+
+
+class FollowupRow(QAbstractButton):
+    """A follow-up: a 3 px bar (amber: waiting on you; cyan: owed to you), who and the age on the first
+    line (a dim state tag after the age), the subject dim and elided under it. Focusable with Tab; a
+    click, Space or Enter emits ``activated(row_id)``. Never painted as HTML."""
+
+    activated = Signal(str)
+    HEIGHT = 42
+    _PAD = 8
+    _GAP = 10
+
+    def __init__(self, info: FollowupRowInfo, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(self.HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._who_font = body_font(13)
+        self._age_font = mono_font(11)
+        self._tag_font = mono_font(10, 400, 0.06)
+        self._subject_font = body_font(12)
+        self._focus_visible = False
+        self._info = info
+        self.clicked.connect(lambda: self.activated.emit(self._info.row_id))
+        self.set_info(info)
+
+    def info(self) -> FollowupRowInfo:
+        return self._info
+
+    def set_info(self, info: FollowupRowInfo) -> None:
+        self._info = info
+        words = [info.who, info.age, info.state_text, info.subject]
+        self.setAccessibleName(", ".join(word for word in words if word))
+        self.setToolTip(plain_tooltip(info.tooltip or info.subject))
+        self.update()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(220, self.HEIGHT)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(120, self.HEIGHT)
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.click()
+            return
+        super().keyPressEvent(event)
+
+    def focusInEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self._focus_visible = _focus_ring_after(event.reason(), self._focus_visible)
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().focusOutEvent(event)
+        self.update()
+
+    def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().leaveEvent(event)
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        info = self._info
+        bar = _FOLLOWUP_BARS.get(info.kind, ACCENT)
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = QRectF(self.rect())
+            if self.underMouse() and self.isEnabled():
+                painter.fillRect(rect, rgba(bar, 0.06))
+            painter.fillRect(QRectF(self._PAD, round((rect.height() - 30) / 2), 3, 30), QColor(bar))
+            left = self._PAD + 3 + self._GAP
+            width = rect.width() - left - 6
+            who_metrics, sub_metrics = QFontMetricsF(self._who_font), QFontMetricsF(self._subject_font)
+            top = round((rect.height() - who_metrics.height() - sub_metrics.height()) / 2)
+            right = rect.width() - 6
+            age_metrics = QFontMetricsF(self._age_font)
+            painter.setFont(self._age_font)
+            painter.setPen(QColor(TEXT_SOFT))
+            age_width = age_metrics.horizontalAdvance(info.age)
+            painter.drawText(QPointF(right - age_width, top + who_metrics.ascent()), info.age)
+            right -= age_width + (8 if info.age else 0)
+            if info.state_text:
+                tag_metrics = QFontMetricsF(self._tag_font)
+                # The tag gets what the name leaves (at least half the line); the name is elided after it.
+                room = max((right - left) * 0.5, right - left - who_metrics.horizontalAdvance(info.who) - 8)
+                tag = _elide(tag_metrics, info.state_text.upper(), max(0.0, room))
+                painter.setFont(self._tag_font)
+                painter.setPen(QColor(TEXT_DIM))
+                tag_width = tag_metrics.horizontalAdvance(tag)
+                painter.drawText(QPointF(right - tag_width, top + who_metrics.ascent()), tag)
+                right -= tag_width + 8
+            painter.setFont(self._who_font)
+            painter.setPen(QColor(TEXT_BODY if self.isEnabled() else TEXT_DIM))
+            painter.drawText(QPointF(left, top + who_metrics.ascent()), _elide(who_metrics, info.who, right - left))
+            painter.setFont(self._subject_font)
+            painter.setPen(QColor(TEXT_DIM))
+            painter.drawText(QPointF(left, top + who_metrics.height() + sub_metrics.ascent()),
+                             _elide(sub_metrics, info.subject, width))
+            if self.hasFocus() and self._focus_visible:
+                painter.setPen(QPen(QColor(ACCENT), 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect.adjusted(1, 1, -1, -1))
+        finally:
+            painter.end()
+
+
 class AgendaPanel(ChamferPanel):
     """TODAY / TOMORROW agenda rows followed by the DEADLINES list, scrolling inside the panel.
 
@@ -3360,9 +3509,15 @@ class AgendaPanel(ChamferPanel):
     instead, with an optional link button (``link_button``, ``linkClicked``).
     ``set_deadlines(rows, empty_text)`` and ``set_deadlines_meta(text)`` fill
     the DEADLINES part. Row widgets are reused, so a refresh does not flicker.
+    ``set_followups(info)`` fills the FOLLOW-UPS section under DEADLINES (None hides it): its rows
+    emit ``followupActivated(row_id)``, its fix lines' links ``followupsLinkClicked(link_id)`` and its
+    "..." button ``followupsMenuRequested()``.
     """
 
     linkClicked = Signal()
+    followupActivated = Signal(str)
+    followupsLinkClicked = Signal(str)
+    followupsMenuRequested = Signal()
     EVENT_GAP = 4
 
     def __init__(self, title: str = "Today", parent: QWidget | None = None) -> None:
@@ -3393,6 +3548,8 @@ class AgendaPanel(ChamferPanel):
         layout.addSpacing(2)
         layout.addLayout(self._deadline_layout)
         layout.addWidget(self.deadlines_empty)
+        self._followups_box = self._make_followups()
+        layout.addWidget(self._followups_box)
         layout.addStretch(1)
         self.body_layout.addWidget(self._scroll, 1)
 
@@ -3427,6 +3584,70 @@ class AgendaPanel(ChamferPanel):
 
     def _on_link(self) -> None:
         self.linkClicked.emit()
+
+    def _make_followups(self) -> QWidget:
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setSpacing(2)
+        header = QWidget()
+        row = QHBoxLayout(header)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.followups_title = make_label("FOLLOW-UPS", mono_font(11, 400, 0.16), ACCENT)
+        caps = mono_font(10, 400, 0.12)
+        caps.setCapitalization(QFont.Capitalization.AllUppercase)
+        # The meta has a line of its own under the title (a narrow column has no room beside it).
+        self.followups_meta = make_label("", caps, TEXT_DIM, wrap=True)
+        self.followups_meta.hide()
+        self.followups_menu_button = HudButton("...", LINK)
+        self.followups_menu_button.set_link_color(ACCENT)
+        self.followups_menu_button.setToolTip("Follow-ups: rescan, hidden rows, turn off on this PC")
+        self.followups_menu_button.setAccessibleName("Follow-ups menu")
+        self.followups_menu_button.clicked.connect(self.followupsMenuRequested.emit)
+        row.addWidget(self.followups_title)
+        row.addStretch(1)
+        row.addWidget(self.followups_menu_button)
+        layout.addWidget(header)
+        layout.addWidget(self.followups_meta)
+        self._followup_notes = QVBoxLayout()
+        self._followup_notes.setContentsMargins(0, 0, 0, 0)
+        self._followup_notes.setSpacing(2)
+        layout.addLayout(self._followup_notes)
+        self._note_widgets: list[QWidget] = []
+        self.followups_empty = make_label("", mono_font(11, 400, 0.02), TEXT_DIM, wrap=True)
+        self.followups_empty.hide()
+        layout.addWidget(self.followups_empty)
+        self._followup_rows: dict[str, list[FollowupRow]] = {FOLLOWUP_WAITING: [], FOLLOWUP_OWED: []}
+        self._followup_labels: dict[str, QLabel] = {}
+        self._followup_layouts: dict[str, QVBoxLayout] = {}
+        self._followup_more: dict[str, HudButton] = {}
+        self._expanded: set[str] = set()
+        for kind in (FOLLOWUP_WAITING, FOLLOWUP_OWED):
+            label = make_label("", mono_font(10, 400, 0.12), TEXT_DIM)
+            label.hide()
+            layout.addWidget(label)
+            rows = QVBoxLayout()
+            rows.setContentsMargins(0, 0, 0, 0)
+            rows.setSpacing(0)
+            layout.addLayout(rows)
+            more = HudButton("", LINK)
+            more.set_link_color(ACCENT)
+            more.hide()
+            more.clicked.connect(lambda _checked=False, which=kind: self._toggle_more(which))
+            layout.addWidget(more, 0, Qt.AlignmentFlag.AlignLeft)
+            self._followup_labels[kind], self._followup_layouts[kind], self._followup_more[kind] = label, rows, more
+        self._followups_info: FollowupsInfo | None = None
+        box.hide()
+        return box
+
+    def _toggle_more(self, kind: str) -> None:
+        if kind in self._expanded:
+            self._expanded.discard(kind)
+        else:
+            self._expanded.add(kind)
+        if self._followups_info is not None:
+            self.set_followups(self._followups_info)
 
     # ---- narrow columns -------------------------------------------------------------
 
@@ -3484,6 +3705,61 @@ class AgendaPanel(ChamferPanel):
         self.deadlines_meta.setText(text)
         self._fit_metas()
 
+    def set_followups(self, info: FollowupsInfo | None) -> None:
+        """The FOLLOW-UPS section (None hides it): the meta, the fix lines, the rows of each kind (the
+        first ``shown``, then "+N more" expanding in place) or the empty line. Rows are reused."""
+        self._followups_info = info
+        if info is None:
+            self._followups_box.hide()
+            return
+        self.followups_meta.setText(info.meta)
+        set_label_color(self.followups_meta, info.meta_color)
+        self.followups_meta.setVisible(bool(info.meta))
+        while len(self._note_widgets) > 0:
+            widget = self._note_widgets.pop()
+            self._followup_notes.removeWidget(widget)
+            widget.hide()
+            widget.deleteLater()
+        for text, link_text, link_id in info.notes:
+            line = QWidget()
+            row = QVBoxLayout(line)
+            row.setContentsMargins(0, 2, 0, 2)
+            row.setSpacing(0)
+            label = make_label(text, mono_font(11, 400, 0.02), TEXT_SOFT, wrap=True)
+            row.addWidget(label)
+            if link_text:
+                button = HudButton(link_text, LINK)
+                button.set_link_color(ACCENT)
+                button.clicked.connect(lambda _checked=False, target=link_id: self.followupsLinkClicked.emit(target))
+                row.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
+            self._followup_notes.addWidget(line)
+            self._note_widgets.append(line)
+        any_rows = bool(info.waiting or info.owed)
+        for kind, rows, label_text in ((FOLLOWUP_WAITING, info.waiting, info.waiting_label),
+                                       (FOLLOWUP_OWED, info.owed, info.owed_label)):
+            limit = len(rows) if kind in self._expanded else max(1, info.shown)
+            shown = rows[:limit]
+            _reuse_rows(self._followup_rows[kind], self._followup_layouts[kind], shown, self._followup_row)
+            label = self._followup_labels[kind]
+            label.setText(label_text)
+            label.setVisible(bool(rows))
+            more = self._followup_more[kind]
+            hidden = len(rows) - len(shown)
+            if hidden > 0:
+                more.setText(f"+{hidden} more")
+            elif kind in self._expanded and len(rows) > max(1, info.shown):
+                more.setText("Show fewer")
+            more.setVisible(hidden > 0 or (kind in self._expanded and len(rows) > max(1, info.shown)))
+        self.followups_empty.setText(info.empty_text)
+        self.followups_empty.setVisible(not any_rows and bool(info.empty_text))
+        self._followups_box.show()
+        self._fit_metas()
+
+    def _followup_row(self, info: FollowupRowInfo) -> FollowupRow:
+        row = FollowupRow(info)
+        row.activated.connect(self.followupActivated.emit)
+        return row
+
     # ---- for tests ---------------------------------------------------------------
 
     def events(self) -> list[AgendaRowInfo]:
@@ -3504,6 +3780,31 @@ class AgendaPanel(ChamferPanel):
 
     def scroll_area(self) -> QScrollArea:
         return self._scroll
+
+    def followups_visible(self) -> bool:
+        return not self._followups_box.isHidden()
+
+    def followup_rows(self) -> list[FollowupRow]:
+        return [row for kind in (FOLLOWUP_WAITING, FOLLOWUP_OWED) for row in self._followup_rows[kind]]
+
+    def followup_row(self, row_id: str) -> FollowupRow | None:
+        return next((row for row in self.followup_rows() if row.info().row_id == row_id), None)
+
+    def followup_notes(self) -> list[str]:
+        return [label.text() for widget in self._note_widgets for label in widget.findChildren(QLabel)
+                if not isinstance(label, QAbstractButton)]
+
+    def followup_more(self, kind: str) -> HudButton:
+        return self._followup_more[kind]
+
+    def followups_section(self) -> QWidget:
+        return self._followups_box
+
+    def reveal_followups(self) -> None:
+        """Scroll the panel so the FOLLOW-UPS section's header is at the top ("Show follow-ups")."""
+        if self._followups_box.isVisible():
+            self._scroll.widget().layout().activate()
+            self._scroll.verticalScrollBar().setValue(self._followups_box.y())
 
 
 def _reuse_rows(rows: list, layout: QVBoxLayout, infos: Sequence[Any],
@@ -5102,6 +5403,19 @@ class ActionCard(QWidget):
     def note(self) -> str:
         return self.note_label.text()
 
+    def flash(self, ms: int = 1600) -> None:
+        """Its frame lights up for a moment (a follow-up's "Show the draft"); focus never moves."""
+        self._flashing = True
+        self.update()
+        QTimer.singleShot(ms, self._end_flash)
+
+    def flashing(self) -> bool:
+        return bool(getattr(self, "_flashing", False))
+
+    def _end_flash(self) -> None:
+        self._flashing = False
+        self.update()
+
     def _sync_extra(self) -> None:
         self._extra.setVisible(self.failure_label.used() or self.note_label.used())
 
@@ -5110,6 +5424,8 @@ class ActionCard(QWidget):
         try:
             rect = QRectF(self.rect())
             strength = 1.0 if self._actionable else 0.5
+            if self.flashing():
+                strength = 2.5
             gradient = QLinearGradient(rect.topLeft(), rect.topRight())
             gradient.setColorAt(0.0, rgba(AMBER, 0.08 * strength))
             gradient.setColorAt(1.0, rgba(AMBER, 0.025 * strength))
@@ -5231,6 +5547,16 @@ class ActionList(QScrollArea):
 
     def card(self, action_id: str) -> ActionCard | None:
         return next((card for card in self._cards if card.action_id == action_id), None)
+
+    def reveal(self, action_id: str) -> bool:
+        """Scroll ``action_id``'s card into view and flash its frame (the keyboard focus stays where it
+        is); False when there is no such card."""
+        card = self.card(action_id)
+        if card is None:
+            return False
+        self.ensureWidgetVisible(card, 0, 8)
+        card.flash()
+        return True
 
     def clear(self) -> None:
         for item in self._items:
@@ -6363,6 +6689,85 @@ class AccountDialog(QDialog):
         self.move(x, y)
         super().open()
         self.setFocus(Qt.FocusReason.OtherFocusReason)   # no button has the focus: Enter answers nothing
+
+
+NUDGE_WORDS_MAX = 300
+NUDGE_WORDS_TITLE = "Tell Jarvis what to say"
+NUDGE_WORDS_OK = "Draft it"
+NUDGE_WORDS_CANCEL = "Cancel"
+NUDGE_WORDS_HINT = ("Jarvis drafts the reply with these words and that one thread; it waits for your OK under "
+                    "NEEDS YOUR OK. Nothing is sent before you click Send.")
+
+
+class NudgeWordsDialog(QDialog):
+    """"Tell Jarvis what to say...": one line (at most NUDGE_WORDS_MAX characters) that becomes the owner's
+    words of one follow-up draft (spec 3.4), with "Draft it" and "Cancel". Window-modal, opened with
+    ``open()``; "Draft it" (or Enter in the field, with words) emits ``words(text)`` and closes; Cancel
+    or Escape closes with nothing. Nothing here touches the command bar. ``about`` (the subject) is
+    shown as plain text."""
+
+    words = Signal(str)
+    WIDTH = 460
+
+    def __init__(self, about: str = "", parent: QWidget | None = None) -> None:
+        flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+        super().__init__(parent, flags)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowTitle(NUDGE_WORDS_TITLE)
+        self.panel = ChamferPanel(NUDGE_WORDS_TITLE, "FOLLOW-UP", border_alpha=0.5, padding=(18, 14, 18, 16),
+                                  spacing=8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.panel)
+        layout = self.panel.body_layout
+        shown = " ".join(str(about or "").split())
+        self.about_label = _PlainWrapLabel(f"In \"{shown}\"" if shown else "In this thread", body_font(14, 600),
+                                           TEXT_BRIGHT)
+        layout.addWidget(self.about_label)
+        self.input = _memory_line_edit("What should the reply say?")
+        self.input.setMaxLength(NUDGE_WORDS_MAX)
+        layout.addWidget(self.input)
+        self.hint_label = make_label(NUDGE_WORDS_HINT, mono_font(10), TEXT_DIM, wrap=True)
+        layout.addWidget(self.hint_label)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 6, 0, 0)
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.cancel_button = HudButton(NUDGE_WORDS_CANCEL, SECONDARY, compact=True)
+        self.ok_button = HudButton(NUDGE_WORDS_OK, PRIMARY, compact=True)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.ok_button)
+        layout.addLayout(buttons)
+        self.cancel_button.clicked.connect(self.reject)
+        self.ok_button.clicked.connect(self._on_ok)
+        self.input.returnPressed.connect(self._on_ok)
+        self.input.textChanged.connect(self._sync)
+        self._sync()
+        self.setFixedWidth(self.WIDTH)
+
+    def text(self) -> str:
+        return " ".join(self.input.text().split())
+
+    def _sync(self) -> None:
+        self.ok_button.setEnabled(bool(self.text()))
+
+    def _on_ok(self) -> None:
+        words = self.text()
+        if not words:
+            return
+        self.words.emit(words)
+        self.accept()
+
+    def open(self) -> None:  # noqa: D102 - QDialog.open, centred over the parent window
+        self.adjustSize()
+        parent = self.parentWidget()
+        if parent is not None:
+            window = parent.window()
+            center = window.mapToGlobal(QPoint(window.width() // 2, window.height() // 2))
+            self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+        super().open()
+        self.input.setFocus(Qt.FocusReason.OtherFocusReason)
 
 
 def _short_text(text: str, limit: int) -> str:
@@ -8133,6 +8538,7 @@ LIVE_TAG_COLORS = {
     live_events.TASK_ASK: PINK, live_events.TASK_ACTION: AMBER, live_events.TASK_BRIEFING: TEXT_MUTED,
     live_events.TASK_BACKGROUND: TEXT_DIM, live_events.TASK_WEB: ACCENT, live_events.TASK_MEMORY: GREEN,
     live_events.TASK_PLAN: LAVENDER, live_events.TASK_PREP: PEACH, live_events.TASK_OWN_READS: TEXT_DIM,
+    live_events.TASK_NUDGE: AMBER_HOVER,
 }
 _LIVE_BORDERS = {
     live_events.STATUS_RUNNING: rgba(ACCENT, 0.45), live_events.STATUS_OK: rgba(ACCENT, 0.18),

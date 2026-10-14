@@ -8,8 +8,9 @@ the first start after the update); ``"live_window": {"x", "y", "w", "h"}`` and
 ``"live_popped_out"``: where the LIVE pop-out window was and whether it was open
 when Jarvis quit (written once the pop-out has been used); ``"prod_hint_shown":
 true`` once the productivity bundle's one-time "minimize instead of Done" entry
-was shown (R34). Ids, numbers and booleans only: never any text (the LIVE view's
-steps are never saved).
+was shown (R34); ``"followups_off": true`` while the follow-up list is turned off on
+this PC (its section's "Turn off on this PC"). Ids, numbers and booleans only: never any
+text (the LIVE view's steps are never saved).
 
 The file is written atomically (temporary file + ``os.replace``); a missing,
 corrupt or unwritable file counts as the defaults and never stops the app
@@ -42,7 +43,7 @@ class AssistantPrefs:
         self.path = Path(path)
         self._lock = threading.Lock()
         (self._muted, self._recent, self._adopted, self._live_window, self._live_popped,
-         self._prod_hint) = _load(self.path)
+         self._prod_hint, self._followups_off) = _load(self.path)
 
     @property
     def muted(self) -> bool:
@@ -103,6 +104,18 @@ class AssistantPrefs:
             self._prod_hint = True
             return self._save_locked()
 
+    @property
+    def followups_off(self) -> bool:
+        """The follow-up list is turned off on this PC (nothing is scanned; the section says so)."""
+        with self._lock:
+            return self._followups_off
+
+    def set_followups_off(self, off: bool) -> bool:
+        """Turn the follow-up list off (True) or on again on this PC."""
+        with self._lock:
+            self._followups_off = bool(off)
+            return self._save_locked()
+
     def remember_greeting(self, greeting_id: str) -> bool:
         """Add ``greeting_id`` as the most recent greeting (the oldest beyond 5 is forgotten)."""
         if not isinstance(greeting_id, str) or not _GREETING_ID_RE.fullmatch(greeting_id):
@@ -124,6 +137,8 @@ class AssistantPrefs:
             values["live_popped_out"] = self._live_popped
         if self._prod_hint:
             values["prod_hint_shown"] = True
+        if self._followups_off:
+            values["followups_off"] = True
         return _write_atomic(self.path, json.dumps(values, indent=2) + "\n")
 
 
@@ -144,8 +159,8 @@ def _live_rect(value: object) -> tuple[int, int, int, int] | None:
 
 
 
-_Loaded = tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool, bool]
-_DEFAULTS: _Loaded = (False, [], False, None, False, False)
+_Loaded = tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool, bool, bool]
+_DEFAULTS: _Loaded = (False, [], False, None, False, False, False)
 
 
 def _load(path: Path) -> _Loaded:
@@ -170,7 +185,8 @@ def _load(path: Path) -> _Loaded:
         if isinstance(raw, list) else []
     return (muted, recent[-RECENT_GREETINGS_MAX:], data.get("answers_adopted") is True,
             _live_rect(window) if isinstance(window := data.get("live_window"), dict) else None,
-            data.get("live_popped_out") is True, data.get("prod_hint_shown") is True)
+            data.get("live_popped_out") is True, data.get("prod_hint_shown") is True,
+            data.get("followups_off") is True)
 
 
 def _write_atomic(path: Path, data: str) -> bool:

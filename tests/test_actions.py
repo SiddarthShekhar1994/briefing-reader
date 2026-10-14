@@ -2677,6 +2677,26 @@ class PlanModeCardTests(unittest.TestCase):
         self.assertEqual((approve_label(plain), actions.kind_label(plain)), ("Approve", "calendar"))
 
 
+class ReopenTests(unittest.TestCase):
+    def test_reopen_removes_only_a_denied_decision(self) -> None:
+        """B5, R15: a follow-up draft the owner clicked again reopens its denied id; sent, unknown,
+        failed, done or created decisions are never reopened."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "actions.json"
+            store = ActionStore(path, clock=FixedClock(NOW))
+            for action_id, status in (("denied1", "denied"), ("sent1", "sent"), ("unknown1", "unknown"),
+                                      ("failed1", "failed"), ("done1", "done"), ("created1", "created")):
+                store.set(action_id, status)
+            self.assertTrue(store.reopen("denied1"))
+            self.assertIsNone(store.get("denied1"))
+            self.assertFalse(store.is_decided("denied1"))
+            self.assertNotIn("denied1", json.loads(path.read_text(encoding="utf-8")))   # saved
+            for action_id in ("sent1", "unknown1", "failed1", "done1", "created1", "nothing"):
+                with self.subTest(action_id=action_id):
+                    self.assertFalse(store.reopen(action_id))
+            self.assertEqual(ActionStore(path).get("sent1")["status"], "sent")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.CRITICAL)
     unittest.main()

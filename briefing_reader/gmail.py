@@ -9,7 +9,11 @@ the threads an Ask is about (gmail.readonly only; GmailReader, a separate client
     thread_link(address, id)     the sent message's thread in Gmail (the card's Open link)
     GmailSender(account)         one account's sending: ready(), sign_in(), send(mail) -> SentMail
     GmailReader(account)         Ask Jarvis's reading: available(), search(query), thread(id);
-                                 never signs in, never sends, never changes or deletes mail
+                                 never signs in, never sends, never changes or deletes mail. The
+                                 productivity bundle's follow-up list reads headers only through
+                                 scan_ids(label=, days=, max_threads=), thread_metadata(id) and
+                                 own_addresses() (field masks without a snippet or a body), and asks
+                                 confirmed_address() / scan_problem() / identity_key() (files only)
 
 What build_message refuses (GmailError, before anything goes anywhere):
 
@@ -701,6 +705,32 @@ class GmailSender:
 
 READ_RETRIES = 2              # reads are safe to retry
 MAX_SEARCH_THREADS = 3
+# The follow-up list's header scan (the productivity bundle): the labels it lists, the categories the
+# inbox leaves out (Updates stay: a known correspondent's mail there is listed), the only headers it
+# reads and the field masks of its requests: never a snippet, a size or a body.
+SCAN_LABELS = ("INBOX", "SENT")
+SCAN_INBOX_EXCLUDE = "-category:promotions -category:social -category:forums"
+SCAN_HEADERS = ("From", "To", "Cc", "Reply-To", "Subject", "List-Id", "List-Unsubscribe", "Precedence",
+                "Auto-Submitted")
+SCAN_PAGE = 100
+SCAN_MAX_PAGES = 2            # per label
+SCAN_DAYS_MAX = 14
+SCAN_THREADS_MAX = 300
+SCAN_LIST_FIELDS = "threads(id,historyId),nextPageToken"
+SCAN_GET_FIELDS = "id,historyId,messages(id,labelIds,internalDate,payload/headers)"
+OWN_PROFILE_FIELDS = "emailAddress"
+OWN_SEND_AS_FIELDS = "sendAs(sendAsEmail)"
+SCAN_UNCONFIRMED = "unconfirmed"   # the binding is not confirmed yet: AppController._ask_account fixes it
+SCAN_IDENTITY = "identity"         # the saved sign-in names no (or another) Google account: sign in again
+_HISTORY_RE = re.compile(r"\d{1,30}")
+
+
+def is_rate_limited(error: BaseException) -> bool:
+    """Gmail asked Jarvis to slow down: a MailReadError with status 429, or a 403 without a sign-in
+    problem (the rate-limit path of GmailReader._http_error)."""
+    if not isinstance(error, MailReadError):
+        return False
+    return error.status == 429 or (error.status == 403 and not error.problem)
 
 
 class MailReadError(GmailError):
@@ -728,6 +758,7 @@ class GmailReader:
         self._service_generation = -1
         self._refused: tuple[str, str] = ("", "")
         self._refused_generation = -1
+        self._own_cache: tuple[str, tuple[str, ...]] | None = None   # (identity_key, own addresses)
         self.log_name = f"Gmail reading ({logged_alias(account.alias)})"
 
     @property
@@ -780,6 +811,131 @@ class GmailReader:
                 fields="id,messages(id,threadId,labelIds,internalDate,payload)")
             answer = self._execute(request, "reading a thread")
         return answer if isinstance(answer, dict) else {}
+
+    # ---- the follow-up list's header scan (metadata only) ----------------------------------
+
+    def scan_ids(self, *, label: str, days: int, max_threads: int) -> list[tuple[str, str]]:
+        """(thread id, historyId) of the threads with ``label`` (SCAN_LABELS) in the last ``days``
+        days (1..14), newest first, at most ``max_threads`` (1..300) and SCAN_MAX_PAGES pages; the
+        inbox leaves out promotions, social and forums. Ids and historyIds only (the field mask);
+        never spam or trash. No free text reaches this request."""
+        if label not in SCAN_LABELS:
+            raise ValueError("not a label the scan lists")
+        days = max(1, min(SCAN_DAYS_MAX, int(days)))
+        cap = max(1, min(SCAN_THREADS_MAX, int(max_threads)))
+        query = f"newer_than:{days}d" + (f" {SCAN_INBOX_EXCLUDE}" if label == "INBOX" else "")
+        found: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        token = ""
+        with self._lock:
+            service = self._get_service()
+            for _page in range(SCAN_MAX_PAGES):
+                kwargs: dict[str, Any] = {"userId": "me", "labelIds": [label], "q": query,
+                                          "maxResults": min(SCAN_PAGE, cap - len(found)), "includeSpamTrash": False,
+                                          "fields": SCAN_LIST_FIELDS}
+                if token:
+                    kwargs["pageToken"] = token
+                answer = self._execute(service.users().threads().list(**kwargs), "listing threads")
+                answer = answer if isinstance(answer, dict) else {}
+                for item in answer.get("threads") or ():
+                    thread_id = item.get("id") if isinstance(item, dict) else None
+                    if not isinstance(thread_id, str) or not _GMAIL_ID_RE.fullmatch(thread_id) or thread_id in seen:
+                        continue
+                    history = item.get("historyId")
+                    history = str(history) if isinstance(history, (str, int)) and not isinstance(history, bool) else ""
+                    seen.add(thread_id)
+                    found.append((thread_id, history if _HISTORY_RE.fullmatch(history) else ""))
+                    if len(found) >= cap:
+                        break
+                token = answer.get("nextPageToken") if isinstance(answer.get("nextPageToken"), str) else ""
+                if not token or len(found) >= cap:
+                    break
+        logger.info("%s: a scan listed %d thread(s)", self.log_name, len(found))
+        return found
+
+    def thread_metadata(self, thread_id: str) -> dict[str, Any]:
+        """users.threads.get(format="metadata") of one thread: its messages' ids, labels, dates and
+        the SCAN_HEADERS only (the field mask: never a snippet, a size or a body). MailReadError
+        (404) when there is no such thread."""
+        if not isinstance(thread_id, str) or not _GMAIL_ID_RE.fullmatch(thread_id):
+            raise MailReadError("That is not a Gmail thread id")
+        with self._lock:
+            service = self._get_service()
+            request = service.users().threads().get(userId="me", id=thread_id, format="metadata",
+                                                    metadataHeaders=list(SCAN_HEADERS), fields=SCAN_GET_FIELDS)
+            answer = self._execute(request, "reading a thread's headers")
+        return answer if isinstance(answer, dict) else {}
+
+    def own_addresses(self) -> tuple[str, ...]:
+        """The owner's own addresses on this account: the profile's address and every "send as"
+        address (gmail.readonly), casefolded and once each; () on any error except a refusal (a 401,
+        or a 403 that is not a rate limit: that MailReadError is raised, so the follow-up scan stops
+        the account, R19). Kept per account identity (identity_key): a token refresh never asks
+        again. Logs a count only."""
+        key = self.identity_key()
+        cached = self._own_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        found: list[str] = []
+        try:
+            with self._lock:
+                service = self._get_service()
+                profile = self._execute(service.users().getProfile(userId="me", fields=OWN_PROFILE_FIELDS),
+                                        "reading the profile")
+                send_as = self._execute(service.users().settings().sendAs().list(userId="me",
+                                                                                 fields=OWN_SEND_AS_FIELDS),
+                                        "reading the send-as addresses")
+        except Exception as exc:  # noqa: BLE001 - only the bound address is known then
+            logger.info("%s: own addresses not read (%s)", self.log_name, type(exc).__name__)
+            if isinstance(exc, MailReadError) and exc.status in (401, 403) and not is_rate_limited(exc):
+                raise
+            return ()
+        values = [profile.get("emailAddress") if isinstance(profile, dict) else None]
+        for item in (send_as.get("sendAs") if isinstance(send_as, dict) else None) or ():
+            values.append(item.get("sendAsEmail") if isinstance(item, dict) else None)
+        for value in values:
+            plain = email_address(value) if isinstance(value, str) else ""
+            if plain and plain.casefold() not in found:
+                found.append(plain.casefold())
+        result = tuple(found)
+        self._own_cache = (key, result)
+        logger.info("%s: %d own address(es)", self.log_name, len(result))
+        return result
+
+    def confirmed_address(self) -> str:
+        """The bound address when you confirmed the binding and the saved sign-in is that Google
+        account; else "" (the follow-up scan reads only such an account). Files only."""
+        account = self._account
+        try:
+            if account.binding_confirmed() and account.identity_confirmed():
+                return account.bound_email()
+        except Exception:  # noqa: BLE001 - unknown: not scanned
+            return ""
+        return ""
+
+    def scan_problem(self) -> str:
+        """"" | SCAN_UNCONFIRMED (bound, but you have not confirmed it: Confirm) | SCAN_IDENTITY (the saved
+        sign-in names no or another Google account: sign in again). Files only."""
+        account = self._account
+        try:
+            if not account.bound_email() or not account.identity_confirmed():
+                return SCAN_IDENTITY
+            if not account.binding_confirmed():
+                return SCAN_UNCONFIRMED
+        except Exception:  # noqa: BLE001
+            return SCAN_IDENTITY
+        return ""
+
+    def identity_key(self) -> str:
+        """The account identity the scan's cache and the own addresses are kept for: the saved
+        sign-in's Google id and the bound address ("" when both are unknown). Never
+        GoogleAccount.generation, which changes on every token refresh."""
+        account = self._account
+        try:
+            sub, bound = account.token_sub(), account.bound_email().casefold()
+        except Exception:  # noqa: BLE001
+            return ""
+        return f"{sub}|{bound}" if sub or bound else ""
 
     def _get_service(self) -> Any:
         problem, message = self.available()
