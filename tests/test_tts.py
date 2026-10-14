@@ -8,11 +8,16 @@ import re
 import tempfile
 import threading
 import time
+import types
 import unittest
 import unittest.mock
 import wave
+from collections.abc import Callable
 from pathlib import Path
 
+import aiohttp
+from edge_tts import communicate as edge_communicate
+from edge_tts import constants as edge_constants
 from edge_tts.exceptions import NoAudioReceived
 
 from briefing_reader import tts
@@ -27,7 +32,9 @@ from briefing_reader.models import (
 )
 from briefing_reader.tts import (
     EDGE,
+    NEWER,
     SAPI,
+    USUAL,
     SpeechSynthesizer,
     TtsError,
     TtsWorker,
@@ -40,8 +47,28 @@ from briefing_reader.tts import (
 
 WAIT_S = 5.0
 
+# The library's own service address, as installed (read before any test can switch it).
+LIBRARY_URLS = (edge_constants.BASE_URL, edge_constants.WSS_URL, edge_constants.VOICE_LIST)
+REFUSED_URL = "wss://example.invalid/tts?TrustedClientToken=abc123&ConnectionId=def456"
+
 # Expected fallback warnings would otherwise go to logging's last-resort stderr handler.
 logging.getLogger("briefing_reader.tts").addHandler(logging.NullHandler())
+
+
+def refusal(status: int = 403, cls: type = aiohttp.WSServerHandshakeError,
+            message: str = "Invalid response status") -> aiohttp.ClientResponseError:
+    """An aiohttp refusal as the service answers it (str() of it carries the URL with its query)."""
+    request_info = types.SimpleNamespace(real_url=REFUSED_URL)
+    return cls(request_info, (), status=status, message=message)
+
+
+def applied_address() -> str:
+    """Name of the address edge_tts's constants point at; fails when they do not all agree."""
+    current, base_url, wss_url, voice_list, communicate_wss = tts.edge_address.snapshot()
+    for name in tts.edge_address.names:
+        if (base_url, wss_url, voice_list) == tts.edge_address.urls(name) and communicate_wss == wss_url:
+            return name
+    raise AssertionError(f"edge_tts constants belong to no single address (selector says {current!r})")
 
 
 def entry(spoken: str, display: str | None = None) -> ScriptItem:
@@ -98,14 +125,23 @@ class FakeSynth(SpeechSynthesizer):
         super().__init__(voice="en-US-GuyNeural", rate="+0%", volume="+0%", offline_voice="",
                          out_dir=out_dir, clock=clock, **kwargs)
         self.edge_error: BaseException | None = None
+        self.edge_errors: dict[str, BaseException | None] = {}   # per address name; else edge_error
         self.sapi_error: BaseException | None = None
         self.edge_calls: list[str] = []
+        self.edge_addresses: list[str] = []   # the address edge_tts pointed at, per edge call
         self.sapi_calls: list[str] = []
+        self.before_edge: Callable[[], None] | None = None   # runs once, just before the next "connection"
 
     def _edge_to_file(self, text, path):
         self.edge_calls.append(text)
-        if self.edge_error is not None:
-            raise self.edge_error
+        if self.before_edge is not None:   # the other lane acts after _try_edge looked, before this connection
+            hook, self.before_edge = self.before_edge, None
+            hook()
+        address = applied_address()
+        self.edge_addresses.append(address)
+        error = self.edge_errors.get(address, self.edge_error)
+        if error is not None:
+            raise error
         path.write_bytes(b"mp3")
         words = fake_words(text)
         return len(words) * 300, words
@@ -416,6 +452,290 @@ class SpeechSynthesizerFallbackTest(unittest.TestCase):
         self.assertNotIn("Dave", output)
         self.assertNotIn("abc123", output)
         self.assertIn("WARNING", output)
+
+
+# --------------------------------------------------------------------------
+# Online voice address fail-over (the shared selector; stubbed engines)
+# --------------------------------------------------------------------------
+
+REFUSED_USUAL = ("WARNING:briefing_reader.tts:edge-tts refused at the usual address "
+                 "(WSServerHandshakeError: 403); trying the newer address")
+REFUSED_NEWER = ("WARNING:briefing_reader.tts:edge-tts refused at the newer address "
+                 "(WSServerHandshakeError: 403); trying the usual address")
+USING_NEWER = "INFO:briefing_reader.tts:edge-tts: using the newer address"
+USING_USUAL = "INFO:briefing_reader.tts:edge-tts: using the usual address"
+
+
+def address_lines(logs) -> list[str]:
+    """The captured log lines about the voice's address (an assertLogs context)."""
+    return [line for line in logs.output if "address" in line]
+
+
+class EdgeAddressFailoverTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tts.edge_address.reset()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.out_dir = Path(self._tmp.name) / "audio"
+        self.clock = FakeClock()
+        self.synth = self.make_synth()
+
+    def tearDown(self) -> None:
+        self.synth.close()
+        self._tmp.cleanup()
+        tts.edge_address.reset()
+        # Every other test (and the library itself) sees edge-tts's own address again.
+        self.assertEqual((edge_constants.BASE_URL, edge_constants.WSS_URL, edge_constants.VOICE_LIST), LIBRARY_URLS)
+        self.assertEqual(edge_communicate.WSS_URL, LIBRARY_URLS[1])
+        self.assertEqual(tts.edge_address.current, USUAL)
+
+    def make_synth(self) -> FakeSynth:
+        return FakeSynth(self.out_dir, self.clock, divider_pause_ms=800, edge_retry_after_s=120.0)
+
+    def test_the_two_addresses(self) -> None:
+        self.assertEqual(tts.edge_address.names, (USUAL, NEWER))
+        self.assertEqual(tts.edge_address.urls(USUAL), LIBRARY_URLS)
+        base_url, wss_url, voice_list = tts.edge_address.urls(NEWER)
+        token = edge_constants.TRUSTED_CLIENT_TOKEN
+        self.assertEqual(base_url, "api.msedgeservices.com/tts/cognitiveservices")
+        self.assertEqual(wss_url, "wss://api.msedgeservices.com/tts/cognitiveservices/websocket/v1"
+                                  f"?Ocp-Apim-Subscription-Key={token}")
+        self.assertEqual(voice_list, "https://api.msedgeservices.com/tts/cognitiveservices/voices/list"
+                                     f"?Ocp-Apim-Subscription-Key={token}")
+        self.assertEqual(tts.edge_address.current, USUAL)
+        self.assertEqual(applied_address(), USUAL)
+
+    def test_usual_refused_then_newer_works(self) -> None:
+        self.synth.edge_errors = {USUAL: refusal()}
+        with self.assertLogs("briefing_reader.tts", level=logging.INFO) as logs:
+            audio = self.synth.synthesize_section(make_section(entry("Hello there.")))
+        self.assertEqual(audio.engine, EDGE)
+        self.assertEqual(self.synth.last_engine, EDGE)
+        self.assertEqual(self.synth.edge_calls, ["Hello there.", "Hello there."])  # the same segment, once more
+        self.assertEqual(self.synth.edge_addresses, [USUAL, NEWER])
+        self.assertEqual(self.synth.sapi_calls, [])
+        self.assertEqual(tts.edge_address.current, NEWER)
+        self.assertEqual(applied_address(), NEWER)
+        self.assertEqual(address_lines(logs), [REFUSED_USUAL, USING_NEWER])
+        # No cooldown was started, and a later success on the current address needs no log line.
+        with self.assertLogs("briefing_reader.tts", level=logging.INFO) as logs:
+            self.synth.synthesize_section(make_section(entry("Again."), key="s2"))
+        self.assertEqual(self.synth.edge_addresses, [USUAL, NEWER, NEWER])
+        self.assertEqual(self.synth.sapi_calls, [])
+        self.assertEqual(address_lines(logs), [])
+
+    def test_second_synthesizer_starts_on_the_newer_address(self) -> None:
+        self.synth.edge_errors = {USUAL: refusal()}
+        self.synth.synthesize_section(make_section(entry("First.")))
+        other = self.make_synth()   # e.g. the "tts-say" thread's synthesizer
+        self.addCleanup(other.close)
+        other.edge_errors = {USUAL: refusal()}
+        with self.assertLogs("briefing_reader.tts", level=logging.INFO) as logs:
+            audio = other.synthesize_section(make_section(entry("Second."), key="s2"))
+        self.assertEqual(audio.engine, EDGE)
+        self.assertEqual(other.edge_addresses, [NEWER])
+        self.assertEqual(other.sapi_calls, [])
+        self.assertEqual(address_lines(logs), [])
+
+    def test_newer_refused_goes_back_to_usual(self) -> None:
+        self.synth.edge_errors = {USUAL: refusal()}
+        self.synth.synthesize_section(make_section(entry("Out.")))
+        self.synth.edge_errors = {NEWER: refusal(404, aiohttp.ClientResponseError, "Not Found")}
+        with self.assertLogs("briefing_reader.tts", level=logging.INFO) as logs:
+            audio = self.synth.synthesize_section(make_section(entry("Back."), key="s2"))
+        self.assertEqual(audio.engine, EDGE)
+        self.assertEqual(self.synth.edge_addresses, [USUAL, NEWER, NEWER, USUAL])
+        self.assertEqual(self.synth.sapi_calls, [])
+        self.assertEqual(tts.edge_address.current, USUAL)
+        self.assertEqual(applied_address(), USUAL)
+        self.assertEqual(address_lines(logs), [
+            "WARNING:briefing_reader.tts:edge-tts refused at the newer address (ClientResponseError: 404); "
+            "trying the usual address",
+            USING_USUAL,
+        ])
+
+    def test_going_back_before_the_newer_address_ever_worked_is_announced(self) -> None:
+        self.synth.edge_errors = {USUAL: refusal(), NEWER: refusal()}
+        self.synth.synthesize_section(make_section(entry("Both out.")))   # usual -> newer -> SAPI; cooldown
+        self.synth.edge_errors = {NEWER: refusal()}                        # the usual address answers again
+        self.clock.now += 121
+        with self.assertLogs("briefing_reader.tts", level=logging.INFO) as logs:
+            audio = self.synth.synthesize_section(make_section(entry("Back."), key="s2"))
+        self.assertEqual(audio.engine, EDGE)
+        self.assertEqual(self.synth.edge_addresses, [USUAL, NEWER, NEWER, USUAL])
+        self.assertEqual(tts.edge_address.current, USUAL)
+        self.assertEqual(address_lines(logs), [REFUSED_NEWER, USING_USUAL])
+
+    def test_a_switch_by_the_other_lane_mid_attempt_is_announced_once(self) -> None:
+        # Lane A (self.synth) has looked at the selector but not connected yet when lane B (other) is
+        # refused at the usual address, switches and succeeds at the newer one. edge-tts reads the URL
+        # at connect time, so A's connection goes to the newer address too: the announcement follows
+        # the selector, not what A believed, and comes once.
+        other = self.make_synth()
+        self.addCleanup(other.close)
+        other.edge_errors = {USUAL: refusal()}
+        self.synth.before_edge = lambda: other.synthesize_section(make_section(entry("Other lane."), key="b"))
+        with self.assertLogs("briefing_reader.tts", level=logging.INFO) as logs:
+            audio = self.synth.synthesize_section(make_section(entry("Hello.")))
+            self.synth.synthesize_section(make_section(entry("Again."), key="s2"))
+        self.assertEqual(audio.engine, EDGE)
+        self.assertEqual(other.edge_addresses, [USUAL, NEWER])
+        self.assertEqual(self.synth.edge_addresses, [NEWER, NEWER])
+        self.assertEqual(tts.edge_address.current, NEWER)
+        self.assertEqual(address_lines(logs), [REFUSED_USUAL, USING_NEWER])
+
+    def test_confirm_announces_the_selectors_own_address_once(self) -> None:
+        self.assertIsNone(tts.edge_address.confirm())   # the usual address needs no announcement at the start
+        tts.edge_address.apply(NEWER)
+        self.assertEqual(tts.edge_address.confirm(), NEWER)
+        self.assertIsNone(tts.edge_address.confirm())
+        tts.edge_address.apply(NEWER)                    # idempotent: nothing new to announce
+        self.assertIsNone(tts.edge_address.confirm())
+        self.assertEqual(tts.edge_address.switch_from(NEWER), USUAL)
+        self.assertEqual(tts.edge_address.confirm(), USUAL)
+        self.assertIsNone(tts.edge_address.confirm())
+
+    def test_both_refused_falls_back_with_the_cooldown(self) -> None:
+        self.synth.edge_errors = {USUAL: refusal(), NEWER: refusal()}
+        with self.assertLogs("briefing_reader.tts", level=logging.WARNING) as logs:
+            audio = self.synth.synthesize_section(two_segment_section())
+        self.assertEqual(audio.engine, SAPI)
+        self.assertEqual(self.synth.last_engine, SAPI)
+        self.assertEqual(self.synth.edge_addresses, [USUAL, NEWER])  # one switch, then SAPI; segment 2: cooldown
+        self.assertEqual(len(self.synth.sapi_calls), 2)
+        self.assertEqual(tts.edge_address.current, NEWER)
+        self.assertEqual(len(logs.output), 2)
+        self.assertEqual(logs.output[0], REFUSED_USUAL)
+        self.assertRegex(logs.output[1], r"^WARNING:briefing_reader\.tts:edge-tts failed \(WSServerHandshakeError: 403"
+                                         r".*\); using Windows SAPI and retrying edge-tts in 120 s$")
+        self.clock.now += 119
+        self.synth.synthesize_section(make_section(entry("Still refused."), key="s2"))
+        self.assertEqual(len(self.synth.edge_calls), 2)
+        self.assertEqual(len(self.synth.sapi_calls), 3)
+        self.clock.now += 2
+        self.synth.synthesize_section(make_section(entry("Try again."), key="s3"))
+        # After the cooldown: the current (newer) address, the one switch back, then SAPI and a new cooldown.
+        self.assertEqual(self.synth.edge_addresses, [USUAL, NEWER, NEWER, USUAL])
+        self.assertEqual(len(self.synth.sapi_calls), 4)
+        self.assertEqual(tts.edge_address.current, USUAL)
+        self.synth.synthesize_section(make_section(entry("Cooling down."), key="s4"))
+        self.assertEqual(len(self.synth.edge_calls), 4)
+
+    def test_both_refused_and_sapi_broken_raises(self) -> None:
+        self.synth.edge_errors = {USUAL: refusal(), NEWER: refusal()}
+        self.synth.sapi_error = RuntimeError("no SAPI voices")
+        with self.assertRaises(TtsError) as ctx:
+            self.synth.synthesize_section(make_section(entry("Hello.")))
+        self.assertIn("RuntimeError", str(ctx.exception))
+        self.assertNotIn("abc123", str(ctx.exception))
+
+    def test_other_failures_never_switch(self) -> None:
+        errors = (OSError("Cannot connect to host"), TimeoutError(), NoAudioReceived("No audio was received."),
+                  TtsError("edge-tts returned no audio data"))
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                tts.edge_address.reset()
+                synth = self.make_synth()
+                self.addCleanup(synth.close)
+                synth.edge_error = error
+                audio = synth.synthesize_section(make_section(entry("Hello.")))
+                self.assertEqual(audio.engine, SAPI)
+                self.assertEqual(synth.edge_addresses, [USUAL])
+                self.assertEqual(tts.edge_address.current, USUAL)
+
+    def test_refusal_wrapped_as_a_cause_switches(self) -> None:
+        wrapped = RuntimeError("No server date in headers.")  # like edge_tts's SkewAdjustmentError
+        wrapped.__cause__ = refusal()
+        self.synth.edge_errors = {USUAL: wrapped}
+        with self.assertLogs("briefing_reader.tts", level=logging.WARNING) as logs:
+            audio = self.synth.synthesize_section(make_section(entry("Hello.")))
+        self.assertEqual(audio.engine, EDGE)
+        self.assertEqual(self.synth.edge_addresses, [USUAL, NEWER])
+        self.assertEqual(logs.output, [REFUSED_USUAL])
+
+    def test_address_is_not_part_of_the_cache_key(self) -> None:
+        section = make_section(entry("Same words."))
+        first = self.synth.synthesize_section(section)
+        tts.edge_address.apply(NEWER)
+        second = self.synth.synthesize_section(section)
+        self.assertEqual(self.synth.edge_calls, ["Same words."])  # served from the cache
+        self.assertEqual(first, second)
+        # A fresh synthesizer on the newer address writes the same file name for the same voice and text.
+        other = FakeSynth(Path(self._tmp.name) / "other", self.clock)
+        self.addCleanup(other.close)
+        path = other.synthesize_section(section).segments[0].path
+        self.assertEqual(path.name, first.segments[0].path.name)
+        self.assertEqual(other.edge_addresses, [NEWER])
+
+    def test_apply_is_idempotent(self) -> None:
+        tts.edge_address.apply(NEWER)
+        once = tts.edge_address.snapshot()
+        tts.edge_address.apply(NEWER)
+        self.assertEqual(tts.edge_address.snapshot(), once)
+        self.assertEqual(once[0], NEWER)
+        self.assertEqual(once[1:4], tts.edge_address.urls(NEWER))
+        self.assertEqual(once[4], once[2])
+        self.assertEqual(applied_address(), NEWER)
+        tts.edge_address.apply(USUAL)
+        tts.edge_address.apply(USUAL)
+        self.assertEqual(tts.edge_address.snapshot(), (USUAL, *LIBRARY_URLS, LIBRARY_URLS[1]))
+        # switch_from moves only away from the address it was told about, and only once.
+        self.assertEqual(tts.edge_address.switch_from(NEWER), USUAL)
+        self.assertEqual(tts.edge_address.switch_from(USUAL), NEWER)
+        self.assertEqual(tts.edge_address.switch_from(USUAL), NEWER)
+
+    def test_concurrent_switching_keeps_the_constants_consistent(self) -> None:
+        stop = threading.Event()
+        problems: list[str] = []
+
+        def flipper() -> None:
+            for i in range(400):
+                tts.edge_address.apply(NEWER if i % 2 else USUAL)
+
+        def switcher() -> None:
+            for _ in range(400):
+                tts.edge_address.switch_from(tts.edge_address.current)
+
+        def watcher() -> None:
+            while not stop.is_set():
+                try:
+                    applied_address()
+                except AssertionError as exc:
+                    problems.append(str(exc))
+                    return
+
+        threads = [threading.Thread(target=flipper), threading.Thread(target=switcher)]
+        watch = threading.Thread(target=watcher)
+        watch.start()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(WAIT_S)
+        stop.set()
+        watch.join(WAIT_S)
+        self.assertEqual(problems, [])
+        self.assertFalse(any(thread.is_alive() for thread in threads + [watch]))
+        current, base_url, wss_url, voice_list, communicate_wss = tts.edge_address.snapshot()
+        self.assertEqual((base_url, wss_url, voice_list), tts.edge_address.urls(current))
+        self.assertEqual(communicate_wss, wss_url)
+
+    def test_log_lines_carry_no_query_string_or_text(self) -> None:
+        self.synth.edge_errors = {USUAL: refusal(), NEWER: refusal()}
+        with self.assertLogs("briefing_reader.tts", level=logging.INFO) as logs:
+            self.synth.synthesize_section(two_segment_section())
+            self.synth.edge_errors = {USUAL: refusal()}
+            self.clock.now += 121
+            self.synth.synthesize_section(make_section(entry("Reply to Dave about the Q3 budget."), key="s2"))
+        output = "\n".join(logs.output)
+        self.assertIn(REFUSED_USUAL, logs.output)
+        self.assertIn(USING_NEWER, logs.output)
+        self.assertIn("edge-tts failed (WSServerHandshakeError: 403", output)
+        self.assertNotIn("abc123", output)
+        self.assertNotIn("def456", output)
+        self.assertNotIn("TrustedClientToken", output)
+        self.assertNotIn("ConnectionId", output)
+        self.assertNotRegex(output, r"[?&][A-Za-z-]+=")
+        self.assertNotIn("Dave", output)
+        self.assertNotIn("Work inbox", output)
 
 
 # --------------------------------------------------------------------------

@@ -1326,9 +1326,10 @@ most 15 seconds each. Jarvis opens the page on this PC (once
 more, for a page the research read) in a private window you never see: none
 of your browsers' sign-ins or cookies, nothing saved, no pop-ups, downloads,
 camera, microphone, location, notifications, clipboard or Windows Hello,
-sound off (a download a page starts is refused before it is written, and is
-pointed at an empty private temporary folder deleted when Jarvis closes, never
-at your Downloads). Every connection of
+sound off. The page runs in a browser sandbox that forbids downloads, so a
+download it tries to start (a link, a script, a frame or a form) is turned down
+before the browser prepares any file: nothing appears in your Downloads folder,
+not even for a moment. Every connection of
 that window goes through a small gate inside Jarvis that lets it reach only
 public IPv4 addresses on the https port, checked on the address a name
 actually leads to (never an IPv6 address: one may be this PC's own or a
@@ -3168,6 +3169,14 @@ offline voice for 2 minutes, then tries edge-tts again. With the offline voice
 the highlight is estimated from the text length instead of word timings, so it
 is less exact.
 
+Microsoft sometimes moves or refuses the online voice's address (the service is
+moving to a newer one region by region). Jarvis then tries his newer address by
+himself, the log says `edge-tts refused at the usual address
+(WSServerHandshakeError: 403); trying the newer address` and then `edge-tts:
+using the newer address` (or the same two lines the other way round), and only
+when both addresses refuse does the Windows voice fill in, for 2 minutes at a
+time.
+
 ## Logs and saved files
 
 The folders and the log file keep the project's first name, briefing-reader
@@ -3680,6 +3689,13 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 - **No sound**: check the Windows default output device and its volume; the app
   plays on the default device and follows it when it changes. Look in the log for
   playback or speech errors.
+- **The Windows voice speaks although you are online** (amber voice chip, "Audio
+  ready (offline voice)"): Microsoft sometimes moves or refuses the online
+  voice's address. Jarvis then tries his newer address by himself (log:
+  `edge-tts refused at the usual address (...); trying the newer address`, then
+  `edge-tts: using the newer address`), and only when both addresses refuse
+  does the Windows voice fill in for 2 minutes at a time (log: `edge-tts failed
+  (...); using Windows SAPI and retrying edge-tts in 120 s`).
 - **Jarvis is silent** (the briefing plays, but he says nothing on his own):
   the header's speaker button is struck through in amber (muted; click it or
   press Ctrl+M), or `config.toml` has `[assistant] speak = false` (no speaker

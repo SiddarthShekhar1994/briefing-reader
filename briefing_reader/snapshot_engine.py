@@ -20,10 +20,22 @@ address a name actually resolves to, so pre-connections, redirect targets and We
 nothing on this PC or its network either. Every shot gets a FRESH off-the-record profile and page
 (no cookies, cache, storage or permission carries from one page to the next and nothing is written
 to disk) shown in one hidden 1280x800 view per research run (WA_DontShowOnScreen: never on screen,
-no focus, no mouse). Every request of the page also passes snapshots.request_problem (public https
-only, by name); downloads are cancelled, permissions denied, pop-ups, dialogs, file pickers, full
-screen, sign-in prompts and client certificates refused, bad certificates rejected, sound muted,
-the page's console text dropped. Inherited settings that would undo this (no sandbox, remote
+no focus, no mouse). The page's window is SANDBOXED without "allow-downloads" (SANDBOX): Jarvis's
+own seed page (about:blank, nothing of the web) holds an inline frame with that sandbox, which
+opens one pop-up; the shot's page takes that pop-up, and its window keeps the sandbox for its whole
+life - every page, redirect and inline frame in it, the page's own address included. Chromium then
+turns down every download in the window before it prepares one: a link's (<a download>, data:,
+blob: or https), a script's, a form's, a main or inline frame's navigation that would be a download
+(an attachment, a type it cannot show). That is what keeps a pictured page from creating any file
+in the owner's Downloads folder, even briefly: Chromium prepares a download it then hands to
+downloadRequested in Qt's Downloads location (QStandardPaths.DownloadLocation), whatever download
+path the profile has, before any Qt signal - so the profile's private download folder and
+cancelling in downloadRequested (both kept, a last net) cannot do it alone. The page is loaded only
+once a check in that window says it is sandboxed (else R_ENGINE_FAILED, no page opened). Every
+request of the page also passes snapshots.request_problem (public https only, by name); permissions
+are denied, pop-ups, dialogs (also by the sandbox), file pickers, full screen, sign-in prompts and
+client certificates refused, bad certificates rejected, sound muted, the page's console text
+dropped. Inherited settings that would undo this (no sandbox, remote
 debugging, ignored certificate errors, a TLS key log, a quoted or "--"-cut flags value ...) refuse
 every shot: judged on the environment as Jarvis inherited it (_judged_environ), never on his own
 merged flags. A shot ends with a picture (scaled to
@@ -79,6 +91,23 @@ _SETTINGS_OFF = (
 )
 _SETTINGS_ON = ("JavascriptEnabled", "WebRTCPublicInterfacesOnly", "PlaybackRequiresUserGesture",
                 "LocalStorageEnabled")
+# The sandbox of the pictured page's window (see the module doc), the only keywords it gets. Never
+# "allow-downloads" (the point), "allow-popups-to-escape-sandbox", "allow-modals", "allow-forms" or
+# "allow-top-navigation". "allow-scripts" and "allow-same-origin" let a page work as it would
+# elsewhere (its own origin; this private profile's storage and cookies); "allow-popups" lets the
+# seed open the window at all (the page itself still gets none: no window is made for it).
+SANDBOX = "allow-scripts allow-same-origin allow-popups"
+_SEED_PAGES = frozenset({"blank", "srcdoc"})   # all the seed page ever loads: about:blank, about:srcdoc
+# Run in the seed's about:blank (Jarvis's script world): the sandboxed inline frame whose script opens
+# the one pop-up (noopener: the page gets no handle on the seed).
+_SEED_SCRIPT = ("(function () { var frame = document.createElement('iframe');"
+                " frame.setAttribute('sandbox', '" + SANDBOX + "');"
+                " frame.srcdoc = '<script>window.open(\"about:blank\", \"_blank\", \"noopener\")<\\/script>';"
+                " document.documentElement.appendChild(frame); })();")
+# Run in the pop-up before the page is loaded: a sandboxed document may not set document.domain
+# ("... forbidden for sandboxed iframes"); any other answer and no page is opened.
+_SANDBOX_CHECK = ("(function () { try { document.domain = document.domain; return ''; }"
+                  " catch (error) { return String(error && error.message); } })()")
 
 
 # --------------------------------------------------------------------------
@@ -128,10 +157,12 @@ _DOWNLOAD_FOLDER: list[str] = []   # this process's private download folder, mad
 
 
 def download_folder() -> str:
-    """The pictured pages' download folder: a private temporary folder of this process, never the
-    owner's Downloads (Chromium prepares even a download it is told to cancel in the profile's
-    download folder). Every download is cancelled, so it stays empty; it is deleted when Jarvis
-    exits. Raises OSError when it cannot be made (the shot then fails: no fallback folder)."""
+    """The pictured pages' profiles' download path: a private temporary folder of this process. A
+    last net only: the sandbox keeps every download of a pictured page from starting (a download
+    that started would be cancelled in downloadRequested, named for this folder - but Chromium would
+    already have prepared it in Qt's Downloads location: this path does not change that). It stays
+    empty and is deleted when Jarvis exits. Raises OSError when it cannot be made (the shot then
+    fails: no fallback folder)."""
     if not _DOWNLOAD_FOLDER:
         path = tempfile.mkdtemp(prefix="jarvis-snapshots-")
         _DOWNLOAD_FOLDER.append(path)
@@ -169,6 +200,7 @@ def _classes() -> Any:
     from PySide6.QtWebEngineCore import (
         QWebEnginePage,
         QWebEngineProfile,
+        QWebEngineScript,
         QWebEngineSettings,
         QWebEngineUrlRequestInfo,
         QWebEngineUrlRequestInterceptor,
@@ -214,6 +246,19 @@ def _classes() -> Any:
         def chooseFiles(self, *_args: Any) -> list[str]:  # noqa: N802
             return []
 
+    class Seed(Page):
+        """Jarvis's own page (about:blank and his sandboxed inline frame, nothing of the web) whose
+        one pop-up goes to ``adopt()`` - the shot's page, sandboxed for life - and nowhere else."""
+
+        adopt: Callable[[], Any] | None = None
+
+        def createWindow(self, _type: Any) -> Any:  # noqa: N802
+            adopt, self.adopt = self.adopt, None
+            try:
+                return adopt() if adopt is not None else None
+            except Exception:  # noqa: BLE001 - never raise into Chromium: no window
+                return None
+
     info = QWebEngineUrlRequestInfo.ResourceType
     main_types = {info.ResourceTypeMainFrame}
     preload = getattr(info, "ResourceTypeNavigationPreloadMainFrame", None)
@@ -221,8 +266,9 @@ def _classes() -> Any:
         main_types.add(preload)
     _ENGINE.classes = SimpleNamespace(
         QWebEnginePage=QWebEnginePage, QWebEngineProfile=QWebEngineProfile, QWebEngineSettings=QWebEngineSettings,
-        QWebEngineView=QWebEngineView, Interceptor=Interceptor, Page=Page, main_types=frozenset(main_types),
-        websocket=getattr(info, "ResourceTypeWebSocket", None))
+        QWebEngineView=QWebEngineView, Interceptor=Interceptor, Page=Page, Seed=Seed, main_types=frozenset(main_types),
+        websocket=getattr(info, "ResourceTypeWebSocket", None),
+        app_world=int(QWebEngineScript.ScriptWorldId.ApplicationWorld))
     return _ENGINE.classes
 
 
@@ -378,7 +424,8 @@ class _Shot:
     """One shot's state (GUI thread)."""
 
     __slots__ = ("serial", "url", "html", "final_hint", "local", "offline", "started", "progress", "loaded",
-                 "starts", "fail_starts", "tries", "blocked", "done", "profile", "page", "interceptor", "on_view")
+                 "starts", "fail_starts", "tries", "blocked", "done", "profile", "page", "interceptor", "on_view",
+                 "target", "seed", "seeded", "adopted", "opened")
 
     def __init__(self, serial: int, url: str, html: str | None, final_hint: str) -> None:
         self.serial = serial
@@ -399,6 +446,11 @@ class _Shot:
         self.page: Any = None
         self.interceptor: Any = None
         self.on_view = False
+        self.target: Any = None       # the QUrl to load (not for local HTML)
+        self.seed: Any = None         # the seed page until the shot's page took its pop-up
+        self.seeded = False           # the seed's script ran (once)
+        self.adopted = False          # the shot's page took the sandboxed pop-up (once)
+        self.opened = False           # the pop-up passed the sandbox check: the page was asked for
 
     def __repr__(self) -> str:
         return f"_Shot(serial={self.serial}, loaded={self.loaded}, done={self.done})"
@@ -415,6 +467,7 @@ class PageCamera(QObject):
 
     finished = Signal(object)
     _deliver = Signal(object)
+    _adopted = Signal(object)    # the shot's page took the sandboxed pop-up (queued: after Qt's adoption)
 
     def __init__(self, parent: QObject | None = None, *,
                  decide: Callable[..., str] = snapshots.request_problem, timeout_s: float = snapshots.TIMEOUT_S,
@@ -436,6 +489,7 @@ class PageCamera(QObject):
         self._settle = self._timer(self._on_settle)
         self._fail_check = self._timer(self._on_fail_check)
         self._deliver.connect(self._emit_finished, Qt.ConnectionType.QueuedConnection)
+        self._adopted.connect(self._on_adopted, Qt.ConnectionType.QueuedConnection)
 
     def _timer(self, slot: Callable[[], None]) -> QTimer:
         timer = QTimer(self)
@@ -509,6 +563,15 @@ class PageCamera(QObject):
             _ENGINE.started = True
             logger.info("Page snapshots: web engine started in %.1f s", time.monotonic() - _ENGINE.import_at)
         self._configure(profile, classes, shot)
+        if not shot.local:
+            try:
+                target = QUrl.fromEncoded(QByteArray(shot.url.encode("ascii")))
+            except UnicodeEncodeError:
+                target = QUrl(shot.url)
+            if not target.isValid() or self._decide(_encoded(target), main_frame=True, local=False):
+                shot.blocked += 1
+                return snapshots.R_LOAD_FAILED
+            shot.target = target
         view = self._view
         if view is None:
             view = classes.QWebEngineView()
@@ -522,23 +585,97 @@ class PageCamera(QObject):
         shot.page = page
         self._connect(page, shot)
         page.setAudioMuted(True)
-        view.setPage(page)
-        shot.on_view = True
-        if not view.isVisible():
-            view.show()
+        # The seed (never on the view) opens the sandboxed pop-up that the page takes (_adopt); the
+        # page is loaded only once that pop-up passed the sandbox check (_on_sandbox_checked).
+        seed = classes.Seed(profile, self)
+        shot.seed = seed
+        seed.adopt = lambda: self._adopt(shot)
+        seed.settings().setAttribute(classes.QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True)
+        seed.setAudioMuted(True)
+        seed.navigationRequested.connect(lambda request: self._on_seed_navigation(shot, request))
+        seed.loadFinished.connect(lambda ok: self._on_seed_loaded(shot, ok))
         self._timeout.start(self._timeout_ms)
-        if shot.local:
-            page.setHtml(shot.html or "", QUrl(snapshots.LOCAL_BASE_URL))
-            return ""
-        try:
-            target = QUrl.fromEncoded(QByteArray(shot.url.encode("ascii")))
-        except UnicodeEncodeError:
-            target = QUrl(shot.url)
-        if not target.isValid() or self._decide(_encoded(target), main_frame=True, local=False):
-            shot.blocked += 1
-            return snapshots.R_LOAD_FAILED
-        page.load(target)
+        seed.load(QUrl("about:blank"))
         return ""
+
+    # ---- the sandboxed window (GUI thread) ---------------------------------------------------
+
+    def _on_seed_navigation(self, shot: _Shot, request: Any) -> None:
+        """The seed loads about:blank and its inline frame about:srcdoc; anything else is refused."""
+        try:
+            url = request.url()
+            if shot.done or url.scheme().casefold() != "about" or url.path().casefold() not in _SEED_PAGES:
+                request.reject()
+        except Exception:  # noqa: BLE001 - unsure: refuse
+            _quietly(request.reject)
+
+    def _on_seed_loaded(self, shot: _Shot, ok: bool) -> None:
+        if shot is not self._shot or shot.done or shot.seeded or shot.seed is None:
+            return
+        if not ok:
+            self._end(shot, snapshots.R_ENGINE_FAILED)
+            return
+        shot.seeded = True
+        try:
+            shot.seed.runJavaScript(_SEED_SCRIPT, _ENGINE.classes.app_world)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Page snapshots: the private window was not opened (%s)", type(exc).__name__)
+            self._end(shot, snapshots.R_ENGINE_FAILED)
+
+    def _adopt(self, shot: _Shot) -> Any:
+        """The seed's sandboxed frame opened its pop-up: the shot's page takes it, once; anything
+        else gets no window."""
+        if shot is not self._shot or shot.done or shot.adopted or shot.page is None:
+            return None
+        shot.adopted = True
+        self._adopted.emit(shot)   # queued: the rest runs once Qt has given the page its window
+        return shot.page
+
+    def _on_adopted(self, shot: _Shot) -> None:
+        if shot is not self._shot or shot.done:
+            return
+        try:
+            self._drop_seed(shot)
+            page, view = shot.page, self._view
+            page.setAudioMuted(True)
+            view.setPage(page)
+            shot.on_view = True
+            if not view.isVisible():
+                view.show()
+            page.runJavaScript(_SANDBOX_CHECK, _ENGINE.classes.app_world,
+                               lambda result: self._on_sandbox_checked(shot, result))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Page snapshots: the private window was not set up (%s)", type(exc).__name__)
+            self._end(shot, snapshots.R_ENGINE_FAILED)
+
+    def _on_sandbox_checked(self, shot: _Shot, result: Any) -> None:
+        """Load the page into the pop-up only when it answered as a sandboxed document."""
+        if shot is not self._shot or shot.done:
+            return
+        if not (isinstance(result, str) and "sandboxed" in result.casefold()):
+            logger.warning("Page snapshots: the private window was not sandboxed; no page is opened")
+            self._end(shot, snapshots.R_ENGINE_FAILED)
+            return
+        shot.opened = True
+        try:
+            self._load_target(shot)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Page snapshots: the page was not loaded (%s)", type(exc).__name__)
+            self._end(shot, snapshots.R_ENGINE_FAILED)
+
+    def _load_target(self, shot: _Shot) -> None:
+        if shot.local:
+            shot.page.setHtml(shot.html or "", QUrl(snapshots.LOCAL_BASE_URL))
+        else:
+            shot.page.load(shot.target)
+
+    def _drop_seed(self, shot: _Shot) -> None:
+        seed, shot.seed = shot.seed, None
+        if seed is not None:
+            seed.adopt = None
+            _quietly(lambda: seed.triggerAction(type(seed).WebAction.Stop))
+            _quietly(seed.deleteLater)   # before the profile (deferred deletes run in order)
+            self._doomed.append(seed)
 
     def _configure(self, profile: Any, classes: Any, shot: _Shot) -> None:
         kinds = classes.QWebEngineProfile
@@ -554,7 +691,8 @@ class PageCamera(QObject):
         # is collected and then checks nothing.
         shot.interceptor = classes.Interceptor(lambda info: self._judge(shot, info), profile)
         profile.setUrlRequestInterceptor(shot.interceptor)
-        profile.setDownloadPath(download_folder())   # never the owner's Downloads, even for a cancelled one
+        # A last net: the window's sandbox keeps every download from starting (see download_folder).
+        profile.setDownloadPath(download_folder())
         profile.downloadRequested.connect(lambda download: self._refuse("downloads", download, "cancel"))
         settings = profile.settings()
         attribute = classes.QWebEngineSettings.WebAttribute
@@ -622,6 +760,9 @@ class PageCamera(QObject):
         """The interceptor: True blocks the request (counted)."""
         if shot.done:
             return True
+        if not shot.opened:   # nothing loads before the page is asked for in the sandboxed window
+            shot.blocked += 1
+            return True
         classes = _ENGINE.classes
         kind = info.resourceType()
         if info.isDownload() or (classes.websocket is not None and kind == classes.websocket):
@@ -634,6 +775,13 @@ class PageCamera(QObject):
 
     def _on_navigation(self, shot: _Shot, request: Any) -> None:
         try:
+            if not shot.opened:   # the pop-up's own about:blank only, until the page is asked for
+                url = request.url()
+                if shot.done or url.scheme().casefold() != "about" or url.path().casefold() != "blank":
+                    if not shot.done:
+                        shot.blocked += 1
+                    request.reject()
+                return
             if shot.done or self._problem(shot, request.url(), bool(request.isMainFrame())):
                 if not shot.done:
                     shot.blocked += 1
@@ -645,13 +793,15 @@ class PageCamera(QObject):
                 pass
 
     def _on_started(self, shot: _Shot) -> None:
-        shot.starts += 1
+        if shot.opened:
+            shot.starts += 1
 
     def _on_progress(self, shot: _Shot, value: int) -> None:
-        shot.progress = int(value)
+        if shot.opened:
+            shot.progress = int(value)
 
     def _on_loaded(self, shot: _Shot, ok: bool) -> None:
-        if shot is not self._shot or shot.done:
+        if shot is not self._shot or shot.done or not shot.opened:
             return
         if ok:
             shot.loaded = True
@@ -691,7 +841,9 @@ class PageCamera(QObject):
         shot = self._shot
         if shot is None or shot.done:
             return
-        if shot.loaded:
+        if not shot.opened:   # the sandboxed window never came: no page was opened
+            self._end(shot, snapshots.R_ENGINE_FAILED)
+        elif shot.loaded:
             self._grab(shot, final=True)
         elif shot.progress >= GRAB_MIN_PROGRESS:
             self._grab(shot, final=True, still_loading=True)
@@ -758,6 +910,7 @@ class PageCamera(QObject):
         if interceptor is not None:
             # Kept until Qt deleted it with its profile (a request still in flight is blocked: shot.done).
             self._retired.append(interceptor)
+        self._drop_seed(shot)   # a shot that ended before its page took the pop-up
         if page is not None:
             _quietly(lambda: page.triggerAction(type(page).WebAction.Stop))
             if shot.on_view and self._view is not None:

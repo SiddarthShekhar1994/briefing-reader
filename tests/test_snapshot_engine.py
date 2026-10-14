@@ -169,15 +169,19 @@ class PageCameraProbeTests(unittest.TestCase):
         self.assertIn("https", report["decided_subresources"])
         self.assertEqual(report["decided_main_frames"], ["data"])
         self.assertGreaterEqual(report["hooks"].get("permissions", 0), 2)   # geolocation + notifications
-        self.assertGreaterEqual(report["hooks"].get("downloads", 0), 1)
-        # The refused download was meant for the profile's private temporary folder, never the owner's
-        # Downloads; it stayed empty and was gone once the process exited.
+        # The page tried four downloads (<a download> of data: and blob:, a download frame, a form):
+        # the window's sandbox turned each down before Chromium prepared it, so none reached
+        # downloadRequested and nothing appeared in this PC's real Downloads folder, even briefly.
+        # (Something else saving into Downloads during the run would also fail this; rerun it.)
+        self.assertEqual(report["hooks"].get("downloads", 0), 0)
+        self.assertEqual(report["download_dirs"], [])
+        self.assertTrue(report["downloads_watched"])
+        self.assertEqual(report["downloads_new_entries"], [])
+        self.assertFalse(report["downloads_mtime_changed"])
+        # The profile's private download folder (a last net) stayed empty and went with the process.
         folder = Path(report["download_folder"])
         self.assertTrue(folder.name.startswith("jarvis-snapshots-"), folder)
         self.assertNotIn((Path.home() / "Downloads").resolve(), folder.resolve().parents)
-        self.assertTrue(report["download_dirs"])
-        for directory in report["download_dirs"]:
-            self.assertEqual(Path(directory).resolve(), folder.resolve())
         self.assertEqual(report["download_folder_entries"], [])
         self.assertFalse(folder.exists())
         for box, colour in report["boxes"].items():

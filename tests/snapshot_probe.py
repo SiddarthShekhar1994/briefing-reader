@@ -31,6 +31,12 @@ The control case runs Chromium WITHOUT Jarvis's WebRTC policy and with Windows H
 the zero counts of the other cases are the flags' doing. The webauthn case (Jarvis's flags; run by
 the tests only after the control showed Windows Hello reachable without them) asks for a passkey
 and watches that no "Windows Security" dialog comes up. Invented content only.
+
+The hooks page also starts downloads the ways a page can without a network (an <a download> of a
+data: and of a blob: address, an inline frame whose address is a download, a form aimed at one)
+while DownloadsWatcher polls this PC's real Downloads folder (Qt's DownloadLocation, where Chromium
+prepares a download) every millisecond: no entry may appear there, even briefly, and the folder's
+modified time may not change.
 """
 
 from __future__ import annotations
@@ -82,8 +88,47 @@ try { alert('probe'); var c = confirm('probe'); var p = prompt('probe', 'x');
       mark('dialogs', c === false && (p === null || p === '')); } catch (e) { mark('dialogs', false); }
 try { var a = document.createElement('a'); a.href = 'data:text/plain,probe'; a.download = 'probe.txt';
       document.body.appendChild(a); a.click(); } catch (e) {}
+try { var b = document.createElement('a'); b.download = 'probe-blob.bin';
+      b.href = URL.createObjectURL(new Blob(['probe'], {type: 'application/octet-stream'}));
+      document.body.appendChild(b); b.click(); } catch (e) {}
+try { var f = document.createElement('iframe'); f.src = 'data:application/octet-stream,probe';
+      document.body.appendChild(f); } catch (e) {}
+try { var form = document.createElement('form'); form.method = 'GET'; form.target = '_self';
+      form.action = 'data:application/octet-stream,probe'; document.body.appendChild(form); form.submit(); }
+catch (e) {}
 try { navigator.clipboard.readText().catch(function(){}); } catch (e) {}
 </script></body></html>"""
+
+class DownloadsWatcher(threading.Thread):
+    """Polls a folder every millisecond for entries that were not there at the start (a download
+    Chromium prepares lives ~70 ms); finish() stops it and reports what it saw and whether the
+    folder's modified time changed. A missing folder reports nothing."""
+
+    def __init__(self, folder: str) -> None:
+        super().__init__(daemon=True)
+        self.folder = folder
+        self.stop_event = threading.Event()
+        self.seen: set[str] = set()
+        exists = bool(folder) and os.path.isdir(folder)
+        self.before = set(os.listdir(folder)) if exists else set()
+        self.mtime = os.stat(folder).st_mtime_ns if exists else None
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                with os.scandir(self.folder) as entries:
+                    self.seen.update(entry.name for entry in entries if entry.name not in self.before)
+            except OSError:
+                pass
+            time.sleep(0.001)
+
+    def finish(self) -> dict:
+        self.stop_event.set()
+        self.join(2)
+        mtime = os.stat(self.folder).st_mtime_ns if self.mtime is not None else None
+        return {"downloads_watched": self.mtime is not None, "downloads_new_entries": sorted(self.seen),
+                "downloads_mtime_changed": mtime != self.mtime}
+
 
 # A label only: the gate case's fake connector sends it to a listener of this process.
 PUBLIC_LABEL = "93.184.215.14"
@@ -434,6 +479,10 @@ def main(case: str) -> dict:
         listeners = Listeners(CHANNEL_TCP, CHANNEL_UDP)
         camera = make(decide=lambda url, **kw: (recording(url, **kw), decide(url, **kw))[1], settle_ms=3000)
         page = HOOKS_HTML.replace("</body>", channels_html(listeners.ports) + "</body>")
+        from PySide6.QtCore import QStandardPaths
+
+        watcher = DownloadsWatcher(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation))
+        watcher.start()
         download_dirs: list[str] = []
         refuse = camera._refuse
 
@@ -452,6 +501,7 @@ def main(case: str) -> dict:
         report.update(download_dirs=download_dirs, download_folder=folder,
                       download_folder_entries=sorted(os.listdir(folder)) if os.path.isdir(folder) else None)
         pause(0.5)
+        report.update(watcher.finish())
         listeners.stop.set()
         report.update(channel_hits=listeners.counts(), reports=dict(reports))
         report.update(result=describe(result), hooks=camera.hook_counts(),
