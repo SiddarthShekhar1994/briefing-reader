@@ -21,7 +21,7 @@ from PySide6.QtGui import QColor, QFontMetricsF, QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPlainTextEdit
 
-from briefing_reader import hud, live, ui
+from briefing_reader import dock, hud, live, ui
 from briefing_reader.actions import parse_action_line
 from briefing_reader.ask.planner import STDIN_PENDING, STDIN_SENT
 from tests.ask_fakes import FakeProcess
@@ -837,7 +837,7 @@ class AutoOpenTests(AppCase):
         self.assertIn("1 recipient you didn't type", card.header.meta())
         self.assertEqual(card.step_widgets()[-1].view.kind, live.ASK_CARDS)
         self.assertEqual(self.reading.current_tab(), hud.TAB_LIVE)     # the tab stays where it is
-        self.assertTrue(self.reading.tabs.unread())                    # JARVIS got the answer
+        self.assertTrue(self.reading.unread())                    # JARVIS got the answer
         self.assertEqual(self.reading.live_status.state(), hud.LIVE_IDLE)
         # The answer's entry links to every step of this Ask.
         entry = self.reading.conversation.entry_widgets()[-1]
@@ -849,24 +849,48 @@ class AutoOpenTests(AppCase):
         self.assertEqual(self.reading.current_tab(), hud.TAB_LIVE)
         self.assertFalse(log.following())                              # held at the revealed task
 
+    def test_an_ask_from_home_keeps_home_and_live_gets_its_dot(self) -> None:
+        """Spec 16.0: the request plays out on Home (echo, thinking line, captions, Stop on the bar)."""
+        gate = threading.Event()
+        self.make(GatedProcess(plan(), gate))
+        self.ready()
+        self.assertEqual(self.reading.current_tab(), ui.SCREEN_HOME)
+        self.submit()
+        self.drained()
+        task_id = self.c.ask.task_id
+        self.assertTrue(task_id)
+        self.assertEqual(self.reading.current_tab(), ui.SCREEN_HOME)
+        self.assertTrue(self.reading.command_bar.isVisible())                  # its Stop is in sight
+        self.assertTrue(self.reading.command_bar.is_running())
+        self.assertEqual(self.reading.live_activity(), hud.ACTIVITY_WORKING)   # Live works on behind its dot
+        self.assertIn("Jarvis is working", self.reading.dock.button(dock.LIVE).accessibleName())
+        self.assertIsNone(self.c._live_window)
+        gate.set()
+        self.assertTrue(wait_for(lambda: not self.c.ask.busy, 10))
+        self.drained()
+        self.assertEqual(self.reading.current_tab(), ui.SCREEN_HOME)
+        entry = self.reading.conversation.entry_widgets()[-1]
+        self.assertEqual(entry.link(), (ui.SEE_STEPS_TEXT, f"live:{task_id}"))
+
     def test_the_owner_leaving_live_is_never_pulled_back(self) -> None:
         gate = threading.Event()
         self.make(GatedProcess(plan(), gate))
         self.ready()
+        self.reading.set_tab(hud.TAB_BRIEFING)        # an Ask that starts while another screen is current
         self.submit()
         self.assertEqual(self.reading.current_tab(), hud.TAB_LIVE)
         self.reading.set_tab(hud.TAB_JARVIS)
         self.drained()
         self.assertEqual(self.reading.current_tab(), hud.TAB_JARVIS)
-        self.assertEqual(self.reading.tabs.activity(), hud.ACTIVITY_WORKING)   # the working dot instead
-        self.assertIn("Jarvis is working", self.reading.tabs.tab(hud.TAB_LIVE).accessibleName())
+        self.assertEqual(self.reading.live_activity(), hud.ACTIVITY_WORKING)   # the working dot instead
+        self.assertIn("Jarvis is working", self.reading.dock.button(dock.LIVE).accessibleName())
         gate.set()
         self.assertTrue(wait_for(lambda: not self.c.ask.busy, 10))
         self.drained()
         self.assertEqual(self.reading.current_tab(), hud.TAB_JARVIS)
-        self.assertEqual(self.reading.tabs.activity(), hud.ACTIVITY_UNREAD)
+        self.assertEqual(self.reading.live_activity(), hud.ACTIVITY_UNREAD)
         self.reading.set_tab(hud.TAB_LIVE)
-        self.assertEqual(self.reading.tabs.activity(), "")
+        self.assertEqual(self.reading.live_activity(), "")
 
     def test_an_approved_email_shows_its_payload_during_the_countdown(self) -> None:
         self.make()
@@ -918,7 +942,7 @@ class AutoOpenTests(AppCase):
         self.approve(mail)
         self.drained()
         self.assertEqual(self.reading.current_tab(), hud.TAB_BRIEFING)
-        self.assertEqual(self.reading.tabs.activity(), hud.ACTIVITY_WORKING)
+        self.assertEqual(self.reading.live_activity(), hud.ACTIVITY_WORKING)
 
     def test_clear_keeps_the_running_task(self) -> None:
         self.make()
@@ -1057,7 +1081,7 @@ class PopOutTests(AppCase):
         self.assertEqual(window.size(), ui.LIVE_WINDOW_SIZE)
         self.assertTrue(self.reading.live_popped())
         self.assertIn(window.log, self.c._live_feed.views())
-        self.assertEqual(self.reading.tabs.activity(), "")
+        self.assertEqual(self.reading.live_activity(), "")
         # An approved card while popped out: the main window stays on its tab, the pop-out shows it.
         self.reading.set_tab(hud.TAB_JARVIS)
         mail = self.add_mail()
@@ -1065,7 +1089,7 @@ class PopOutTests(AppCase):
         self.drained()
         self.assertEqual(self.reading.current_tab(), hud.TAB_JARVIS)
         self.assertIn(self.c._countdown.task.id, window.log.task_ids())
-        self.assertEqual(self.reading.tabs.activity(), "")             # no dot while popped out
+        self.assertEqual(self.reading.live_activity(), "")             # no dot while popped out
         self.assertEqual(window.status.state(), hud.LIVE_COUNTDOWN)
         self.c._countdown.started -= 5
         self.c.undo_action(mail.id)

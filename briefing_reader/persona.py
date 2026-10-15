@@ -1007,8 +1007,8 @@ def prep_choice_text(title: str, start: datetime, alias: str, *, day: str = "tod
 
 def prep_result_speech(start: datetime | None, address: str = "sir", *, in_jarvis_tab: bool = True,
                        day: str = "today") -> str:
-    """"Your brief for the 2 PM meeting is ready, sir." (JARVIS current, or the window minimized) /
-    "Your brief for the 2 PM meeting is in the JARVIS tab, sir." (another tab stays current, R33);
+    """"Your brief for the 2 PM meeting is ready, sir." (Home current, or the window minimized) /
+    "Your brief for the 2 PM meeting is in the Transcript, sir." (another screen stays current, R33);
     tomorrow's meeting: "Your brief for tomorrow's 9 AM meeting ...". The time only, never the brief."""
     if start is None:
         meeting = "the meeting"
@@ -1016,7 +1016,7 @@ def prep_result_speech(start: datetime | None, address: str = "sir", *, in_jarvi
         meeting = f"tomorrow's {spoken_clock(start)} meeting"
     else:
         meeting = f"the {spoken_clock(start)} meeting"
-    where = "is ready" if in_jarvis_tab else "is in the JARVIS tab"
+    where = "is ready" if in_jarvis_tab else "is in the Transcript"
     return with_address(f"Your brief for {meeting} {where}, {{sir}}.", address)
 
 

@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import unittest
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import config, hud, ui
+from briefing_reader import config, holo, hud, ui
 
 _app: QApplication | None = None
 IMG = '<img src="file://203.0.113.9/share/x.png">'
@@ -269,16 +269,27 @@ class ReadingScreenTests(unittest.TestCase):
         self.assertFalse(self.reading.ask_available())
         self.assertFalse(self.reading.command_bar.isVisible())
 
-    def test_the_bar_sits_between_the_orb_row_and_the_controls(self) -> None:
+    def test_the_bar_sits_at_the_bottom_of_home_under_the_caption(self) -> None:
+        # HOLOGRAM_SPEC 11.3 / 16.0 (it sat between the orb row and the controls before the hologram):
+        # Home only, under the orb and the caption band, centred, at most 620 wide plus its ring.
         self.show(ask=True)
         bar = self.reading.command_bar
+        self.assertEqual(self.reading.current_tab(), ui.SCREEN_HOME)
         self.assertTrue(bar.isVisible())
         y = {name: widget.mapTo(self.reading, widget.rect().topLeft()).y()
-             for name, widget in (("orb", self.reading.orb), ("bar", bar), ("play", self.reading.play_button),
-                                  ("transcript", self.reading.transcript_panel))}
-        self.assertLess(y["orb"], y["bar"])
-        self.assertLess(y["bar"], y["play"])
-        self.assertLess(y["play"], y["transcript"])
+             for name, widget in (("orb", self.reading.hero), ("caption", self.reading.captions), ("bar", bar))}
+        self.assertLess(y["orb"], y["caption"])
+        self.assertLess(y["caption"], y["bar"])
+        self.assertLessEqual(bar.width(), holo.COMMAND_MAX_WIDTH + 8)
+        stage = self.reading.stage
+        centre = stage.mapTo(self.reading, stage.rect().center()).x()
+        self.assertLessEqual(abs(bar.mapTo(self.reading, bar.rect().center()).x() - centre), 2)
+        corner = bar.mapTo(self.window, QPoint(bar.width(), bar.height()))
+        self.assertLessEqual(corner.y(), self.window.height())
+        self.reading.set_tab(hud.TAB_BRIEFING)                  # the transport controls never share a screen
+        settle()
+        self.assertFalse(bar.isVisible())
+        self.assertTrue(self.reading.play_button.isVisible())
 
     def test_space_in_the_bar_is_a_space_elsewhere_it_plays_and_pauses(self) -> None:
         self.show(ask=True)
@@ -312,11 +323,18 @@ class ReadingScreenTests(unittest.TestCase):
         self.assertFalse(ui._keeps_space(self.reading))
         self.assertFalse(ui._keeps_space(None))
 
-    def test_narrow_or_short_screens_get_the_compact_bar(self) -> None:
-        for size, compact in (((1120, 700), False), ((900, 640), False), ((900, 600), True), ((760, 652), True)):
+    def test_home_has_the_hologram_pill_at_every_size(self) -> None:
+        # The compact bar used to depend on the window's size; Home's pill is always one line under the field
+        # and never shows the meta line (its counts and seconds are LIVE's).
+        for size in ((1120, 700), (900, 640), (900, 600), (760, 652)):
             with self.subTest(size=size):
                 self.show(ask=True, size=size)
-                self.assertEqual(self.reading.command_bar.is_compact(), compact)
+                bar = self.reading.command_bar
+                self.assertTrue(bar.is_holo() and bar.is_compact())
+                bar.set_meta(f"1.2 s {hud.MIDDLE_DOT} 3 runs left this hour")
+                self.assertFalse(bar.meta_label.isVisible())
+                self.assertTrue(bar.send_button.isVisible())
+                self.assertFalse(bar.button.isVisible())
 
     def test_the_wrapped_controls_keep_their_room_with_the_bar(self) -> None:
         for size in ((760, 652), (900, 600), (1120, 700)):

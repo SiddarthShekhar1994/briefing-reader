@@ -192,13 +192,25 @@ class FrameTests(unittest.TestCase):
                     settle()
                     if view == "prompt":
                         self.assertEqual(window.width(), ui.PROMPT_SIZE.width())
-                    header = window.header
-                    minimize = header.minimize_button.geometry()
-                    close = header.close_button.geometry()
-                    self.assertTrue(header.minimize_button.isVisible() and header.close_button.isVisible())
-                    self.assertLessEqual(close.right(), header.width() - 1)
-                    self.assertLessEqual(header._clock.geometry().right(), minimize.left())
-                    self.assertLessEqual(header._chips_box.geometry().right(), header._clock.geometry().left())
+                        header = window.header
+                        minimize = header.minimize_button.geometry()
+                        close = header.close_button.geometry()
+                        self.assertTrue(header.minimize_button.isVisible() and header.close_button.isVisible())
+                        self.assertLessEqual(close.right(), header.width() - 1)
+                        self.assertLessEqual(header._clock.geometry().right(), minimize.left())
+                        self.assertLessEqual(header._chips_box.geometry().right(), header._clock.geometry().left())
+                    else:
+                        # The reading view's title bar is the hologram's header (the frame's is hidden).
+                        self.assertFalse(window.header.isVisible())
+                        holo_header = window.reading.header
+                        minimize = holo_header.minimize_button.geometry()
+                        close = holo_header.close_button.geometry()
+                        self.assertTrue(holo_header.minimize_button.isVisible()
+                                        and holo_header.close_button.isVisible())
+                        self.assertLessEqual(close.right(), holo_header.width() - 1)
+                        self.assertLessEqual(holo_header.clock.geometry().right(), minimize.left())
+                        self.assertLessEqual(holo_header.readout.geometry().right(),
+                                             holo_header.clock.geometry().left())
             window.hide()
 
 
@@ -367,6 +379,39 @@ class ControllerTests(unittest.TestCase):
         newest = c.window.reading.activity.entries()[0]
         self.assertEqual(newest[2], "Undone: Add Dentist")
         self.assertIn("window minimized, nothing was created", newest[3])
+
+    def test_off_approvals_the_header_shows_the_countdown_and_its_undo(self) -> None:
+        """The card's Undo is on Approvals; on any other screen the header shows the countdown with an
+        Undo that works, so the Undo is never out of sight (minimizing still stops it)."""
+        c = self.prompt()
+        c.enter_reading()
+        c.window.show()
+        settle()
+        reading = c.window.reading
+        reading.set_tab(ui.SCREEN_APPROVALS)
+        action = parse_action_line("Calendar: Dentist | 2026-10-09 15:00-16:00")
+        now = time.monotonic()
+        c._countdown = ui._Countdown(action, deadline=now + 30, started=now)
+        c._jobs[action.id] = ui._STAGE_COUNTDOWN
+        c._countdown_timer.start()
+        reading.set_countdown("ADDING", now + 30)
+        header = reading.header
+        self.assertEqual(header.countdown_text(), "")             # on Approvals the card has it
+        for screen in (ui.SCREEN_HOME, ui.SCREEN_LIVE, ui.SCREEN_BRIEFING):
+            reading.set_tab(screen)
+            settle()
+            self.assertIsNotNone(c._countdown, screen)            # leaving the card never stops it
+            self.assertRegex(header.countdown_text(), r"^ADDING IN (29|30) S$")
+            self.assertTrue(header.undo_button.isVisible())
+        self.assertIn("Undo is available", header.countdown.accessibleName())
+        c._countdown.started -= 5                                 # past the double-click guard
+        with self.assertLogs("briefing_reader.ui", level="INFO") as logs:
+            header.undo_button.click()
+        self.assertIsNone(c._countdown)
+        self.assertNotIn(action.id, c._jobs)
+        self.assertTrue(any("undone (undone); nothing was sent" in line for line in logs.output))
+        self.assertEqual(reading.activity.entries()[0][2], "Undone: Add Dentist")
+        self.assertEqual(header.countdown_text(), "")              # it went with the countdown
 
 
 if __name__ == "__main__":

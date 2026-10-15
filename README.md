@@ -887,7 +887,11 @@ labels and times.
   voice, red: no speech could be generated) and **calendar** (green:
   signed in to Google, amber: not signed in yet, grey: turned off or not set
   up). Hover over a chip for details; the calendar chip also says how many
-  proposals need your OK.
+  proposals need your OK. The assistant screen has the hologram's own header
+  instead (see below): there a service that is not OK shows as its name with
+  a dot after the state word (**NOTION**, **VOICE**, **CALENDAR**, **CLAUDE**;
+  steel for amber above, coral for red), with the chip's text as its tooltip;
+  nothing shows while every service is fine.
 - **The orb** shows what the app is doing, with the state written next to it:
   WAITING ON YOU (amber), WORKING (cyan, while the briefing loads or the reading
   waits for its audio), SPEAKING (pink, while reading), STANDBY (grey: paused,
@@ -916,39 +920,68 @@ greeting was more than 2 minutes ago. Without sound (muted, `[assistant]
 speak = false`, no voice available) the same words are shown in the JARVIS
 tab; `[assistant] greet = false` turns the greeting off.
 
-**JARVIS, BRIEFING and LIVE.** The middle panel has three tabs right above it,
-four with MEMORY (click them, press **Ctrl+1** / **Ctrl+2** / **Ctrl+3** /
-**Ctrl+4**, or Left / Right on a focused tab):
+**The Dock and the screens (the hologram).** A narrow rail of glyphs on the
+window's left edge, the Dock, opens the screens (hover a glyph, or Tab to it,
+for its name and shortcut; Up / Down move along it):
 
-- **JARVIS** is this session's conversation: the greeting, "Your AM briefing is
-  ready to view." with a **View briefing** link, your Ask requests and Jarvis's
-  whole answers, never cut off. It scrolls and follows the newest entry unless
-  you just scrolled yourself; an answer taller than the panel is shown from its
-  first line (its "JARVIS" time line at the top), the rest a scroll away. A dot
-  on the tab says something new came while another tab was current. It is kept
-  in memory only (at most 100 entries).
-- **BRIEFING** is the briefing's text, as before: chips for the current section
-  and its neighbours, **SECTIONS**, and the line being spoken marked while it
-  plays. In a very small window (a screen narrower than 900 px, Ask on) its
-  "AM BRIEFING . UPDATED ..." line folds away so the controls keep their room
-  (STATUS still shows the time; a "May be stale" warning always shows).
-- **LIVE** shows every step Jarvis takes, as it happens (see
-  [LIVE: watch Jarvis work](#live-watch-jarvis-work)).
-- **MEMORY** (**Ctrl+4**, only while the productivity bundle and its memory
-  are on) holds the notes Jarvis keeps on this PC (see
+- **Home** (**Ctrl+1**; the Dock's glyph is Jarvis's small orb) is Jarvis
+  himself: the large orb in the middle shows what he is doing (STANDBY,
+  LISTENING while you type, THINKING while an Ask, a plan or a brief runs,
+  SPEAKING, NEEDS YOU while something waits for your decision, MUTED, OFFLINE
+  VOICE, WAITING FOR THE AM BRIEFING), the same word sits in the header beside
+  J.A.R.V.I.S., and what he says appears under the orb a few words at a time.
+  Below them: one quiet chip and the command bar (**Ctrl+Space** from any
+  screen). The chip is, first that applies: an offer waiting for your answer
+  (**Plan my day** or **Prepare brief** in amber; it opens the Transcript at
+  the offer, whose link does the work, and the offer's question stays under
+  the orb until you answer or it expires), the plan or brief just made
+  (**Plan ready** / **Brief ready** in cyan; it opens the Transcript there),
+  **Briefing ready** in cyan while a briefing is new, else **2 need your OK**
+  in amber. A request you type plays out on Home: your words under the orb,
+  THINKING with a short line of what he is doing, then his answer a few words
+  at a time; the send arrow is the stop button meanwhile (or Esc). LIVE keeps
+  every step behind its Dock dot. After two quiet minutes the orb breathes
+  slower to save power; a key, a click or anything he does wakes it at once.
+- **Transcript** (the speech-bubble button at Home's bottom left) is this
+  session's conversation, as the JARVIS tab was: the greeting, "Your AM
+  briefing is ready to view." with a **View briefing** link, your Ask requests
+  and Jarvis's whole answers, offers and briefs with their links. A cyan dot on
+  the button says something new came while it was closed. Run counts, seconds
+  and sizes are left out here; LIVE keeps them.
+- **The clock** in the header opens the **Day view**: TODAY / TOMORROW and
+  DEADLINES. Esc closes it.
+- **Briefing** (**Ctrl+2**) is the briefing's text with **Play**, **Skip
+  section**, **Read everything**, **Open in Notion** and **Done**, STATUS,
+  chips for the current section and its neighbours, **SECTIONS**, and the line
+  being spoken marked while it plays.
+- **Approvals** (**Ctrl+3**, an amber count on its glyph) holds the NEEDS YOUR
+  OK cards: countdowns, Undo, Edit and the rest work as before. A card's undo
+  countdown keeps running when you go to another screen (to ask something,
+  say): the header then shows it, SENDING IN 7 S in amber, with its own
+  **Undo**. Minimizing still stops it (nothing is sent).
+- **Live** (**Ctrl+4**) shows every step Jarvis takes, as it happens, with
+  ACTIVITY beside it (see [LIVE: watch Jarvis work](#live-watch-jarvis-work)).
+- **Memory** (**Ctrl+5**; a cyan dot while a suggested note waits, or after a
+  note was saved) and **Follow-ups** (**Ctrl+6**) show only while the
+  productivity bundle and its memory / follow-ups are on (see
   [Memory (the MEMORY tab)](#memory-the-memory-tab)).
+- **Settings** (**Ctrl+,**) says where the settings live and opens
+  `config.toml` or the data folder; nothing there changes a setting.
 
-**NEW.** A briefing nobody has looked at yet is NEW: an amber **NEW** badge on
-the BRIEFING tab, "Your AM briefing is ready to view" under the orb while
-nothing is spoken, "new" before the Updated time in STATUS (amber) and "Jarvis:
-AM briefing ready to view" on the tray icon. It is viewed once its BRIEFING
-tab is open while the window is active, or as soon as it plays (**Play** on
-the JARVIS or LIVE tab switches to BRIEFING). A briefing more than 18 hours old, a page
-without an "Updated:" line and a setup error are never NEW. Each briefing is
-announced at most once, also across restarts (`runstate.json`): open Jarvis at
-10:08, hear "Your AM briefing is ready to view" and close him, and the 10:12
-task stays silent. While the PC is locked, an announcement waits for the
-unlock (its JARVIS entry is there at once).
+Elsewhere in this README "the JARVIS tab" means Home's Transcript, "the
+BRIEFING / LIVE / MEMORY tab" the screen of that name.
+
+**NEW.** A briefing nobody has looked at yet is NEW: a cyan dot on the Dock's
+Briefing glyph, **Briefing ready** on Home, "Your AM briefing is ready to view"
+under the Briefing screen's orb while nothing is spoken, "new" before the
+Updated time in STATUS and "Jarvis: AM briefing ready to view" on the tray
+icon. It is viewed once the Briefing screen is open while the window is
+active, or as soon as it plays (**Play** switches to Briefing). A briefing more
+than 18 hours old, a page without an "Updated:" line and a setup error are
+never NEW. Each briefing is announced at most once, also across restarts
+(`runstate.json`): open Jarvis at 10:08, hear "Your AM briefing is ready to
+view" and close him, and the 10:12 task stays silent. While the PC is locked,
+an announcement waits for the unlock (its Transcript entry is there at once).
 
 **Scheduled runs.** The AM and PM tasks (and the catch-up) start Jarvis
 without a window: only the tray icon shows ("Jarvis: waiting for the AM
@@ -1118,7 +1151,7 @@ voice when the online one cannot be reached), politely and to the point:
   JARVIS tab shows the title).
 - **Meeting prep** (see [Meeting prep](#meeting-prep)): "Your brief for the 2
   PM meeting is ready, sir." when the JARVIS tab is in front (or the window is
-  minimized), "Your brief for the 2 PM meeting is in the JARVIS tab, sir." when
+  minimized), "Your brief for the 2 PM meeting is in the Transcript, sir." when
   you are on another tab ("tomorrow's 9 AM meeting" for one tomorrow); "Which
   meeting, sir? The choices are on screen."; "I don't see a meeting like that
   today or tomorrow, sir.", "That meeting has ended, sir." or "That meeting is
@@ -1285,9 +1318,11 @@ opened. The only links are the Google result links Jarvis made (they open like
 a card's Open); a web address in a research step is plain text.
 
 When Jarvis starts on an Ask or on a card you approved, LIVE comes up by itself
-(`[live] auto_open = "tab"`, the default); not while the briefing plays (the
-LIVE tab gets a blinking dot instead), not when the window is minimized or
-hidden, and only once per piece of work: when you go back to another tab, it
+(`[live] auto_open = "tab"`, the default); not for a request typed on Home
+(Home shows it; the Dock's Live glyph gets a dot while Jarvis works), not for a
+card you approve on Approvals, not while the briefing plays (the LIVE tab gets
+a blinking dot instead), not when the window is minimized or hidden, and only
+once per piece of work: when you go back to another tab, it
 does not pull you back. `auto_open = "window"` shows the pop-out window
 instead (without taking the focus), `"off"` never switches. In a window too
 small for the LIVE tab to show the steps (a small screen), `"tab"` shows the
@@ -2523,10 +2558,11 @@ briefing; with the app already open, the same command brings it forward there.
   mail: click "Allow work mail" to let it"). The bar shows two lines of it; the
   **JARVIS** tab below has your request and the whole answer, never cut off,
   and Jarvis says the answer aloud (see [Jarvis talks](#jarvis-talks)). When
-  you press Enter the **LIVE** tab comes up and shows every step of the request
-  as it happens (see [LIVE: watch Jarvis work](#live-watch-jarvis-work); with
-  `[live] auto_open = "off"` the JARVIS tab comes up instead), and a dot on
-  JARVIS tells you when the answer is there. Your request stays in the field
+  you press Enter, Home stays: the orb thinks and then says the answer, and
+  **LIVE** (its Dock glyph has a dot meanwhile) shows every step of the request
+  as it happens (see [LIVE: watch Jarvis work](#live-watch-jarvis-work);
+  `[live] auto_open = "window"` shows it in the pop-out window), and a dot on
+  the Transcript button tells you when the answer is there. Your request stays in the field
   after a question back or when nothing was proposed, so you can edit it and
   press Enter again; it is cleared once there is a card to decide. The
   proposals are at the top of NEEDS YOUR OK under **ASK**, above the
@@ -2540,10 +2576,13 @@ briefing; with the app already open, the same command brings it forward there.
   keeps them, and a new request puts its cards above the earlier ones (at most
   16 stay). They last until Jarvis closes; your decisions on them are saved by
   id like every card's.
-- The header's **claude** chip (reading screen) shows OK with the planner runs
-  left this hour, SIGN IN (run `claude auth login --claudeai`), LIMIT (the
-  hourly or daily cap, or your plan's usage limit) or ERR (Claude Code missing,
-  not supported, or its work folder not empty); hover it for the reason.
+- The **claude** service (reading screen) is OK with the planner runs left
+  this hour, SIGN IN (run `claude auth login --claudeai`), LIMIT (the hourly or
+  daily cap, or your plan's usage limit) or ERR (Claude Code missing, not
+  supported, or its work folder not empty); the header shows **CLAUDE** with a
+  dot while it is not OK: hover it for the reason. On Home the bar's line says
+  only what happened ("Ask's daily limit reached; try again after 9:00 AM");
+  its tooltip, ACTIVITY and LIVE keep the counts and the setting's name.
   ACTIVITY gets one line per request ("2 proposals · 8.4 s · 1 planner run"),
   never the request or the answer.
 - **Allow work mail** (the account's name) appears under the bar when that
@@ -3191,7 +3230,7 @@ log. Changes apply the next time the app starts.
 | `[assistant] scheduled_prompt` | `false` | `true`: the scheduled runs and the catch-up show the classic "Hear it now?" prompt (with Later and Read now) instead of announcing the briefing. |
 | `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY, STATUS and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
 | `[live] enabled` | `true` | The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)): every step Jarvis takes for an Ask or a card you approved, on screen only. `false`: no LIVE tab, nothing recorded. |
-| `[live] auto_open` | `"tab"` | When Jarvis starts on an Ask or an approved card: `"tab"` brings up the LIVE tab (not while the briefing plays, not when the window is hidden or minimized), `"window"` shows the LIVE pop-out window without taking the focus, `"off"` never switches. `true` / `false` mean `"tab"` / `"off"`. |
+| `[live] auto_open` | `"tab"` | When Jarvis starts on an Ask or an approved card: `"tab"` brings up the LIVE tab (not for a request typed on Home, not for a card approved on Approvals, not while the briefing plays, not when the window is hidden or minimized), `"window"` shows the LIVE pop-out window without taking the focus, `"off"` never switches. `true` / `false` mean `"tab"` / `"off"`. |
 | `[live] background` | `true` | Also show the reads Jarvis does on his own (agenda, event checks, sign-ins, Claude Code checks) in one compact LIVE row. The productivity bundle's own reads and offers have a row of their own that is always shown. |
 | `[live] text` | `true` | Show the texts Jarvis read and sent in LIVE (email threads, the planner's input and reply, the outgoing message). `false`: only their sizes (also of the message text in the planner's proposal lines); subjects, names, addresses, event titles and Jarvis's answer still show. `false` also takes no page pictures and leaves the email texts out of the pictures (their headers still show). |
 | `[live] pictures` | `true` | Email, calendar and search pictures in LIVE ([Pictures in LIVE](#pictures-in-live)), drawn by Jarvis on this PC from the text he already has: no email HTML, no images from the web, no page opened for them. `false`: none. |

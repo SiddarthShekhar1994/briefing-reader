@@ -106,6 +106,8 @@ class CardSourceTests(unittest.TestCase):
         settle()
         self.assertIs(self.c._countdown, countdown)
         self.assertEqual(reading.action_card(page_card.id).status(), hud.CARD_COUNTDOWN)
+        reading.set_tab(ui.SCREEN_APPROVALS)                     # the cards are on the Approvals screen
+        settle()
         self.assertTrue(reading.action_card(page_card.id).undo_button.isVisible())
 
     def test_an_ask_card_counting_down_keeps_its_content(self) -> None:

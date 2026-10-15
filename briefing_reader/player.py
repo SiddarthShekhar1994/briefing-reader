@@ -121,6 +121,19 @@ class BriefingPlayer(QObject):
     def played(self) -> list[int]:
         return list(self._played)
 
+    def current_item_ms(self) -> int:
+        """How long the audio says the item now highlighted: from its mark to the next one (or to its
+        segment's end); 0 when unknown. Home's caption paces its words by it."""
+        audio, (section, item) = self._current_audio, self._last_item
+        if audio is None or section != self._current or item not in self._mark_items:
+            return 0
+        if not 0 <= self._segment_index < len(audio.segments):
+            return 0
+        i = self._mark_items.index(item)
+        end = (self._mark_starts[i + 1] if i + 1 < len(self._mark_starts)
+               else audio.segments[self._segment_index].duration_ms)
+        return max(0, int(end) - int(self._mark_starts[i]))
+
     # ------------------------------------------------------------------ public API
 
     def set_audio(self, section_index: int, audio: SectionAudio) -> None:

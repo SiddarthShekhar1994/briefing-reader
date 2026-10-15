@@ -3501,6 +3501,11 @@ class FollowupRow(QAbstractButton):
             painter.end()
 
 
+AGENDA_ALL = "all"
+AGENDA_DAY = "day"              # TODAY / DEADLINES only (the hologram's Day view)
+AGENDA_FOLLOWUPS = "followups"  # FOLLOW-UPS only (the hologram's Follow-ups screen)
+
+
 class AgendaPanel(ChamferPanel):
     """TODAY / TOMORROW agenda rows followed by the DEADLINES list, scrolling inside the panel.
 
@@ -3511,7 +3516,9 @@ class AgendaPanel(ChamferPanel):
     the DEADLINES part. Row widgets are reused, so a refresh does not flicker.
     ``set_followups(info)`` fills the FOLLOW-UPS section under DEADLINES (None hides it): its rows
     emit ``followupActivated(row_id)``, its fix lines' links ``followupsLinkClicked(link_id)`` and its
-    "..." button ``followupsMenuRequested()``.
+    "..." button ``followupsMenuRequested()``. ``set_mode(AGENDA_ALL | AGENDA_DAY | AGENDA_FOLLOWUPS)``
+    shows everything, only TODAY / DEADLINES (the hologram's Day view) or only FOLLOW-UPS (its
+    Follow-ups screen, without the panel's TODAY title); the content is kept either way.
     """
 
     linkClicked = Signal()
@@ -3538,20 +3545,54 @@ class AgendaPanel(ChamferPanel):
         self._deadline_layout.setSpacing(0)
         self.deadlines_empty = make_label("", mono_font(11, 400, 0.02), TEXT_DIM, wrap=True)
         self.deadlines_empty.hide()
+        self._mode = AGENDA_ALL
+        self._agenda_box = QWidget()
+        agenda = QVBoxLayout(self._agenda_box)
+        agenda.setContentsMargins(0, 0, 0, 0)
+        agenda.setSpacing(0)
+        agenda.addLayout(self._events_layout)
+        agenda.addWidget(self._message_box)
+        agenda.addSpacing(12)
+        agenda.addWidget(self._make_deadlines_header())
+        agenda.addSpacing(2)
+        agenda.addLayout(self._deadline_layout)
+        agenda.addWidget(self.deadlines_empty)
+        self._followups_part = QWidget()
+        part = QVBoxLayout(self._followups_part)
+        part.setContentsMargins(0, 0, 0, 0)
+        part.setSpacing(0)
+        self._followups_box = self._make_followups()
+        part.addWidget(self._followups_box)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 6, 0)   # keeps the rows off the scroll bar
         layout.setSpacing(0)
-        layout.addLayout(self._events_layout)
-        layout.addWidget(self._message_box)
-        layout.addSpacing(12)
-        layout.addWidget(self._make_deadlines_header())
-        layout.addSpacing(2)
-        layout.addLayout(self._deadline_layout)
-        layout.addWidget(self.deadlines_empty)
-        self._followups_box = self._make_followups()
-        layout.addWidget(self._followups_box)
+        layout.addWidget(self._agenda_box)
+        layout.addWidget(self._followups_part)
         layout.addStretch(1)
         self.body_layout.addWidget(self._scroll, 1)
+
+    def set_mode(self, mode: str) -> None:
+        """AGENDA_ALL, AGENDA_DAY (TODAY / DEADLINES only) or AGENDA_FOLLOWUPS (FOLLOW-UPS only)."""
+        if mode not in (AGENDA_ALL, AGENDA_DAY, AGENDA_FOLLOWUPS):
+            mode = AGENDA_ALL
+        self._mode = mode
+        self._agenda_box.setVisible(mode != AGENDA_FOLLOWUPS)
+        self._followups_part.setVisible(mode != AGENDA_DAY)
+        self._sync_header()
+        self._fit_metas()
+
+    def mode(self) -> str:
+        return self._mode
+
+    def _sync_header(self) -> None:
+        if self._mode == AGENDA_FOLLOWUPS:
+            self._header.hide()
+        else:
+            self._header.setVisible(bool(self.title_label.text() or self.meta_label.text()))
+
+    def set_title(self, text: str) -> None:
+        super().set_title(text)
+        self._sync_header()
 
     def _make_message_box(self) -> QWidget:
         box = QWidget()
@@ -3670,6 +3711,7 @@ class AgendaPanel(ChamferPanel):
 
     def set_meta(self, text: str, color: str | QColor | None = None) -> None:
         super().set_meta(text, color)
+        self._sync_header()
         self._fit_metas()
 
     def set_day(self, title: str, meta: str = "") -> None:
@@ -6836,7 +6878,12 @@ class _CommandInput(QLineEdit):
         self._fit_placeholder()
 
     def _fit_placeholder(self) -> None:
-        """The longest COMMAND_PLACEHOLDERS text the field shows whole."""
+        """The longest COMMAND_PLACEHOLDERS text the field shows whole (the hologram bar: "Ask Jarvis",
+        HOLOGRAM_SPEC 11.3)."""
+        if getattr(self, "_holo", False):
+            if self.placeholderText() != COMMAND_PLACEHOLDERS[-1]:
+                self.setPlaceholderText(COMMAND_PLACEHOLDERS[-1])
+            return
         room = self.width() - 8   # QLineEdit's own text margins
         metrics = QFontMetricsF(self.font())
         text = next((item for item in COMMAND_PLACEHOLDERS if metrics.horizontalAdvance(item) <= room),
@@ -6850,6 +6897,8 @@ class _CommandField(QWidget):
     focus) and a leading prompt glyph."""
 
     HEIGHT = 36
+    HOLO_HEIGHT = 60              # the hologram pill (52) with room for its 4 px focus ring
+    HOLO_GLYPH = 40
     _CUT = 8
 
     def __init__(self, line_edit: _CommandInput, parent: QWidget | None = None) -> None:
@@ -6858,13 +6907,45 @@ class _CommandField(QWidget):
         self.setFixedHeight(self.HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.IBeamCursor)
-        glyph = make_label(_PROMPT_GLYPH, mono_font(15, 600), ACCENT)
+        self._glyph = make_label(_PROMPT_GLYPH, mono_font(15, 600), ACCENT)
+        self._holo = False
+        self._listening = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 10, 0)
         layout.setSpacing(8)
-        layout.addWidget(glyph, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self._glyph, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(line_edit, 1, Qt.AlignmentFlag.AlignVCenter)
         line_edit.installEventFilter(self)
+
+    def set_holo(self, send_button: QWidget) -> None:
+        """The hologram pill (HOLOGRAM_SPEC 11.3): the Ask glyph painted on the left, the input in the
+        input type and ``send_button`` (the send arrow / stop glyph) on the right."""
+        from . import holo
+
+        self._holo = True
+        self.setFixedHeight(self.HOLO_HEIGHT)
+        self._glyph.hide()
+        layout = self.layout()
+        layout.setContentsMargins(4 + 6 + self.HOLO_GLYPH + 10, 10, 4 + 6, 10)
+        layout.setSpacing(10)
+        layout.addWidget(send_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.line_edit.setFont(holo.font("input"))
+        palette = self.line_edit.palette()
+        palette.setColor(QPalette.ColorRole.Text, QColor(holo.INK_1))
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(holo.INK_4))
+        palette.setColor(QPalette.ColorRole.Highlight, holo.alpha(holo.HOLO, 0.35))
+        self.line_edit.setPalette(palette)
+        self.line_edit._holo = True
+        self.line_edit._fit_placeholder()
+        self.update()
+
+    def set_listening(self, listening: bool) -> None:
+        if bool(listening) != self._listening:
+            self._listening = bool(listening)
+            self.update()
+
+    def is_listening(self) -> bool:
+        return self._listening
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
         if watched is self.line_edit and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut,
@@ -6876,10 +6957,35 @@ class _CommandField(QWidget):
         self.line_edit.setFocus(Qt.FocusReason.MouseFocusReason)   # a click beside the text
         super().mousePressEvent(event)
 
+    def _paint_holo(self, painter: QPainter) -> None:
+        from . import holo
+
+        rect = QRectF(self.rect()).adjusted(4.5, 4.5, -4.5, -4.5)      # room for the 4 px ring
+        radius = rect.height() / 2
+        lit = self.line_edit.hasFocus() or self._listening
+        if lit:
+            painter.setPen(QPen(holo.alpha(holo.HOLO, 0.08), 4.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(-2, -2, 2, 2), radius + 2, radius + 2)
+        painter.setPen(QPen(holo.alpha(holo.INK_1, 0.70) if lit else holo.LINE_INPUT, 1.0))
+        painter.setBrush(holo.alpha(holo.FIELD, 0.86))
+        painter.drawRoundedRect(rect, radius, radius)
+        glyph = QRectF(rect.left() + 5.5, rect.center().y() - self.HOLO_GLYPH / 2,
+                       self.HOLO_GLYPH, self.HOLO_GLYPH)
+        painter.setPen(QPen(holo.alpha(holo.HOLO, 0.25), 1.0))
+        painter.setBrush(holo.alpha(holo.HOLO, 0.12))
+        painter.drawEllipse(glyph.adjusted(0.5, 0.5, -0.5, -0.5))
+        box = QRectF(0, 0, 18, 18)
+        box.moveCenter(glyph.center())
+        holo.paint_icon(painter, box, "ask", QColor(holo.HOLO), stroke=1.8)
+
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            if self._holo:
+                self._paint_holo(painter)
+                return
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
             focused = self.line_edit.hasFocus()
             painter.fillPath(chamfer_path(rect, self._CUT), rgba("#030a10", 0.92))
@@ -6891,6 +6997,95 @@ class _CommandField(QWidget):
             painter.drawPath(chamfer_path(rect, self._CUT))
         finally:
             painter.end()
+
+
+class _SendButton(QAbstractButton):
+    """The hologram bar's 40 px round send arrow: ``field``-tinted until there is text, then the cyan
+    go; while a request runs, a stop glyph (a filled 10 px square)."""
+
+    SIZE = 40
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._ready = False
+        self._stop = False
+        self._focus_ring = False
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setAccessibleName("Send")
+
+    def set_look(self, ready: bool, stop: bool) -> None:
+        if (bool(ready), bool(stop)) != (self._ready, self._stop):
+            self._ready, self._stop = bool(ready), bool(stop)
+            self.setAccessibleName("Stop" if self._stop else "Send")
+            self.update()
+
+    def look(self) -> str:
+        return "stop" if self._stop else ("ready" if self._ready else "idle")
+
+    def focusInEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        from . import holo
+
+        self._focus_ring = holo.keyboard_focus(event.reason(), self._focus_ring)
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self._focus_ring = False
+        super().focusOutEvent(event)
+        self.update()
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.animateClick()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        from . import holo
+
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            hot = self._ready or self._stop
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(holo.HOLO) if hot else holo.alpha(holo.HOLO, 0.10))
+            if not self.isEnabled():
+                painter.setOpacity(0.45)
+            painter.drawEllipse(rect)
+            ink = QColor(holo.HOLO_INK) if hot else QColor(holo.INK_4)
+            if self._stop:
+                square = QRectF(0, 0, 10, 10)
+                square.moveCenter(rect.center())
+                painter.setBrush(ink)
+                painter.drawRoundedRect(square, 1.5, 1.5)
+            else:
+                box = QRectF(0, 0, 18, 18)
+                box.moveCenter(rect.center())
+                holo.paint_icon(painter, box, "send_arrow", ink, stroke=2.0)
+            if self._focus_ring and self.hasFocus():
+                painter.setOpacity(1.0)
+                holo.paint_focus_ring(painter, rect.adjusted(2, 2, -2, -2), (rect.height() - 4) / 2)
+        finally:
+            painter.end()
+
+
+_READOUT_GROUP = re.compile(r"\s*\(([^()]*)\)")
+_READOUT_WORDS = re.compile(r"\b\d+\s+(?:[a-z]+\s+)?runs?\b|\bruns?\s+left\b"
+                            r"|\b\d+(?:\.\d+)?\s?(?:s|ms|kb|mb|bytes?)\b", re.IGNORECASE)
+
+
+def quiet_readouts(text: str) -> str:
+    """A status without its technical readouts (owner decision 1: counts of runs, seconds and sizes
+    live in LIVE only): "Ask's daily limit reached; try again after 9 AM (20 planner runs a day: [ask]
+    max_per_day)." -> "Ask's daily limit reached; try again after 9 AM." Other brackets stay, such as
+    how to turn something on ("([research] enabled = false in config.toml)")."""
+    def drop(match: re.Match[str]) -> str:
+        return "" if _READOUT_WORDS.search(match.group(1)) else match.group(0)
+
+    return " ".join(_READOUT_GROUP.sub(drop, text or "").split())
 
 
 class CommandBar(QWidget):
@@ -6920,6 +7115,8 @@ class CommandBar(QWidget):
     cancelRequested = Signal()
     linkClicked = Signal()
     statusDismissed = Signal()   # Esc in an empty field while nothing runs: put the last answer away
+    statusChanged = Signal(str, str)   # the status line's text and tone (the hologram Home's thinking line)
+    typingChanged = Signal(bool)       # the owner types in the field (focused, with text, nothing running)
 
     _STATUS_LINES = 2
 
@@ -6932,8 +7129,13 @@ class CommandBar(QWidget):
         self._tone = TONE_IDLE
         self._keep_link = False      # the status asks for the link beside it (compact)
         self._hint = False           # the status is only the idle hint: it may fold away
+        self._holo = False           # the hologram pill (set_holo): no meta line, only what needs the owner
+        self._typing = False
         self.input = _CommandInput()
         self.field = _CommandField(self.input)
+        self.send_button = _SendButton()
+        self.send_button.hide()
+        self.send_button.clicked.connect(self._on_button)
         self.button = HudButton(ASK_BUTTON_TEXT, SECONDARY, compact=True)
         width = 0
         for text in (ASK_BUTTON_TEXT, CANCEL_BUTTON_TEXT):
@@ -6954,6 +7156,8 @@ class CommandBar(QWidget):
         self.link_button.hide()
         self.input.returnPressed.connect(self._on_return)
         self.input.escapePressed.connect(self._on_escape)
+        self.input.textChanged.connect(self._sync_typing)
+        self.input.installEventFilter(self)
         self.button.clicked.connect(self._on_button)
         self.link_button.clicked.connect(self.linkClicked)
         self._build_layout()
@@ -6980,10 +7184,63 @@ class CommandBar(QWidget):
         layout.addLayout(self._status_row)
         layout.addLayout(self._meta_row)
 
+    def set_holo(self, on: bool = True) -> None:
+        """The hologram Home's bar (HOLOGRAM_SPEC 11.3): a pill with the Ask glyph, the input and the
+        round send arrow (a stop glyph while a request runs; it cancels as Cancel did). The meta line
+        never shows (its counts and seconds are technical readouts: LIVE has them); the status line
+        shows one line, and only what the owner needs to see there: an answer, a question or a
+        problem. What Jarvis is doing goes to the caption band (``statusChanged``)."""
+        if not on or self._holo:
+            return
+        from . import holo
+
+        self.set_compact(True)
+        self._holo = True
+        self.button.hide()
+        self.send_button.show()
+        self.field.set_holo(self.send_button)
+        self.status_label.setFont(holo.font("body_sm"))
+        self.status_label._max_lines = 1
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        self._line = math.ceil(QFontMetricsF(self.status_label.font()).lineSpacing())
+        self.status_label.setFixedHeight(self._line + 2)
+        self._status_row.setContentsMargins(16, 0, 16, 0)
+        set_label_color(self.status_label, self._holo_tone_color())
+        self._render_status()
+        self._sync_send()
+        self._show_link()
+
+    def is_holo(self) -> bool:
+        return self._holo
+
+    def _sync_send(self) -> None:
+        self.send_button.set_look(bool(self.text()), self._running)
+        self.send_button.setToolTip("Stop planning; nothing is proposed (Esc)" if self._running
+                                    else "Plan this request (Enter)")
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        if watched is self.input and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            QTimer.singleShot(0, self._sync_typing)
+        return super().eventFilter(watched, event)
+
+    def _sync_typing(self, *_args: Any) -> None:
+        if not shiboken6.isValid(self):
+            return
+        typing = self.input.hasFocus() and bool(self.input.text().strip()) and not self._running
+        if self._holo:
+            self._sync_send()
+            self.field.set_listening(typing)
+        if typing != self._typing:
+            self._typing = typing
+            self.typingChanged.emit(typing)
+
+    def is_typing(self) -> bool:
+        return self._typing
+
     def set_compact(self, compact: bool) -> None:
         """No meta line (its text is in the status tooltip) and the link beside the status while
-        idle: for a narrow or short reading screen."""
-        compact = bool(compact)
+        idle: for a narrow or short reading screen (the hologram bar is always compact)."""
+        compact = bool(compact) or self._holo
         if compact == self._compact:
             return
         self._compact = compact
@@ -7001,14 +7258,21 @@ class CommandBar(QWidget):
         # Never while a request runs; compact: beside the status, only while nothing else is said
         # there (an answer keeps the width) or the status asks for it.
         shown = (bool(self.link_button.text()) and not self._running
-                 and (not self._compact or self._tone == TONE_IDLE or self._keep_link))
+                 and (not self._compact or self._tone == TONE_IDLE or self._keep_link or self._holo))
         self.link_button.setVisible(shown)
         self._fold()
 
     def _fold(self) -> None:
         """The status and meta lines fold away while the status is only the hint and no link shows.
         Unfolded and not compact, a hidden link keeps its room in the meta line, so the bar's
-        height does not change when the link comes and goes (while a request runs, say)."""
+        height does not change when the link comes and goes (while a request runs, say). The
+        hologram bar shows its status line only for an answer, a question or a problem (or a link)."""
+        if self._holo:
+            needs = self._tone in (TONE_DONE, TONE_WARN, TONE_ERROR) and not self._hint and bool(self._status_text)
+            self.status_label.setVisible(needs or not self.link_button.isHidden())
+            self.meta_label.setVisible(False)
+            self.updateGeometry()
+            return
         folded = self._hint and not self._running and self.link_button.isHidden()
         self.status_label.setVisible(not folded)
         self.meta_label.setVisible(not folded and not self._compact)
@@ -7027,7 +7291,12 @@ class CommandBar(QWidget):
         tooltip = None   # cut: the whole text is the tooltip
         if self._compact and self._meta_text:
             tooltip = plain_tooltip("\n".join(part for part in (self._status_text, self._meta_text.upper()) if part))
-        self.status_label.set_full_text(self._status_text, tooltip)
+        text = self._status_text
+        if self._holo:
+            quiet = quiet_readouts(text)   # Home shows no readouts; the tooltip keeps the whole text
+            if quiet != text:
+                text, tooltip = quiet, tooltip or plain_tooltip(self._status_text)
+        self.status_label.set_full_text(text, tooltip)
 
     # ---- input --------------------------------------------------------------------------
 
@@ -7069,8 +7338,10 @@ class CommandBar(QWidget):
     # ---- state --------------------------------------------------------------------------
 
     def set_running(self, running: bool) -> None:
-        """A request runs: the field is read only and the button reads Cancel (enabled)."""
+        """A request runs: the field is read only and the button reads Cancel (enabled); the hologram
+        bar's send arrow becomes the stop glyph."""
         self._running = bool(running)
+        self.send_button.setEnabled(True)
         self.input.setReadOnly(self._running)
         self.button.setText(CANCEL_BUTTON_TEXT if self._running else ASK_BUTTON_TEXT)
         self.button.set_variant(DENY if self._running else SECONDARY)
@@ -7079,11 +7350,13 @@ class CommandBar(QWidget):
         self.button.setEnabled(True)
         self.field.update()
         self._show_link()
+        self._sync_typing()
 
     def set_cancel_enabled(self, enabled: bool) -> None:
         """While running: False after a Cancel click (it is on its way)."""
         if self._running:
             self.button.setEnabled(enabled)
+            self.send_button.setEnabled(enabled)
 
     def is_running(self) -> bool:
         return self._running
@@ -7104,10 +7377,16 @@ class CommandBar(QWidget):
     def _show_status(self, text: str, tone: str, keep_link: bool) -> None:
         self._tone = tone if tone in _TONE_COLORS else TONE_IDLE
         self._keep_link = bool(keep_link)
-        set_label_color(self.status_label, _TONE_COLORS[self._tone])
+        set_label_color(self.status_label, self._holo_tone_color() if self._holo else _TONE_COLORS[self._tone])
         self._status_text = " ".join((text or "").split())
         self._render_status()
         self._show_link()
+        self.statusChanged.emit(self._status_text, TONE_IDLE if self._hint else self._tone)
+
+    def _holo_tone_color(self) -> QColor:
+        from . import holo
+
+        return QColor({TONE_WARN: holo.AMBER_TX2, TONE_ERROR: holo.ALERT_TX}.get(self._tone, holo.INK_3))
 
     def status(self) -> str:
         return self.status_label.full_text()
@@ -7708,9 +7987,11 @@ class _ConversationEntry(QWidget):
     linkClicked = Signal(str)
 
     def __init__(self, entry_id: int, role: str, stamp: str, text: str, tone: str, sub: str,
-                 link_text: str, link_id: str) -> None:
+                 link_text: str, link_id: str, sub_filter: Callable[[str], str] | None = None) -> None:
         super().__init__()
         self.entry_id = entry_id
+        self._sub = sub
+        self._sub_filter = sub_filter
         self.role = role if role in _ROLE_TEXT else ROLE_JARVIS
         self.stamp = stamp
         self._link_id = link_id
@@ -7726,8 +8007,9 @@ class _ConversationEntry(QWidget):
         self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.text_label.setCursor(Qt.CursorShape.IBeamCursor)
         self.text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        self.sub_label = make_label(sub, mono_font(10, 400, 0.02), TEXT_SUB, wrap=True)
-        self.sub_label.setVisible(bool(sub))
+        shown = self._shown(sub)
+        self.sub_label = make_label(shown, mono_font(10, 400, 0.02), TEXT_SUB, wrap=True)
+        self.sub_label.setVisible(bool(shown))
         self.link_button = HudButton(link_text, LINK)
         self.link_button.setVisible(bool(link_text))
         self.link_button.clicked.connect(lambda: self.linkClicked.emit(self._link_id))
@@ -7747,7 +8029,18 @@ class _ConversationEntry(QWidget):
 
     @property
     def entry(self) -> tuple[str, str, str, str]:
-        return (self.role, self.stamp, self.text_label.text(), self.sub_label.text())
+        """(role, time, text, sub) as composed (the sub line shown may leave readouts out)."""
+        return (self.role, self.stamp, self.text_label.text(), self._sub)
+
+    def _shown(self, sub: str) -> str:
+        return self._sub_filter(sub) if self._sub_filter is not None and sub else sub
+
+    def shown_sub(self) -> str:
+        return self.sub_label.text()
+
+    def set_sub_filter(self, sub_filter: Callable[[str], str] | None) -> None:
+        self._sub_filter = sub_filter
+        self.set_content(sub=self._sub)
 
     def tone(self) -> str:
         return self._tone
@@ -7763,8 +8056,10 @@ class _ConversationEntry(QWidget):
             self._tone = tone
             set_label_color(self.text_label, _TONE_COLORS.get(tone, TEXT_BODY))
         if sub is not None:
-            self.sub_label.setText(sub)
-            self.sub_label.setVisible(bool(sub))
+            self._sub = sub
+            shown = self._shown(sub)
+            self.sub_label.setText(shown)
+            self.sub_label.setVisible(bool(shown))
         if link_id is not None:
             self._link_id = link_id
         if link_text is not None:
@@ -7773,7 +8068,8 @@ class _ConversationEntry(QWidget):
         self._update_accessible()
 
     def _update_accessible(self) -> None:
-        role, stamp, text, sub = self.entry
+        role, stamp, text, _sub = self.entry
+        sub = self.sub_label.text()
         self.setAccessibleName(f"{_ROLE_TEXT[role]} {stamp}: {text}" + (f" ({sub})" if sub else ""))
         # The link says what it acts on ("Prep this one: Project sync at 2:00 PM (work)"): several
         # entries may carry the same link words. The entry's first line only, capped: a brief's "See
@@ -7815,6 +8111,7 @@ class ConversationLog(QScrollArea):
         self._user_scrolled_at = -math.inf
         self._follow = True
         self._anchor = 0     # follow_from: the entry a group is followed from (0: the newest entry alone)
+        self._sub_filter: Callable[[str], str] | None = None
         bar = self.verticalScrollBar()
         bar.actionTriggered.connect(self._on_user_scroll)
         bar.rangeChanged.connect(self._on_range_changed)
@@ -7823,10 +8120,18 @@ class ConversationLog(QScrollArea):
         """The clock of the entries added from now on."""
         self._hour24 = hour24
 
+    def set_sub_filter(self, sub_filter: Callable[[str], str] | None) -> None:
+        """What each entry's sub line shows of its composed text (the hologram's Transcript leaves the
+        technical readouts out: runs, seconds, sizes live in LIVE); ``entries()`` keeps the whole."""
+        self._sub_filter = sub_filter
+        for entry in self._entries:
+            entry.set_sub_filter(sub_filter)
+
     def add(self, role: str, text: str, *, when: datetime | str | None = None, tone: str = TONE_DONE,
             sub: str = "", link_text: str = "", link_id: str = "") -> int:
         stamp = when if isinstance(when, str) else format_time(when or datetime.now(), hour24=self._hour24)
-        entry = _ConversationEntry(self._next_id, role, stamp, text, tone, sub, link_text, link_id)
+        entry = _ConversationEntry(self._next_id, role, stamp, text, tone, sub, link_text, link_id,
+                                   sub_filter=self._sub_filter)
         self._next_id += 1
         entry.linkClicked.connect(self.linkClicked)
         self._layout.insertWidget(self._layout.count() - 1, entry)   # before the stretch

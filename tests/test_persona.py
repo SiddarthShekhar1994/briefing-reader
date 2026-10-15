@@ -869,7 +869,7 @@ class PrepSpeechTests(unittest.TestCase):
         cases = [
             (persona.prep_result_speech(two), "Your brief for the 2 PM meeting is ready, sir."),
             (persona.prep_result_speech(two, in_jarvis_tab=False),
-             "Your brief for the 2 PM meeting is in the JARVIS tab, sir."),
+             "Your brief for the 2 PM meeting is in the Transcript, sir."),
             (persona.prep_result_speech(two.replace(hour=9, minute=30), "", day="tomorrow"),
              "Your brief for tomorrow's 9:30 AM meeting is ready."),
             (persona.prep_result_speech(None), "Your brief for the meeting is ready, sir."),

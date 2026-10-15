@@ -22,7 +22,7 @@ from unittest import mock
 
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import ask_ui, hud, live, ui
+from briefing_reader import ask_ui, hud, live, orb, ui
 from briefing_reader.actions import SOURCE_ASK
 from briefing_reader.ask import planner as ask_planner
 from briefing_reader.google_auth import PROBLEM_SCOPE
@@ -138,6 +138,9 @@ class AskControllerTests(unittest.TestCase):
         self.assertTrue(bar.status().startswith("Planning..."))
         self.assertEqual(c.window.reading.state_label.text(), ui.ASK_PLANNING_LABEL)
         self.assertEqual(c.window.reading.orb.state(), hud.ORB_WORKING)
+        self.assertEqual(c.window.reading.hero.state(), orb.THINKING)       # Home's orb thinks while it plans
+        self.assertEqual(c.window.reading.state_word(), "THINKING")
+        self.assertTrue(c.window.reading.echo.text())                      # the YOU echo under the orb
         gate.set()
         self.assertTrue(wait_for(lambda: not c.ask.busy))
         self.assertEqual((bar.status(), bar.tone()), (SAY, hud.TONE_DONE))
@@ -357,10 +360,13 @@ class AskControllerTests(unittest.TestCase):
     def test_the_idle_hint_folds_away_and_comes_back_with_an_answer(self) -> None:
         app = self.make(plan(lines=(CAL_LINE,)))
         c, bar = app.c, self.bar(app)
-        self.assertTrue(bar.is_folded())                               # only the field: the transcript keeps its room
+        self.assertTrue(bar.is_folded())                               # only the field: the stage keeps its room
         self.assertIn("NEEDS YOUR OK", bar.input.toolTip())
         submit(c, "block two hours on Tuesday")
-        self.assertFalse(bar.is_folded())
+        # Home's pill: what Jarvis is doing is the caption's thinking line (no seconds), not a status line.
+        self.assertTrue(bar.is_folded())
+        self.assertTrue(c.window.reading.captions.thinking())
+        self.assertNotRegex(c.window.reading.captions.thinking(), r"\d+ s$")
         self.assertTrue(wait_for(lambda: not c.ask.busy))
         self.assertFalse(bar.is_folded())                              # the answer shows
         bar.statusDismissed.emit()

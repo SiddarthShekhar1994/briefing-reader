@@ -319,6 +319,8 @@ class FocusTests(PlanAppCase):
 
     def test_the_focus_moves_to_the_next_block_from_the_finished_card(self) -> None:
         first, second = self.ready()
+        self.reading.set_tab(ui.SCREEN_APPROVALS)       # the cards' screen (the hologram's Approvals)
+        settle()
         self.c._plan_focus_guard = ("", 0.0)
         self.approve_from_its_button(first.id)
         self.run_countdown(first.id)
@@ -359,6 +361,8 @@ class FocusTests(PlanAppCase):
 
     def test_a_mouse_click_moves_the_focus_without_a_ring(self) -> None:
         first, second = self.ready()
+        self.reading.set_tab(ui.SCREEN_APPROVALS)       # the cards' screen (the hologram's Approvals)
+        settle()
         focused = QApplication.focusWidget()
         if focused is not None:
             focused.clearFocus()
@@ -419,12 +423,33 @@ class GiveWayTests(PlanAppCase):
         """R33."""
         gate = threading.Event()
         self.make(GatedProcess(plan_run(CHAPTER), gate))
+        self.reading.set_tab(hud.TAB_BRIEFING)         # started while another screen is current: LIVE comes up
         self.type("plan my day")
         self.assertTrue(wait_for(lambda: self.reading.current_tab() == hud.TAB_LIVE))
         gate.set()
         self.assertTrue(wait_for(lambda: not self.c.ask.busy, 10))
         settle()
         self.assertEqual(self.reading.current_tab(), hud.TAB_JARVIS)
+
+    def test_a_plan_from_home_stays_on_home_with_its_chip(self) -> None:
+        """Spec 16.0: typed on Home, Home stays; the plan's list is in the Transcript, which the cyan
+        "Plan ready" chip opens at the plan (the chip then goes)."""
+        gate = threading.Event()
+        self.make(GatedProcess(plan_run(CHAPTER), gate))
+        self.type("plan my day")
+        self.assertEqual(self.reading.current_tab(), hud.TAB_JARVIS)
+        gate.set()
+        self.assertTrue(wait_for(lambda: not self.c.ask.busy, 10))
+        settle()
+        self.assertEqual(self.reading.current_tab(), hud.TAB_JARVIS)
+        reading = self.reading
+        reading.captions.clear()                       # the spoken answer's caption has rested
+        settle()
+        self.assertEqual(reading.home_chip(), ui.HOME_PLAN_CHIP)
+        reading.answer_chip.click()
+        settle()
+        self.assertTrue(reading.transcript_drawer.is_open())
+        self.assertNotEqual(reading.home_chip(), ui.HOME_PLAN_CHIP)
 
     def test_not_when_live_was_already_open(self) -> None:
         """R33: the owner was on LIVE before he typed; the answer leaves him there."""
@@ -442,6 +467,7 @@ class GiveWayTests(PlanAppCase):
     def test_not_after_the_owner_changed_tabs(self) -> None:
         gate = threading.Event()
         self.make(GatedProcess(plan_run(CHAPTER), gate))
+        self.reading.set_tab(hud.TAB_BRIEFING)
         self.type("plan my day")
         self.assertTrue(wait_for(lambda: self.reading.current_tab() == hud.TAB_LIVE))
         self.reading.set_tab(hud.TAB_BRIEFING)

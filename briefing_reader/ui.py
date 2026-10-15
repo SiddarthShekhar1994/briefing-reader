@@ -74,6 +74,7 @@ from PySide6.QtCore import (
     QEvent,
     QObject,
     QPoint,
+    QPointF,
     QPropertyAnimation,
     QRect,
     QRectF,
@@ -92,8 +93,10 @@ from PySide6.QtGui import (
     QFontMetricsF,
     QGuiApplication,
     QIcon,
+    QImage,
     QKeySequence,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QShortcut,
@@ -119,8 +122,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import hud
+from . import dock as dock_mod
+from . import holo, home, hud
 from . import live as _live
+from . import orb as orb_mod
 from . import pictures as _pictures
 from .actions import (
     CALENDAR,
@@ -180,7 +185,7 @@ from .ask.modes import (MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_BR
                         ORIGIN_OFFER, ModeInputs, ModeRequest, block_line, todo_facts)
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
-from .config import DEFAULT_ACCOUNT, AgendaConfig, Config
+from .config import CONFIG_FILE_NAME, DEFAULT_ACCOUNT, PROJECT_ROOT, AgendaConfig, Config
 from .executor import (
     DISCONNECT_FAILED_MESSAGE,
     STAGE_SIGNED_IN,
@@ -354,6 +359,7 @@ from .persona import (
     quoted_note,
     research_reply_speech,
     salutation,
+    scrub_for_speech,
     spoken_when,
     with_address,
 )
@@ -844,7 +850,6 @@ _SCROLL_ANCHOR = 0.35          # highlighted block sits this far down the panel
 _MANUAL_SCROLL_HOLD_S = 4.0
 _BULLET = "\u2022 "   # typographic bullet before list entries
 _LIST_PREFIX_RE = re.compile(r"^(?:\d+\.\s|\[[ xX]\]\s)")
-_APPROVALS_MAX_PX = 340        # the cards scroll beyond this, leaving room for the activity log
 _SECTIONS_POPOVER_WIDTH = 300  # the SECTIONS list (the artboard's left-column width)
 _SECTIONS_POPOVER_MIN_PX = 220  # it may reach past the window bottom rather than get smaller
 _ITEM_COLORS = {ITEM_NOTE: hud.AMBER, ITEM_INTRO: hud.TEXT_SOFT, ITEM_OUTRO: hud.TEXT_SOFT,
@@ -960,7 +965,6 @@ class _Tier:
 # Wide (artboard), default 1120 px window, minimum 900 px window, and screens too small for that.
 _TIERS = (_Tier(1320, 300, 372, 168), _Tier(1040, 260, 340, 168), _Tier(860, 230, 300, 112),
           _Tier(0, 190, 250, 96))
-_COMPACT_BAR_BELOW = 570   # a reading view shorter than this (a window under ~640 px) gets the compact bar
 # A reading view shorter than this (a window under ~580 px; with Ask's command bar, add its height)
 # gets a smaller orb, a 2-line spoken line and a tighter panel strip: room for the JARVIS / BRIEFING tabs.
 _SHORT_VIEW_BELOW = 520
@@ -983,13 +987,56 @@ DOCK_TEXT = "Dock"
 # The strip's caption per tab: (in full, where the whole does not fit).
 _CAPTIONS = {hud.TAB_LIVE: (LIVE_CAPTION, LIVE_CAPTION_SHORT), hud.TAB_MEMORY: (MEMORY_CAPTION, MEMORY_CAPTION_SHORT)}
 DOCK_TIP = "Put LIVE back in the main window"
+# The hologram's screens (HOLOGRAM_SPEC 11.1; round 1): Home and the panel pages keep the old tab numbers.
+SCREEN_HOME = hud.TAB_JARVIS
+SCREEN_BRIEFING = hud.TAB_BRIEFING
+SCREEN_LIVE = hud.TAB_LIVE
+SCREEN_MEMORY = hud.TAB_MEMORY
+SCREEN_APPROVALS = 4
+SCREEN_FOLLOWUPS = 5
+SCREEN_SETTINGS = 6
+SCREENS = (SCREEN_HOME, SCREEN_BRIEFING, SCREEN_LIVE, SCREEN_MEMORY, SCREEN_APPROVALS, SCREEN_FOLLOWUPS,
+           SCREEN_SETTINGS)
+_SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING, SCREEN_LIVE: dock_mod.LIVE,
+                 SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
+                 SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS}
+_SLOT_SCREENS = {slot: screen for screen, slot in _SCREEN_SLOTS.items()}
+_PANEL_SCREENS = (SCREEN_BRIEFING, SCREEN_LIVE, SCREEN_MEMORY)     # the transcript panel moves between them
+_SCREEN_MARGINS = (16, 4, 16, 14)
+_APPROVALS_SCREEN_PX = 680          # the NEEDS YOUR OK column on the Approvals screen (round 1: current look)
+_LIST_HEIGHT_MAX = 100_000          # ... whose cards take the screen's whole height
+HOME_BRIEFING_CHIP = "Briefing ready"
+HOME_PLAN_CHIP = "Plan ready"        # cyan: the plan just made is in the Transcript (its blocks on Approvals)
+HOME_BRIEF_CHIP = "Brief ready"      # cyan: the meeting brief just made is in the Transcript
+DAY_VIEW_TITLE = "Day view"
+TRANSCRIPT_TITLE = "Transcript"
+# What the hero orb shows for the old activity states (spec 12.6).
+_ORB_BASE = {hud.ORB_SPEAKING: orb_mod.SPEAKING, hud.ORB_WORKING: orb_mod.THINKING,
+             hud.ORB_LISTENING: orb_mod.LISTENING, hud.ORB_WAITING: orb_mod.WAITING}
+PAUSED_WORD = "PAUSED"
+
+
+def needs_ok_chip(count: int) -> str:
+    """The amber Home chip: "1 needs your OK" / "3 need your OK"."""
+    return f"{count} needs your OK" if count == 1 else f"{count} need your OK"
 SHOW_WINDOW_TEXT = "Show window"
 BRING_BACK_TEXT = "Bring it back here"
 SEE_STEPS_TEXT = "See every step"                    # the link under an Ask's answer in the conversation
 
 
 class ReadingView(QWidget):
-    """The assistant screen (the reading screen of older versions).
+    """The assistant screen (the reading screen of older versions), in the hologram's round 1 layout.
+
+    HOLOGRAM_SPEC 11 / 16.0: ``dock`` (the Dock, left edge) opens the screens, ``header``
+    (home.HoloHeader: wordmark, state word, the clock that opens the Day view, mute, minimize, close)
+    sits over them. Screens (``set_tab(index)``, ``current_tab()``, ``tabChanged``; Ctrl+1..6, Ctrl+,):
+    Home (SCREEN_HOME = hud.TAB_JARVIS: ``stage`` with the ``hero`` orb, ``echo``, ``captions``, one
+    quiet chip, the command bar, the Transcript drawer holding ``conversation``), Briefing (STATUS and
+    the orb row, the controls and the panel with the transcript, as before), Approvals (NEEDS YOUR OK),
+    Live (the panel's LIVE page and ACTIVITY), Memory and Follow-ups (the bundle) and Settings. The
+    transcript panel moves to the panel screen that shows; the agenda panel lives in the Day view's
+    drawer (TODAY / DEADLINES) or on the Follow-ups screen (FOLLOW-UPS). Round 2 restyles the screens
+    other than Home; what follows describes them as they were.
 
     Left: compact STATUS telemetry, then one panel with the TODAY / TOMORROW
     agenda and the DEADLINES list (its Connect link emits
@@ -1023,6 +1070,7 @@ class ReadingView(QWidget):
     openSource = Signal(str)     # a card's Open (tools row): the action id, never the URL
     copyText = Signal(str)       # a card's Copy (tools row): the action id
     undoAction = Signal(str)     # a card's Undo during its countdown: the action id
+    countdownUndo = Signal()     # the header's Undo (the running countdown, its card out of sight)
     editAction = Signal(str)     # a card's Edit (tools row): the action id
     signInAccount = Signal(str)  # a card's Sign in (tools row): the action id
     connectCalendar = Signal()
@@ -1032,6 +1080,8 @@ class ReadingView(QWidget):
     liveClear = Signal()         # the LIVE page's Clear
     liveShowWindow = Signal()    # "Show window" (raise the pop-out)
     liveLink = Signal(str)       # a result link or an internal link id in the LIVE log
+    openConfig = Signal()        # Settings: Open config.toml
+    openDataFolder = Signal()    # Settings: Open the data folder
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1055,6 +1105,7 @@ class ReadingView(QWidget):
         self._make_center_column()
         self._make_sections_popover()
         self._make_side_column()
+        self._make_hologram()
         self._scroll_animation = QPropertyAnimation(self.text.verticalScrollBar(), b"value", self)
         self._scroll_animation.setDuration(220)
         self._scroll_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -1064,13 +1115,15 @@ class ReadingView(QWidget):
         shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         shortcut.setAutoRepeat(False)   # holding Space must not toggle over and over
         shortcut.activated.connect(lambda: self.playPause.emit())
-        for keys, index in (("Ctrl+1", hud.TAB_JARVIS), ("Ctrl+2", hud.TAB_BRIEFING), ("Ctrl+3", hud.TAB_LIVE),
-                            ("Ctrl+4", hud.TAB_MEMORY)):
-            tab_shortcut = QShortcut(QKeySequence(keys), self)
-            tab_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-            tab_shortcut.activated.connect(lambda index=index: self.set_tab(index))
+        # The Dock's Ctrl+1..6 and Ctrl+, (HOLOGRAM_SPEC 11.1; the old tabs were Ctrl+1..4), and Ctrl+Space:
+        # Home with the command bar focused (the owner's own key, so the focus may move).
+        self._shortcuts = self.dock.install_shortcuts(self)
+        ask = QShortcut(QKeySequence("Ctrl+Space"), self)
+        ask.setContext(Qt.ShortcutContext.WindowShortcut)
+        ask.activated.connect(self.focus_command_bar)
+        self._shortcuts.append(ask)
         self._build_layout()
-        self._show_tab_page(self.tabs.current())
+        self._show_screen(SCREEN_HOME)
 
     # ---- construction ----------------------------------------------------
 
@@ -1121,19 +1174,21 @@ class ReadingView(QWidget):
         self.transcript_panel.strip.installEventFilter(self)   # and the JARVIS caption
         self._step_meter = hud.StepStrip(self)                # measures chips, never shown
         self._step_meter.setVisible(False)
-        # Ask Jarvis's command bar (between the orb row and the controls); shown only while
-        # [ask] is enabled (set_ask_available).
+        # Ask Jarvis's command bar: Home's pill at the bottom of the stage (HOLOGRAM_SPEC 11.3), shown
+        # only while [ask] is enabled (set_ask_available).
         self.command_bar = hud.CommandBar()
+        self.command_bar.set_holo(True)
+        self.command_bar.setMaximumWidth(holo.COMMAND_MAX_WIDTH + 2 * 4)
         self._command_holder = QWidget()
-        holder = QVBoxLayout(self._command_holder)
-        holder.setContentsMargins(14, 10, 14, 0)
+        holder = QHBoxLayout(self._command_holder)
+        holder.setContentsMargins(0, 0, 0, 0)
         holder.setSpacing(0)
-        holder.addWidget(self.command_bar)
+        holder.addStretch(1)
+        holder.addWidget(self.command_bar, 1000)       # up to its maximum width, centred
+        holder.addStretch(1)
         self._command_holder.setVisible(False)
-        # The JARVIS / BRIEFING tabs above the centre panel, the conversation (JARVIS) and the
-        # strip's caption on the JARVIS page (where the step chips and SECTIONS are hidden).
-        self.tabs = hud.TabStrip(live=True, memory=True)
-        self.tabs.currentChanged.connect(self._on_tab_changed)
+        # The conversation: Home's Transcript drawer. The panel's strip caption names the LIVE and
+        # MEMORY pages (where the step chips and SECTIONS are hidden).
         self.conversation = hud.ConversationLog()
         self.strip_caption = _label(_caps(hud.mono_font(11, 400, 0.12)), hud.TEXT_DIM, name="stripCaption")
         self.strip_caption.setText(STRIP_CAPTION)
@@ -1221,32 +1276,400 @@ class ReadingView(QWidget):
     def _make_side_column(self) -> None:
         self.approvals_panel = hud.ChamferPanel("Needs your OK", "0 pending", variant=hud.PANEL_AMBER)
         _caps_meta(self.approvals_panel)   # "2 PENDING", as on the artboard
-        self.approvals = hud.ActionList(max_height=_APPROVALS_MAX_PX)
-        self.approvals_panel.body_layout.addWidget(self.approvals)
+        self.approvals = hud.ActionList(max_height=_LIST_HEIGHT_MAX)
+        self.approvals_panel.body_layout.addWidget(self.approvals, 1)
         self.activity_panel = hud.ChamferPanel("Activity", "live", border_alpha=0.18, spacing=8)
         self.activity = hud.ActivityLog()
         self.activity_panel.body_layout.addWidget(self.activity, 1)
 
+    def _make_hologram(self) -> None:
+        """Round 1 of the hologram (HOLOGRAM_SPEC 11, 14, 16.0): the Dock, the header, Home's stage,
+        echo, captions and chips, and the Settings page."""
+        self._screen = -1
+        self._panel_tab = hud.TAB_BRIEFING     # the page the transcript panel shows
+        self._panel_slot: QVBoxLayout | None = None
+        self._agenda_slot: QVBoxLayout | None = None
+        self._activity = hud.ORB_WORKING
+        self._typing = False
+        self._pending = 0
+        self._offers = 0
+        self._muted_look = False
+        self._offline_voice = False
+        self._paused = False
+        self._waiting = False
+        self._new_briefing = False
+        self._offer: tuple[str, int, str] = ("", 0, "")     # an open offer's (link text, entry id, question)
+        self._answer: tuple[str, int] = ("", 0)             # the answer just given: (chip text, entry id)
+        self._memory_unread = False
+        self._live_activity = ""
+        self._live_state = hud.LIVE_IDLE
+        self.dock = dock_mod.Dock()
+        self.dock.set_slot_visible(dock_mod.MEMORY, False)       # the productivity bundle shows them
+        self.dock.set_slot_visible(dock_mod.FOLLOWUPS, False)
+        self.dock.slotActivated.connect(self._on_dock_slot)
+        self.header = home.HoloHeader()
+        self.header.clockClicked.connect(self.open_day_view)
+        self.header.undoClicked.connect(self.countdownUndo)
+        self._countdown_view: tuple[str, float] | None = None   # (word, deadline) of a running countdown
+        self.stage = home.HomeStage()
+        self.hero = self.stage.hero
+        self.stage.transcript_button.clicked.connect(self.open_transcript)
+        self.echo = home.EchoPill()
+        _retain_size(self.echo)
+        self.echo.hide()
+        self.captions = home.CaptionView()
+        self.captions.setFixedHeight(2 * holo.line_height("caption") + 4)
+        self.captions.stateChanged.connect(self._on_caption_state)
+        self.briefing_chip = holo.ActionChip(HOME_BRIEFING_CHIP, holo.CHIP_CYAN, ping=True)
+        self.briefing_chip.clicked.connect(lambda: self.set_tab(SCREEN_BRIEFING))
+        self.approvals_chip = holo.ActionChip(needs_ok_chip(1), holo.CHIP_AMBER)
+        self.approvals_chip.clicked.connect(lambda: self.set_tab(SCREEN_APPROVALS))
+        # An open offer (amber: a decision waits) and the answer just given (cyan): each opens the
+        # Transcript at its entry; the offer itself runs only from its link there (the owner's click).
+        self.offer_chip = holo.ActionChip("", holo.CHIP_AMBER)
+        self.offer_chip.clicked.connect(lambda: self.open_transcript(self._offer[1]))
+        self.answer_chip = holo.ActionChip("", holo.CHIP_CYAN)
+        self.answer_chip.clicked.connect(lambda: self.open_transcript(self._answer[1]))
+        for chip in self._home_chips():
+            chip.hide()
+        self.settings_page = home.SettingsPage()
+        self.settings_page.openConfig.connect(self.openConfig)
+        self.settings_page.openDataFolder.connect(self.openDataFolder)
+        self.command_bar.statusChanged.connect(self._on_bar_status)
+        self.command_bar.typingChanged.connect(self._on_typing)
+        self.conversation.set_sub_filter(home.quiet_sub)   # the Transcript is on Home: no readouts there
+
+    def _build_home(self) -> QWidget:
+        """Home: the stage, the YOU echo, the caption band, one quiet chip and the command bar."""
+        page = QWidget()
+        column = QVBoxLayout(page)
+        column.setContentsMargins(holo.GUTTER_SIDE, 0, holo.GUTTER_SIDE, 12)
+        column.setSpacing(6)
+        column.addWidget(self.stage, 1)
+        column.addWidget(self.echo, 0, Qt.AlignmentFlag.AlignHCenter)
+        column.addWidget(self.captions)
+        self._chip_row = QWidget()
+        chips = QHBoxLayout(self._chip_row)
+        chips.setContentsMargins(0, 0, 0, 0)
+        chips.addStretch(1)
+        for chip in self._home_chips():
+            chips.addWidget(chip)
+        chips.addStretch(1)
+        self._chip_row.setFixedHeight(holo.ActionChip.HEIGHT + 2 * holo.ActionChip.MARGIN)
+        column.addWidget(self._chip_row)
+        column.addWidget(self._command_holder)
+        return page
+
     def _build_layout(self) -> None:
+        # Briefing (round 1: its current look): STATUS beside the orb row, the controls and the panel.
         self._left = QWidget()
         left = QVBoxLayout(self._left)
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(12)
         left.addWidget(self.status_panel)
-        left.addWidget(self.agenda_panel, 1)
+        left.addStretch(1)
+        self.briefing_screen = QWidget()
+        row = QHBoxLayout(self.briefing_screen)
+        row.setContentsMargins(*_SCREEN_MARGINS)
+        row.setSpacing(14)
+        row.addWidget(self._left)
+        row.addWidget(self._build_center(), 1)
+        # Approvals: the NEEDS YOUR OK cards, centred and as tall as the screen.
+        self.approvals_screen = QWidget()
+        row = QHBoxLayout(self.approvals_screen)
+        row.setContentsMargins(*_SCREEN_MARGINS)
+        row.addStretch(1)
+        self.approvals_panel.setMaximumWidth(_APPROVALS_SCREEN_PX)
+        row.addWidget(self.approvals_panel, 6)
+        row.addStretch(1)
+        # Live: the panel's LIVE page and, at the right, ACTIVITY (its rows stay visible here).
         self._right = QWidget()
         right = QVBoxLayout(self._right)
         right.setContentsMargins(0, 0, 0, 0)
-        right.setSpacing(12)
-        right.addWidget(self.approvals_panel)
         right.addWidget(self.activity_panel, 1)
+        self.live_screen = QWidget()
+        row = QHBoxLayout(self.live_screen)
+        row.setContentsMargins(*_SCREEN_MARGINS)
+        row.setSpacing(14)
+        self._live_slot = QVBoxLayout()
+        self._live_slot.setContentsMargins(0, 0, 0, 0)
+        row.addLayout(self._live_slot, 1)
+        row.addWidget(self._right)
+        self.memory_screen = QWidget()
+        self._memory_slot = QVBoxLayout(self.memory_screen)
+        self._memory_slot.setContentsMargins(*_SCREEN_MARGINS)
+        self.followups_screen = QWidget()
+        self._followups_slot = QVBoxLayout(self.followups_screen)
+        self._followups_slot.setContentsMargins(*_SCREEN_MARGINS)
+        self.home_screen = self._build_home()
+        self._screens = _PageSwitch()
+        for screen in (self.home_screen, self.briefing_screen, self.live_screen, self.memory_screen,
+                       self.approvals_screen, self.followups_screen, self.settings_page):
+            self._screens.addWidget(screen)                   # in SCREENS order
+        self._main = QWidget()
+        column = QVBoxLayout(self._main)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self.header)
+        column.addWidget(self._screens, 1)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(14)
-        layout.addWidget(self._left)
-        layout.addWidget(self._build_center(), 1)
-        layout.addWidget(self._right)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.dock)
+        layout.addWidget(self._main, 1)
+        self.transcript_drawer = home.Drawer(TRANSCRIPT_TITLE, self._main)
+        self.transcript_drawer.body_layout.addWidget(self.conversation, 1)
+        self.transcript_drawer.closed.connect(self._sync_echo)
+        self.day_drawer = home.Drawer(DAY_VIEW_TITLE, self._main)
+        self._place_agenda(self.day_drawer.body_layout, hud.AGENDA_DAY)
         self._apply_tier(READING_SIZE.width())
+
+    # ---- screens and the Dock (HOLOGRAM_SPEC 11.1) ----------------------------------------------------
+
+    def _on_dock_slot(self, key: str) -> None:
+        self.set_tab(_SLOT_SCREENS.get(key, SCREEN_HOME))
+
+    def _show_screen(self, index: int) -> None:
+        if index == self._screen:
+            return
+        self.transcript_drawer.close_drawer()
+        self.day_drawer.close_drawer()
+        self._screen = index
+        if index in _PANEL_SCREENS:
+            self._place_panel(index)
+        elif index == SCREEN_FOLLOWUPS:
+            self._place_agenda(self._followups_slot, hud.AGENDA_FOLLOWUPS)
+        self._screens.setCurrentWidget(self._screens.widget(index))
+        if index == SCREEN_MEMORY:
+            self._set_memory_unread(False)
+        self._sync_header_countdown()
+        if index in _PANEL_SCREENS:
+            self._show_tab_page(index)
+        else:
+            self.sections_popover.hide()
+        self.tabChanged.emit(index)
+
+    def set_countdown(self, word: str = "", deadline: float | None = None) -> None:
+        """The running undo countdown ("SENDING" / "ADDING", its monotonic deadline; None: none runs)."""
+        self._countdown_view = (word or "SENDING", deadline) if deadline is not None else None
+        self._sync_header_countdown()
+
+    def _sync_header_countdown(self) -> None:
+        """A running undo countdown shows in the header with its Undo on every screen but Approvals
+        (there the card's own strip has it): leaving the card never leaves the Undo out of sight."""
+        view = self._countdown_view
+        if view is None or self._screen == SCREEN_APPROVALS:
+            self.header.set_countdown()
+        else:
+            self.header.set_countdown(view[0], view[1])
+
+    def _place_panel(self, index: int) -> None:
+        """The transcript panel goes to the panel screen that shows (Briefing, Live or Memory)."""
+        slot = {SCREEN_BRIEFING: self._briefing_slot, SCREEN_LIVE: self._live_slot,
+                SCREEN_MEMORY: self._memory_slot}[index]
+        if slot is not self._panel_slot:
+            if self._panel_slot is not None:
+                self._panel_slot.removeWidget(self.transcript_panel)
+            slot.addWidget(self.transcript_panel, 1)
+            self._panel_slot = slot
+            self.transcript_panel.setVisible(True)
+
+    def _place_agenda(self, slot: QVBoxLayout, mode: str) -> None:
+        """The agenda panel: in the Day view's drawer (TODAY / DEADLINES) or on Follow-ups."""
+        if slot is not self._agenda_slot:
+            if self._agenda_slot is not None:
+                self._agenda_slot.removeWidget(self.agenda_panel)
+            slot.addWidget(self.agenda_panel, 1)
+            self._agenda_slot = slot
+            self.agenda_panel.setVisible(True)
+        self.agenda_panel.set_mode(mode)
+
+    def screen_widget(self, index: int) -> QWidget | None:
+        return self._screens.widget(index)
+
+    def focus_command_bar(self) -> None:
+        """Ctrl+Space: Home with the command bar focused (while Ask is on)."""
+        if not self.ask_available():
+            return
+        self.set_tab(SCREEN_HOME)
+        self.command_bar.focus_input()
+
+    def open_transcript(self, entry_id: int = 0) -> None:
+        """The Transcript drawer on Home (the owner's click): the whole conversation, from ``entry_id``
+        when it is given (an offer's or an answer's chip) and still there, else at the newest entry."""
+        self.set_tab(SCREEN_HOME)
+        self.stage.set_unread(False)
+        self.transcript_drawer.open_drawer(self.stage.transcript_button)
+        if entry_id and self.conversation.entry(entry_id) is not None:
+            self.conversation.follow_from(entry_id)
+        self.conversation.scroll_to_newest()
+        if self._answer[0]:
+            self._answer = ("", 0)              # seen: the answer's chip goes
+            self._sync_chip()
+
+    def open_day_view(self) -> None:
+        """The Day view (the header clock): TODAY / DEADLINES in a drawer over the current screen."""
+        if self._screen == SCREEN_FOLLOWUPS:
+            self.set_tab(SCREEN_HOME)
+        self._place_agenda(self.day_drawer.body_layout, hud.AGENDA_DAY)
+        self.transcript_drawer.close_drawer()
+        self.day_drawer.open_drawer(self.header.clock)
+
+    # ---- Home: the look, captions, chips (HOLOGRAM_SPEC 12.6, 14, 16.0) -------------------------------
+
+    def look(self) -> tuple[str, bool, bool]:
+        """(base, muted, offline) of the hero orb, from the app's states (priority speaking > thinking >
+        listening > needs you > waiting > idle)."""
+        base = _ORB_BASE.get(self._activity, orb_mod.IDLE)
+        if base not in (orb_mod.SPEAKING, orb_mod.THINKING):
+            if self._typing:
+                base = orb_mod.LISTENING
+            elif self._pending > 0 or self._offers > 0:
+                base = orb_mod.NEEDS
+            elif self._waiting or base == orb_mod.WAITING:
+                base = orb_mod.WAITING
+            else:
+                base = orb_mod.IDLE
+        return base, self._muted_look, self._offline_voice
+
+    def _sync_look(self) -> None:
+        base, muted, offline = self.look()
+        self.hero.set_look(base, muted=muted, offline=offline)
+        self.dock.set_orb_look(base, muted=muted, offline=offline)
+        word = orb_mod.state_word(base, muted, offline)
+        if self._paused and base == orb_mod.IDLE and not muted:
+            word = PAUSED_WORD
+        if word == orb_mod.READOUTS[orb_mod.NEEDS]:
+            tone = home.TONE_AMBER
+        elif muted or word in (PAUSED_WORD, orb_mod.READOUTS[orb_mod.OFFLINE]):
+            tone = home.TONE_STEEL
+        else:
+            tone = home.TONE_HOLO
+        self.header.set_state_word(word, tone)
+
+    def state_word(self) -> str:
+        return self.header.state_word()
+
+    def set_muted_look(self, muted: bool) -> None:
+        """Jarvis's own voice is muted: the orb's modifier and the header's MUTED."""
+        self._muted_look = bool(muted)
+        self.header.set_muted(self._muted_look)
+        self._sync_look()
+
+    def set_offline_voice(self, offline: bool) -> None:
+        """The Windows voice speaks (the online one is out of reach): OFFLINE VOICE."""
+        if bool(offline) != self._offline_voice:
+            self._offline_voice = bool(offline)
+            self._sync_look()
+
+    def set_briefing_paused(self, paused: bool) -> None:
+        if bool(paused) != self._paused:
+            self._paused = bool(paused)
+            self._sync_look()
+
+    def set_waiting(self, waiting: bool) -> None:
+        """A scheduled run waits for its briefing: the orb's waiting state."""
+        if bool(waiting) != self._waiting:
+            self._waiting = bool(waiting)
+            self._sync_look()
+
+    def set_offers_waiting(self, count: int, *, link: str = "", entry: int = 0, question: str = "") -> None:
+        """Offers on screen that wait for the owner's answer (they count as needs you). The newest one's
+        link text and entry make Home's amber chip (it opens the Transcript there) and its spoken
+        question stays as the caption's resting line until it is answered or expires (spec 14.5)."""
+        count = max(0, int(count))
+        self._offer = (link, int(entry), question) if count else ("", 0, "")
+        self.captions.set_question(self._offer[2])
+        if count != self._offers:
+            self._offers = count
+            self._sync_look()
+        self._sync_chip()
+
+    def set_answer_chip(self, text: str, entry: int) -> None:
+        """The answer just given lives in the Transcript (a plan, a brief): Home's cyan chip opens it
+        there until the drawer is opened or the next request is made (none while the drawer is open:
+        the answer is in view)."""
+        shown = bool(text and entry) and not self.transcript_drawer.is_open()
+        self._answer = (text, int(entry)) if shown else ("", 0)
+        self._sync_chip()
+
+    def offer_question(self) -> str:
+        return self._offer[2]
+
+    def _on_typing(self, typing: bool) -> None:
+        self._typing = bool(typing)
+        self._sync_look()
+
+    def _on_bar_status(self, text: str, tone: str) -> None:
+        """What Jarvis is doing for a request becomes the caption's thinking line (no seconds)."""
+        self.captions.set_thinking(text if tone == hud.TONE_WORKING else "")
+        self._sync_echo()
+
+    def set_greeting(self, text: str) -> None:
+        """Home's resting line (spec 14.10: the greeting, at most 6 words); an open offer's question
+        shows instead while it waits."""
+        self.captions.set_resting(text)
+
+    def say_caption(self, text: str, *, spoken: bool = True, duration_ms: int = 0) -> None:
+        """Jarvis's words as Home's caption (what is spoken, never an email or a card body);
+        ``duration_ms``: how long the audio says them (a briefing item), which paces the words."""
+        self.captions.say(text, spoken=spoken, duration_ms=duration_ms)
+        self._sync_echo()
+
+    def end_caption(self) -> None:
+        """The voice stopped: the last page holds, then the band rests."""
+        self.captions.finish()
+
+    def show_request(self, text: str) -> None:
+        """The owner's request just made, as the YOU echo under the orb (until the band rests again);
+        the last answer's chip goes."""
+        self.echo.set_text(text)
+        self._answer = ("", 0)
+        self._sync_echo()
+        self._sync_chip()
+
+    def _on_caption_state(self, state: str) -> None:
+        if state == home.RESTING:
+            self.echo.set_text("")            # handled: the echo goes with the last caption
+        self._sync_echo()
+        self._sync_chip()
+
+    def _sync_echo(self) -> None:
+        self.echo.setVisible(bool(self.echo.text()))
+
+    def _home_chips(self) -> tuple[holo.ActionChip, ...]:
+        return (self.offer_chip, self.answer_chip, self.briefing_chip, self.approvals_chip)
+
+    def _sync_chip(self) -> None:
+        """At most one quiet chip at rest, in this order: an open offer (amber, its link's words: the
+        only place it shows besides the Transcript, and it expires), the answer just given (cyan: Plan
+        ready / Brief ready), Briefing ready (cyan) before N need your OK (amber); the Dock carries
+        the last two as well."""
+        resting = self.captions.state() == home.RESTING
+        link, _entry, _question = self._offer
+        offer = resting and self._offers > 0 and bool(link)
+        answer = resting and not offer and bool(self._answer[0])
+        briefing = resting and not (offer or answer) and self._new_briefing
+        approvals = resting and not (offer or answer or briefing) and self._pending > 0
+        for chip, shown, text in ((self.offer_chip, offer, link), (self.answer_chip, answer, self._answer[0]),
+                                  (self.approvals_chip, approvals, needs_ok_chip(self._pending))):
+            if shown and chip.text() != text:
+                chip.setText(text)
+                chip.updateGeometry()
+        was_shown = not self.briefing_chip.isHidden()
+        self.offer_chip.setVisible(offer)
+        self.answer_chip.setVisible(answer)
+        self.briefing_chip.setVisible(briefing)
+        self.approvals_chip.setVisible(approvals)
+        if briefing and not was_shown:
+            self.briefing_chip.start_ping()
+
+    def home_chip(self) -> str:
+        """The chip Home shows ("" when none)."""
+        for chip in self._home_chips():
+            if not chip.isHidden():
+                return chip.text()
+        return ""
 
     def _build_center(self) -> QWidget:
         voice = QVBoxLayout()
@@ -1315,26 +1738,20 @@ class ReadingView(QWidget):
         briefing.addWidget(doc_header)
         briefing.addWidget(self.text, 1)
         self._pages = _PageSwitch()
-        self._pages.addWidget(self.conversation)      # hud.TAB_JARVIS
+        self._pages.addWidget(QWidget())              # hud.TAB_JARVIS: Home (the conversation is its drawer)
         self._pages.addWidget(self.briefing_page)     # hud.TAB_BRIEFING
         self._pages.addWidget(self.live_page)         # hud.TAB_LIVE
         self._pages.addWidget(self.memory_page)       # hud.TAB_MEMORY
         self.transcript_panel.body_layout.addWidget(self._pages, 1)
-        # Folder tabs: left-aligned right above the panel, the current one's underline on its edge.
-        tab_row = QWidget()
-        tab_layout = QHBoxLayout(tab_row)
-        tab_layout.setContentsMargins(14, 0, 14, 0)
-        tab_layout.setSpacing(0)
-        tab_layout.addWidget(self.tabs, 1)
         center = QWidget()
         column = QVBoxLayout(center)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
         column.addWidget(top)
-        column.addWidget(self._command_holder)
         column.addWidget(controls)
-        column.addWidget(tab_row)
-        column.addWidget(self.transcript_panel, 1)
+        self._briefing_slot = QVBoxLayout()
+        self._briefing_slot.setContentsMargins(0, 0, 0, 0)
+        column.addLayout(self._briefing_slot, 1)
         return center
 
     def _apply_tier(self, width: int) -> None:
@@ -1344,19 +1761,20 @@ class ReadingView(QWidget):
         self._tier = tier
         self._left.setFixedWidth(tier.left)
         self._right.setFixedWidth(tier.right)
-        self._fit_short(self.height() if self.height() > 0 else READING_SIZE.height())
+        self._fit_short(self._screens_height(self.height() if self.height() > 0 else READING_SIZE.height()))
+
+    @staticmethod
+    def _screens_height(view_height: int) -> int:
+        return view_height - home.HEADER_HEIGHT
 
     def _fit_short(self, height: int) -> None:
-        """The orb at its tier's size, the spoken line in up to 3 lines and the strip's padding; a
-        very short view (under about 520 px, plus the command bar's height when Ask is on: the
-        900 x 600 window with Ask, or a small screen's window) gets a smaller orb, 2 lines and a
-        tighter strip, so the controls and the tab row above the panel keep their room."""
+        """The Briefing screen's orb at its tier's size, the spoken line in up to 3 lines and the strip's
+        padding; a very short screen area (``height``, under about 520 px: a small screen's window) gets
+        a smaller orb, 2 lines and a tighter strip, so the controls above the panel keep their room."""
         tier = self._tier
         if tier is None:
             return
-        # The command bar (Ask on) takes its own height: such a view counts as short sooner.
-        bar = self._command_holder.sizeHint().height() if self.ask_available() else 0
-        short = height < _SHORT_VIEW_BELOW + bar
+        short = height < _SHORT_VIEW_BELOW
         orb = min(tier.orb, _SHORT_ORB_PX) if short else tier.orb
         if (self.orb.width(), self.orb.height()) != (orb, orb):
             self.orb.setFixedSize(orb, orb)
@@ -1406,37 +1824,47 @@ class ReadingView(QWidget):
     # ---- tabs ----------------------------------------------------------------------
 
     def set_tab(self, index: int) -> None:
-        """Make JARVIS (hud.TAB_JARVIS), BRIEFING (hud.TAB_BRIEFING), LIVE (hud.TAB_LIVE) or MEMORY
-        (hud.TAB_MEMORY), each while it is available, the current tab."""
-        self.tabs.set_current(index)
+        """Open a screen while its Dock slot shows: SCREEN_HOME (hud.TAB_JARVIS), SCREEN_BRIEFING
+        (hud.TAB_BRIEFING), SCREEN_LIVE (hud.TAB_LIVE), SCREEN_MEMORY (hud.TAB_MEMORY), SCREEN_APPROVALS,
+        SCREEN_FOLLOWUPS or SCREEN_SETTINGS."""
+        key = _SCREEN_SLOTS.get(index)
+        if key is None or not self.dock.is_slot_visible(key):
+            return
+        self.dock.set_current(key)
+        self._show_screen(index)
 
     def current_tab(self) -> int:
-        return self.tabs.current()
+        return self._screen
 
     def set_new_briefing(self, new: bool, label: str = "") -> None:
-        """A briefing nobody has viewed yet: the NEW badge on BRIEFING, and ``label`` ("Your AM
-        briefing is ready to view") as the speech line while nothing is being said."""
-        self.tabs.set_badge(new)
+        """A briefing nobody has viewed yet: the Dock's cyan dot on Briefing, Home's "Briefing ready"
+        chip, and ``label`` ("Your AM briefing is ready to view") as the Briefing screen's speech line
+        while nothing is being said."""
+        self._new_briefing = bool(new)
+        self.dock.set_briefing_new(self._new_briefing)
         self._new_label = label if new else ""
         if not self._speech_text:
             self.speech.setText(self._new_label or self._speech_fallback)
+        self._sync_chip()
 
     def is_new_briefing(self) -> bool:
-        return self.tabs.badge()
+        return self._new_briefing
 
     def mark_unread(self) -> None:
-        """Something was added to the conversation: a dot on JARVIS unless it is the current tab."""
-        self.tabs.set_unread(True)
+        """Something was added to the conversation: a cyan dot on Home's Transcript button unless the
+        drawer is open."""
+        if not self.transcript_drawer.is_open():
+            self.stage.set_unread(True)
 
-    def _on_tab_changed(self, index: int) -> None:
-        self._show_tab_page(index)
-        self.tabChanged.emit(index)
+    def unread(self) -> bool:
+        return self.stage.unread()
 
     def _show_tab_page(self, index: int) -> None:
-        """The panel's page for ``index``; on JARVIS, LIVE and MEMORY the strip shows its caption
-        instead of the step chips and SECTIONS (both stay in the strip, hidden); on LIVE the
-        briefing's LIVE marker gives its slot to ``live_status``."""
-        captioned = index in (hud.TAB_JARVIS, hud.TAB_LIVE, hud.TAB_MEMORY)
+        """The panel's page for ``index`` (BRIEFING, LIVE, MEMORY); on LIVE and MEMORY the strip shows
+        its caption instead of the step chips and SECTIONS (both stay in the strip, hidden); on LIVE
+        the briefing's LIVE marker gives its slot to ``live_status``."""
+        self._panel_tab = index
+        captioned = index in (hud.TAB_LIVE, hud.TAB_MEMORY)
         page = self._pages.widget(index)
         if page is not None:
             self._pages.setCurrentWidget(page)
@@ -1455,7 +1883,7 @@ class ReadingView(QWidget):
         """The briefing's LIVE marker on JARVIS / BRIEFING (its space kept while hidden); on the LIVE
         tab it is out of the strip and ``live_status`` shows in its place."""
         marker = self.transcript_panel.live
-        on_live = self.tabs.current() == hud.TAB_LIVE
+        on_live = self._panel_tab == hud.TAB_LIVE
         policy = marker.sizePolicy()
         if policy.retainSizeWhenHidden() == on_live:
             policy.setRetainSizeWhenHidden(not on_live)
@@ -1465,24 +1893,69 @@ class ReadingView(QWidget):
 
     # ---- the LIVE tab --------------------------------------------------------------
 
+    def _set_slot_available(self, slot: str, screen: int, available: bool) -> None:
+        self.dock.set_slot_visible(slot, bool(available))
+        if not available and self._screen == screen:
+            self.set_tab(SCREEN_HOME)
+
     def set_live_available(self, available: bool) -> None:
-        """``[live] enabled``: the LIVE tab and its page (hidden: JARVIS when LIVE was current)."""
-        self.tabs.set_live_visible(available)
+        """``[live] enabled``: the Dock's Live slot and its screen (hidden: Home when Live was current)."""
+        self._set_slot_available(dock_mod.LIVE, SCREEN_LIVE, available)
 
     def live_available(self) -> bool:
-        return self.tabs.live_visible()
+        return self.dock.is_slot_visible(dock_mod.LIVE)
 
     def set_memory_available(self, available: bool) -> None:
-        """The productivity bundle's memory: the MEMORY tab and its page (hidden: JARVIS when MEMORY
-        was current)."""
-        self.tabs.set_memory_visible(available)
+        """The productivity bundle's memory: the Dock's Memory slot and its screen (hidden: Home when
+        Memory was current)."""
+        self._set_slot_available(dock_mod.MEMORY, SCREEN_MEMORY, available)
 
     def memory_available(self) -> bool:
-        return self.tabs.memory_visible()
+        return self.dock.is_slot_visible(dock_mod.MEMORY)
+
+    def set_followups_available(self, available: bool) -> None:
+        """FOLLOW-UPS is on (the bundle): the Dock's Follow-ups slot and its screen."""
+        self._set_slot_available(dock_mod.FOLLOWUPS, SCREEN_FOLLOWUPS, available)
+
+    def followups_available(self) -> bool:
+        return self.dock.is_slot_visible(dock_mod.FOLLOWUPS)
+
+    def set_followups_waiting(self, count: int) -> None:
+        """WAITING ON YOU threads: the Dock's amber count on Follow-ups."""
+        self.dock.set_followups(max(0, int(count)))
 
     def mark_memory_unread(self) -> None:
-        """A note was saved or a suggestion arrived: a dot on MEMORY unless it is the current tab."""
-        self.tabs.set_memory_unread(True)
+        """A note was saved: the Dock's dot on Memory ("Memory, new") unless it is current."""
+        if self._screen != SCREEN_MEMORY:
+            self._set_memory_unread(True)
+
+    def _set_memory_unread(self, unread: bool) -> None:
+        self._memory_unread = bool(unread)
+        self.dock.set_memory_new(self._memory_unread)
+
+    def set_memory_suggestions(self, count: int) -> None:
+        """Suggested notes waiting for Save or Dismiss: the Dock's dot ("Memory, 2 suggestions")."""
+        self.dock.set_memory_suggestions(max(0, int(count)))
+
+    def memory_unread(self) -> bool:
+        return self._memory_unread
+
+    def set_live_activity(self, activity: str) -> None:
+        """The Live slot's dot: hud.ACTIVITY_WORKING while Jarvis works (still; it blinks while a
+        countdown runs); "" or hud.ACTIVITY_UNREAD show none (the Dock has no unread dot)."""
+        self._live_activity = activity or ""
+        self._sync_live_dot()
+
+    def live_activity(self) -> str:
+        return self._live_activity
+
+    def _sync_live_dot(self) -> None:
+        if self._live_activity != hud.ACTIVITY_WORKING:
+            self.dock.set_live_activity(dock_mod.LIVE_IDLE)
+        elif self._live_state == hud.LIVE_COUNTDOWN:
+            self.dock.set_live_activity(dock_mod.LIVE_COUNTDOWN)
+        else:
+            self.dock.set_live_activity(dock_mod.LIVE_WORKING)
 
     def set_live_popped(self, popped: bool) -> None:
         """The pop-out window shows the steps (the page says so, with Show window and Bring it back
@@ -1494,8 +1967,12 @@ class ReadingView(QWidget):
         return self._live_switch.currentWidget() is self.live_away
 
     def live_room(self) -> int:
-        """The height the LIVE tab's log has (the panel's page area, whichever tab is current)."""
-        return self._pages.height()
+        """The height the Live screen's log has (the panel's page area there; estimated from the screen
+        area while the panel is on another screen)."""
+        if self._panel_slot is self._live_slot and self.transcript_panel.isVisible():
+            return self._pages.height()
+        margins = _SCREEN_MARGINS[1] + _SCREEN_MARGINS[3]
+        return max(0, self._screens.height() - margins - self.transcript_panel.strip.sizeHint().height() - 14)
 
     def set_live_summary(self, text: str) -> None:
         """The LIVE summary ("3 tasks - 1 running"): the strip's status tag's tooltip and description."""
@@ -1511,11 +1988,13 @@ class ReadingView(QWidget):
         """The LIVE tab's strip tag (hud.LiveStatus.set_state); the caption beside it fits again."""
         old = self.live_status.sizeHint().width()
         self.live_status.set_state(state, text, since=since, deadline=deadline)
+        self._live_state = state
+        self._sync_live_dot()
         if self.live_status.sizeHint().width() != old:
             self._fit_caption()
 
     def _after_briefing_page_shown(self) -> None:
-        if not shiboken6.isValid(self) or self.tabs.current() != hud.TAB_BRIEFING:
+        if not shiboken6.isValid(self) or self._screen != hud.TAB_BRIEFING:
             return
         self._fit_steps()
         self._apply_highlight(scroll_to=True)
@@ -1542,7 +2021,10 @@ class ReadingView(QWidget):
 
     def set_activity_state(self, state: str, live: bool, label: str | None = None) -> None:
         """Orb and state label (SPEAKING, STANDBY, WORKING, or ``label`` such as PLANNING) and the
-        transcript's LIVE marker."""
+        transcript's LIVE marker; Home's hero orb, the Dock's mini orb and the header's state word
+        follow (``look()``)."""
+        self._activity = state
+        self._sync_look()
         self.orb.set_state(state)
         if state != self.state_label.state() or (label or None) != self._state_text:
             self.state_label.set_state(state, label or None)
@@ -1551,10 +2033,8 @@ class ReadingView(QWidget):
         self._sync_marker()
 
     def set_ask_available(self, available: bool) -> None:
-        """Show Ask Jarvis's command bar ([ask] enabled) or keep it out of the layout."""
+        """Show Ask Jarvis's command bar on Home ([ask] enabled) or keep it out of the layout."""
         self._command_holder.setVisible(available)
-        if self.height() > 0:
-            self._fit_short(self.height())
 
     def ask_available(self) -> bool:
         return not self._command_holder.isHidden()
@@ -1661,7 +2141,7 @@ class ReadingView(QWidget):
         strip = self.transcript_panel.strip
         margins = strip.layout().contentsMargins()
         spacing = strip.layout().spacing()
-        current = self.tabs.current()
+        current = self._panel_tab
         on_live = current == hud.TAB_LIVE
         tag = self.live_status if on_live else self.transcript_panel.live
         full, short = _CAPTIONS.get(current, (STRIP_CAPTION, STRIP_CAPTION_SHORT))
@@ -1686,9 +2166,14 @@ class ReadingView(QWidget):
             self.strip_caption.setVisible(bool(text))
 
     def set_pending(self, pending: int, total: int) -> None:
-        """Pending proposals: the panel's meta and the STATUS bar."""
+        """Pending proposals: the panel's meta, the STATUS bar, the Dock's amber count, Home's chip and
+        the orb's needs you."""
         self.approvals_panel.set_meta(f"{pending} pending")
         self.approvals_bar.set_value(str(pending), pending / total if total else 0.0)
+        self._pending = max(0, int(pending))
+        self.dock.set_approvals(self._pending)
+        self._sync_chip()
+        self._sync_look()
 
     # ---- approval cards ------------------------------------------------------
 
@@ -1789,16 +2274,14 @@ class ReadingView(QWidget):
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         self._apply_tier(event.size().width())
-        self._fit_command_bar(event.size().height())
-        self._fit_short(event.size().height())
+        self._fit_short(self._screens_height(event.size().height()))
         self._apply_highlight(scroll_to=False)   # line wrapping changed
+        QTimer.singleShot(0, self._place_drawers)
 
-    def _fit_command_bar(self, height: int) -> None:
-        """The narrowest tier or a short screen gets the compact bar (one status line), so the
-        controls and the transcript below keep their room."""
-        compact = (self._tier is not None and self._tier.orb < _TIERS[2].orb) or height < _COMPACT_BAR_BELOW
-        self.command_bar.set_compact(compact)
-        self._command_holder.layout().setContentsMargins(14, 6 if compact else 10, 14, 0)
+    def _place_drawers(self) -> None:
+        if shiboken6.isValid(self):
+            self.transcript_drawer.place()
+            self.day_drawer.place()
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
@@ -1807,6 +2290,14 @@ class ReadingView(QWidget):
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().hideEvent(event)
         self.sections_popover.hide()
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() == Qt.Key.Key_Escape and (self.transcript_drawer.is_open() or self.day_drawer.is_open()):
+            event.accept()
+            self.transcript_drawer.close_drawer()
+            self.day_drawer.close_drawer()
+            return
+        super().keyPressEvent(event)
 
     def _auto_scroll(self, block: QTextBlock) -> None:
         if time.monotonic() - self._user_scrolled_at < _MANUAL_SCROLL_HOLD_S:
@@ -1826,6 +2317,13 @@ class ReadingView(QWidget):
         # actionTriggered fires for wheel, drag, clicks and keys, never for setValue().
         self._user_scrolled_at = time.monotonic()
         self._scroll_animation.stop()
+
+
+def _retain_size(widget: QWidget) -> None:
+    """A hidden ``widget`` keeps its room (a row that comes and goes never moves the rest)."""
+    policy = widget.sizePolicy()
+    policy.setRetainSizeWhenHidden(True)
+    widget.setSizePolicy(policy)
 
 
 def _item_format(item: ScriptItem, dim: bool, first: bool, style: _TranscriptStyle,
@@ -1911,7 +2409,8 @@ READING_SIZE = QSize(1120, 700)
 READING_MIN_SIZE = QSize(900, 600)
 SCREEN_MARGIN = 24
 _PROMPT_MARGINS = (10, 4, 10, 10)
-_READING_MARGINS = (12, 4, 12, 12)
+_READING_MARGINS = (6, 4, 6, 6)     # the hologram: the Dock near the edge; 6 px stay the resize grab zone
+_WM_SETTINGCHANGE = 0x001A          # Windows: "Show animations in Windows" (reduced motion) may have changed
 MAIN_WINDOW_TITLE = "Jarvis"                  # the taskbar button, Alt+Tab and the window's accessible name
 HEADER_SUBTITLE = f"assistant {DOT} desktop"  # next to the JARVIS wordmark (the LIVE pop-out has its own)
 
@@ -1971,6 +2470,12 @@ class BriefingWindow(hud.HudWindowFrame):
     Alt+F4 go through ``closeRequested`` so the controller decides what
     closing means. Its minimize button minimizes the window to its taskbar
     button; ``visibilityChanged`` tells the controller.
+
+    The reading view (the hologram, round 1) brings its own header (``reading.header``); the frame's
+    ``header`` then stays hidden but keeps working (its speaker button carries the mute, Ctrl+M and
+    ``muteToggled``; its chips the service states). The window paints the hologram ground there
+    (``ground``, a holo.GroundCache the hero orb paints its slice of), and reads the Windows
+    animation setting again on WM_SETTINGCHANGE (holo.refresh_reduced_motion).
     """
 
     closeRequested = Signal()
@@ -1988,6 +2493,12 @@ class BriefingWindow(hud.HudWindowFrame):
             self.header.set_service(name, hud.STATUS_OFF)
         self.prompt = PromptView(short_minutes, long_minutes)
         self.reading = ReadingView()
+        self.ground = holo.GroundCache()
+        self.reading.hero.set_ground(orb_mod.ground_painter(self.ground))
+        holo_header = self.reading.header
+        holo_header.muteClicked.connect(self._on_holo_mute)
+        holo_header.minimizeClicked.connect(self.showMinimized)
+        holo_header.closeClicked.connect(self.close)
         self._stack = _PageSwitch()
         self._stack.addWidget(self.prompt)
         self._stack.addWidget(self.reading)
@@ -2005,6 +2516,9 @@ class BriefingWindow(hud.HudWindowFrame):
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
+        handle = self.windowHandle()
+        if handle is not None:
+            orb_mod.watch_input(handle)    # the owner's keys and mouse here end the orbs' deep idle
         self.visibilityChanged.emit()
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -2016,7 +2530,51 @@ class BriefingWindow(hud.HudWindowFrame):
         if event.type() == QEvent.Type.WindowStateChange:
             self.visibilityChanged.emit()
         elif event.type() == QEvent.Type.ActivationChange:
+            if self.isActiveWindow():
+                orb_mod.note_activity()       # a window activation ends deep idle
             self.activeChanged.emit(self.isActiveWindow())
+
+    def nativeEvent(self, event_type: Any, message: Any) -> Any:  # noqa: N802 - Qt override
+        """WM_SETTINGCHANGE: Windows' animation setting may have changed (reduced motion, spec 12.9)."""
+        try:
+            if bytes(event_type) == b"windows_generic_MSG" and _native_windows():
+                from ctypes import wintypes
+
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == _WM_SETTINGCHANGE:
+                    QTimer.singleShot(0, holo.refresh_reduced_motion)
+        except Exception:  # noqa: BLE001 - a message this cannot read changes nothing
+            pass
+        return super().nativeEvent(event_type, message)
+
+    def _render_ground(self, dpr: float, center: QPointF | None) -> QPixmap:
+        """The hologram ground behind the reading view (void, the triangle grid, the vignette), the
+        same pixels the hero orb paints under itself; the prompt keeps the HUD ground."""
+        if not self.is_reading_view():
+            return super()._render_ground(dpr, center)
+        size = self.size()
+        image = QImage(max(1, round(size.width() * dpr)), max(1, round(size.height() * dpr)),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(dpr)
+        image.fill(Qt.GlobalColor.transparent)
+        rect = QRectF(0, 0, size.width(), size.height())
+        painter = QPainter(image)
+        try:
+            painter.drawPixmap(rect, self.ground.pixmap(size, dpr), QRectF(0, 0, size.width() * dpr,
+                                                                         size.height() * dpr))
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            outline = hud.chamfer_path(rect, self._cut, self._corners)
+            outside = QPainterPath()
+            outside.addRect(rect)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.fillPath(outside.subtracted(outline), QColor(0, 0, 0, 255))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.setPen(QPen(holo.LINE, 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(hud.chamfer_path(rect.adjusted(0.5, 0.5, -0.5, -0.5), self._cut, self._corners))
+        finally:
+            painter.end()
+        return QPixmap.fromImage(image)
 
     def event(self, event: QEvent) -> bool:
         # A Tab-focused button keeps Space (pressed, then clicked on release, as
@@ -2037,14 +2595,36 @@ class BriefingWindow(hud.HudWindowFrame):
         """The header clock and the activity times: "13:05" (True) or "1:05 PM" (False)."""
         assert self.header is not None
         self.header.set_hour24(hour24)
+        self.reading.header.set_hour24(hour24)
         self.reading.activity.set_hour24(hour24)
         self.reading.conversation.set_hour24(hour24)
         self.reading.live_log.set_hour24(hour24)
 
     # ---- views and sizes ------------------------------------------------------
 
+    def set_clock(self, now: Callable[[], datetime]) -> None:
+        """Both headers' clocks (the prompt's and the hologram's) read ``now``."""
+        assert self.header is not None
+        self.header.set_clock(now)
+        self.reading.header.set_clock(now)
+
+    def set_muted(self, muted: bool) -> None:
+        """Jarvis's own voice is muted: the speaker button, the hologram's mute button and MUTED."""
+        assert self.header is not None
+        self.header.set_muted(muted)
+        self.reading.set_muted_look(muted)
+
+    def _on_holo_mute(self) -> None:
+        """The hologram header's mute button works the frame header's speaker button (muteToggled)."""
+        assert self.header is not None
+        self.header.speaker_button.click()
+        self.reading.set_muted_look(self.header.muted())
+
     def show_prompt_view(self) -> None:
         self._stack.setCurrentWidget(self.prompt)
+        assert self.header is not None
+        self.header.show()
+        self._cache = None
         self._show_reading_chips(False)
         self.layout().setContentsMargins(*_PROMPT_MARGINS)
         self.set_resizable(False)
@@ -2059,6 +2639,14 @@ class BriefingWindow(hud.HudWindowFrame):
             self.header.set_service_visible(name, shown)
         self._show_speaker()
 
+    def set_service(self, name: str, status: str, tooltip: str = "") -> None:
+        """A service chip (notion, voice, calendar, claude): the title bar's chip, and in the hologram
+        header a note while it is not OK (the reading view hides the old bar; round 2 makes them error
+        tiles, spec 11.7)."""
+        assert self.header is not None
+        self.header.set_service(name, status, tooltip)
+        self.reading.header.set_service(name, status, tooltip)
+
     def set_speaker_available(self, available: bool) -> None:
         """``[assistant] speak``: the header's speaker button (mute Jarvis's own voice) exists; it shows
         on the assistant screen only."""
@@ -2068,6 +2656,7 @@ class BriefingWindow(hud.HudWindowFrame):
     def _show_speaker(self) -> None:
         assert self.header is not None
         self.header.set_speaker_visible(self._speaker_available and self.is_reading_view())
+        self.reading.header.set_mute_visible(self._speaker_available)
 
     def _on_mute_shortcut(self) -> None:
         """Ctrl+M: the speaker button, while it shows."""
@@ -2089,10 +2678,13 @@ class BriefingWindow(hud.HudWindowFrame):
 
     def show_reading_view(self) -> None:
         self._stack.setCurrentWidget(self.reading)
+        assert self.header is not None
+        self.header.hide()                 # the hologram's own header (reading.header) is the title bar
+        self._cache = None
         self._show_reading_chips(True)
         self.layout().setContentsMargins(*_READING_MARGINS)
         self.set_resizable(True)
-        self.set_glow_anchor(self.reading.orb)
+        self.set_glow_anchor(None)
         room = self._screen_room()
         minimum = READING_MIN_SIZE.boundedTo(room)   # a small screen gets a smaller window
         self._apply_size(READING_SIZE.boundedTo(room).expandedTo(minimum), minimum)
@@ -3469,7 +4061,7 @@ class AppController(QObject):
         self._volume = volume
         self.window = BriefingWindow(config.prompt.later_short_minutes, config.prompt.later_long_minutes)
         self.window.set_hour24(config.display.hour24)
-        self.window.header.set_clock(now_func)
+        self.window.set_clock(now_func)
         self.player = self._create_player()
         self.tray: QSystemTrayIcon | None = None
         self._tray_menu: QMenu | None = None
@@ -3505,6 +4097,35 @@ class AppController(QObject):
         self.voice: Voice = voice_factory(self) if voice_factory is not None else SilentVoice()
         self.window.set_speaker_available(bool(config.assistant.speak))
         self._sync_speaker()
+        self._init_hologram()
+
+    def _init_hologram(self) -> None:
+        """Round 1 of the hologram: the orbs stop while the session is locked (the existing probe,
+        polled while an orb moves) and rest deeper after two quiet minutes (any input wakes them);
+        Settings names where config.toml and the data folder are."""
+        orb_mod.set_lock_probe(self._locked)        # the lock screen check the announcements use
+        reading = self.window.reading
+        reading.settings_page.set_paths(str(self._config_path()), str(self.config.data_dir))
+        reading.set_greeting(self._resting_greeting())
+
+    def _config_path(self) -> Path:
+        return Path(getattr(self.config, "project_root", None) or PROJECT_ROOT) / CONFIG_FILE_NAME
+
+    def _resting_greeting(self) -> str:
+        """Home's resting line: the plain greeting of the hour ("Good evening, sir.")."""
+        try:
+            return salutation(self._now()).text(self.config.assistant.address)
+        except Exception:  # noqa: BLE001 - no greeting rather than no Home
+            return ""
+
+    def _open_config(self) -> None:
+        """Settings: config.toml in the owner's editor (a file on this PC; nothing leaves it)."""
+        logger.info("Settings: open config.toml")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._config_path())))
+
+    def _open_data_folder(self) -> None:
+        logger.info("Settings: open the data folder")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.config.data_dir)))
 
     def _init_fetch_state(self) -> None:
         self._fetch_id = 0
@@ -3633,6 +4254,8 @@ class AppController(QObject):
         self._say_worker: SayWorker | None = None  # Jarvis's own speech worker ("tts-say"; start() only)
         self._utterance = ""                       # what Jarvis is saying right now (orb SPEAKING, speech line)
         self._briefing_speech = ""                 # the briefing's line for the speech line
+        self._briefing_caption = ""                # ... and what the voice says for it (Home's caption)
+        self._briefing_caption_ms = 0              # ... and how long its audio says it (0: unknown)
         self._last_ack = ""                        # the last "One moment, sir." template (never twice in a row)
 
     def _init_timers(self) -> None:
@@ -3692,11 +4315,14 @@ class AppController(QObject):
         reading.openSource.connect(self.open_action_source)
         reading.copyText.connect(self.copy_action_text)
         reading.undoAction.connect(self.undo_action)
+        reading.countdownUndo.connect(self._undo_running_countdown)
         reading.editAction.connect(self.edit_action)
         reading.signInAccount.connect(self.sign_in_account)
         reading.connectCalendar.connect(self.connect_calendar)
         reading.tabChanged.connect(self._on_tab_changed)
         reading.conversation.linkClicked.connect(self._on_conversation_link)
+        reading.openConfig.connect(self._open_config)
+        reading.openDataFolder.connect(self._open_data_folder)
         self.window.header.muteToggled.connect(self._on_mute_toggled)
         self.window.closeRequested.connect(self._on_close_requested)
         self.window.visibilityChanged.connect(self._sync_agenda_timer)
@@ -4052,10 +4678,10 @@ class AppController(QObject):
         self.window.reading.activity.add(tag, message, sub, when=self._now())
 
     def _update_service_chips(self) -> None:
-        header = self.window.header
-        header.set_service("notion", *self._notion_chip())
-        header.set_service("voice", *self._voice_chip())
-        header.set_service("calendar", *self._calendar_chip())
+        window = self.window
+        window.set_service("notion", *self._notion_chip())
+        window.set_service("voice", *self._voice_chip())
+        window.set_service("calendar", *self._calendar_chip())
 
     def _notion_chip(self) -> tuple[str, str]:
         if self.startup_error:
@@ -5162,6 +5788,7 @@ class AppController(QObject):
         self._countdown.task = self._live_action_task(action, seconds, now + seconds)
         self._live_auto_open(_live.TASK_ACTION, self._countdown.task.id)
         self._jobs[action.id] = _STAGE_COUNTDOWN
+        self.window.reading.set_countdown("ADDING" if _adds_event(action) else "SENDING", now + seconds)
         logger.info("Approved action %s (%s, %s): %s in %d s unless undone", action.id, action.kind,
                     logged_alias(account_of(action)), "adding" if _adds_event(action) else "sending", seconds)
         self._show_card_state(action.id)
@@ -5250,6 +5877,7 @@ class AppController(QObject):
         """The countdown ran out: queue the one call (the worker saves "running" right before it)."""
         countdown, self._countdown = self._countdown, None
         self._countdown_timer.stop()
+        self.window.reading.set_countdown()
         self._pump_voice()   # what waited for the countdown may be said now (never "Done": the result says that)
         if countdown is None:
             return
@@ -5286,6 +5914,11 @@ class AppController(QObject):
         task = countdown.task
         worker.execute(action, expected_from=countdown.sender, live=task if task is not _live.NO_TASK else None)
 
+    def _undo_running_countdown(self) -> None:
+        """The header's Undo: the running countdown's card is on Approvals, out of sight."""
+        if self._countdown is not None:
+            self.undo_action(self._countdown.action.id)
+
     def undo_action(self, action_id: str) -> None:
         """Undo during the countdown: nothing is sent and nothing is saved; the card waits again.
 
@@ -5308,6 +5941,7 @@ class AppController(QObject):
     def _cancel_countdown(self, reason: str) -> None:
         countdown, self._countdown = self._countdown, None
         self._countdown_timer.stop()
+        self.window.reading.set_countdown()
         self._pump_voice()
         if countdown is None:
             return
@@ -6336,9 +6970,8 @@ class AppController(QObject):
         """The header's ``claude`` chip (reading screen only): OK, SIGN IN, LIMIT, OFF or ERR."""
         from .ask_ui import CHIP_STATUSES
 
-        header = self.window.header
-        header.set_service(ASK_CHIP, CHIP_STATUSES.get(state, hud.STATUS_OFF), tooltip)
-        header.set_service_visible(ASK_CHIP, self.window.is_reading_view())
+        self.window.set_service(ASK_CHIP, CHIP_STATUSES.get(state, hud.STATUS_OFF), tooltip)
+        self.window.header.set_service_visible(ASK_CHIP, self.window.is_reading_view())
 
     def _ask_context(self) -> tuple[Any, list[str]]:
         """What an Ask may see of the briefing (its pending cards, sections and deadlines; never the
@@ -6384,9 +7017,10 @@ class AppController(QObject):
         self._say(KIND_ACK, with_address(self._last_ack, assistant.address), key=ASK_ACK_KEY)
 
     def _on_ask_started(self, _seq: int, text: str) -> None:
-        """An Ask really started: the owner's words as a YOU entry, and the LIVE tab comes up
-        ([live] auto_open = "tab", the default: every step as it happens; a "web:" request's WEB task
-        as an Ask's), else the JARVIS tab (it shows the whole answer when it arrives)."""
+        """An Ask really started: the owner's words as a YOU entry and Home's YOU echo. Asked from Home
+        (the bar is there), Home stays: the thinking line, then the answer as captions, Stop on the bar;
+        Live works on behind its Dock dot. [live] auto_open = "window" shows the pop-out; from another
+        screen "tab" brings LIVE up (a "web:" request's WEB task as an Ask's), else Home comes up."""
         if self.state == STATE_QUITTING:
             return
         self._you(text)
@@ -6633,8 +7267,11 @@ class AppController(QObject):
         sub = [_plural(len(valid), "block") if valid else "no block", _plural(outcome.runs, "planner run"),
                f"{outcome.duration_ms / 1000:.1f} s"]
         link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
-        self._jarvis(text, tone=hud.TONE_DONE if valid else hud.TONE_WARN, sub=f" {DOT} ".join(sub), link=link)
+        entry = self._jarvis(text, tone=hud.TONE_DONE if valid else hud.TONE_WARN, sub=f" {DOT} ".join(sub),
+                             link=link)
         self._plan_gives_way()
+        if valid:
+            self.window.reading.set_answer_chip(HOME_PLAN_CHIP, entry)   # the list is in the Transcript
         if not assistant.speak_replies:
             return
         if valid:
@@ -6729,10 +7366,11 @@ class AppController(QObject):
             sub.append(f"{_plural(brief.dropped, 'item')} left out")
         task_id = self._ask_task_id
         link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
-        self._jarvis(text, tone=hud.TONE_DONE, sub=f" {DOT} ".join(sub), link=link)
+        entry = self._jarvis(text, tone=hud.TONE_DONE, sub=f" {DOT} ".join(sub), link=link)
         self._brief_nudge_entries(brief)
         self._plan_gives_way()
         reading = self.window.reading
+        reading.set_answer_chip(HOME_BRIEF_CHIP, entry)   # the brief is in the Transcript
         in_jarvis = reading.current_tab() == hud.TAB_JARVIS or self.window.isMinimized()
         self._prep_say(prep_result_speech(brief.start, address, in_jarvis_tab=in_jarvis, day=brief.day))
 
@@ -6895,6 +7533,8 @@ class AppController(QObject):
             logger.warning("Could not set up the productivity offers (%s)", type(exc).__name__)
             return None
         controller.offerPosted.connect(self._on_offer_posted)
+        controller.offerPosted.connect(self._sync_offers_waiting)
+        controller.offerRetired.connect(self._sync_offers_waiting)
         controller.offerSpeak.connect(self._on_offer_speak)
         controller.offerRetired.connect(self._on_offer_retired)
         controller.offerChanged.connect(self._on_offer_changed)
@@ -7023,6 +7663,23 @@ class AppController(QObject):
                 QApplication.alert(self.window, 0)   # the taskbar button flashes; the window stays where it is
             except Exception as exc:  # noqa: BLE001
                 logger.debug("No taskbar flash (%s)", type(exc).__name__)
+
+    def _sync_offers_waiting(self, *_args: Any) -> None:
+        """Offers that wait for the owner's answer count as Home's needs you; the newest one gives Home
+        its amber chip (its link's words) and its question as the resting line."""
+        controller = getattr(self, "productivity", None)
+        try:
+            offers = tuple(controller.open_offers()) if controller is not None else ()
+        except Exception:  # noqa: BLE001 - unknown: none
+            offers = ()
+        if not offers:
+            self.window.reading.set_offers_waiting(0)
+            return
+        offer = offers[-1]
+        link = PREP_OFFER_LINK if getattr(offer, "kind", "") == "prep" else PLAN_OFFER_LINK
+        entry = self._offer_entries.get(getattr(offer, "id", ""), 0) or getattr(offer, "entry_id", 0) or 0
+        self.window.reading.set_offers_waiting(len(offers), link=link, entry=entry,
+                                               question=str(getattr(offer, "speech", "") or ""))
 
     def _on_offer_speak(self, offer: Any) -> None:
         """The offer's one sentence (times and counts only; KIND_NOTICE, key offer:<id>). It counts as
@@ -7193,12 +7850,17 @@ class AppController(QObject):
         """FOLLOW-UPS under DEADLINES from the controller's list (memory only): its meta, fix lines, rows
         (with "draft waiting" / "replied - checking", R31 / R47) or why it is empty; hidden while off."""
         controller = getattr(self, "productivity", None)
-        panel = self.window.reading.agenda_panel
+        reading = self.window.reading
+        panel = reading.agenda_panel
         if controller is None or not self._followups_section_on() or self.state == STATE_QUITTING:
             panel.set_followups(None)
+            reading.set_followups_available(False)
+            reading.set_followups_waiting(0)
             return
+        reading.set_followups_available(True)
         view = controller.followups()
         settings = self.config.productivity
+        reading.set_followups_waiting(0 if view.off else len(view.waiting))
         if view.off:
             panel.set_followups(hud.FollowupsInfo(meta=FOLLOWUPS_OFF_META, notes=(
                 (FOLLOWUPS_OFF_LINE, FOLLOWUPS_ON_LINK, FOLLOWUPS_ON),), shown=int(settings.followups_shown)))
@@ -7901,8 +8563,7 @@ class AppController(QObject):
             self._memory_links.pop(old.link, None)
             self._memory_entry(old.entry_id, MEMORY_PUSHED_TEXT)
         logger.info("Memory: a suggestion was offered")
-        self._render_memory()
-        self.window.reading.mark_memory_unread()
+        self._render_memory()                       # the Dock counts it ("Memory, 1 suggestion")
 
     def _memory_save_suggestion(self, suggestion: Any, *, from_conversation: bool) -> None:
         store = self.memory_store
@@ -7917,6 +8578,7 @@ class AppController(QObject):
                 self.window.reading.memory_view.set_refusal(text)
             return
         self._memory_suggestions = [item for item in self._memory_suggestions if item.id != suggestion.id]
+        self.window.reading.set_memory_suggestions(len(self._memory_suggestions))
         old = self._memory_links.pop(suggestion.link, None)
         text = "Remembered: " + quoted_note(result.text)
         if from_conversation:
@@ -8116,6 +8778,7 @@ class AppController(QObject):
         view.set_rows([hud.MemoryRowInfo(entry.id, entry.text, _memory_meta(entry), sent=entry.id in sent_ids
                                          or deleted, deleted=deleted) for entry, deleted in rows])
         view.set_suggestions([hud.SuggestionRowInfo(item.id, item.text) for item in self._memory_suggestions])
+        self.window.reading.set_memory_suggestions(len(self._memory_suggestions))
         count = _plural(len(entries), "note") if entries else "No notes"
         view.set_status(MEMORY_STATUS.format(given=MEMORY_GIVEN_TO, count=count,
                                              kb=sum(len(text) for text in sent) / 1000, cap=PROMPT_CAP // 1000))
@@ -8139,7 +8802,8 @@ class AppController(QObject):
         return entry
 
     def _you(self, text: str) -> int:
-        """A YOU entry (the owner's request, as typed; display only, never logged)."""
+        """A YOU entry (the owner's request, as typed; display only, never logged) and Home's YOU echo."""
+        self.window.reading.show_request(text)
         return self.window.reading.conversation.add(hud.ROLE_YOU, text, when=self._now())
 
     def _say(self, kind: str, text: str, *, key: str = "") -> bool:
@@ -8148,9 +8812,22 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return False
         try:
-            return bool(self.voice.say(kind, text, key=key))
+            said = bool(self.voice.say(kind, text, key=key))
         except Exception as exc:  # noqa: BLE001 - his words are on screen either way
             logger.warning("Jarvis's voice failed (%s); shown only", type(exc).__name__)
+            said = False
+        if not said and text and self.state == STATE_READING and self._voice_silent():
+            # Muted (or no voice): the same words as Home's caption, text only (HOLOGRAM_SPEC 14.7).
+            self.window.reading.say_caption(scrub_for_speech(text), spoken=False)
+        return said
+
+    def _voice_silent(self) -> bool:
+        """Jarvis's voice is muted or off: what he would say shows as a caption only."""
+        if not self.config.assistant.speak:
+            return True
+        try:
+            return bool(self.voice.muted)
+        except Exception:  # noqa: BLE001 - unknown: as if it spoke
             return False
 
     def _voice_call(self, name: str, *args: Any) -> None:
@@ -8180,7 +8857,12 @@ class AppController(QObject):
             self._prod_call("on_speaking", text)   # an offer's sentence counts as spoken from now (R26)
         if self.state != STATE_READING:
             return
-        self.window.reading.set_speech(self._utterance or self._briefing_speech)
+        reading = self.window.reading
+        reading.set_speech(self._utterance or self._briefing_speech)
+        if text:
+            reading.say_caption(text)              # Home's caption: what he says now, as he says it
+        elif not self._briefing_speech or self.player.state != PLAYING:
+            reading.end_caption()
         self._update_reading_controls()
 
     def _set_briefing_speech(self, text: str) -> None:
@@ -8189,6 +8871,10 @@ class AppController(QObject):
         self._briefing_speech = text or ""
         if not self._utterance:
             self.window.reading.set_speech(self._briefing_speech)
+            if text and self.player.state == PLAYING and self.state == STATE_READING:
+                # the line being read, its words paced by the item's audio when its length is known
+                self.window.reading.say_caption(self._briefing_caption or text,
+                                                duration_ms=self._briefing_caption_ms if self._briefing_caption else 0)
 
     def _on_mute_toggled(self, muted: bool) -> None:
         """The header's speaker button (or Ctrl+M): Jarvis's own voice off or on (remembered in
@@ -8204,7 +8890,7 @@ class AppController(QObject):
             muted = bool(self.voice.muted)
         except Exception:  # noqa: BLE001 - unknown: shown as on
             muted = False
-        self.window.header.set_muted(muted)
+        self.window.set_muted(muted)
 
     # ---- what Jarvis says after a card was carried out ---------------------------------------
 
@@ -8313,21 +8999,22 @@ class AppController(QObject):
         reading = self.window.reading
         if self._live_popped() or reading.current_tab() == hud.TAB_LIVE or not self.live.enabled:
             self._live_unread = False
-            reading.tabs.set_activity("")
+            reading.set_live_activity("")
             return
         if self._live_summary.running:
-            reading.tabs.set_activity(hud.ACTIVITY_WORKING)
+            reading.set_live_activity(hud.ACTIVITY_WORKING)
         else:
-            reading.tabs.set_activity(hud.ACTIVITY_UNREAD if self._live_unread else "")
+            reading.set_live_activity(hud.ACTIVITY_UNREAD if self._live_unread else "")
 
     def _live_auto_open(self, kind: str, task_id: int) -> bool:
         """[live] auto_open when Jarvis starts on an Ask or an approved card (once per task): "tab"
-        makes LIVE current (not while the briefing plays, for a card), "window" shows the pop-out
-        without the focus, "off" nothing. "tab" shows the pop-out too (without the focus) when the
-        LIVE tab would be shorter than LIVE_DOCKED_MIN_PX and there is another screen. Never while
-        the main window is hidden, minimized or on the prompt; an open pop-out keeps everything as
-        with "off" (a minimized one is restored without the focus). True when LIVE became the
-        current tab."""
+        makes LIVE current (not for an Ask from Home, where it plays out under the orb, spec 16.0; not
+        while the briefing plays, for a card; not on Approvals, for a card), "window" shows the
+        pop-out without the focus, "off" nothing. "tab" shows the pop-out too (without the focus)
+        when the LIVE tab would be shorter than LIVE_DOCKED_MIN_PX and there is another screen.
+        Never while the main window is hidden, minimized or on the prompt; an open pop-out keeps
+        everything as with "off" (a minimized one is restored without the focus). True when LIVE
+        became the current tab."""
         if not self.live.enabled or not task_id or self.state == STATE_QUITTING or task_id in self._live_opened:
             return False
         self._live_opened = (self._live_opened + [task_id])[-64:]
@@ -8342,12 +9029,18 @@ class AppController(QObject):
         main = self.window
         if self.state != STATE_READING or not main.isVisible() or main.isMinimized() or not main.is_reading_view():
             return False
+        if mode == "tab" and kind != _live.TASK_ACTION and self.window.reading.current_tab() == SCREEN_HOME:
+            # An Ask from Home's bar keeps Home (the YOU echo, the thinking line, the captions, Stop on
+            # the bar): Live gets its working dot and the Transcript's "See every step" opens it.
+            return False
         if mode == "window" or (self.window.reading.live_room() < LIVE_DOCKED_MIN_PX and self._other_screen()):
             # "window"; or the LIVE tab would show hardly a step and there is another screen for it.
             self.pop_out_live(activate=False)
             return False
         if kind == _live.TASK_ACTION and self.player.state in (PLAYING, WAITING):
             return False   # the briefing plays on BRIEFING: the tab stays, LIVE gets its working dot
+        if kind == _live.TASK_ACTION and self.window.reading.current_tab() == SCREEN_APPROVALS:
+            return False   # the owner decides cards there (countdown, Undo, the next card): Live gets its dot
         self.window.reading.set_tab(hud.TAB_LIVE)
         return True
 
@@ -9109,14 +9802,7 @@ class AppController(QObject):
         """Out of sight, nothing is decided for you: an undo countdown stops (its Undo would be out of
         sight too) and a prompt asks again after the short Later, from its taskbar button. The
         reading keeps playing."""
-        countdown = self._countdown
-        if countdown is not None and self.state != STATE_QUITTING:
-            action = countdown.action
-            self._cancel_countdown("the window was minimized")
-            nothing = "nothing was created" if _adds_event(action) else "nothing was sent"
-            self._activity(hud.TAG_STOP, f"Undone: {_action_phrase(action)}",
-                           f"{kind_label(action).upper()} {DOT} window minimized, {nothing}")
-            self._refresh_actions_ui()
+        self._stop_countdown_out_of_sight("the window was minimized", "window minimized")
         if self.state == STATE_PROMPT and not self.startup_error:
             minutes = self.config.prompt.later_short_minutes
             self._stop_prompt_timers()
@@ -9124,6 +9810,19 @@ class AppController(QObject):
             at = format_time(self._now() + timedelta(minutes=minutes))
             self._update_tray(f"Briefing: asking again at {at}")
             logger.info("Prompt minimized: asking again at %s unless it is restored first", at)
+
+    def _stop_countdown_out_of_sight(self, reason: str, words: str) -> None:
+        """A running undo countdown stops when its Undo goes out of sight (the window minimized; on
+        another screen the header shows the countdown with its Undo): nothing is sent or changed."""
+        countdown = self._countdown
+        if countdown is None or self.state == STATE_QUITTING:
+            return
+        action = countdown.action
+        self._cancel_countdown(reason)
+        nothing = "nothing was created" if _adds_event(action) else "nothing was sent"
+        self._activity(hud.TAG_STOP, f"Undone: {_action_phrase(action)}",
+                       f"{kind_label(action).upper()} {DOT} {words}, {nothing}")
+        self._refresh_actions_ui()
 
     def _on_restored(self) -> None:
         """A prompt restored by hand waits for an answer again, with a new countdown."""
@@ -9257,7 +9956,8 @@ class AppController(QObject):
         self._reading_settled = False
         if settle:
             self._settle_reading()   # Read now, --read, or an older hotkey
-        # Reading at once shows the transcript; opening for the assistant shows the conversation.
+        # Reading at once shows the Briefing screen; opening for the assistant shows Home.
+        self.window.reading.set_greeting(self._resting_greeting())
         self.window.reading.set_tab(hud.TAB_BRIEFING if autoplay else hud.TAB_JARVIS)
         self.window.show_reading_view()
         if not was_visible:
@@ -9434,6 +10134,8 @@ class AppController(QObject):
         if self.state != STATE_READING:
             return
         reading = self.window.reading
+        reading.set_waiting(bool(self._pending_run) and self._pending_briefing is None)
+        reading.set_briefing_paused(self._script is not None and self.player.state == PAUSED)
         if self._script is None:
             if self._utterance:   # Jarvis is saying something himself
                 reading.set_activity_state(hud.ORB_SPEAKING, False)
@@ -9568,6 +10270,7 @@ class AppController(QObject):
             position = 0
         reading.progress_bar.set_value(f"{position} / {len(order)}",
                                        position / len(order) if order else 0.0)
+        reading.set_offline_voice(self._uses_offline_voice())
         if self._uses_offline_voice():
             reading.voice_bar.set_value("offline", 1.0, hud.AMBER)
         elif self._engine is not None:
@@ -9599,7 +10302,20 @@ class AppController(QObject):
             return
         reading = self.window.reading
         reading.highlight(section_index, item_index)
+        self._briefing_caption = self._item_spoken(section_index, item_index)
+        try:
+            self._briefing_caption_ms = max(0, int(self.player.current_item_ms()))   # 0: unknown
+        except Exception:  # noqa: BLE001 - no timing: the estimated pace
+            self._briefing_caption_ms = 0
         self._set_briefing_speech(self._item_text(section_index, item_index))
+
+    def _item_spoken(self, section_index: int, item_index: int) -> str:
+        """What the voice says for that item (Home's caption shows what is spoken)."""
+        script = self._script
+        if script is None or not 0 <= section_index < len(script.sections):
+            return ""
+        items = script.sections[section_index].items
+        return items[item_index].spoken if 0 <= item_index < len(items) else ""
 
     def _item_text(self, section_index: int, item_index: int) -> str:
         script = self._script
@@ -9631,6 +10347,8 @@ class AppController(QObject):
 
     def _on_player_state(self, state: str) -> None:
         self._pump_voice()
+        if state != PLAYING and self.state == STATE_READING and not self._utterance:
+            self.window.reading.end_caption()      # paused or finished: the last line holds, then rests
         if state == PLAYING and self.state == STATE_READING:
             self._prod_call("on_playback_started", self._shown_key() or "")
         elif state == FINISHED and self.state == STATE_READING:

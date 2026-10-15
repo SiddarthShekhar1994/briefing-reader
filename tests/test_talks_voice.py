@@ -34,7 +34,7 @@ from unittest import mock
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import ask_ui, hud, speech, ui, voice_ui
+from briefing_reader import ask_ui, home, hud, orb, speech, ui, voice_ui
 from briefing_reader.actions import SOURCE_ASK, parse_action_line
 from briefing_reader.ask import planner as ask_planner
 from briefing_reader.ask.planner import AskOutcome
@@ -188,11 +188,18 @@ class VoiceBuildTests(unittest.TestCase):
         greeting = reading.conversation.entries()[0][2]
         self.assertEqual(reading.orb.state(), hud.ORB_SPEAKING)
         self.assertEqual(reading.speech.text(), greeting)
+        # Home: the hero orb speaks, the header says so and the caption pages what is said.
+        self.assertEqual(reading.hero.state(), orb.SPEAKING)
+        self.assertEqual(reading.state_word(), "SPEAKING")
+        self.assertEqual(reading.captions.state(), home.SPEAKING)
+        self.assertEqual(" ".join(reading.captions.pages()), " ".join(greeting.split()))
         self.assertTrue(c.voice.speaking)
         player.end()
         settle()
         self.assertNotEqual(reading.orb.state(), hud.ORB_SPEAKING)
         self.assertNotEqual(reading.speech.text(), greeting)
+        self.assertNotEqual(reading.hero.state(), orb.SPEAKING)
+        self.assertEqual(reading.captions.state(), home.HOLDING)          # the last page holds, then rests
         self.assertTrue(c.window.header.speaker_visible())
 
     def test_shutdown_waits_for_tts_say(self) -> None:
@@ -374,13 +381,15 @@ class HeaderSpeakerTests(unittest.TestCase):
                 window.show()
                 settle()
                 header = window.header
-                self.assertTrue(header.speaker_visible())
-                self.assertLessEqual(header._required_width(header.compact_level()), header.width())
-                speaker = header.speaker_button.geometry()
-                self.assertLessEqual(header._chips_box.geometry().right(), header._clock.geometry().left())
-                self.assertLessEqual(header._clock.geometry().right(), speaker.left())
-                self.assertEqual(speaker.right() + 1 + header._SPEAKER_GAP, header.minimize_button.geometry().left())
-                self.assertLessEqual(header.close_button.geometry().right(), header.width() - 1)
+                self.assertTrue(header.speaker_visible())              # hidden bar, its button still works (Ctrl+M)
+                # The reading view's title bar is the hologram's: clock, divider, mute, minimize, close.
+                holo_header = window.reading.header
+                self.assertTrue(holo_header.mute_visible() and holo_header.mute_button.isVisible())
+                mute = holo_header.mute_button.geometry()
+                self.assertLessEqual(holo_header.readout.geometry().right(), holo_header.clock.geometry().left())
+                self.assertLessEqual(holo_header.clock.geometry().right(), mute.left())
+                self.assertLessEqual(mute.right(), holo_header.minimize_button.geometry().left())
+                self.assertLessEqual(holo_header.close_button.geometry().right(), holo_header.width() - 1)
                 window.show_prompt_view()                              # the legacy prompt: no speaker
                 settle()
                 self.assertFalse(header.speaker_visible())
@@ -499,6 +508,7 @@ class AskConversationTests(unittest.TestCase):
         entry = c.window.reading.conversation.entry_widgets()[-1]
         self.assertEqual(entry.text_label.text(), full)              # never elided or cut
         self.assertEqual(entry.entry[3], f"1 proposal under NEEDS YOUR OK {hud.MIDDLE_DOT} 6.9 s")
+        self.assertEqual(entry.shown_sub(), "1 proposal under NEEDS YOUR OK")   # Home's Transcript: no seconds
         spoken = app.voice.texts()[-1]
         self.assertLessEqual(len(spoken), 400)
         self.assertNotIn("Mail of the work account", spoken)          # Jarvis's note is shown, not said

@@ -1,6 +1,7 @@
-"""Tests for the JARVIS / BRIEFING tabs (hud.TabStrip) and the conversation (hud.ConversationLog),
-and how the assistant screen (ui.ReadingView) holds them: the tab row above the centre panel, the
-two pages in the panel, the strip caption on JARVIS and SECTIONS on BRIEFING.
+"""Tests for the old tab strip widget (hud.TabStrip, no longer in the app since the hologram's Dock), the
+conversation (hud.ConversationLog), and how the assistant screen (ui.ReadingView) holds its screens: the
+Dock and its shortcuts, the panel that moves between Briefing, Live and Memory, the strip caption and
+SECTIONS, and the conversation in Home's Transcript drawer.
 
 Qt runs offscreen in this process with the bundled fonts and shows nothing; every text is invented.
 """
@@ -16,7 +17,7 @@ from PySide6.QtGui import QFontMetricsF
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
-from briefing_reader import config, hud, ui
+from briefing_reader import config, dock, home, hud, ui
 
 _app: QApplication | None = None
 WHEN = datetime(2026, 10, 8, 14, 41)
@@ -534,12 +535,16 @@ class ConversationLogTests(unittest.TestCase):
         self.assertLessEqual(entry.text_label.sizeHint().width(), 200)
 
 
-class ReadingViewTabTests(unittest.TestCase):
+class ReadingViewScreenTests(unittest.TestCase):
+    """The assistant screen in the hologram's round 1 layout: the Dock opens the screens (the old tab
+    row and its Ctrl+1..4 are gone, on purpose: HOLOGRAM_SPEC 11.1), the transcript panel moves to the
+    Briefing, Live or Memory screen that shows, the conversation lives in Home's Transcript drawer."""
+
     def window(self, hour24: bool) -> ui.BriefingWindow:
         window = ui.BriefingWindow(10, 30)
         self.addCleanup(window.deleteLater)
         window.set_hour24(hour24)
-        window.header.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
+        window.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
         for name in ("notion", "voice", "calendar"):
             window.header.set_service(name, hud.STATUS_WARN)
         window.reading.set_ask_available(True)
@@ -549,6 +554,14 @@ class ReadingViewTabTests(unittest.TestCase):
         settle(6)
         return window
 
+    def assert_inside(self, widget, window) -> None:
+        corner = widget.mapTo(window, QPoint(widget.width(), widget.height()))
+        origin = widget.mapTo(window, QPoint(0, 0))
+        self.assertGreaterEqual(origin.x(), 0)
+        self.assertGreaterEqual(origin.y(), 0)
+        self.assertLessEqual(corner.x(), window.width())
+        self.assertLessEqual(corner.y(), window.height())
+
     def test_the_900_by_600_window_with_both_clocks(self) -> None:
         for hour24 in (False, True):
             with self.subTest(hour24=hour24):
@@ -557,62 +570,44 @@ class ReadingViewTabTests(unittest.TestCase):
                 reading = window.reading
                 reading.set_new_briefing(True, "Your AM briefing is ready to view")
                 settle(4)
-                tabs = reading.tabs
-                for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING):
-                    tab = tabs.tab(index)
-                    self.assertTrue(tab.isVisible())
-                    right = tab.mapTo(reading, QPoint(tab.width(), 0)).x()
-                    self.assertLessEqual(right, reading.transcript_panel.mapTo(reading, QPoint(
-                        reading.transcript_panel.width(), 0)).x())
-                self.assertFalse(tabs.is_compact())
-                badge = tabs.tab(hud.TAB_BRIEFING).badge_rect()
-                self.assertGreater(badge.width(), badge.height())          # the whole NEW pill
-                self.assertLessEqual(badge.right(), tabs.tab(hud.TAB_BRIEFING).width())
-                # The tab row sits right above the panel, outside it.
-                bottom = tabs.mapTo(reading, QPoint(0, tabs.height())).y()
-                top = reading.transcript_panel.mapTo(reading, QPoint(0, 0)).y()
-                self.assertLessEqual(abs(bottom - top), 1)
-                self.assertFalse(reading.transcript_panel.isAncestorOf(tabs))
-                # JARVIS: the conversation and the caption; SECTIONS stays in the strip, hidden.
-                strip = reading.transcript_panel.strip
-                self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
-                self.assertTrue(strip.isAncestorOf(reading.sections_button))
-                self.assertFalse(reading.sections_button.isVisible())
-                self.assertFalse(reading.transcript_panel.steps.isVisible())
-                self.assertTrue(reading.strip_caption.isVisible())
-                # At 900 px the whole caption does not fit beside LIVE: "CONVERSATION" alone, never cut.
-                self.assertEqual(reading.strip_caption.text(), ui.STRIP_CAPTION_SHORT)
-                self.assertLessEqual(reading.strip_caption.sizeHint().width(), reading.strip_caption.width() + 1)
-                self.assertTrue(reading.conversation.isVisible())
-                self.assertFalse(reading.text.isVisible())
-                self.assertTrue(reading.transcript_panel.live.isVisible())
+                # Home: the Dock, the header, the hero orb, the chip and the command bar, all inside.
+                self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
+                for widget in (reading.dock, reading.header, reading.hero, reading.briefing_chip,
+                               reading.command_bar, reading.header.close_button, reading.header.clock):
+                    self.assertTrue(widget.isVisible())
+                    self.assert_inside(widget, window)
+                self.assertGreaterEqual(reading.hero.orb_size(), home.ORB_MIN)
+                self.assertFalse(reading.conversation.isVisible())     # in the Transcript drawer
+                self.assertFalse(reading.transcript_panel.isVisible())  # no panel on Home
+                self.assertFalse(window.header.isVisible())             # the hologram's header instead
                 # BRIEFING: the transcript, the step chips and SECTIONS; no caption.
                 reading.set_tab(hud.TAB_BRIEFING)
                 settle(4)
+                strip = reading.transcript_panel.strip
                 self.assertTrue(reading.sections_button.isVisible())
                 self.assertTrue(strip.isAncestorOf(reading.sections_button))
                 self.assertTrue(reading.transcript_panel.steps.isVisible())
                 self.assertFalse(reading.strip_caption.isVisible())
                 self.assertTrue(reading.text.isVisible())
-                self.assertFalse(reading.conversation.isVisible())
-                # Every control row button still fits inside the window.
-                for button in (reading.play_button, reading.done_button):
-                    corner = button.mapTo(window, QPoint(button.width(), button.height()))
-                    self.assertLessEqual(corner.x(), window.width())
-                    self.assertLessEqual(corner.y(), window.height())
-                # With the command bar at 900 x 600 the transcript keeps a few lines (the tab row takes 28 px).
-                self.assertGreaterEqual(reading.text.height(), 40)
-                reading.set_tab(hud.TAB_JARVIS)
+                self.assertTrue(reading.transcript_panel.live.isVisible())
+                for button in (reading.play_button, reading.skip_button, reading.everything_button,
+                               reading.notion_button, reading.done_button):
+                    self.assert_inside(button, window)
+                self.assertGreaterEqual(reading.text.height(), 120)     # no tab row, no command bar here
+                # The conversation is in the drawer: it opens over Home and holds the whole height.
+                reading.open_transcript()
                 settle(4)
+                self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
+                self.assertTrue(reading.conversation.isVisible())
                 self.assertGreaterEqual(reading.conversation.height(), 90)
                 window.hide()
 
     def test_a_small_screens_window_keeps_the_controls_whole(self) -> None:
-        # A window of 760 x 560 (as on an 808 px screen): the tab row takes 28 px, so the orb and the
-        # panel strip get smaller and every control and the briefing subtitle stay whole.
+        # A window of 760 x 560 (as on an 808 px screen): the Briefing screen's orb and panel strip get
+        # smaller and every control and the briefing subtitle stay whole.
         window = ui.BriefingWindow(10, 30)
         self.addCleanup(window.deleteLater)
-        window.header.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
+        window.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
         window.show_reading_view()
         window.setMinimumSize(700, 500)
         window.resize(760, 560)
@@ -632,13 +627,12 @@ class ReadingViewTabTests(unittest.TestCase):
         self.assertEqual(reading.transcript_panel.strip_layout.contentsMargins().top(), 12)
         window.hide()
 
-    def test_a_small_screens_window_with_ask_keeps_the_tab_row_put_on_both_tabs(self) -> None:
-        # 760 x 560 with the command bar: the controls wrap into four rows. The BRIEFING page folds its
-        # title line and rule, so it needs no more height than JARVIS: the tab row never covers the
-        # controls (Open in Notion) and stays where it is when the tab changes.
+    def test_a_small_screens_window_folds_the_briefing_title_line(self) -> None:
+        # 760 x 560: the Briefing screen folds its title line and rule (also under STATUS and in the spoken
+        # line), so the transcript keeps a few lines below the controls; the stale warning always shows.
         window = ui.BriefingWindow(10, 30)
         self.addCleanup(window.deleteLater)
-        window.header.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
+        window.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
         window.reading.set_ask_available(True)
         window.show_reading_view()
         window.setMinimumSize(700, 500)
@@ -647,26 +641,17 @@ class ReadingViewTabTests(unittest.TestCase):
         reading = window.reading
         reading.set_header("AM briefing", "Updated today at 10:04 AM")
         reading.set_speech("AM briefing")
-        reading.command_bar.set_hint("Ask Jarvis - nothing happens without your OK")   # idle, as at the start
-        reading.conversation.add(hud.ROLE_JARVIS, "Good afternoon, sir.", when=WHEN)
-        settle(8)
-        rows = {}
-        for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_LIVE, hud.TAB_JARVIS):
-            reading.set_tab(index)
-            settle(8)
-            top = reading.tabs.mapTo(reading, QPoint(0, 0)).y()
-            rows.setdefault(index, set()).add(top)
-            for button in (reading.play_button, reading.skip_button, reading.everything_button,
-                           reading.notion_button, reading.done_button):
-                with self.subTest(tab=index, button=button.text()):
-                    self.assertLessEqual(button.mapTo(reading, QPoint(0, button.height())).y(), top)
-        self.assertEqual(len(rows[hud.TAB_JARVIS] | rows[hud.TAB_BRIEFING] | rows[hud.TAB_LIVE]), 1, rows)
-        self.assertTrue(reading.doc_header_folded())
         reading.set_tab(hud.TAB_BRIEFING)
-        settle(4)
+        settle(8)
+        self.assertTrue(reading.doc_header_folded())
         self.assertFalse(reading.title.isVisible())
         self.assertTrue(reading.text.isVisible())
         self.assertGreaterEqual(reading.text.height(), 54)
+        top = reading.transcript_panel.mapTo(reading, QPoint(0, 0)).y()
+        for button in (reading.play_button, reading.skip_button, reading.everything_button,
+                       reading.notion_button, reading.done_button):
+            with self.subTest(button=button.text()):
+                self.assertLessEqual(button.mapTo(reading, QPoint(0, button.height())).y(), top)
         reading.set_header("AM briefing", "Updated today at 10:04 AM", "May be stale - updated yesterday")
         settle(4)
         self.assertTrue(reading.stale.isVisible())                         # the warning always shows
@@ -677,26 +662,45 @@ class ReadingViewTabTests(unittest.TestCase):
         self.assertTrue(reading.title.isVisible() and reading.subtitle.isVisible())
         window.hide()
 
-    def test_the_tab_row_stays_put_over_three_tabs_at_900_by_600(self) -> None:
+    def test_every_screen_opens_from_the_dock_and_fits(self) -> None:
         window = self.window(False)
         reading = window.reading
-        reading.set_header("AM briefing", "Updated today at 10:04 AM")
-        reading.conversation.add(hud.ROLE_JARVIS, "Good afternoon, sir.", when=WHEN)
-        settle(6)
-        tops = set()
-        for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_LIVE, hud.TAB_JARVIS, hud.TAB_LIVE):
-            reading.set_tab(index)
-            settle(6)
-            tops.add(reading.tabs.mapTo(reading, QPoint(0, 0)).y())
-        self.assertEqual(len(tops), 1, tops)
-        self.assertFalse(reading.tabs.is_compact())
-        for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_LIVE):
-            tab = reading.tabs.tab(index)
-            self.assertTrue(tab.isVisible())
-            self.assertGreaterEqual(tab.width(), tab.sizeHint().width())
-            right = tab.mapTo(reading, QPoint(tab.width(), 0)).x()
-            self.assertLessEqual(right, reading.transcript_panel.mapTo(reading, QPoint(
-                reading.transcript_panel.width(), 0)).x())
+        reading.set_memory_available(True)
+        reading.set_followups_available(True)
+        seen: list[int] = []
+        reading.tabChanged.connect(seen.append)
+        for size in ((900, 600), (1120, 700)):
+            window.resize(*size)
+            for slot in dock.SLOTS:
+                with self.subTest(size=size, slot=slot):
+                    reading.dock.button(slot).click()
+                    settle(4)
+                    screen = ui._SLOT_SCREENS[slot]
+                    self.assertEqual(reading.current_tab(), screen)
+                    self.assertEqual(reading.dock.current(), slot)
+                    page = reading.screen_widget(screen)
+                    self.assertTrue(page.isVisible())
+                    self.assert_inside(page, window)
+                    self.assertTrue(reading.dock.button(slot).isVisible())
+                    self.assert_inside(reading.dock.button(slot), window)
+        self.assertEqual(seen[:len(dock.SLOTS)], [ui._SLOT_SCREENS[slot] for slot in dock.SLOTS][1:] + [
+            ui.SCREEN_HOME])
+        # The panel follows the panel screens; the agenda follows Follow-ups.
+        for screen, holder in ((hud.TAB_BRIEFING, reading.briefing_screen), (hud.TAB_LIVE, reading.live_screen),
+                               (hud.TAB_MEMORY, reading.memory_screen)):
+            reading.set_tab(screen)
+            settle()
+            self.assertTrue(holder.isAncestorOf(reading.transcript_panel))
+            self.assertTrue(reading.transcript_panel.isVisible())
+        reading.set_tab(ui.SCREEN_FOLLOWUPS)
+        settle()
+        self.assertTrue(reading.followups_screen.isAncestorOf(reading.agenda_panel))
+        self.assertEqual(reading.agenda_panel.mode(), hud.AGENDA_FOLLOWUPS)
+        reading.open_day_view()                      # the clock: the Day view over Home
+        settle()
+        self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
+        self.assertTrue(reading.day_drawer.isAncestorOf(reading.agenda_panel))
+        self.assertEqual(reading.agenda_panel.mode(), hud.AGENDA_DAY)
         window.hide()
 
     def test_the_live_page_its_caption_and_status_tag(self) -> None:
@@ -704,6 +708,7 @@ class ReadingViewTabTests(unittest.TestCase):
         window.resize(ui.READING_SIZE)
         reading = window.reading
         reading.set_activity_state(hud.ORB_SPEAKING, True)          # the briefing is live
+        reading.set_tab(hud.TAB_BRIEFING)
         settle(4)
         marker = reading.transcript_panel.live
         self.assertTrue(marker.isVisible())
@@ -712,6 +717,7 @@ class ReadingViewTabTests(unittest.TestCase):
         settle(6)
         self.assertTrue(reading.live_page.isVisible())
         self.assertTrue(reading.live_log.isVisible())
+        self.assertTrue(reading.activity_panel.isVisible())       # ACTIVITY's rows are on Live now
         self.assertFalse(reading.conversation.isVisible())
         self.assertTrue(reading.strip_caption.isVisible())
         self.assertEqual(reading.strip_caption.text(), ui.LIVE_CAPTION)
@@ -732,6 +738,7 @@ class ReadingViewTabTests(unittest.TestCase):
             self.assertTrue(strip.isAncestorOf(button))
         self.assertEqual(reading.live_log.mapTo(reading, QPoint(0, 0)).y(),
                          reading.live_page.mapTo(reading, QPoint(0, 0)).y())
+        self.assertGreaterEqual(reading.live_room(), ui.LIVE_DOCKED_MIN_PX)
         reading.set_live_popped(True)
         settle()
         self.assertTrue(reading.live_away.isVisible())
@@ -754,9 +761,8 @@ class ReadingViewTabTests(unittest.TestCase):
         reading.set_tab(hud.TAB_LIVE)
         reading.set_live_state(hud.LIVE_COUNTDOWN, "SENDING", deadline=time.monotonic() + 8)
         settle(6)
-        # A wider tag (counting down) in the 900 px window: no room for the caption beside the tag, Pop
-        # out and Clear; nothing is cut.
-        self.assertIn(reading.strip_caption.text(), ("", ui.LIVE_CAPTION_SHORT))
+        # A wider tag (counting down) in the 900 px window: the caption gives way before anything is cut.
+        self.assertIn(reading.strip_caption.text(), ("", ui.LIVE_CAPTION_SHORT, ui.LIVE_CAPTION))
         self.assertLessEqual(reading.strip_caption.sizeHint().width(), reading.strip_caption.width() + 1)
         self.assertGreaterEqual(reading.live_status.width(), reading.live_status.sizeHint().width())
         for button in (reading.live_pop_button, reading.live_clear_button):
@@ -770,7 +776,7 @@ class ReadingViewTabTests(unittest.TestCase):
         self.assertLessEqual(reading.strip_caption.sizeHint().width(), reading.strip_caption.width() + 1)
         window.hide()
 
-    def test_live_unavailable_hides_its_tab(self) -> None:
+    def test_live_unavailable_hides_its_slot(self) -> None:
         window = self.window(False)
         reading = window.reading
         reading.set_tab(hud.TAB_LIVE)
@@ -778,46 +784,53 @@ class ReadingViewTabTests(unittest.TestCase):
         reading.set_live_available(False)
         settle()
         self.assertFalse(reading.live_available())
-        self.assertFalse(reading.tabs.tab(hud.TAB_LIVE).isVisible())
-        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+        self.assertFalse(reading.dock.button(dock.LIVE).isVisible())
+        self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
         self.assertFalse(reading.live_page.isVisible())
-        QTest.keyClick(window, Qt.Key.Key_3, Qt.KeyboardModifier.ControlModifier)
-        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+        window.activateWindow()
+        settle()
+        QTest.keyClick(window, Qt.Key.Key_4, Qt.KeyboardModifier.ControlModifier)
+        settle()
+        self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
         window.hide()
 
-    def test_ctrl_1_and_ctrl_2(self) -> None:
+    def test_ctrl_1_to_6_and_ctrl_comma(self) -> None:
+        # The Dock's shortcuts replace the tab row's Ctrl+1..4 (JARVIS / BRIEFING / LIVE / MEMORY), on purpose.
         window = self.window(False)
         reading = window.reading
         seen: list[int] = []
         reading.tabChanged.connect(seen.append)
         window.activateWindow()
         settle()
-        QTest.keyClick(window, Qt.Key.Key_2, Qt.KeyboardModifier.ControlModifier)
+        for key in (Qt.Key.Key_2, Qt.Key.Key_1, Qt.Key.Key_3, Qt.Key.Key_4):
+            QTest.keyClick(window, key, Qt.KeyboardModifier.ControlModifier)
+            settle()
+        self.assertEqual(seen, [hud.TAB_BRIEFING, ui.SCREEN_HOME, ui.SCREEN_APPROVALS, hud.TAB_LIVE])
+        QTest.keyClick(window, Qt.Key.Key_Comma, Qt.KeyboardModifier.ControlModifier)
         settle()
-        QTest.keyClick(window, Qt.Key.Key_1, Qt.KeyboardModifier.ControlModifier)
-        settle()
-        self.assertEqual(seen, [hud.TAB_BRIEFING, hud.TAB_JARVIS])
+        self.assertEqual(reading.current_tab(), ui.SCREEN_SETTINGS)
+        self.assertTrue(reading.settings_page.isVisible())
         keys = sorted(shortcut.key().toString() for shortcut in reading.findChildren(ui.QShortcut))
-        self.assertIn("Ctrl+1", keys)
-        self.assertIn("Ctrl+2", keys)
-        self.assertIn("Ctrl+3", keys)
-        QTest.keyClick(window, Qt.Key.Key_3, Qt.KeyboardModifier.ControlModifier)
+        for key in ("Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+,", "Ctrl+Space"):
+            self.assertIn(key, keys)
+        QTest.keyClick(window, Qt.Key.Key_Space, Qt.KeyboardModifier.ControlModifier)   # Home, the bar focused
         settle()
-        self.assertEqual(seen[-1], hud.TAB_LIVE)
+        self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
+        self.assertTrue(reading.command_bar.input.hasFocus())
+        window.hide()
 
-    def test_ctrl_4_and_the_memory_page(self) -> None:
+    def test_ctrl_5_and_the_memory_screen(self) -> None:
         window = self.window(False)
         reading = window.reading
-        self.assertFalse(reading.memory_available())             # the bundle off: no MEMORY
-        keys = sorted(shortcut.key().toString() for shortcut in reading.findChildren(ui.QShortcut))
-        self.assertIn("Ctrl+4", keys)
+        self.assertFalse(reading.memory_available())             # the bundle off: no Memory
+        self.assertFalse(reading.followups_available())
         window.activateWindow()
         settle()
-        QTest.keyClick(window, Qt.Key.Key_4, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClick(window, Qt.Key.Key_5, Qt.KeyboardModifier.ControlModifier)
         settle()
-        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+        self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
         reading.set_memory_available(True)
-        QTest.keyClick(window, Qt.Key.Key_4, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClick(window, Qt.Key.Key_5, Qt.KeyboardModifier.ControlModifier)
         settle(4)
         self.assertEqual(reading.current_tab(), hud.TAB_MEMORY)
         self.assertTrue(reading.memory_view.isVisible())
@@ -831,32 +844,7 @@ class ReadingViewTabTests(unittest.TestCase):
         settle(6)
         self.assertEqual(reading.strip_caption.text(), ui.MEMORY_CAPTION)
         reading.set_memory_available(False)
-        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
-
-    def test_four_tabs_whole_and_the_row_put_at_every_size(self) -> None:
-        window = self.window(False)
-        reading = window.reading
-        reading.set_memory_available(True)
-        reading.set_header("AM briefing", "Updated today at 10:04 AM")
-        reading.conversation.add(hud.ROLE_JARVIS, "Good afternoon, sir.", when=WHEN)
-        window.setMinimumSize(700, 500)
-        for size in ((830, 560), (900, 600), (1120, 700)):
-            with self.subTest(size=size):
-                window.resize(*size)
-                settle(8)
-                tops = set()
-                for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_LIVE, hud.TAB_MEMORY, hud.TAB_JARVIS):
-                    reading.set_tab(index)
-                    settle(6)
-                    tops.add(reading.tabs.mapTo(reading, QPoint(0, 0)).y())
-                    self.assertEqual(reading.tabs.height(), hud.TabStrip.HEIGHT)
-                self.assertEqual(len(tops), 1, tops)
-                panel_right = reading.transcript_panel.mapTo(reading, QPoint(reading.transcript_panel.width(), 0)).x()
-                for index in hud.TABS:
-                    tab = reading.tabs.tab(index)
-                    self.assertTrue(tab.isVisible())
-                    self.assertGreaterEqual(tab.width(), tab.sizeHint().width())
-                    self.assertLessEqual(tab.mapTo(reading, QPoint(tab.width(), 0)).x(), panel_right)
+        self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
         window.hide()
 
     def test_speech_line_falls_back_to_ready_to_view_while_new(self) -> None:
@@ -868,41 +856,51 @@ class ReadingViewTabTests(unittest.TestCase):
         reading.set_new_briefing(True, "Your AM briefing is ready to view")
         self.assertEqual(reading.speech.text(), "Your AM briefing is ready to view")
         self.assertTrue(reading.is_new_briefing())
+        self.assertEqual(reading.dock.accessible_name(dock.BRIEFING), "Briefing, new")
         reading.set_speech("Two new emails from the department.")
         self.assertEqual(reading.speech.text(), "Two new emails from the department.")
         reading.set_speech("")
         self.assertEqual(reading.speech.text(), "Your AM briefing is ready to view")
         reading.set_new_briefing(False)
         self.assertEqual(reading.speech.text(), "AM briefing")
-        self.assertFalse(reading.tabs.badge())
+        self.assertFalse(reading.is_new_briefing())
+        self.assertEqual(reading.dock.accessible_name(dock.BRIEFING), "Briefing")
+        window.hide()
 
     def test_unread_and_window_activation_signal(self) -> None:
         window = self.window(False)
         reading = window.reading
         reading.set_tab(hud.TAB_BRIEFING)
         reading.mark_unread()
-        self.assertTrue(reading.tabs.unread())
-        reading.set_tab(hud.TAB_JARVIS)
-        self.assertFalse(reading.tabs.unread())
+        self.assertTrue(reading.unread())                          # a dot on Home's Transcript button
+        self.assertEqual(reading.stage.transcript_button.accessibleName(), "Transcript, new")
+        reading.open_transcript()
+        self.assertFalse(reading.unread())
+        reading.mark_unread()
+        self.assertFalse(reading.unread())                         # the drawer shows it already
         seen: list[bool] = []
         window.activeChanged.connect(seen.append)
         from PySide6.QtCore import QEvent
         QApplication.sendEvent(window, QEvent(QEvent.Type.ActivationChange))
         self.assertEqual(len(seen), 1)
+        window.hide()
 
     def test_the_whole_caption_at_the_default_size(self) -> None:
         window = self.window(False)
         window.resize(ui.READING_SIZE)
+        window.reading.set_tab(hud.TAB_LIVE)
         settle(6)
         caption = window.reading.strip_caption
-        self.assertEqual(caption.text(), ui.STRIP_CAPTION)
+        self.assertEqual(caption.text(), ui.LIVE_CAPTION)
         self.assertLessEqual(caption.sizeHint().width(), caption.width() + 1)
+        window.hide()
 
     def test_conversation_hour24_follows_the_window(self) -> None:
         window = self.window(True)
         window.reading.conversation.add(hud.ROLE_JARVIS, "x", when=datetime(2026, 10, 8, 13, 5))
         self.assertEqual(window.reading.conversation.entries()[0][1], "13:05")
         self.assertIsInstance(window.reading.strip_caption, QLabel)
+        window.hide()
 
 
 class TelemetryValueColorTests(unittest.TestCase):

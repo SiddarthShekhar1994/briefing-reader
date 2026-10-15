@@ -96,7 +96,7 @@ class RememberTests(MemoryAppCase):
         self.assertEqual(entry.link()[0], ui.MEMORY_UNDO_TEXT)
         self.assertEqual([row.info().text for row in self.view.rows()], [NOTE])
         self.assertEqual(self.view.rows()[0].info().meta, f"TOLD {ui.DOT} OCT 4")
-        self.assertTrue(self.reading.tabs.memory_unread())
+        self.assertTrue(self.reading.memory_unread())
         step = self.memory_steps()[-1]
         self.assertEqual((step.kind, step.title, step.status), (live.MEMORY_SAVE, "Saved a note (on this PC)",
                                                                 live.STATUS_OK))

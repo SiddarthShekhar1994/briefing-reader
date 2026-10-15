@@ -206,7 +206,7 @@ class OpenTests(unittest.TestCase):
         self.assertIn("announced_at", flow.saved())
         self.assertNotIn("how", flow.saved())                 # no slot settled
         self.assertNotIn("viewed_at", flow.saved())
-        self.assertTrue(flow.reading.tabs.badge())             # NEW until viewed
+        self.assertTrue(flow.reading.is_new_briefing())             # NEW until viewed
         # A second OPEN within 2 minutes into the visible window: no greeting, no second announcement.
         c.handle_activation({"cmd": "activate", "run": None, "now": False, "open": True})
         settle()
@@ -244,7 +244,7 @@ class OpenTests(unittest.TestCase):
         kind, text, key = flow.voice.said[0]
         self.assertEqual((kind, key), ("greeting", ""))
         self.assertNotIn("ready to view", text)
-        self.assertFalse(flow.reading.tabs.badge())
+        self.assertFalse(flow.reading.is_new_briefing())
         self.assertNotIn("announced_at", flow.saved())
 
     def test_a_briefing_heard_through_the_older_prompt_is_not_new(self) -> None:
@@ -256,14 +256,14 @@ class OpenTests(unittest.TestCase):
                 flow.attempt()
                 self.assertEqual(flow.voice.kinds(), ["greeting"])
                 self.assertNotIn(READY, flow.voice.said[0][1])
-                self.assertFalse(flow.reading.tabs.badge())
+                self.assertFalse(flow.reading.is_new_briefing())
                 self.assertNotIn("announced_at", flow.saved())
                 self.assertTrue(AssistantPrefs(flow.config.data_dir / PREFS_FILE).answers_adopted)
         flow = self.older_runstate("dismissed")   # dismissed: never heard, so still NEW
         flow.c.start()
         flow.attempt()
         self.assertTrue(flow.voice.said[0][1].endswith(READY))
-        self.assertTrue(flow.reading.tabs.badge())
+        self.assertTrue(flow.reading.is_new_briefing())
 
     def test_older_answers_are_adopted_once_only(self) -> None:
         # After the first start of this version, an answer is only an answer: a "read" this version
@@ -272,7 +272,7 @@ class OpenTests(unittest.TestCase):
         flow.c.start()
         flow.attempt()
         self.assertTrue(flow.voice.said[0][1].endswith(READY))
-        self.assertTrue(flow.reading.tabs.badge())
+        self.assertTrue(flow.reading.is_new_briefing())
 
     def older_runstate(self, how: str, *, adopted: bool = False) -> Flow:
         flow = Flow(self, launch=LAUNCH_OPEN, expected_run=None)
@@ -289,7 +289,7 @@ class OpenTests(unittest.TestCase):
         flow.attempt()
         self.assertEqual(flow.voice.kinds(), ["greeting"])
         self.assertNotIn("ready to view", flow.voice.texts()[0])
-        self.assertFalse(flow.reading.tabs.badge())
+        self.assertFalse(flow.reading.is_new_briefing())
         self.assertIsNone(flow.c._new_key())
 
     def test_a_slow_fetch_gets_the_greeting_first_then_the_announcement(self) -> None:
@@ -390,7 +390,7 @@ class ViewingTests(unittest.TestCase):
     def test_briefing_tab_in_the_active_window_views_it(self) -> None:
         flow = self.opened()
         c, reading = flow.c, flow.reading
-        self.assertTrue(reading.tabs.badge())
+        self.assertTrue(reading.is_new_briefing())
         self.assertEqual(reading.speech.text(), "Your AM briefing is ready to view")
         self.assertTrue(reading.updated_bar.value().startswith(f"new {ui.DOT} "))
         self.assertEqual(reading.updated_bar.value_color().name(), hud.AMBER)
@@ -399,7 +399,7 @@ class ViewingTests(unittest.TestCase):
         settle()
         self.assertIn("viewed_at", flow.saved())
         self.assertIn(f"announce:{KEY}", flow.voice.cancelled)    # a queued announcement is dropped
-        self.assertFalse(reading.tabs.badge())
+        self.assertFalse(reading.is_new_briefing())
         self.assertEqual(reading.speech.text(), "AM briefing")
         self.assertFalse(reading.updated_bar.value().startswith("new"))
         self.assertEqual(c._tray_tooltip(), ui.TRAY_TOOLTIP)
@@ -410,12 +410,12 @@ class ViewingTests(unittest.TestCase):
         flow.active = False
         flow.reading.set_tab(hud.TAB_BRIEFING)
         settle()
-        self.assertTrue(flow.reading.tabs.badge())
+        self.assertTrue(flow.reading.is_new_briefing())
         self.assertNotIn("viewed_at", flow.saved())
         flow.active = True
         flow.c.window.activeChanged.emit(True)
         settle()
-        self.assertFalse(flow.reading.tabs.badge())
+        self.assertFalse(flow.reading.is_new_briefing())
         self.assertIn("viewed_at", flow.saved())
 
     def test_play_from_jarvis_switches_to_briefing_and_views(self) -> None:
@@ -428,7 +428,7 @@ class ViewingTests(unittest.TestCase):
         self.assertEqual(len(flow.c.player.starts), 1)
         self.assertIn("viewed_at", flow.saved())
         self.assertEqual(flow.saved().get("how"), "read")         # Play settles the slot, as before
-        self.assertFalse(flow.reading.tabs.badge())
+        self.assertFalse(flow.reading.is_new_briefing())
 
     def test_view_briefing_link(self) -> None:
         flow = self.opened()
@@ -462,7 +462,7 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(saved.get("how"), "read")
         self.assertIn("viewed_at", saved)
         self.assertNotIn("announced_at", saved)
-        self.assertFalse(flow.reading.tabs.badge())
+        self.assertFalse(flow.reading.is_new_briefing())
 
     def test_now_mode_is_read(self) -> None:
         flow = Flow(self, now_mode=True)
@@ -506,7 +506,7 @@ class ScheduledTests(unittest.TestCase):
         self.assertIn("announced_at", saved)
         self.assertIn("shown_at", saved)
         self.assertNotIn("how", saved)
-        self.assertTrue(flow.reading.tabs.badge())
+        self.assertTrue(flow.reading.is_new_briefing())
 
     def test_poll_timeout_shows_nothing_and_quits(self) -> None:
         flow = Flow(self, expected_run="AM")
@@ -572,7 +572,7 @@ class ScheduledTests(unittest.TestCase):
         self.assertTrue(flow.c.window.isVisible())
         self.assertEqual(flow.entries()[0][2], "I can't reach your briefing: Notion token missing.")
         self.assertEqual(flow.voice.said, [])
-        self.assertFalse(flow.reading.tabs.badge())
+        self.assertFalse(flow.reading.is_new_briefing())
         self.assertEqual(flow.fetches, [])
 
     def test_classic_prompt_mode(self) -> None:
@@ -660,7 +660,7 @@ class NewerBriefingTests(unittest.TestCase):
         self.assertEqual(flow.fetches[-1], "AM")
         flow.attempt(flow.page)
         self.assertEqual(c._script.run_label, "AM")
-        self.assertTrue(flow.reading.tabs.badge())
+        self.assertTrue(flow.reading.is_new_briefing())
         self.assertEqual(flow.voice.said, [("announce", ALONE, f"announce:{KEY}")])
         self.assertEqual(c.player.starts, [])
 
@@ -688,7 +688,7 @@ class NewerBriefingTests(unittest.TestCase):
         settle()
         self.assertEqual(c._script.run_label, "AM")
         self.assertEqual(flow.voice.said, [("announce", ALONE, f"announce:{KEY}")])
-        self.assertTrue(flow.reading.tabs.badge())
+        self.assertTrue(flow.reading.is_new_briefing())
 
     def test_replaced_in_front_of_the_owner_counts_as_viewed(self) -> None:
         flow = self.open_with_stale()
@@ -836,13 +836,13 @@ class WithoutRunStateTests(unittest.TestCase):
         c._greeting_timer.timeout.emit()
         flow.attempt()
         self.assertEqual(flow.voice.kinds(), ["greeting", "announce"])
-        self.assertTrue(flow.reading.tabs.badge())
+        self.assertTrue(flow.reading.is_new_briefing())
         c.handle_activation({"cmd": "activate", "open": True})
         flow.attempt()
         self.assertEqual(flow.voice.kinds(), ["greeting", "announce"])   # once
         flow.reading.set_tab(hud.TAB_BRIEFING)
         settle()
-        self.assertFalse(flow.reading.tabs.badge())
+        self.assertFalse(flow.reading.is_new_briefing())
         self.assertIn(KEY, c._viewed_keys)
         self.assertFalse((flow.root / "runstate.json").exists())
 

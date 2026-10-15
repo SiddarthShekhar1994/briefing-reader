@@ -130,6 +130,7 @@ class PrepFlowTests(PrepAppCase):
         sentence then says the brief is in the JARVIS tab."""
         gate = threading.Event()
         app = self.make(GatedProcess(plan_stream(ANSWER), gate))
+        self.reading.set_tab(hud.TAB_MEMORY)            # started while another screen is current
         self.type(TYPED)
         self.assertTrue(wait_for(lambda: self.reading.current_tab() == hud.TAB_LIVE))
         self.reading.set_tab(hud.TAB_BRIEFING)
@@ -137,13 +138,14 @@ class PrepFlowTests(PrepAppCase):
         self.assertTrue(wait_for(lambda: not self.c.ask.busy, 10))
         settle()
         self.assertEqual(self.reading.current_tab(), hud.TAB_BRIEFING)
-        self.assertEqual(app.voice.texts()[-1], "Your brief for tomorrow's 2 PM meeting is in the JARVIS tab, sir.")
+        self.assertEqual(app.voice.texts()[-1], "Your brief for tomorrow's 2 PM meeting is in the Transcript, sir.")
 
     def test_the_brief_says_ready_when_the_window_is_minimized(self) -> None:
         """R33: minimized, the owner is not looking at another tab: "... is ready" even after he
         switched to BRIEFING before minimizing."""
         gate = threading.Event()
         app = self.make(GatedProcess(plan_stream(ANSWER), gate))
+        self.reading.set_tab(hud.TAB_MEMORY)
         self.type(TYPED)
         self.assertTrue(wait_for(lambda: self.reading.current_tab() == hud.TAB_LIVE))
         self.reading.set_tab(hud.TAB_BRIEFING)
@@ -157,6 +159,7 @@ class PrepFlowTests(PrepAppCase):
     def test_live_auto_opened_by_the_run_gives_way(self) -> None:
         gate = threading.Event()
         app = self.make(GatedProcess(plan_stream(ANSWER), gate))
+        self.reading.set_tab(hud.TAB_MEMORY)
         self.type(TYPED)
         self.assertTrue(wait_for(lambda: self.reading.current_tab() == hud.TAB_LIVE))
         gate.set()
@@ -164,6 +167,23 @@ class PrepFlowTests(PrepAppCase):
         settle()
         self.assertEqual(self.reading.current_tab(), hud.TAB_JARVIS)
         self.assertEqual(app.voice.texts()[-1], "Your brief for tomorrow's 2 PM meeting is ready, sir.")
+
+    def test_a_brief_typed_on_home_stays_on_home_with_its_chip(self) -> None:
+        """Spec 16.0: Home stays; the brief lives in the Transcript and the cyan "Brief ready" chip
+        opens it at the brief (never by itself)."""
+        self.make(plan_stream(ANSWER))
+        self.prep()
+        reading = self.reading
+        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+        self.assertFalse(reading.transcript_drawer.is_open())
+        reading.captions.clear()
+        settle()
+        self.assertEqual(reading.home_chip(), ui.HOME_BRIEF_CHIP)
+        reading.answer_chip.click()
+        settle()
+        self.assertTrue(reading.transcript_drawer.is_open())
+        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+        self.assertNotEqual(reading.home_chip(), ui.HOME_BRIEF_CHIP)
 
     def test_an_approved_prep_reply_is_said_without_its_subject(self) -> None:
         """R27: the entry keeps the subject on screen; the spoken result has none."""
