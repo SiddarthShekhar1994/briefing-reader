@@ -489,6 +489,10 @@ TILE_NEEDS = "needs"
 TILE_DONE = "done"
 TILE_ERROR = "error"
 TILE_INFO = "info"
+TILE_NEEDS_FOCUS = "needs_focus"          # round 2: the focal needs-you card (all four brackets)
+TILE_NEEDS_SELECTED = "needs_selected"    # the queue's selected tile (all four brackets, stronger border)
+TILE_COUNTING = "counting"                # a card whose undo countdown runs
+TILE_STEEL = "steel"                      # denied: nothing was sent
 
 BRACKETS_DIAGONAL = "diagonal"     # top-left + bottom-right
 BRACKETS_ALL = "all"               # the "viewfinder"
@@ -517,6 +521,15 @@ TILE_STYLES: dict[str, TileStyle] = {
     TILE_ERROR: TileStyle(TILE_ALERT, alpha(ALERT, 0.50), ALERT, BRACKETS_DIAGONAL, 10, RADIUS_TILE, None,
                           ALERT_TX, INK_1),
     TILE_INFO: TileStyle(TILE, LINE_FAINT, None, BRACKETS_NONE, 0, RADIUS_TILE, None, INK_4, INK_2),
+    # Round 2 (Approvals): the card in focus (the screen's focal card; the queue's selected tile with a
+    # stronger border: all four brackets), a card counting down and a denied card (steel).
+    TILE_NEEDS_FOCUS: TileStyle(TILE_AMBER, alpha(AMBER, 0.50), AMBER, BRACKETS_ALL, 12, RADIUS_TILE_AMBER,
+                                SCAN_AMBER, AMBER, AMBER_TX),
+    TILE_NEEDS_SELECTED: TileStyle(TILE_AMBER, alpha(AMBER, 0.80), AMBER, BRACKETS_ALL, 12, RADIUS_TILE_AMBER,
+                                   SCAN_AMBER, AMBER, AMBER_TX),
+    TILE_COUNTING: TileStyle(TILE_AMBER, alpha(AMBER, 0.72), AMBER, BRACKETS_ALL, 12, RADIUS_TILE_AMBER,
+                             SCAN_AMBER, AMBER, AMBER_TX),
+    TILE_STEEL: TileStyle(TILE, alpha(STEEL, 0.45), None, BRACKETS_NONE, 0, RADIUS_TILE_AMBER, None, INK_4, INK_3),
 }
 
 _SCAN_BRUSHES: dict[int, QBrush] = {}
@@ -776,9 +789,22 @@ ICONS: dict[str, tuple[str, ...]] = {
     "popout": ("M14 4h6v6", "M20 4l-8 8", "M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"),
     "check": ("M5 12.5l4.2 4.2L19 7",),                      # the YOU echo's tick (Home)
     "stop": ("M7 7h10v10H7z",),                               # the command bar while a request runs
+    # Round 2 (the Briefing and Approvals boards).
+    "pause": ("M9 6v12M15 6v12",),
+    "replay": ("M4 12a8 8 0 1 0 2.45-5.75", "M4 4.5v4.5h4.5"),
+    "skip": ("M6 6.5l8.5 5.5L6 17.5z", "M18 6v12"),
+    "notion": ("M13.5 4.5H19.5V10.5", "M19.5 4.5l-8.5 8.5",
+               "M17.5 13.5v5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1h5"),
+    "read_all": ("M5 6h14M5 10h14M5 14h14M5 18h8",),
+    "edit": ("M4 20h4L19 9l-4-4L4 16z", "M13.5 6.5l4 4"),
+    "info": ("M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 1 0 0-17z", "M12 11v5", "M12 8v.01"),
+    "calendar": ("M5.5 5h13a2 2 0 0 1 2 2v11.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z", "M3.5 10h17",
+                 "M8 3v4M16 3v4"),
+    "warning": ("M12 4l9 16H3z", "M12 10v4.5", "M12 17.5v.01"),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",
+    "play_lg": "M7.5 5.2v13.6L18.5 12z",
 }
 
 
@@ -1369,3 +1395,115 @@ class ActionChip(QAbstractButton):
                 paint_focus_ring(painter, rect, radius)
         finally:
             painter.end()
+
+# --------------------------------------------------------------------------
+# Round 2: shared faces for widgets that are not HoloButtons (spec 6, 8, 9)
+# --------------------------------------------------------------------------
+
+STAMP_OK = "ok"          # an ok disc with a check (sent, added, moved, accepted, cancelled, done)
+STAMP_STEEL = "steel"    # a steel ring (denied, undone: nothing was sent)
+STAMP_ALERT = "alert"    # the warning glyph (failed)
+STAMP_AMBER = "amber"    # an amber dot (unknown: check before retrying)
+STAMP_HOLO = "holo"      # a cyan dot (working, waiting for the sign-in)
+STAMP_DISC = 20          # a stamp's disc (16 in compact rows)
+TICK_BOX = 18            # the NEW RECIPIENT tick's box
+
+
+def paint_button_face(painter: QPainter, rect: QRectF, variant: str, *, hover: bool = False, down: bool = False,
+                      enabled: bool = True, focus: bool = False, text: str = "", text_font: QFont | None = None,
+                      icon: str | None = None, small: bool = False) -> None:
+    """A spec 6 button drawn into ``rect`` (the button itself, without ring room) for widgets that keep their
+    own class (the approval card's buttons): the variant's fill, border and label, the 3 px hover ring of a
+    commit / go / danger button, 45 % when disabled and the keyboard focus ring. A link is its text alone."""
+    look = BUTTON_LOOKS.get(variant, BUTTON_LOOKS[GHOST])
+    if down and enabled:
+        fill, border, label = look.pressed
+    elif hover and enabled:
+        fill, border, label = look.hover
+    else:
+        fill, border, label = look.rest
+    radius = RADIUS_BUTTON_SM if small else RADIUS_BUTTON
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if not enabled:
+            painter.setOpacity(painter.opacity() * 0.45)
+        if look.ring is not None and hover and enabled:
+            painter.setPen(QPen(look.ring, 3.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(-1.5, -1.5, 1.5, 1.5), radius + 1.5, radius + 1.5)
+        painter.setPen(QPen(border, 1.0) if border.alpha() else Qt.PenStyle.NoPen)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        link = variant in (LINK, LINK_CYAN)
+        use = QFont(text_font) if text_font is not None else font("button_sm" if small else "button",
+                                                                    600 if look.weight == 600 else None)
+        use.setUnderline(link)
+        painter.setFont(use)
+        painter.setPen(label)
+        if icon:
+            metrics = QFontMetricsF(use)
+            lead = 10 if small else 13
+            width = 16 + 8 + metrics.horizontalAdvance(text)
+            left = max(rect.left() + lead, rect.center().x() - width / 2)
+            box = QRectF(left, rect.center().y() - 8, 16, 16)
+            paint_icon(painter, box, icon, label, stroke=1.9)
+            painter.drawText(QRectF(box.right() + 8, rect.top(), rect.right() - box.right() - 8, rect.height()),
+                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
+        else:
+            painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextShowMnemonic), text)
+        if focus:
+            painter.setOpacity(1.0)
+            paint_focus_ring(painter, rect, radius)
+    finally:
+        painter.restore()
+
+
+def paint_stamp(painter: QPainter, center: QPointF, kind: str, *, size: float = STAMP_DISC) -> None:
+    """A result stamp's disc (spec 8): ``kind`` is STAMP_OK, _STEEL, _ALERT, _AMBER or _HOLO."""
+    r = size / 2
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if kind == STAMP_OK:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(OK))
+            painter.drawEllipse(center, r, r)
+            box = QRectF(center.x() - r * 0.62, center.y() - r * 0.62, r * 1.24, r * 1.24)
+            paint_icon(painter, box, "check", OK_INK, stroke=3.0)
+        elif kind == STAMP_STEEL:
+            painter.setPen(QPen(QColor(STEEL), 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(center, r - 0.75, r - 0.75)
+        elif kind == STAMP_ALERT:
+            box = QRectF(center.x() - r, center.y() - r, size, size)
+            paint_icon(painter, box, "warning", ALERT, stroke=2.0)
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(AMBER if kind == STAMP_AMBER else HOLO))
+            painter.drawEllipse(center, 3.5, 3.5)
+    finally:
+        painter.restore()
+
+
+def paint_tick_box(painter: QPainter, rect: QRectF, checked: bool, *, enabled: bool = True,
+                   nudge: float = 0.0) -> None:
+    """The NEW RECIPIENT tick's box (spec 9): 18 x 18, radius 4, a 1.5 px coral border; ticked = coral fill
+    with a dark check. ``nudge`` (1..0) draws the coral ring that says "tick this first" (a click on the
+    disabled Send)."""
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if not enabled:
+            painter.setOpacity(painter.opacity() * 0.45)
+        if nudge > 0.0:
+            painter.setPen(QPen(alpha(ALERT, nudge), 2.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(-5, -5, 5, 5), 7, 7)
+        painter.setPen(QPen(QColor(ALERT), 1.5))
+        painter.setBrush(QColor(ALERT) if checked else alpha(ALERT, 0.0))
+        painter.drawRoundedRect(rect.adjusted(0.75, 0.75, -0.75, -0.75), RADIUS_CHECKBOX, RADIUS_CHECKBOX)
+        if checked:
+            paint_icon(painter, rect.adjusted(2, 2, -2, -2), "check", ALERT_INK, stroke=3.0)
+    finally:
+        painter.restore()

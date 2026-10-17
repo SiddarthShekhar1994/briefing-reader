@@ -122,6 +122,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import approvals_view, briefing_view
 from . import dock as dock_mod
 from . import holo, home, hud
 from . import live as _live
@@ -188,6 +189,7 @@ from .ask.validate import ALREADY_LISTED
 from .config import CONFIG_FILE_NAME, DEFAULT_ACCOUNT, PROJECT_ROOT, AgendaConfig, Config
 from .executor import (
     DISCONNECT_FAILED_MESSAGE,
+    NEW_RECIPIENT_NOTE,
     STAGE_SIGNED_IN,
     STAGE_SIGNIN,
     STAGE_WORKING,
@@ -1001,10 +1003,22 @@ _SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING,
                  SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
                  SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS}
 _SLOT_SCREENS = {slot: screen for screen, slot in _SCREEN_SLOTS.items()}
-_PANEL_SCREENS = (SCREEN_BRIEFING, SCREEN_LIVE, SCREEN_MEMORY)     # the transcript panel moves between them
+_PANEL_SCREENS = (SCREEN_LIVE, SCREEN_MEMORY)     # the transcript panel moves between them (round 2: not Briefing)
 _SCREEN_MARGINS = (16, 4, 16, 14)
-_APPROVALS_SCREEN_PX = 680          # the NEEDS YOUR OK column on the Approvals screen (round 1: current look)
 _LIST_HEIGHT_MAX = 100_000          # ... whose cards take the screen's whole height
+# Statuses the Briefing screen's transport already says (its quiet line leaves them out).
+_QUIET_STATUS_RE = re.compile(r"^(?:Playing|Paused|Finished|Loading)(?: \(([^)]*)\))?(?: - (.*))?$", re.S)
+
+
+def _briefing_notice(status: str) -> str:
+    """What the Briefing screen's quiet line keeps of the reading status: "Playing" goes (the transport
+    says it), "Playing (offline voice) - Your PM briefing is due" reads "Offline voice \u00b7 Your PM ..."."""
+    match = _QUIET_STATUS_RE.match(status or "")
+    if match is None:
+        return status or ""
+    extra, note = match.group(1) or "", match.group(2) or ""
+    return f" {hud.MIDDLE_DOT} ".join(part for part in (extra[:1].upper() + extra[1:], note) if part)
+
 HOME_BRIEFING_CHIP = "Briefing ready"
 HOME_PLAN_CHIP = "Plan ready"        # cyan: the plan just made is in the Transcript (its blocks on Approvals)
 HOME_BRIEF_CHIP = "Brief ready"      # cyan: the meeting brief just made is in the Transcript
@@ -1072,6 +1086,7 @@ class ReadingView(QWidget):
     undoAction = Signal(str)     # a card's Undo during its countdown: the action id
     countdownUndo = Signal()     # the header's Undo (the running countdown, its card out of sight)
     editAction = Signal(str)     # a card's Edit (tools row): the action id
+    recipientTicked = Signal(str, str, bool)   # a NEW RECIPIENT tick on a card: (action id, address, ticked)
     signInAccount = Signal(str)  # a card's Sign in (tools row): the action id
     connectCalendar = Signal()
     tabChanged = Signal(int)     # hud.TAB_JARVIS / TAB_BRIEFING / TAB_LIVE / TAB_MEMORY became current
@@ -1101,6 +1116,11 @@ class ReadingView(QWidget):
         self._doc_folded = False              # ... on the narrowest tier: no title line on BRIEFING
         self._state_text: str | None = None   # the state label's own text (PLANNING), None for the state's
         self._marker_live = True              # the briefing's LIVE marker should show (as built; not on LIVE)
+        self._has_script = False              # a briefing is loaded (else the Briefing screen loads / failed)
+        self._controls = ("Play", False)      # (primary text, can skip) as set_controls had them
+        self._minutes = 0                     # about how long the briefing reads
+        self._lens_previous = ""              # the lens's previous line (same section only)
+        self._lens_section = -1
         self._make_status_column()
         self._make_center_column()
         self._make_sections_popover()
@@ -1138,12 +1158,16 @@ class ReadingView(QWidget):
         for widget in (self.progress_bar, self.voice_bar, self.updated_bar, self.approvals_bar,
                        self.status):
             self.status_panel.body_layout.addWidget(widget)
+        # Technical readouts live in LIVE only (the owner's decision): STATUS keeps the values, unshown.
+        self.status_panel.setParent(self)
+        self.status_panel.hide()
         self.agenda_panel = hud.AgendaPanel("Today")
         self.agenda_panel.linkClicked.connect(self.connectCalendar)
 
     def _make_sections_popover(self) -> None:
-        """SECTIONS: a button in the transcript strip and the list it opens (rows keep their states)."""
-        self.sections_button = hud.ChipButton("Sections")
+        """SECTIONS: a button before the Briefing screen's section track and the list it opens (rows keep
+        their states)."""
+        self.sections_button = briefing_view.SectionsButton()
         self.sections_button.setToolTip("The briefing's sections: click one to play from there")
         self.sections_button.setEnabled(False)
         self.sections_button.toggled.connect(self._on_sections_toggled)
@@ -1156,9 +1180,15 @@ class ReadingView(QWidget):
         self.sections_panel.body_layout.addWidget(self.sections, 1)
 
     def _make_center_column(self) -> None:
-        self.orb = hud.Orb(168, hud.ORB_WORKING)
-        self.state_label = hud.StateLabel(hud.ORB_WORKING)
-        self.speech = hud.SpeechLabel(max_lines=_SPEECH_LINES)
+        # The activity state (orb / state_label: STANDBY, SPEAKING, WORKING, PLANNING ...): kept for the
+        # app's state, not shown since round 2 (the compact orb on Briefing and the header's word show it).
+        self.orb = hud.Orb(168, hud.ORB_WORKING, parent=self)
+        self.orb.hide()
+        self.state_label = hud.StateLabel(hud.ORB_WORKING, parent=self)
+        self.state_label.hide()
+        # The line being read: the Briefing screen's reading lens (Sora 22 / 33, ink-1).
+        self.speech = hud.SpeechLabel(font=holo.font("lens"), color=holo.INK_1, line_height=1.5,
+                                      max_lines=_SPEECH_LINES)
         self.speech.setObjectName("speech")
         self._make_buttons()
         self.title = _label(_caps(hud.display_font(15, 600, 0.12)), hud.TEXT_BRIGHT, name="title")
@@ -1256,17 +1286,17 @@ class ReadingView(QWidget):
         self.set_live_summary("Nothing running")
 
     def _make_buttons(self) -> None:
-        self.play_button = hud.HudButton("", hud.PRIMARY)
-        # "Pause" / "Play" / "Replay" / "Retry" without the row jumping around.
-        widths = []
-        for text in ("Play", "Replay", "Retry", "Pause"):
-            self.play_button.setText(text)
-            widths.append(self.play_button.sizeHint().width())
-        self.play_button.setMinimumWidth(max(widths))
-        self.skip_button = hud.HudButton("Skip section")
-        self.everything_button = hud.HudButton("Read everything")
-        self.notion_button = hud.HudButton("Open in Notion")
-        self.done_button = hud.HudButton("Done")
+        # The Briefing transport (HOLOGRAM_SPEC 6 / 16.1): Play / Pause / Replay / Retry as the 56 px go button
+        # (its glyph follows its text), Skip section and Open in Notion as 40 px icons, Read everything a ghost.
+        self.play_button = briefing_view.TransportButton("Play", holo.GO, size=holo.SIZE_LG)
+        self.skip_button = briefing_view.TransportButton("Skip section", holo.ICON, icon="skip", diameter=40)
+        self.skip_button.setToolTip("Skip section")
+        self.everything_button = holo.HoloButton("Read everything", holo.GHOST, icon="read_all")
+        self.notion_button = briefing_view.TransportButton("Open in Notion", holo.ICON, icon="notion", diameter=40)
+        self.notion_button.setToolTip("Open in Notion")
+        # Done = the header's close (round 2: no Done button on the Briefing screen); kept for its tooltip (R34).
+        self.done_button = hud.HudButton("Done", parent=self)
+        self.done_button.hide()
         self.play_button.clicked.connect(lambda: self.playPause.emit())
         self.skip_button.clicked.connect(lambda: self.skip.emit())
         self.everything_button.clicked.connect(lambda: self.readEverything.emit())
@@ -1274,10 +1304,10 @@ class ReadingView(QWidget):
         self.done_button.clicked.connect(lambda: self.done.emit())
 
     def _make_side_column(self) -> None:
-        self.approvals_panel = hud.ChamferPanel("Needs your OK", "0 pending", variant=hud.PANEL_AMBER)
-        _caps_meta(self.approvals_panel)   # "2 PENDING", as on the artboard
+        # Approvals (round 2, HOLOGRAM_SPEC 16.2): the cards as the focal column and the queue at their right.
         self.approvals = hud.ActionList(max_height=_LIST_HEIGHT_MAX)
-        self.approvals_panel.body_layout.addWidget(self.approvals, 1)
+        self.approvals_stage = approvals_view.ApprovalsStage(self.approvals)
+        self.approvals_queue = self.approvals_stage.queue
         self.activity_panel = hud.ChamferPanel("Activity", "live", border_alpha=0.18, spacing=8)
         self.activity = hud.ActivityLog()
         self.activity_panel.body_layout.addWidget(self.activity, 1)
@@ -1308,6 +1338,7 @@ class ReadingView(QWidget):
         self.dock.set_slot_visible(dock_mod.FOLLOWUPS, False)
         self.dock.slotActivated.connect(self._on_dock_slot)
         self.header = home.HoloHeader()
+        self._close_tip = self.header.close_button.toolTip()
         self.header.clockClicked.connect(self.open_day_view)
         self.header.undoClicked.connect(self.countdownUndo)
         self._countdown_view: tuple[str, float] | None = None   # (word, deadline) of a running countdown
@@ -1361,27 +1392,13 @@ class ReadingView(QWidget):
         return page
 
     def _build_layout(self) -> None:
-        # Briefing (round 1: its current look): STATUS beside the orb row, the controls and the panel.
-        self._left = QWidget()
-        left = QVBoxLayout(self._left)
-        left.setContentsMargins(0, 0, 0, 0)
-        left.setSpacing(12)
-        left.addWidget(self.status_panel)
-        left.addStretch(1)
-        self.briefing_screen = QWidget()
-        row = QHBoxLayout(self.briefing_screen)
-        row.setContentsMargins(*_SCREEN_MARGINS)
-        row.setSpacing(14)
-        row.addWidget(self._left)
-        row.addWidget(self._build_center(), 1)
-        # Approvals: the NEEDS YOUR OK cards, centred and as tall as the screen.
+        self._build_center()
+        self.briefing_screen = self._build_briefing()
+        # Approvals: the NEEDS YOUR OK cards (the focal column) and the queue, inside the stage brackets.
         self.approvals_screen = QWidget()
         row = QHBoxLayout(self.approvals_screen)
-        row.setContentsMargins(*_SCREEN_MARGINS)
-        row.addStretch(1)
-        self.approvals_panel.setMaximumWidth(_APPROVALS_SCREEN_PX)
-        row.addWidget(self.approvals_panel, 6)
-        row.addStretch(1)
+        row.setContentsMargins(holo.GUTTER_SIDE, 0, holo.GUTTER_SIDE, 12)
+        row.addWidget(self.approvals_stage, 1)
         # Live: the panel's LIVE page and, at the right, ACTIVITY (its rows stay visible here).
         self._right = QWidget()
         right = QVBoxLayout(self._right)
@@ -1442,6 +1459,8 @@ class ReadingView(QWidget):
         self._screens.setCurrentWidget(self._screens.widget(index))
         if index == SCREEN_MEMORY:
             self._set_memory_unread(False)
+        elif index == SCREEN_APPROVALS:
+            self.approvals_stage.open_first()   # the screen opens on the first undecided card
         self._sync_header_countdown()
         if index in _PANEL_SCREENS:
             self._show_tab_page(index)
@@ -1464,9 +1483,8 @@ class ReadingView(QWidget):
             self.header.set_countdown(view[0], view[1])
 
     def _place_panel(self, index: int) -> None:
-        """The transcript panel goes to the panel screen that shows (Briefing, Live or Memory)."""
-        slot = {SCREEN_BRIEFING: self._briefing_slot, SCREEN_LIVE: self._live_slot,
-                SCREEN_MEMORY: self._memory_slot}[index]
+        """The transcript panel goes to the panel screen that shows (Live or Memory)."""
+        slot = {SCREEN_LIVE: self._live_slot, SCREEN_MEMORY: self._memory_slot}[index]
         if slot is not self._panel_slot:
             if self._panel_slot is not None:
                 self._panel_slot.removeWidget(self.transcript_panel)
@@ -1536,6 +1554,8 @@ class ReadingView(QWidget):
         base, muted, offline = self.look()
         self.hero.set_look(base, muted=muted, offline=offline)
         self.dock.set_orb_look(base, muted=muted, offline=offline)
+        # Briefing's compact orb: as the hero, but never amber (nothing there waits on a decision).
+        self.briefing_orb.set_look(orb_mod.IDLE if base == orb_mod.NEEDS else base, muted=muted, offline=offline)
         word = orb_mod.state_word(base, muted, offline)
         if self._paused and base == orb_mod.IDLE and not muted:
             word = PAUSED_WORD
@@ -1671,36 +1691,22 @@ class ReadingView(QWidget):
                 return chip.text()
         return ""
 
-    def _build_center(self) -> QWidget:
-        voice = QVBoxLayout()
-        voice.setSpacing(8)
-        voice.addStretch(1)
-        voice.addWidget(self.state_label)
-        voice.addWidget(self.speech)
-        voice.addStretch(1)
-        top = QWidget()
-        top_layout = QHBoxLayout(top)
-        top_layout.setContentsMargins(14, 4, 14, 0)
-        top_layout.setSpacing(20)
-        top_layout.addWidget(self.orb, 0, Qt.AlignmentFlag.AlignVCenter)
-        top_layout.addLayout(voice, 1)
-        # The controls wrap onto a second row in a narrow column; Done stays bottom-right.
-        # Margins leave room for the Pause glow, which is drawn outside the button.
-        flow_holder = QWidget()
-        flow = hud.FlowLayout(flow_holder, 6, 6)
-        flow.setContentsMargins(14, 8, 0, 10)
-        for button in (self.play_button, self.skip_button, self.everything_button, self.notion_button):
-            flow.addWidget(button)
-        done_column = QVBoxLayout()
-        done_column.setContentsMargins(0, 8, 0, 10)
-        done_column.addStretch(1)
-        done_column.addWidget(self.done_button)
-        controls = QWidget()
-        controls_layout = QHBoxLayout(controls)
-        controls_layout.setContentsMargins(0, 0, 14, 0)
-        controls_layout.setSpacing(6)
-        controls_layout.addWidget(flow_holder, 1)
-        controls_layout.addLayout(done_column)
+    def _build_briefing(self) -> QWidget:
+        """The Briefing screen (round 2, HOLOGRAM_SPEC 16.1): the stage with the compact orb, the ready view
+        or the reading lens, the section track and the transport."""
+        self.briefing_stage = briefing_view.BriefingStage(self.speech, self.play_button, self.skip_button,
+                                                          self.everything_button, self.notion_button,
+                                                          self.sections_button)
+        self.briefing_orb = self.briefing_stage.orb
+        self.briefing_stage.track.sectionClicked.connect(self._on_section_row)
+        self.briefing_stage.approvalsClicked.connect(lambda: self.set_tab(SCREEN_APPROVALS))
+        screen = QWidget()
+        column = QVBoxLayout(screen)
+        column.setContentsMargins(holo.GUTTER_SIDE, 0, holo.GUTTER_SIDE, 12)
+        column.addWidget(self.briefing_stage, 1)
+        return screen
+
+    def _build_center(self) -> None:
         self._title_line = QWidget()
         title_row = QHBoxLayout(self._title_line)
         title_row.setContentsMargins(0, 0, 0, 0)
@@ -1722,13 +1728,13 @@ class ReadingView(QWidget):
         # The LIVE tab's status tag, in the slot of the briefing's LIVE marker (hidden there).
         strip.insertWidget(strip.indexOf(self.transcript_panel.live) + 1, self.live_status, 0,
                            Qt.AlignmentFlag.AlignVCenter)
-        strip.addWidget(self.sections_button, 0, Qt.AlignmentFlag.AlignVCenter)
         # The LIVE tab's Pop out and Clear (shown on that tab only; Clear gives way on a narrow strip).
         strip.addWidget(self._live_links, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
         # As tall as the step chips and SECTIONS it stands in for: the strip (and the tab row above
         # the panel) keeps its height when the tab changes (the links too: on LIVE the caption may
         # give way to them).
-        strip_height = max(self.sections_button.sizeHint().height(), self.transcript_panel.steps.sizeHint().height())
+        strip_height = max(hud.ChipButton("Sections").sizeHint().height(),
+                           self.transcript_panel.steps.sizeHint().height())
         self.strip_caption.setMinimumHeight(strip_height)
         self._live_links.setMinimumHeight(strip_height)
         self.briefing_page = QWidget()
@@ -1743,23 +1749,12 @@ class ReadingView(QWidget):
         self._pages.addWidget(self.live_page)         # hud.TAB_LIVE
         self._pages.addWidget(self.memory_page)       # hud.TAB_MEMORY
         self.transcript_panel.body_layout.addWidget(self._pages, 1)
-        center = QWidget()
-        column = QVBoxLayout(center)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(0)
-        column.addWidget(top)
-        column.addWidget(controls)
-        self._briefing_slot = QVBoxLayout()
-        self._briefing_slot.setContentsMargins(0, 0, 0, 0)
-        column.addLayout(self._briefing_slot, 1)
-        return center
 
     def _apply_tier(self, width: int) -> None:
         tier = next(tier for tier in _TIERS if width >= tier.min_width)
         if tier == self._tier:
             return
         self._tier = tier
-        self._left.setFixedWidth(tier.left)
         self._right.setFixedWidth(tier.right)
         self._fit_short(self._screens_height(self.height() if self.height() > 0 else READING_SIZE.height()))
 
@@ -1775,12 +1770,7 @@ class ReadingView(QWidget):
         if tier is None:
             return
         short = height < _SHORT_VIEW_BELOW
-        orb = min(tier.orb, _SHORT_ORB_PX) if short else tier.orb
-        if (self.orb.width(), self.orb.height()) != (orb, orb):
-            self.orb.setFixedSize(orb, orb)
-        if short != self._short:
-            self._short = short
-            self.speech.set_max_lines(_SHORT_SPEECH_LINES if short else _SPEECH_LINES)
+        self._short = short
         # A narrow transcript strip still needs room for a step chip beside SECTIONS.
         side = 20 if tier.orb >= 168 else 12
         pad = _SHORT_STRIP_PAD if short else 12
@@ -1817,6 +1807,8 @@ class ReadingView(QWidget):
         self.stale.setText(stale_text)
         self.stale.setVisible(bool(stale_text))
         self._sync_doc_header()
+        self.briefing_stage.set_kicker(title, subtitle)
+        self.briefing_stage.set_stale(stale_text)   # the warning always shows on the Briefing screen
         self._speech_fallback = title
         if not self._speech_text:
             self.speech.setText(self._new_label or self._speech_fallback)
@@ -1842,6 +1834,7 @@ class ReadingView(QWidget):
         while nothing is being said."""
         self._new_briefing = bool(new)
         self.dock.set_briefing_new(self._new_briefing)
+        self.briefing_stage.set_new(self._new_briefing)
         self._new_label = label if new else ""
         if not self._speech_text:
             self.speech.setText(self._new_label or self._speech_fallback)
@@ -2003,21 +1996,58 @@ class ReadingView(QWidget):
         self.status.setText(text)
         self.status.setVisible(bool(text))
         _set_status_style(self.status, is_error, hud.TEXT_SOFT)
+        # The Briefing screen shows a status only when it says something the controls do not ("Playing",
+        # "Paused" ... are the transport's; a note after them stays: "Playing - Your PM briefing is due").
+        shown = _briefing_notice(text)
+        self.briefing_stage.set_status(text if is_error and not shown else shown, is_error)
 
     def set_controls(self, primary: str, primary_enabled: bool, can_skip: bool) -> None:
         self.play_button.setText(primary)
+        self.play_button.setAccessibleName(primary)
+        self.play_button.setToolTip(primary)
         self.play_button.setEnabled(primary_enabled)
         self.skip_button.setEnabled(can_skip)
+        self._controls = (primary, bool(can_skip))
+        self._sync_briefing_phase()
+
+    def _sync_briefing_phase(self) -> None:
+        """The Briefing screen's phase from the controls and whether a briefing is loaded."""
+        primary, can_skip = self._controls
+        if not self._has_script:
+            phase = briefing_view.FAILED if primary == "Retry" else briefing_view.LOADING
+        elif primary == "Pause":
+            phase = briefing_view.PLAYING
+        elif primary == "Replay":
+            phase = briefing_view.ENDED
+        elif primary == "Retry":
+            phase = briefing_view.FAILED
+        else:
+            phase = briefing_view.PAUSED if can_skip else briefing_view.READY
+        if phase != self.briefing_stage.phase():
+            self.briefing_stage.set_phase(phase)
+
+    def pace_line(self, duration_ms: int = 0) -> None:
+        """The line just set (set_speech) is being read now: the lens lights its words one by one, over
+        ``duration_ms`` when the audio's length is known (0: the voice's estimated pace)."""
+        self.briefing_stage.start_words(duration_ms)
 
     def set_read_everything(self, enabled: bool, tooltip: str) -> None:
         self.everything_button.setEnabled(enabled)
         self.everything_button.setToolTip(tooltip)
 
     def set_speech(self, text: str) -> None:
-        """The line being spoken (Sora Light 20 px); "" shows "Your AM briefing is ready to view"
-        while the briefing is NEW, else the briefing title."""
+        """The line being read (the Briefing screen's lens); "" shows "Your AM briefing is ready to view"
+        while the briefing is NEW, else the briefing title. The lens shows the line before it in the same
+        section above it, in ink-4."""
+        previous = self._speech_text
+        if text and previous and text != previous and self._lens_section == self._current[0]:
+            self._lens_previous = previous
+        elif text != previous:
+            self._lens_previous = ""
+        self._lens_section = self._current[0]
         self._speech_text = text or ""
-        self.speech.setText(text or self._new_label or self._speech_fallback)
+        self.briefing_stage.set_line(text or self._new_label or self._speech_fallback,
+                                     self._lens_previous if text else "")
 
     def set_activity_state(self, state: str, live: bool, label: str | None = None) -> None:
         """Orb and state label (SPEAKING, STANDBY, WORKING, or ``label`` such as PLANNING) and the
@@ -2043,6 +2073,7 @@ class ReadingView(QWidget):
         """The Done button's tooltip (the productivity bundle: while a meeting with guests remains
         today, Done says that prep offers stop; R34). "" restores the default (none)."""
         self.done_button.setToolTip(text or DONE_TOOLTIP)
+        self.header.close_button.setToolTip(text or self._close_tip)
 
     def done_tooltip(self) -> str:
         return self.done_button.toolTip()
@@ -2061,6 +2092,9 @@ class ReadingView(QWidget):
         if current is not None and current != self._shown_section:
             self.sections.ensure_visible(current)
         self._shown_section = current
+        self.briefing_stage.set_rows(rows, current)
+        if rows:
+            self.briefing_stage.set_summary(briefing_view.summary_text(len(rows), self._minutes))
 
     # ---- sections popover ------------------------------------------------------
 
@@ -2166,9 +2200,10 @@ class ReadingView(QWidget):
             self.strip_caption.setVisible(bool(text))
 
     def set_pending(self, pending: int, total: int) -> None:
-        """Pending proposals: the panel's meta, the STATUS bar, the Dock's amber count, Home's chip and
-        the orb's needs you."""
-        self.approvals_panel.set_meta(f"{pending} pending")
+        """Pending proposals: the queue's count badge, the STATUS bar, the Dock's amber count, Home's chip
+        and the orb's needs you."""
+        self.approvals_queue.set_count(pending)
+        self.briefing_stage.set_proposals(pending)
         self.approvals_bar.set_value(str(pending), pending / total if total else 0.0)
         self._pending = max(0, int(pending))
         self.dock.set_approvals(self._pending)
@@ -2195,6 +2230,7 @@ class ReadingView(QWidget):
         card.undoClicked.connect(self.undoAction)
         card.editClicked.connect(self.editAction)
         card.signInClicked.connect(self.signInAccount)
+        card.tickToggled.connect(self.recipientTicked)
         return self.approvals.add_card(card)
 
     def action_card(self, action_id: str) -> hud.ActionCard | None:
@@ -2203,7 +2239,11 @@ class ReadingView(QWidget):
     # ---- panel content ------------------------------------------------------
 
     def show_message(self, text: str, is_error: bool = False) -> None:
-        """Replace the panel with one line (loading text or an error)."""
+        """Replace the panel with one line (loading text or an error); the Briefing screen shows it in place
+        of its ready line."""
+        self._has_script = False
+        self.briefing_stage.set_message(text, is_error)
+        self._sync_briefing_phase()
         self._block_numbers = {}
         self._current = (-1, -1)
         self.text.set_row(-1)
@@ -2220,7 +2260,14 @@ class ReadingView(QWidget):
         cursor.insertText(text, char_format)
 
     def set_script(self, script: Script, include_ignored: bool) -> None:
-        """Render one text block per script item; keeps the scroll position and highlight."""
+        """Render one text block per script item; keeps the scroll position and highlight. The Briefing
+        screen's ready view gets its readout (sections, about how many minutes)."""
+        self._has_script = True
+        words = sum(len(item.spoken.split()) for index in script.section_indices(include_ignored)
+                    for item in script.sections[index].items)
+        self._minutes = briefing_view.estimate_minutes(words)
+        self.briefing_stage.set_summary(briefing_view.summary_text(len(script.sections), self._minutes))
+        self._sync_briefing_phase()
         bar = self.text.verticalScrollBar()
         scroll = bar.value()
         document = self.text.document()
@@ -2495,6 +2542,7 @@ class BriefingWindow(hud.HudWindowFrame):
         self.reading = ReadingView()
         self.ground = holo.GroundCache()
         self.reading.hero.set_ground(orb_mod.ground_painter(self.ground))
+        self.reading.briefing_orb.set_ground(orb_mod.ground_painter(self.ground))
         holo_header = self.reading.header
         holo_header.muteClicked.connect(self._on_holo_mute)
         holo_header.minimizeClicked.connect(self.showMinimized)
@@ -3126,17 +3174,13 @@ _VERBS = {RSVP: "answer", MOVE: "move", CANCEL: "cancel"}
 # Sign-in problems of an account (google_auth PROBLEM_*): the card offers Sign in again.
 _SIGN_IN_PROBLEMS = (PROBLEM_SIGNED_OUT, PROBLEM_EXPIRED, PROBLEM_BLOCKED, PROBLEM_DENIED, PROBLEM_SCOPE,
                      PROBLEM_TIMEOUT, PROBLEM_IDENTITY)
-# A Reply / Email card: its Send signs the account in first (no countdown), opens Edit to confirm
-# new recipients or to read a long message, and only then counts down. The card's amber note
-# says what the last click on Send needs next.
+# A Reply / Email card: its Send signs the account in first (no countdown), opens Edit to read a
+# long message, and only then counts down; a NEW RECIPIENT is ticked on the card itself (Send stays
+# disabled until it is: the owner's decision of 2026-10-12). The card's amber note says what the
+# last click on Send needs next.
 # The notes never say "above": on a short window the card's FROM line may be scrolled out of view.
 MAIL_SIGN_IN_NOTE = "Finish the Google sign-in in your browser; nothing is sent - then check From and click Send again"
 MAIL_SIGNED_IN_NOTE = "Signed in - this card sends from {sender}; nothing is sent until you click Send"
-CONFIRM_NOTE = "Tick each new recipient in Edit (or remove it), then click Send again"
-CONFIRM_BANNER = ("Jarvis has not sent to the red addresses before. Tick \"Send to ...\" for each one you mean "
-                  "(or remove it), Save, then click Send again.")
-# Added to CONFIRM_BANNER when the card does not show all of the message either.
-CONFIRM_READ_TOO = "The card doesn't show all of the message: read it here to its end too."
 REVIEW_NOTE = "Read the whole message in Edit, then click Send again"
 REVIEW_BANNER = ("The card doesn't show all of this message. Read all of it here, to its end; Save keeps any "
                  "change. Nothing is sent until you click Send again.")
@@ -4317,6 +4361,7 @@ class AppController(QObject):
         reading.undoAction.connect(self.undo_action)
         reading.countdownUndo.connect(self._undo_running_countdown)
         reading.editAction.connect(self.edit_action)
+        reading.recipientTicked.connect(self.tick_recipient)
         reading.signInAccount.connect(self.sign_in_account)
         reading.connectCalendar.connect(self.connect_calendar)
         reading.tabChanged.connect(self._on_tab_changed)
@@ -5155,6 +5200,9 @@ class AppController(QObject):
             card.set_approve_text(RETRY_TEXT if status == STATUS_UNKNOWN else approve)
         if stage == _STAGE_COUNTDOWN:
             card.set_status(hud.CARD_COUNTDOWN, self._countdown_text())
+            countdown = self._countdown
+            if countdown is not None and countdown.action.id == action_id:   # the strip's drain bar
+                card.set_countdown(countdown.deadline, countdown.deadline - countdown.started)
             return
         if stage is not None:
             if stage == _STAGE_SIGNIN:
@@ -5292,7 +5340,8 @@ class AppController(QObject):
         elif status == STATUS_FAILED:
             parts.append(_NOTHING_SENT_RE.sub("", entry.get("message", "")))
         asking = self._account_dialog is not None and self._account_dialog.alias == action.account
-        if not self._signing_in(action.account) and not asking:   # meanwhile the hint says what to do
+        # The NEW RECIPIENT note is the card's own helper line under its ticks ("Tick ... first, then Send.").
+        if not self._signing_in(action.account) and not asking and mail.note != NEW_RECIPIENT_NOTE:
             parts.append(_for_button(mail.note, button))
         parts.append(card_view(action, self._now().date()).note)
         return f" {DOT} ".join(dict.fromkeys(part for part in parts if part))
@@ -5456,8 +5505,18 @@ class AppController(QObject):
         total = sum(1 for action in self._actions if action.decidable)
         self.window.prompt.set_pending(pending)
         self.window.reading.set_pending(pending, total)
+        self._sync_mail_cards()
         self._update_service_chips()
         self._render_followups()   # a row whose reply card waits reads "draft waiting" (R31)
+
+    def _sync_mail_cards(self) -> None:
+        """Every Reply / Email card that waits for a decision shows its recipients as they are now: an
+        address Jarvis has just sent to is known, so its tick (and the disabled Send) goes from the other
+        cards too. Nothing is sent; a card being carried out or decided keeps what it shows."""
+        for action in self._actions:
+            if (action.sends_mail and action.decidable and action.id not in self._jobs
+                    and not self._store.is_decided(action.id)):
+                self._show_card_state(action.id)
 
     def _decision_click_too_soon(self) -> bool:
         """True (and logged) for an Approve / Deny within 1 s of the previous one, on any card.
@@ -5672,15 +5731,26 @@ class AppController(QObject):
         self._start_countdown(action)   # a Todo's block keeps the Todo's id, so the result lands on its card
 
     def _approve_mail(self, action: ProposedAction) -> None:
-        """Send / Retry on a Reply or Email: sign in first (no countdown) while its account can't
-        send, ask whether a new binding is the right Google account, refuse while a recipient is
-        the sending account itself (the note says so; Edit fixes it), open Edit while a new
-        recipient is not ticked or a long message was not read there, else count down. Done
-        (Jarvis can't send it here) records that you handled it."""
+        """Send / Retry on a Reply or Email: refuse while a NEW RECIPIENT is not ticked on the card (Send
+        is disabled then; nothing is sent, no dialog opens), sign in first (no countdown) while its
+        account can't send, ask whether a new binding is the right Google account, refuse while a
+        recipient is the sending account itself (the note says so; Edit fixes it), open Edit while a
+        long message was not read there, else count down. Done (Jarvis can't send it here) records
+        that you handled it."""
         action_id = action.id
         mail = self._mail_status(action)
         if mail.hand_off:
             self._mark_done(action)
+            return
+        if mail.needs_edit:
+            # A NEW RECIPIENT is not ticked on the card: its Send is disabled, so only a key or a program
+            # gets here. Nothing is sent and nothing opens; the card's helper line says what to tick.
+            review = mail.review
+            logger.info("Send %s: not sent - %d new recipient(s) not ticked on the card", action_id,
+                        len(review.unconfirmed) if review is not None else 0)
+            card = self.window.reading.action_card(action_id)
+            if card is not None:
+                card.ticks.nudge()
             return
         if self._start_calendar() is None:   # no sending account is set up at all
             self._hint(action_id, mail.note or MAIL_OFF_NOTE.format(tools=hand_off_tools(action)))
@@ -5705,16 +5775,6 @@ class AppController(QObject):
             self._activity(hud.TAG_STOP, f"Not sent: {_kind_title(action)}",
                            f"{kind_label(action).upper()} {DOT} "
                            + ("a recipient is the sending account itself" if own else "nobody in To"))
-            return
-        if mail.needs_edit:
-            review = mail.review
-            logger.info("Send %s: %d new recipient(s) to confirm in Edit first", action_id,
-                        len(review.unconfirmed) if review is not None else 0)
-            banner = CONFIRM_BANNER
-            if self._unread(action):
-                banner = f"{banner} {CONFIRM_READ_TOO}"
-            self._hint(action_id, CONFIRM_NOTE)
-            self._open_mail_dialog(action, banner)
             return
         if self._unread(action):
             logger.info("Send %s: opening Edit to read the whole message first", action_id)
@@ -6044,6 +6104,52 @@ class AppController(QObject):
         logger.info("Open the result of an action")
         QDesktopServices.openUrl(QUrl(link))
 
+    # ---- the NEW RECIPIENT ticks on the card --------------------------------------------------------
+
+    def tick_recipient(self, action_id: str, address: str, ticked: bool) -> None:
+        """A NEW RECIPIENT ticked (or unticked) on its Reply / Email card (the owner's decision of 2026-10-12:
+        the tick is on the card, Send waits for it). Kept in memory with the card's other changes (same id);
+        nothing is sent. Ignored while the card is being carried out or decided, or beside another
+        approval or a dialog (the card then shows its ticks as they were)."""
+        page = self._action(action_id)
+        busy = (self.state == STATE_QUITTING or page is None or not page.sends_mail or action_id in self._jobs
+                or self._store.is_decided(action_id) or self._dialog is not None
+                or self._account_dialog is not None or self._locked_out(action_id))
+        if busy:
+            if page is not None:
+                self._show_card_state(action_id)
+            return
+        current = self._effective(page)
+        key = email_address(address).casefold()
+        if not key:
+            return
+        confirmed = set(current.confirmed)
+        if ticked:
+            confirmed.add(key)
+        else:
+            confirmed.discard(key)
+        edit = dataclasses.replace(self._edits.get(action_id) or ActionEdit(), confirmed_new=frozenset(confirmed))
+        try:
+            edited = apply_edit(page, edit)
+        except EditError:
+            logger.info("A tick on action %s did not fit its line; nothing changed", action_id)
+            self._show_card_state(action_id)
+            return
+        if edited == page:
+            self._edits.pop(action_id, None)
+        else:
+            self._edits[action_id] = edit
+        self._hints.pop(action_id, None)
+        review = self._mail_status(edited).review
+        logger.info("Recipient %s on action %s (%d of %d new recipient(s) ticked)",
+                    "ticked" if ticked else "unticked", action_id,
+                    len(review.new) - len(review.unconfirmed) if review is not None else 0,
+                    len(review.new) if review is not None else 0)
+        self._show_card_state(action_id)
+        self._activity(hud.TAG_DONE, f"{'Recipient confirmed' if ticked else 'Tick removed'}: {_kind_title(edited)}",
+                       f"{kind_label(edited).upper()} {DOT} nothing was sent")
+        self._refresh_actions_ui()
+
     # ---- the Edit dialog --------------------------------------------------------------------------
 
     def edit_action(self, action_id: str) -> None:
@@ -6101,8 +6207,10 @@ class AppController(QObject):
     def _mail_edit(self, page: ProposedAction, values: Mapping[str, Any]) -> ActionEdit:
         """The Edit dialog's Reply / Email values as an edit of the page's line: only what differs from
         the line is changed (the recipients as the card shows them, without the account's own address,
-        count as unchanged), so ticking new recipients alone is no edit of the message."""
+        count as unchanged). The ticks of the new recipients are the card's (the dialog has none): they
+        stay for the addresses that remain, and an address added here is NEW until it is ticked."""
         shown = self._mail_status(page).review
+        ticked = self._effective(page).confirmed
 
         def addresses(key: str, before: Sequence[str]) -> tuple[str, ...] | None:
             typed = tuple(values.get(key) or ())
@@ -6113,8 +6221,7 @@ class AppController(QObject):
         subject = values.get("subject") if page.kind == EMAIL else None
         body = values.get("body", "")
         return ActionEdit(to=to, cc=cc, subject=None if subject == page.title else subject,
-                          body=None if body == page.body else body,
-                          confirmed_new=frozenset(values.get("confirmed") or ()))
+                          body=None if body == page.body else body, confirmed_new=frozenset(ticked))
 
     def _on_edit_saved(self, action_id: str, values: Any) -> None:
         """Save in the Edit dialog: checked like a line; a problem keeps the dialog open."""
@@ -6129,7 +6236,6 @@ class AppController(QObject):
             dialog.show_error("This card is already being carried out or decided; nothing was changed")
             return
         values = dict(values) if isinstance(values, Mapping) else {}
-        previous = self._effective(page)
         try:
             if page.sends_mail:
                 edit = self._mail_edit(page, values)
@@ -6158,10 +6264,10 @@ class AppController(QObject):
             card.set_body(view.body, body_links(edited.body) if edited.sends_mail else ())
         self._show_card_state(action_id)
         logger.info("Edited action %s (%s)", action_id, edited.kind)
-        # Ticking new recipients alone leaves the message as it was: say what was saved.
+        # Save with the message as it was: say so (the ticks are the card's).
         what = "Edited"
         if edited.sends_mail and not self._is_edited(page):
-            what = "Recipients confirmed" if edited.confirmed != previous.confirmed else "Saved, unchanged"
+            what = "Saved, unchanged"
         self._activity(hud.TAG_DONE, f"{what}: {_kind_title(edited)}",
                        f"{kind_label(edited).upper()} {DOT} nothing was sent")
         self._refresh_actions_ui()
@@ -8872,6 +8978,8 @@ class AppController(QObject):
         if not self._utterance:
             self.window.reading.set_speech(self._briefing_speech)
             if text and self.player.state == PLAYING and self.state == STATE_READING:
+                # the Briefing screen's lens lights the words as they are read
+                self.window.reading.pace_line(self._briefing_caption_ms if self._briefing_caption else 0)
                 # the line being read, its words paced by the item's audio when its length is known
                 self.window.reading.say_caption(self._briefing_caption or text,
                                                 duration_ms=self._briefing_caption_ms if self._briefing_caption else 0)

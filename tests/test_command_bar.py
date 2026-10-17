@@ -16,7 +16,7 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import config, holo, hud, ui
+from briefing_reader import briefing_view, config, holo, hud, ui
 
 _app: QApplication | None = None
 IMG = '<img src="file://203.0.113.9/share/x.png">'
@@ -336,12 +336,24 @@ class ReadingScreenTests(unittest.TestCase):
                 self.assertTrue(bar.send_button.isVisible())
                 self.assertFalse(bar.button.isVisible())
 
-    def test_the_wrapped_controls_keep_their_room_with_the_bar(self) -> None:
+    def test_the_briefing_transport_keeps_its_room_with_the_bar(self) -> None:
+        # Round 2: the Briefing screen's transport is one centred row inside its stage (no wrapping flow).
         for size in ((760, 652), (900, 600), (1120, 700)):
             with self.subTest(size=size):
                 self.show(ask=True, size=size)
-                flow = self.reading.play_button.parentWidget()
-                self.assertGreaterEqual(flow.height(), flow.layout().heightForWidth(flow.width()))
+                self.reading.set_tab(hud.TAB_BRIEFING)
+                settle()
+                stage = self.reading.briefing_stage
+                for phase in (briefing_view.READY, briefing_view.PLAYING):
+                    stage.set_phase(phase)
+                    settle()
+                    buttons = [self.reading.play_button, self.reading.skip_button, self.reading.everything_button,
+                               self.reading.notion_button]
+                    shown = [button for button in buttons if button.isVisible()]
+                    self.assertEqual(len(shown), 4 if phase == briefing_view.PLAYING else 1)
+                    for button in shown:
+                        self.assertIs(button.parentWidget(), stage)
+                        self.assertTrue(stage.rect().contains(button.geometry()), (size, phase, button.text()))
 
     def test_the_claude_chip_is_for_the_reading_screen_only(self) -> None:
         header = self.window.header

@@ -180,7 +180,7 @@ MAIL_SETUP_NOTE = "Sending email is not set up yet - see README step 8b"
 # A Reply or Email goes out only through run_action(writes_running=True): after the undo
 # countdown, with "running" saved first.
 COUNTDOWN_ONLY_MESSAGE = "Email is only sent when the Send countdown runs out; nothing was sent"
-NEW_RECIPIENTS_MESSAGE = "Tick the new recipients in Edit first; nothing was sent"
+NEW_RECIPIENTS_MESSAGE = "Tick the new recipients on the card first; nothing was sent"
 NO_EVENT_MESSAGE = "There is no event to check on this card"
 UNCONFIRMED_FROM = "account not confirmed yet"
 # A new binding you have not confirmed yet (google_auth.PROBLEM_CONFIRM): nothing is sent or changed.
@@ -345,7 +345,7 @@ class MailStatus:
 
     @property
     def needs_edit(self) -> bool:
-        """A Send click opens the Edit dialog: a NEW RECIPIENT is not ticked yet."""
+        """A NEW RECIPIENT is not ticked on the card yet: Send waits (it is disabled)."""
         return self.review is not None and bool(self.review.unconfirmed)
 
     @property
@@ -578,7 +578,7 @@ class GmailBackend:
     and only when the saved sign-in is the bound Google account and you confirmed that binding,
     the card's text is sendable (actions.mail_problem), no recipient is the sending account itself
     (checked on the card's recipients, on the message and once more right before the send) and
-    every NEW RECIPIENT was ticked in the Edit dialog. After a send the recipients are remembered
+    every NEW RECIPIENT was ticked on its card. After a send the recipients are remembered
     (recipients.json), so they need no tick next time.
     """
 
@@ -613,7 +613,7 @@ class GmailBackend:
 
     def review(self, action: ProposedAction) -> RecipientReview:
         """The card's recipients, each one OWN (the sending account itself: the card is refused) /
-        TRUSTED / KNOWN / NEW, the new ones not yet ticked in Edit."""
+        TRUSTED / KNOWN / NEW, the new ones not yet ticked on the card."""
         sender = self._senders.get(action.account)
         own = _call_text(sender, "from_address") if sender is not None else ""
         return review(action.recipients(), action.cc(), own=own, account=action.account,
@@ -747,7 +747,7 @@ class GmailBackend:
                             in_reply_to=action.field("msgid") if reply else "")
 
 
-NEW_RECIPIENT_NOTE = "New recipient: tick it in Edit before Send"
+NEW_RECIPIENT_NOTE = "New recipient: tick it on the card before Send"
 
 
 def _sender_ready(sender: Any) -> tuple[str, str]:

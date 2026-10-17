@@ -211,7 +211,7 @@ class HomeWindowTests(unittest.TestCase):
         for widget in (reading.dock, reading.header, reading.stage, reading.hero, reading.captions,
                        reading.command_bar):
             self.assertTrue(widget.isVisible())
-        for widget in (reading.status_panel, reading.activity_panel, reading.approvals_panel, reading.agenda_panel,
+        for widget in (reading.status_panel, reading.activity_panel, reading.approvals_stage, reading.agenda_panel,
                        reading.play_button, reading.skip_button, reading.everything_button, reading.notion_button,
                        reading.transcript_panel, reading.conversation):
             self.assertFalse(widget.isVisible())
@@ -238,7 +238,7 @@ class HomeWindowTests(unittest.TestCase):
         self.assertEqual(reading.home_chip(), "1 needs your OK")
         reading.approvals_chip.click()
         self.assertEqual(reading.current_tab(), ui.SCREEN_APPROVALS)
-        self.assertTrue(reading.approvals_panel.isVisible())
+        self.assertTrue(reading.approvals_stage.isVisible())
         reading.set_tab(ui.SCREEN_HOME)
         reading.say_caption("Something to say.")
         self.assertEqual(reading.home_chip(), "")                   # only at rest

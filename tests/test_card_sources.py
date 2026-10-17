@@ -62,7 +62,7 @@ class CardSourceTests(unittest.TestCase):
         self.assertEqual([a.source for a in self.c._actions], [SOURCE_ASK, SOURCE_BRIEFING, SOURCE_BRIEFING])
         labels = [label for label, *_rest in shown(self.c)]
         self.assertEqual(labels, ["ASK \u00b7 CALENDAR", "CALENDAR", "TODO"])
-        self.assertEqual(reading.approvals_panel.meta_label.text(), "3 pending")
+        self.assertEqual(reading.approvals_queue.count(), 3)   # round 2: the queue's amber count badge
 
     def test_a_briefing_refresh_keeps_the_ask_cards_and_an_ask_keeps_the_briefings(self) -> None:
         self.c._take_ask_cards([ask_card(CAL_LINE)])

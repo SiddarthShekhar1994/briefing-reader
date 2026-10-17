@@ -151,7 +151,7 @@ class ProposedAction:
     text in ``body`` and soft problems in ``warnings``. ``start``/``end`` are
     a Todo's block or a Move's new time; ``title`` is the card headline.
     ``confirmed`` holds the NEW RECIPIENT addresses of a Reply / Email that you
-    ticked in the Edit dialog (casefolded; set only by edit_mail, never by a
+    ticked on its card (casefolded; set only by edit_mail, never by a
     line, kept in memory only).
 
     ``source`` says who proposed it: the briefing page (SOURCE_BRIEFING, every
@@ -188,7 +188,7 @@ class ProposedAction:
     body: str = ""                             # unescaped body (or Slack reply), "" when none
     warnings: tuple[str, ...] = ()             # soft problems, shown as the card's amber note
     structured: bool = False                   # read by the key=value path (errored lines too)
-    confirmed: frozenset[str] = frozenset()    # new recipients ticked in Edit (casefolded; memory only)
+    confirmed: frozenset[str] = frozenset()    # new recipients ticked on the card (casefolded; memory only)
     source: str = "briefing"                   # SOURCE_BRIEFING or SOURCE_ASK; never part of the id
     unverified: frozenset[str] = frozenset()   # Ask recipients you did not type (casefolded; memory only)
     web: bool = False                          # a web research card: its link follows the web rule

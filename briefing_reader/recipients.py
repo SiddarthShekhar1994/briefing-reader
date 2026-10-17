@@ -16,7 +16,7 @@ extra confirmation only when it is
 - an address Jarvis sent to before (RecipientHistory: recipients.json).
 
 Every other address is NEW: its card shows a red NEW RECIPIENT chip and Send waits until it is
-ticked in the Edit dialog ("Send to <address>"; ProposedAction.confirmed, memory only).
+ticked on its card ("Send to <address>"; ProposedAction.confirmed, memory only).
 Addresses are compared as plain, casefolded addresses; a display name never counts. A recipient
 that Ask Jarvis proposed and you did not type (ProposedAction.unverified) skips the trusted
 domains: it is NEW unless Jarvis sent to it before.
@@ -54,7 +54,7 @@ RECIPIENTS_FILE = "recipients.json"
 OWN = "own"            # the sending account itself: Send refuses until it is removed
 TRUSTED = "trusted"    # in [actions] trusted_domains
 KNOWN = "known"        # Jarvis sent to it before
-NEW = "new"            # needs a tick in the Edit dialog before Send
+NEW = "new"            # needs a tick on the card before Send
 MAX_REMEMBERED = 5000  # the most recent addresses kept in recipients.json
 NO_TO_PROBLEM = "The message has nobody in To - edit the recipients"
 # The card's refusal (shown on the card only: it names the address, so it is never logged or saved).
@@ -259,7 +259,7 @@ class RecipientReview:
     kinds: tuple[tuple[str, str], ...]
     own: tuple[str, ...]            # the sending account itself: the card is refused as it stands
     new: tuple[str, ...]            # the red NEW RECIPIENT chips
-    unconfirmed: tuple[str, ...]    # new and not ticked yet: Send opens the Edit dialog
+    unconfirmed: tuple[str, ...]    # new and not ticked yet: Send waits (disabled) for the tick
     problem: str = ""               # why nothing can be sent as it stands ("" = nothing)
 
     @property

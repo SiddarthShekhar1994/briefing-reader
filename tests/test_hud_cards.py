@@ -20,7 +20,7 @@ import weakref
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextDocument
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QWidget
 
 from briefing_reader import config, hud
 
@@ -520,16 +520,18 @@ class MailEditDialogTests(unittest.TestCase):
 
     def test_values_are_what_is_shown(self) -> None:
         dialog = self.make()
+        # Round 2 (the owner's decision of 2026-10-12): a new recipient is ticked on the card, never here.
         self.assertEqual(dialog.values(), {"to": ["ben@example.edu", "dee@example.org"], "cc": [],
-                                           "subject": IMG + " Re: Notes", "body": MAIL_BODY, "confirmed": []})
+                                           "subject": IMG + " Re: Notes", "body": MAIL_BODY})
         self.assertTrue(dialog.subject_edit.isReadOnly())        # a reply keeps its thread's subject
         self.assertTrue(dialog.title_label.isHidden())
         self.assertEqual(dialog.from_label.text(), "work (ana@example.edu)")
         new = dialog.to_list.row("dee@example.org")
         self.assertIsNotNone(new.badge)
-        self.assertIsNone(dialog.to_list.row("ben@example.edu").confirm_box)
-        new.confirm_box.setChecked(True)
-        self.assertEqual(dialog.values()["confirmed"], ["dee@example.org"])
+        self.assertIsNone(dialog.to_list.row("ben@example.edu").badge)
+        self.assertEqual(new.focus_chain(), [new.remove_button])   # no tick in the dialog: only Remove
+        self.assertEqual([box.text() for box in dialog.findChildren(QCheckBox) if box.text().startswith("Send")],
+                         [])
         self.assertEqual(dialog.links_label.text(), "Contains 1 link (highlighted)")
         dialog.close()
 
@@ -545,7 +547,8 @@ class MailEditDialogTests(unittest.TestCase):
         dialog.cc_list.add_edit.setText("eve@example.org")
         dialog.cc_list.add_typed()
         self.assertEqual(dialog.values()["cc"], ["eve@example.org"])
-        self.assertIsNotNone(dialog.cc_list.row("eve@example.org").confirm_box)   # new: needs a tick
+        added = dialog.cc_list.row("eve@example.org")   # new: coral, its tick is on the card after Save
+        self.assertEqual((added.badge.state(), added.badge.text()), (hud.RECIPIENT_NEW, hud.NEW_RECIPIENT_TEXT))
         to.add_edit.setText("fay@example.edu")
         to.add_typed()
         self.assertEqual(to.error(), "At most 3 recipients in To and Cc together")
@@ -569,17 +572,15 @@ class MailEditDialogTests(unittest.TestCase):
         self.assertEqual([values["cc"] for values in got], [["gil@example.edu"]])
         dialog.close()
 
-    def test_a_long_new_address_wraps_and_its_text_ticks_too(self) -> None:
+    def test_a_long_new_address_wraps(self) -> None:
         dialog = self.make(cc=[hud.RecipientChip(LONG_ADDRESS + "x", hud.RECIPIENT_NEW)], max_recipients=5)
         dialog.show()
         QApplication.processEvents()
         row = dialog.cc_list.rows[0]
-        label = row.confirm_label
+        label = row.address_label
         self.assertEqual(label.text(), LONG_ADDRESS + "x")
         self.assertLessEqual(label.heightForWidth(label.width()), label.height() + 1)   # wrapped, not cut
-        self.assertEqual(row.confirm_box.accessibleName(), f"Send to {LONG_ADDRESS}x (new recipient)")
-        QTest.mouseClick(label, Qt.MouseButton.LeftButton)
-        self.assertTrue(row.confirm_box.isChecked())
+        self.assertEqual(row.badge.text(), hud.NEW_RECIPIENT_TEXT)
         height = dialog.height()
         dialog.to_list.add_edit.setText("gil@example.org")
         dialog.to_list.add_typed()
@@ -608,8 +609,7 @@ class MailEditDialogTests(unittest.TestCase):
         dialog = self.make(cc=[hud.RecipientChip("eve@example.org", hud.RECIPIENT_NEW)], max_recipients=5)
         to, cc = dialog.to_list, dialog.cc_list
         expected = [to.row("ben@example.edu").remove_button, to.row("dee@example.org").remove_button,
-                    to.row("dee@example.org").confirm_box, to.add_edit, to.add_button,
-                    cc.row("eve@example.org").remove_button, cc.row("eve@example.org").confirm_box, cc.add_edit,
+                    to.add_edit, to.add_button, cc.row("eve@example.org").remove_button, cc.add_edit,
                     cc.add_button, dialog.subject_edit, dialog.body_edit, dialog.cancel_button, dialog.save_button]
         chain = [expected[0]]
         while len(chain) < len(expected):
@@ -620,18 +620,17 @@ class MailEditDialogTests(unittest.TestCase):
         to.add_edit.setText("gil@example.org")
         to.add_typed()   # a new row joins the chain where it is shown
         gil = to.row("gil@example.org")
-        self.assertIs(to.row("dee@example.org").confirm_box.nextInFocusChain(), gil.remove_button)
+        self.assertIs(to.row("dee@example.org").remove_button.nextInFocusChain(), gil.remove_button)
         dialog.close()
 
     def test_the_badge_reads_as_on_the_card(self) -> None:
-        dialog = self.make()
+        dialog = self.make(cc=[hud.RecipientChip("eve@example.org", hud.RECIPIENT_CONFIRMED)], max_recipients=5)
         row = dialog.to_list.row("dee@example.org")
         self.assertEqual((row.badge.state(), row.badge.text()), (hud.RECIPIENT_NEW, hud.NEW_RECIPIENT_TEXT))
-        width = row.badge.width()
-        row.confirm_box.setChecked(True)
-        self.assertEqual((row.badge.state(), row.badge.text()), (hud.RECIPIENT_CONFIRMED,
-                                                                 hud.CONFIRMED_RECIPIENT_TEXT))
-        self.assertEqual(row.badge.width(), width)   # a tick never moves Remove
+        ticked = dialog.cc_list.row("eve@example.org")   # ticked on the card: the dialog shows it confirmed
+        self.assertEqual((ticked.badge.state(), ticked.badge.text()), (hud.RECIPIENT_CONFIRMED,
+                                                                       hud.CONFIRMED_RECIPIENT_TEXT))
+        self.assertEqual(ticked.badge.width(), row.badge.width())   # either text: Remove never moves
         dialog.close()
 
     def test_a_long_message_and_subject_are_shown_whole_and_scroll_on_a_short_screen(self) -> None:
@@ -703,8 +702,8 @@ class MailEditDialogTests(unittest.TestCase):
         dialog.show()
         QApplication.processEvents()
         row = dialog.to_list.row("ana@example.edu")
-        self.assertEqual((row.badge.text(), row.badge.state(), row.confirm_box), (hud.OWN_RECIPIENT_TEXT,
-                                                                                hud.RECIPIENT_OWN, None))
+        self.assertEqual((row.badge.text(), row.badge.state()), (hud.OWN_RECIPIENT_TEXT, hud.RECIPIENT_OWN))
+        self.assertEqual(row.focus_chain(), [row.remove_button])   # no tick: only Remove
         row.badge.set_state(hud.RECIPIENT_CONFIRMED)   # it has no tick: it stays SENDING ACCOUNT
         self.assertEqual(row.badge.text(), hud.OWN_RECIPIENT_TEXT)
         self.assertEqual(dialog.to_list.own(), ["ana@example.edu"])

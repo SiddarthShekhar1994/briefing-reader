@@ -17,7 +17,7 @@ from PySide6.QtGui import QFontMetricsF
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
-from briefing_reader import config, dock, home, hud, ui
+from briefing_reader import briefing_view, config, dock, home, hud, ui
 
 _app: QApplication | None = None
 WHEN = datetime(2026, 10, 8, 14, 41)
@@ -580,20 +580,25 @@ class ReadingViewScreenTests(unittest.TestCase):
                 self.assertFalse(reading.conversation.isVisible())     # in the Transcript drawer
                 self.assertFalse(reading.transcript_panel.isVisible())  # no panel on Home
                 self.assertFalse(window.header.isVisible())             # the hologram's header instead
-                # BRIEFING: the transcript, the step chips and SECTIONS; no caption.
+                # BRIEFING (round 2, HOLOGRAM_SPEC 16.1): the stage - the compact orb and Play, no panel;
+                # while it reads, the lens, SECTIONS before the section track and the transport.
                 reading.set_tab(hud.TAB_BRIEFING)
                 settle(4)
-                strip = reading.transcript_panel.strip
-                self.assertTrue(reading.sections_button.isVisible())
-                self.assertTrue(strip.isAncestorOf(reading.sections_button))
-                self.assertTrue(reading.transcript_panel.steps.isVisible())
-                self.assertFalse(reading.strip_caption.isVisible())
-                self.assertTrue(reading.text.isVisible())
-                self.assertTrue(reading.transcript_panel.live.isVisible())
-                for button in (reading.play_button, reading.skip_button, reading.everything_button,
-                               reading.notion_button, reading.done_button):
-                    self.assert_inside(button, window)
-                self.assertGreaterEqual(reading.text.height(), 120)     # no tab row, no command bar here
+                stage = reading.briefing_stage
+                self.assertFalse(reading.transcript_panel.isVisible())
+                self.assertFalse(reading.text.isVisible())
+                for widget in (stage, stage.orb, reading.play_button):
+                    self.assertTrue(widget.isVisible())
+                    self.assert_inside(widget, window)
+                stage.set_phase(briefing_view.PLAYING)
+                settle(4)
+                for widget in (reading.play_button, reading.skip_button, reading.everything_button,
+                               reading.notion_button, reading.sections_button, stage.track, reading.speech):
+                    self.assertTrue(widget.isVisible())
+                    self.assert_inside(widget, window)
+                self.assertTrue(stage.isAncestorOf(reading.sections_button))
+                self.assertFalse(reading.done_button.isVisible())          # Done is the header's close
+                stage.set_phase(briefing_view.READY)
                 # The conversation is in the drawer: it opens over Home and holds the whole height.
                 reading.open_transcript()
                 settle(4)
@@ -603,8 +608,8 @@ class ReadingViewScreenTests(unittest.TestCase):
                 window.hide()
 
     def test_a_small_screens_window_keeps_the_controls_whole(self) -> None:
-        # A window of 760 x 560 (as on an 808 px screen): the Briefing screen's orb and panel strip get
-        # smaller and every control and the briefing subtitle stay whole.
+        # A window of 760 x 560 (as on an 808 px screen) and the regular minimum: the Briefing screen's
+        # ready view and its reading view (lens, track, transport) stay whole and never overlap.
         window = ui.BriefingWindow(10, 30)
         self.addCleanup(window.deleteLater)
         window.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
@@ -613,23 +618,33 @@ class ReadingViewScreenTests(unittest.TestCase):
         window.resize(760, 560)
         window.show()
         reading = window.reading
+        stage = reading.briefing_stage
         reading.set_header("AM briefing", "Updated today at 10:04 AM")
+        reading.set_speech("Alice Chen - Q3 budget review - wants the numbers by Friday, before the check-in "
+                           "with the whole project team")
         reading.set_tab(hud.TAB_BRIEFING)
-        settle(8)
-        self.assertEqual(reading.orb.width(), ui._SHORT_ORB_PX)
-        for button in (reading.play_button, reading.skip_button, reading.everything_button, reading.notion_button):
-            with self.subTest(button=button.text()):
-                self.assertLessEqual(button.geometry().bottom(), button.parentWidget().height())
-        self.assertGreaterEqual(reading.subtitle.height() + 1, reading.subtitle.heightForWidth(reading.subtitle.width()))
-        window.resize(900, 600)   # the regular minimum: the tier's own orb and strip again
-        settle(8)
-        self.assertEqual(reading.orb.width(), 112)
-        self.assertEqual(reading.transcript_panel.strip_layout.contentsMargins().top(), 12)
+        for size in ((760, 560), (900, 600)):
+            window.resize(*size)
+            for phase in (briefing_view.READY, briefing_view.PLAYING):
+                with self.subTest(size=size, phase=phase):
+                    stage.set_phase(phase)
+                    settle(8)
+                    shown = [widget for widget in (stage.orb, reading.play_button, reading.skip_button,
+                                                   reading.everything_button, reading.notion_button,
+                                                   reading.sections_button, stage.track, reading.speech)
+                             if widget.isVisible()]
+                    self.assertEqual(len(shown), 8 if phase == briefing_view.PLAYING else 2)
+                    for widget in shown:
+                        self.assertTrue(stage.rect().contains(widget.geometry()), type(widget).__name__)
+                    if phase == briefing_view.PLAYING:
+                        self.assertLess(reading.speech.geometry().bottom(), stage.track.geometry().top())
+                        self.assertLess(stage.track.geometry().bottom(), reading.play_button.geometry().top())
+                        self.assertGreaterEqual(reading.speech.width(), 200)
         window.hide()
 
-    def test_a_small_screens_window_folds_the_briefing_title_line(self) -> None:
-        # 760 x 560: the Briefing screen folds its title line and rule (also under STATUS and in the spoken
-        # line), so the transcript keeps a few lines below the controls; the stale warning always shows.
+    def test_the_briefing_screen_always_shows_the_stale_warning(self) -> None:
+        # Round 2: the Briefing screen's kicker carries the title and "Updated ..."; the stale warning is its
+        # quiet line, in the ready view and over the reading lens, at 760 x 560 too.
         window = ui.BriefingWindow(10, 30)
         self.addCleanup(window.deleteLater)
         window.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
@@ -639,27 +654,25 @@ class ReadingViewScreenTests(unittest.TestCase):
         window.resize(760, 560)
         window.show()
         reading = window.reading
+        stage = reading.briefing_stage
         reading.set_header("AM briefing", "Updated today at 10:04 AM")
-        reading.set_speech("AM briefing")
         reading.set_tab(hud.TAB_BRIEFING)
         settle(8)
-        self.assertTrue(reading.doc_header_folded())
-        self.assertFalse(reading.title.isVisible())
-        self.assertTrue(reading.text.isVisible())
-        self.assertGreaterEqual(reading.text.height(), 54)
-        top = reading.transcript_panel.mapTo(reading, QPoint(0, 0)).y()
-        for button in (reading.play_button, reading.skip_button, reading.everything_button,
-                       reading.notion_button, reading.done_button):
-            with self.subTest(button=button.text()):
-                self.assertLessEqual(button.mapTo(reading, QPoint(0, button.height())).y(), top)
+        self.assertEqual(stage.kicker(), "AM BRIEFING \u00b7 UPDATED TODAY AT 10:04 AM")
+        self.assertEqual(stage.notice(), ("", False))
         reading.set_header("AM briefing", "Updated today at 10:04 AM", "May be stale - updated yesterday")
         settle(4)
-        self.assertTrue(reading.stale.isVisible())                         # the warning always shows
-        self.assertFalse(reading.title.isVisible())
-        window.resize(900, 600)                                            # the regular minimum: back
-        settle(8)
-        self.assertFalse(reading.doc_header_folded())
-        self.assertTrue(reading.title.isVisible() and reading.subtitle.isVisible())
+        self.assertEqual(stage.notice(), ("May be stale - updated yesterday", False))
+        rects = stage._ready_layout()
+        self.assertIn("status", rects)                                     # its own line in the ready view
+        self.assertLessEqual(rects["status"].bottom(), reading.play_button.geometry().top())
+        reading.set_status("Playing - Your PM briefing is due")
+        self.assertEqual(stage.notice()[0], "Your PM briefing is due \u00b7 May be stale - updated yesterday")
+        reading.set_status("Playing")                                      # the transport says that itself
+        self.assertEqual(stage.notice()[0], "May be stale - updated yesterday")
+        stage.set_phase(briefing_view.PLAYING)
+        settle(4)
+        self.assertGreaterEqual(stage._reading_layout()["lens"].top(), 24 + 20)   # the lens stays under it
         window.hide()
 
     def test_every_screen_opens_from_the_dock_and_fits(self) -> None:
@@ -685,13 +698,21 @@ class ReadingViewScreenTests(unittest.TestCase):
                     self.assert_inside(reading.dock.button(slot), window)
         self.assertEqual(seen[:len(dock.SLOTS)], [ui._SLOT_SCREENS[slot] for slot in dock.SLOTS][1:] + [
             ui.SCREEN_HOME])
-        # The panel follows the panel screens; the agenda follows Follow-ups.
-        for screen, holder in ((hud.TAB_BRIEFING, reading.briefing_screen), (hud.TAB_LIVE, reading.live_screen),
-                               (hud.TAB_MEMORY, reading.memory_screen)):
+        # The panel follows the panel screens (round 2: Live and Memory; Briefing has its own stage); the
+        # agenda follows Follow-ups.
+        for screen, holder in ((hud.TAB_LIVE, reading.live_screen), (hud.TAB_MEMORY, reading.memory_screen)):
             reading.set_tab(screen)
             settle()
             self.assertTrue(holder.isAncestorOf(reading.transcript_panel))
             self.assertTrue(reading.transcript_panel.isVisible())
+        reading.set_tab(hud.TAB_BRIEFING)
+        settle()
+        self.assertTrue(reading.briefing_screen.isAncestorOf(reading.briefing_stage))
+        self.assertFalse(reading.transcript_panel.isVisible())
+        reading.set_tab(ui.SCREEN_APPROVALS)
+        settle()
+        self.assertTrue(reading.approvals_screen.isAncestorOf(reading.approvals_stage))
+        self.assertTrue(reading.approvals_stage.isAncestorOf(reading.approvals))
         reading.set_tab(ui.SCREEN_FOLLOWUPS)
         settle()
         self.assertTrue(reading.followups_screen.isAncestorOf(reading.agenda_panel))
@@ -711,7 +732,7 @@ class ReadingViewScreenTests(unittest.TestCase):
         reading.set_tab(hud.TAB_BRIEFING)
         settle(4)
         marker = reading.transcript_panel.live
-        self.assertTrue(marker.isVisible())
+        self.assertFalse(marker.isVisible())                         # round 2: no panel on Briefing
         self.assertFalse(reading.live_status.isVisible())
         reading.set_tab(hud.TAB_LIVE)
         settle(6)
@@ -754,7 +775,7 @@ class ReadingViewScreenTests(unittest.TestCase):
         reading.set_live_popped(False)
         reading.set_tab(hud.TAB_BRIEFING)
         settle(4)
-        self.assertTrue(marker.isVisible())                          # back on BRIEFING
+        self.assertFalse(marker.isVisible())                         # back on BRIEFING: its own stage
         self.assertFalse(reading.live_status.isVisible())
         self.assertFalse(reading.live_pop_button.isVisible() or reading.live_clear_button.isVisible())
         window.resize(ui.READING_MIN_SIZE)

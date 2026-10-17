@@ -295,6 +295,7 @@ from PySide6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    QVariantAnimation,
     Signal,
 )
 from PySide6.QtGui import (
@@ -351,6 +352,13 @@ from . import pictures as live_pictures
 from .text_prep import clock_parts, format_time
 
 logger = logging.getLogger(__name__)
+
+
+def _holo() -> Any:
+    """The hologram theme (briefing_reader.holo) for the approval cards, which round 2 restyled. holo imports
+    this module for its fonts, so it is imported on first use, never while this module loads."""
+    from . import holo
+    return holo
 
 # --------------------------------------------------------------------------
 # Tokens
@@ -591,6 +599,11 @@ class SpeechLabel(QLabel):
     ``text()`` returns exactly what was passed to ``setText``. With
     ``max_lines`` the text is cut to that many lines at the current width,
     ending in an ellipsis (the full text becomes the tooltip).
+
+    ``set_head(index, colors)`` (the Briefing screen's reading lens, HOLOGRAM_SPEC 14.3): the words before
+    word ``index`` in ``colors[0]`` (said), that word in ``colors[1]`` (being said) and the rest in
+    ``colors[2]`` (still to come); ``set_head(-1)`` shows the line in the label's own colour. A new
+    ``setText`` keeps the head (the caller resets it).
     """
 
     def __init__(self, text: str = "", *, font: QFont | None = None, color: str | QColor = TEXT_BRIGHT,
@@ -599,6 +612,8 @@ class SpeechLabel(QLabel):
         self._plain = ""
         self._line_height = line_height
         self._max_lines = max_lines
+        self._head = -1
+        self._head_colors: tuple[str, str, str] | None = None
         self.setTextFormat(Qt.TextFormat.RichText)
         self.setWordWrap(True)
         self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -623,6 +638,35 @@ class SpeechLabel(QLabel):
         self._max_lines = max_lines
         self._render()
 
+    def set_head(self, index: int, colors: tuple[str, str, str] | None = None) -> None:
+        """The word being said (see the class docstring); -1: none (the plain colour)."""
+        if colors is not None:
+            self._head_colors = colors
+        if int(index) != self._head:
+            self._head = int(index)
+            self._render()
+
+    def head(self) -> int:
+        return self._head
+
+    def word_count(self) -> int:
+        return len(self._plain.split())
+
+    def _head_html(self, shown: str) -> str:
+        said, saying, coming = self._head_colors or (TEXT_BRIGHT, TEXT_BRIGHT, TEXT_BRIGHT)
+        parts: list[str] = []
+        index = 0
+        for token in re.split(r"(\s+)", shown):
+            if not token:
+                continue
+            if token.isspace():
+                parts.append("<br>" * token.count("\n") if "\n" in token else " ")
+                continue
+            color = said if index < self._head else (saying if index == self._head else coming)
+            parts.append(f'<span style="color:{QColor(color).name()};">{html.escape(token)}</span>')
+            index += 1
+        return "".join(parts)
+
     def _line_percent(self) -> int:
         # CSS line-height is relative to the font size; Qt's percentage is
         # relative to the font's own line height (ascent + descent).
@@ -633,7 +677,10 @@ class SpeechLabel(QLabel):
     def _render(self) -> None:
         shown = self.shown_text()
         self.setToolTip(plain_tooltip(self._plain) if shown != self._plain else "")
-        body = html.escape(shown).replace("\n", "<br>")
+        if self._head >= 0 and self._head_colors is not None:
+            body = self._head_html(shown)
+        else:
+            body = html.escape(shown).replace("\n", "<br>")
         super().setText(f'<div style="line-height:{self._line_percent()}%;">{body}</div>')
 
     def _elided(self, text: str) -> str:
@@ -1007,7 +1054,9 @@ SECONDARY = "secondary"
 DENY = "deny"
 APPROVE = "approve"
 LINK = "link"
-BUTTON_VARIANTS = (PRIMARY, SECONDARY, DENY, APPROVE, LINK)
+CARD_FACE = "card_face"        # round 2: an approval card's button in a hologram look (holo.paint_button_face)
+CARD_LINK = "card_link"        # ... and its text links (Open thread, Copy, Undo, Open)
+BUTTON_VARIANTS = (PRIMARY, SECONDARY, DENY, APPROVE, LINK, CARD_FACE, CARD_LINK)
 
 
 @dataclass(frozen=True)
@@ -1029,6 +1078,12 @@ _BUTTON_SPECS: dict[tuple[str, bool], _ButtonSpec] = {
     (APPROVE, True): _ButtonSpec(lambda: mono_font(11, 700, 0.14), 36, 14, 6),
     (LINK, False): _ButtonSpec(lambda: mono_font(11, 400, 0.12), 24, 2, 0),
     (LINK, True): _ButtonSpec(lambda: mono_font(10, 400, 0.12), 22, 2, 0),
+    # The hologram's md button (38 high, padding 16) and text link (32 high, padding 8), each with 4 px
+    # around it for the hover and focus rings (holo.HoloButton.MARGIN).
+    (CARD_FACE, False): _ButtonSpec(lambda: display_font(14, 600, 0.02), 46, 20, 0),
+    (CARD_FACE, True): _ButtonSpec(lambda: display_font(14, 600, 0.02), 46, 20, 0),
+    (CARD_LINK, False): _ButtonSpec(lambda: display_font(14, 600, 0.04), 40, 12, 0),
+    (CARD_LINK, True): _ButtonSpec(lambda: display_font(14, 600, 0.04), 40, 12, 0),
 }
 _GLOWS = {PRIMARY: (ACCENT, 0.55, 22.0), APPROVE: (AMBER, 0.5, 16.0)}
 
@@ -4152,6 +4207,10 @@ class _TextMemory:
         if len(self._heights) > self._CACHE_LIMIT:
             self._heights.clear()
         height = 0
+        label = self._meter.parentWidget()
+        if label is not None and self._meter.contentsMargins() != label.contentsMargins():
+            self._meter.setContentsMargins(label.contentsMargins())   # measured with the label's own margins
+            self._heights.clear()
         for text in self._texts:
             key = (text, width)
             if key not in self._heights:
@@ -4400,10 +4459,70 @@ class _ToolLink(HudButton):
             painter.end()
 
 
+class _FaceButton(HudButton):
+    """A HudButton drawn as a hologram button (round 2: the approval cards, HOLOGRAM_SPEC 6).
+
+    ``face`` names a holo variant (holo.AMBER_COMMIT, AMBER_GHOST, DANGER, LINK, LINK_CYAN ...), ``icon`` a
+    holo glyph before the label. The widget is ``MARGIN`` px larger than the drawn button on every side
+    (room for the hover and focus rings), as a holo.HoloButton is. Hover and press follow the mouse at once.
+    """
+
+    MARGIN = 4
+
+    def __init__(self, text: str = "", face: str = "amber_ghost", *, icon: str | None = None) -> None:
+        holo = _holo()
+        super().__init__(text, CARD_LINK if face in (holo.LINK, holo.LINK_CYAN) else CARD_FACE)
+        self._face = face
+        self._icon = icon
+        self._fit_face_font()
+
+    def _is_link(self) -> bool:
+        holo = _holo()
+        return self._face in (holo.LINK, holo.LINK_CYAN)
+
+    def _fit_face_font(self) -> None:
+        look = _holo().BUTTON_LOOKS.get(self._face)
+        weight = look.weight if look is not None else 500
+        self._font = display_font(14, weight, 0.04 if self._is_link() else 0.02)
+        self.setFont(self._font)
+
+    def face(self) -> str:
+        return self._face
+
+    def set_face(self, face: str) -> None:
+        """Another hologram variant (Cancel event's danger commit, the amber commit otherwise)."""
+        if face != self._face and face in _holo().BUTTON_LOOKS:
+            self._face = face
+            self._fit_face_font()
+            self.updateGeometry()
+            self.update()
+
+    def icon_name(self) -> str | None:
+        return self._icon
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        hint = super().sizeHint()
+        width = hint.width() + (21 if self._icon else 0)   # 16 px glyph + 8 px gap, 3 px less lead
+        if not self._is_link():
+            width = max(width, 64 + 2 * self.MARGIN)
+        return QSize(width, hint.height())
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        m = self.MARGIN
+        painter = QPainter(self)
+        try:
+            _holo().paint_button_face(painter, QRectF(self.rect()).adjusted(m, m, -m, -m), self._face,
+                                      hover=self.isEnabled() and self.underMouse(), down=self.isDown(),
+                                      enabled=self.isEnabled(), focus=self.hasFocus() and self._focus_visible,
+                                      text=self.text(), text_font=self._font, icon=self._icon)
+        finally:
+            painter.end()
+
+
 _ACTIVATING_KEYS = (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Select)
 
 
-class _DecisionButton(HudButton):
+class _DecisionButton(_FaceButton):
     """Deny / Approve: also reports a click made while it is disabled (``disabledClicked``), and
     whether the click it is making came from the keyboard (``by_key``).
 
@@ -4418,10 +4537,10 @@ class _DecisionButton(HudButton):
     """
 
     disabledClicked = Signal()
-    _TIGHT_PADDING = 7   # the chamfer cut is 6 px
+    _TIGHT_PADDING = 11   # 4 px ring room and 7 px beside the label
 
-    def __init__(self, text: str = "", variant: str = SECONDARY, *, compact: bool = False) -> None:
-        super().__init__(text, variant, compact=compact)
+    def __init__(self, text: str = "", face: str = "amber_ghost") -> None:
+        super().__init__(text, face)
         self._hint_width = 0
         self._tight_width = 0
         self._keyed = False   # the press that is clicking it now came from the keyboard (Space / Enter)
@@ -4480,30 +4599,44 @@ class _DecisionButton(HudButton):
 
 # A Reply / Email card's recipients (RecipientChips, the Edit dialog's To / Cc lists).
 RECIPIENT_KNOWN = "known"          # the account's trusted domains, or sent to through Jarvis before
-RECIPIENT_NEW = "new"              # red NEW RECIPIENT: Send asks to confirm it in the Edit dialog
-RECIPIENT_CONFIRMED = "confirmed"  # a new recipient ticked in the Edit dialog ("Send to <address>")
+RECIPIENT_NEW = "new"              # coral NEW RECIPIENT: Send waits until it is ticked on the card
+RECIPIENT_CONFIRMED = "confirmed"  # a new recipient ticked on the card ("Send to <address>")
 RECIPIENT_OWN = "own"              # the sending account itself: never a recipient (Send refuses)
 NEW_RECIPIENT_TEXT = "NEW RECIPIENT"
 CONFIRMED_RECIPIENT_TEXT = "NEW " + MIDDLE_DOT + " CONFIRMED"
 OWN_RECIPIENT_TEXT = "SENDING ACCOUNT"
 _BADGE_TEXTS = {RECIPIENT_NEW: NEW_RECIPIENT_TEXT, RECIPIENT_CONFIRMED: CONFIRMED_RECIPIENT_TEXT,
                 RECIPIENT_OWN: OWN_RECIPIENT_TEXT}
-_RED_RECIPIENTS = (RECIPIENT_NEW, RECIPIENT_CONFIRMED, RECIPIENT_OWN)
+_RED_RECIPIENTS = (RECIPIENT_NEW, RECIPIENT_OWN)   # coral chips (a confirmed one takes the known look)
+
+
+def _badge_font() -> QFont:
+    """The recipient badge's text: JetBrains Mono 10 / 500, 0.1em (HOLOGRAM_SPEC 7: inside a chip only)."""
+    return mono_font(10, 500, 0.10)
 
 
 def _paint_recipient_badge(painter: QPainter, rect: QRectF, text: str, state: str, font: QFont) -> None:
-    """A recipient's badge, on a card and in the Edit dialog alike: NEW RECIPIENT filled red while
-    the address is not confirmed, outlined red once it is ("NEW \u00b7 CONFIRMED"); SENDING ACCOUNT
-    filled red on the account's own address (Send refuses until it is removed)."""
+    """A recipient's badge (a pill inside its chip, HOLOGRAM_SPEC 7 / 9), on a card and in the Edit dialog
+    alike: NEW RECIPIENT filled coral while the address is not ticked, "NEW \u00b7 CONFIRMED" outlined cyan
+    once it is; SENDING ACCOUNT filled coral on the account's own address (Send refuses until it is
+    removed). Never colour alone: the words always show."""
+    holo = _holo()
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    radius = rect.height() / 2
     if state in (RECIPIENT_NEW, RECIPIENT_OWN):
-        painter.fillRect(rect, QColor(RED_LINE))
-        painter.setPen(QColor("#1a0505"))
+        painter.setPen(QPen(QColor(holo.ALERT), 1))
+        painter.setBrush(QColor(holo.ALERT))
+        ink = QColor(holo.ALERT_INK)
     else:
-        painter.setPen(QPen(rgba(RED_LINE, 0.9), 1))
-        painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
-        painter.setPen(QColor(RED))
+        painter.setPen(QPen(holo.alpha(holo.HOLO, 0.55), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        ink = QColor(holo.HOLO)
+    painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+    painter.setPen(ink)
     painter.setFont(font)
     painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+    painter.restore()
 
 
 @dataclass(frozen=True)
@@ -4542,32 +4675,35 @@ class RecipientChips(QWidget):
     """A Reply / Email card's FROM line and its TO / CC recipients as chips (painted).
 
     ``set_rows(sender, to, cc)``: ``sender`` is the From text ("work (ana@example.edu)"),
-    ``to`` / ``cc`` RecipientChip items (an empty Cc has no row). A RECIPIENT_NEW chip is red
-    with a NEW RECIPIENT badge (Send asks to confirm it in the Edit dialog first); a
-    RECIPIENT_CONFIRMED one is red with "NEW \u00b7 CONFIRMED"; a RECIPIENT_OWN one (the sending
-    account itself: Send refuses) is red with SENDING ACCOUNT. Every address is shown whole: a
+    ``to`` / ``cc`` RecipientChip items (an empty Cc has no row). A RECIPIENT_NEW chip is coral
+    with a NEW RECIPIENT badge (Send waits until it is ticked on the card); a RECIPIENT_CONFIRMED
+    one takes the known look with "NEW \u00b7 CONFIRMED" (cyan outline); a RECIPIENT_OWN one (the
+    sending account itself: Send refuses) is coral with SENDING ACCOUNT. Every address is shown whole: a
     long one wraps inside its chip. Like the card's other texts it never gets shorter once it
     has been shown (a later, shorter list keeps the room), so the card never shrinks under the
     mouse. ``text()`` is what is shown, as plain text (also the accessible name and tooltip).
     """
 
-    _CAPTION_GAP = 10
-    _ROW_GAP = 4
+    _CAPTION_COLUMN = 52   # FROM / TO / CC (HOLOGRAM_SPEC 16.2: a 52 px label column, 12 px gap)
+    _CAPTION_GAP = 12
+    _ROW_GAP = 10
     _CHIP_GAP = 6
-    _CHIP_VGAP = 4
-    _PAD_X = 6
-    _PAD_Y = 2
-    _BADGE_GAP = 6
-    _BADGE_PAD = 4
+    _CHIP_VGAP = 6
+    _CHIP_HEIGHT = 28
+    _PAD_X = 10
+    _BADGE_PAD_RIGHT = 4   # a chip with a badge: the badge sits 4 px from its right end
+    _BADGE_GAP = 7
+    _BADGE_PAD = 7
+    _BADGE_HEIGHT = 20
     _REMEMBER = 4
     _MIN_VALUE_WIDTH = 60
 
     def __init__(self, parent: QWidget | None = None, *, top_margin: int = 0) -> None:
         super().__init__(parent)
         self._top = top_margin
-        self._caption_font = mono_font(10, 400, 0.14)
-        self._value_font = mono_font(11)
-        self._badge_font = mono_font(9, 600, 0.08)
+        self._caption_font = mono_font(11, 500, 0.16)
+        self._value_font = mono_font(12, 400, 0.02)
+        self._badge_font = _badge_font()
         self._sender = ""
         self._to: tuple[RecipientChip, ...] = ()
         self._cc: tuple[RecipientChip, ...] = ()
@@ -4619,10 +4755,13 @@ class RecipientChips(QWidget):
     # ---- geometry --------------------------------------------------------------
 
     def _caption_width(self) -> float:
-        return max(_text_advance(self._caption_font, word) for word in ("FROM", "TO", "CC")) + self._CAPTION_GAP
+        return float(self._CAPTION_COLUMN + self._CAPTION_GAP)
+
+    def _line(self) -> float:
+        return max(18.0, QFontMetricsF(self._value_font).lineSpacing())
 
     def _chip_height(self, lines: int) -> float:
-        return lines * QFontMetricsF(self._value_font).lineSpacing() + 2 * self._PAD_Y
+        return float(self._CHIP_HEIGHT) + (lines - 1) * self._line()
 
     def _layout(self, sender: str, to: Sequence[RecipientChip], cc: Sequence[RecipientChip],
                 width: int) -> tuple[float, list[tuple]]:
@@ -4631,15 +4770,14 @@ class RecipientChips(QWidget):
         x0 = self._caption_width()
         avail = max(float(self._MIN_VALUE_WIDTH), width - x0)
         right = x0 + avail
-        value = QFontMetricsF(self._value_font)
-        line_h = value.lineSpacing()
-        caption_dy = max(0.0, (line_h - QFontMetricsF(self._caption_font).lineSpacing()) / 2)
+        line_h = self._line()
+        pad_y = (self._CHIP_HEIGHT - line_h) / 2
         badge_w = {text: _text_advance(self._badge_font, text) + 2 * self._BADGE_PAD
                    for text in _BADGE_TEXTS.values()}
         y = 0.0
         first = True
         if sender:
-            items.append(("caption", QPointF(0, y + caption_dy), "FROM"))
+            items.append(("caption", QRectF(0, y, self._CAPTION_COLUMN, line_h), "FROM"))
             for line in _wrapped_lines(sender, self._value_font, avail):
                 items.append(("value", QRectF(x0, y, avail, line_h), line))
                 y += line_h
@@ -4650,12 +4788,12 @@ class RecipientChips(QWidget):
             if not first:
                 y += self._ROW_GAP
             first = False
-            items.append(("caption", QPointF(0, y + self._PAD_Y + caption_dy), caption))
+            items.append(("caption", QRectF(0, y + pad_y, self._CAPTION_COLUMN, line_h), caption))
             x, row_h = x0, 0.0
             for chip in chips:
                 badge = _BADGE_TEXTS.get(chip.state, "")
                 text_w = _text_advance(self._value_font, chip.address)
-                extra = self._BADGE_GAP + badge_w[badge] if badge else 0.0
+                extra = self._BADGE_GAP + badge_w[badge] - self._PAD_X + self._BADGE_PAD_RIGHT if badge else 0.0
                 single = 2 * self._PAD_X + text_w + extra
                 if single <= avail:
                     if x > x0 and x + single > right + 0.5:
@@ -4673,7 +4811,8 @@ class RecipientChips(QWidget):
                     count = len(lines)
                     badge_at = None
                     if badge:
-                        if last_w + extra <= inner:
+                        room = inner + self._PAD_X - self._BADGE_PAD_RIGHT
+                        if last_w + self._BADGE_GAP + badge_w[badge] <= room:
                             badge_at = QPointF(x + self._PAD_X + last_w + self._BADGE_GAP, y + (count - 1) * line_h)
                         else:
                             badge_at = QPointF(x + self._PAD_X, y + count * line_h)
@@ -4682,11 +4821,12 @@ class RecipientChips(QWidget):
                     x = right + 1   # the next chip starts a new row
                 items.append(("chip", rect, chip.state))
                 for index, line in enumerate(lines):
-                    items.append(("chip_text", QRectF(rect.x() + self._PAD_X, rect.y() + self._PAD_Y + index * line_h,
+                    items.append(("chip_text", QRectF(rect.x() + self._PAD_X, rect.y() + pad_y + index * line_h,
                                                       rect.width() - 2 * self._PAD_X, line_h), line, chip.state))
                 if badge and badge_at is not None:
-                    items.append(("badge", QRectF(badge_at.x(), badge_at.y() + self._PAD_Y + 1, badge_w[badge],
-                                                  line_h - 2), badge, chip.state))
+                    top = badge_at.y() + (self._CHIP_HEIGHT - self._BADGE_HEIGHT) / 2
+                    items.append(("badge", QRectF(badge_at.x(), top, badge_w[badge], self._BADGE_HEIGHT), badge,
+                                  chip.state))
                 row_h = max(row_h, rect.height())
             y += row_h
         return y, items
@@ -4722,34 +4862,35 @@ class RecipientChips(QWidget):
     # ---- painting ----------------------------------------------------------------
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        holo = _holo()
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.translate(0, self._top)
             _height, items = self._layout(self._sender, self._to, self._cc, self.width())
+            left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             for item in items:
                 kind = item[0]
                 if kind == "caption":
                     painter.setFont(self._caption_font)
-                    painter.setPen(QColor(AMBER_META))
-                    metrics = QFontMetricsF(self._caption_font)
-                    painter.drawText(QPointF(item[1].x(), item[1].y() + metrics.ascent()), item[2])
+                    painter.setPen(QColor(holo.INK_4))
+                    painter.drawText(item[1], left, item[2])
                 elif kind == "value":
                     painter.setFont(self._value_font)
-                    painter.setPen(QColor(TEXT_SOFT))
-                    painter.drawText(item[1], Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, item[2])
+                    painter.setPen(QColor(holo.INK_2))
+                    painter.drawText(item[1], left, item[2])
                 elif kind == "chip":
-                    new = item[2] in _RED_RECIPIENTS
+                    coral = item[2] in _RED_RECIPIENTS
                     rect = item[1].adjusted(0.5, 0.5, -0.5, -0.5)
-                    path = chamfer_path(rect, 4)
-                    painter.fillPath(path, rgba(RED, 0.10) if new else rgba(AMBER, 0.06))
-                    painter.setPen(QPen(rgba(RED_LINE, 0.9) if new else rgba(AMBER, 0.35), 1))
-                    painter.drawPath(path)
+                    radius = min(self._CHIP_HEIGHT / 2, rect.height() / 2)
+                    painter.setPen(QPen(holo.alpha(holo.ALERT, 0.60) if coral else holo.alpha(holo.HOLO, 0.40), 1))
+                    painter.setBrush(holo.alpha(holo.ALERT if coral else holo.HOLO, 0.08))
+                    painter.drawRoundedRect(rect, radius, radius)
                 elif kind == "chip_text":
-                    new = item[3] in _RED_RECIPIENTS
+                    coral = item[3] in _RED_RECIPIENTS
                     painter.setFont(self._value_font)
-                    painter.setPen(QColor(RED if new else AMBER_TEXT))
-                    painter.drawText(item[1], Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, item[2])
+                    painter.setPen(QColor(holo.ALERT_TX2 if coral else holo.INK_1))
+                    painter.drawText(item[1], left, item[2])
                 elif kind == "badge":
                     _paint_recipient_badge(painter, item[1], item[2], item[3], self._badge_font)
         finally:
@@ -4904,8 +5045,398 @@ class _MailBody(QWidget):
             painter.end()
 
 
+def tick_first_text(addresses: Sequence[str]) -> str:
+    """The card's helper line while a NEW RECIPIENT is not ticked: "Tick dana@example.com first, then Send."
+    (the owner's decision of 2026-10-12: the tick is on the card, Send waits for it)."""
+    return f"Tick {_who(addresses)} first, then Send."
+
+
+def tick_tip_text(addresses: Sequence[str]) -> str:
+    """The disabled Send's tooltip: "Tick dana@example.com first"."""
+    return f"Tick {_who(addresses)} first"
+
+
+def ticked_text(addresses: Sequence[str]) -> str:
+    """The helper line once every new recipient is ticked: "dana@example.com confirmed."."""
+    if len(addresses) > 2:
+        return f"{len(addresses)} new recipients confirmed."
+    return f"{_who(addresses)} confirmed."
+
+
+def _who(addresses: Sequence[str]) -> str:
+    if len(addresses) == 1:
+        return addresses[0]
+    if len(addresses) == 2:
+        return f"{addresses[0]} and {addresses[1]}"
+    return f"the {len(addresses)} new recipients"
+
+
+class RecipientTick(QAbstractButton):
+    """One NEW RECIPIENT tick on a Reply / Email card (HOLOGRAM_SPEC 9; the owner's decision of 2026-10-12):
+    an 18 px coral box and "Send to <address>" (Chakra 14, the address always whole: it wraps), the whole
+    line clickable and at least 32 px high. Space toggles it. ``nudge()`` rings the box for a moment (a
+    click on the disabled Send)."""
+
+    _BOX = 18
+    _GAP = 10
+    LEAD = 6          # room left of the box for the nudge ring (it reaches 5 px out)
+    MIN_HEIGHT = 32
+
+    def __init__(self, address: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.address = address
+        self.setCheckable(True)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setText(f"Send to {address}")
+        self.setAccessibleName(f"Send to {address} (new recipient)")
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self._font = display_font(14, 400, 0.02)
+        self._focus_visible = False
+        self._nudge = 0.0
+        self._nudge_anim = QVariantAnimation(self)
+        self._nudge_anim.setDuration(900)
+        self._nudge_anim.setStartValue(1.0)
+        self._nudge_anim.setEndValue(0.0)
+        self._nudge_anim.valueChanged.connect(self._on_nudge)
+
+    def _text_width(self, width: int) -> float:
+        return max(40.0, width - self.LEAD - self._BOX - self._GAP - 2)
+
+    def _lines(self, width: int) -> list[str]:
+        return _wrapped_lines(self.text(), self._font, self._text_width(width))
+
+    def _line(self) -> float:
+        return QFontMetricsF(self._font).lineSpacing()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        return max(self.MIN_HEIGHT, math.ceil(len(self._lines(width)) * self._line()) + 10)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = self.LEAD + self._BOX + self._GAP + math.ceil(_text_advance(self._font, self.text())) + 4
+        return QSize(width, self.heightForWidth(max(self.width(), width)))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = self.LEAD + self._BOX + self._GAP + 60
+        return QSize(width, self.heightForWidth(max(self.width(), width)))
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            self.updateGeometry()
+
+    def nudge(self) -> None:
+        """A coral ring round the box that fades out (it says: tick this first)."""
+        self._nudge_anim.stop()
+        self._on_nudge(1.0)   # the ring shows at once, then fades
+        if _holo().reduced_motion():
+            QTimer.singleShot(600, lambda: self._on_nudge(0.0) if shiboken6.isValid(self) else None)
+            return
+        self._nudge_anim.start()
+
+    def nudging(self) -> bool:
+        return self._nudge > 0.0
+
+    def _on_nudge(self, value: Any) -> None:
+        self._nudge = float(value)
+        self.update()
+
+    def focusInEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self._focus_visible = _focus_ring_after(event.reason(), self._focus_visible)
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().focusOutEvent(event)
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        holo = _holo()
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            lines = self._lines(self.width())
+            line_h = self._line()
+            top = max(0.0, (self.height() - len(lines) * line_h) / 2)
+            box = QRectF(self.LEAD, top + (line_h - self._BOX) / 2, self._BOX, self._BOX)
+            holo.paint_tick_box(painter, box, self.isChecked(), enabled=self.isEnabled(), nudge=self._nudge)
+            if self.hasFocus() and self._focus_visible:
+                holo.paint_focus_ring(painter, box, holo.RADIUS_CHECKBOX)
+            if not self.isEnabled():
+                painter.setOpacity(0.45)
+            painter.setFont(self._font)
+            painter.setPen(QColor(holo.ALERT_TX2))
+            x = box.right() + self._GAP
+            for index, line in enumerate(lines):
+                painter.drawText(QRectF(x, top + index * line_h, self.width() - x, line_h),
+                                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), line)
+        finally:
+            painter.end()
+
+
+class RecipientTicks(QWidget):
+    """A Reply / Email card's NEW RECIPIENT ticks, one RecipientTick per new address (none: hidden).
+
+    ``set_ticks([(address, ticked), ...])`` (a new list of addresses rebuilds the rows; the same list only
+    sets the boxes, without a signal); ``tickToggled(address, ticked)`` when the owner ticks or unticks one.
+    """
+
+    tickToggled = Signal(str, bool)
+
+    def __init__(self, parent: QWidget | None = None, *, indent: int = 0) -> None:
+        super().__init__(parent)
+        self._layout = QVBoxLayout(self)
+        # Under the chips, in their value column (HOLOGRAM_SPEC 16.2: the tick sits under its chip).
+        self._layout.setContentsMargins(indent, 6, 0, 0)
+        self._layout.setSpacing(2)
+        self._ticks: list[RecipientTick] = []
+        self._kept = 0   # the tallest its ticks have needed: a card never shrinks under the mouse
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.hide()
+
+    def _needed(self) -> int:
+        """The height its ticks need at its width (measured from them, never from a size not laid out)."""
+        if not self._ticks:
+            return 0
+        width = self.width() if self.width() > 0 else self.sizeHint().width()
+        return max(0, self._layout.totalHeightForWidth(max(1, width)))
+
+    def set_ticks(self, ticks: Sequence[tuple[str, bool]]) -> None:
+        addresses = [address for address, _ticked in ticks]
+        needed = self._needed()
+        if needed > self._kept:
+            self._kept = needed
+            self.setMinimumHeight(self._kept)   # the parent layout honours it (this widget has a layout)
+        if addresses != [tick.address for tick in self._ticks]:
+            focus = QApplication.focusWidget()
+            if focus is not None and any(focus is tick for tick in self._ticks):
+                (self.parentWidget() or self).setFocus(Qt.FocusReason.OtherFocusReason)
+            for tick in self._ticks:
+                self._layout.removeWidget(tick)
+                tick.hide()
+                tick.deleteLater()
+            self._ticks = []
+            for address in addresses:
+                tick = RecipientTick(address)
+                tick.toggled.connect(self._on_toggled)
+                self._layout.addWidget(tick)
+                self._ticks.append(tick)
+        for tick, (_address, ticked) in zip(self._ticks, ticks):
+            if tick.isChecked() != bool(ticked):
+                tick.blockSignals(True)
+                tick.setChecked(bool(ticked))
+                tick.blockSignals(False)
+                tick.update()
+        self.setVisible(bool(self._ticks) or self._kept > 0)
+        self.updateGeometry()
+
+    def _on_toggled(self, checked: bool) -> None:
+        tick = self.sender()
+        if isinstance(tick, RecipientTick):
+            self.tickToggled.emit(tick.address, bool(checked))
+
+    def ticks(self) -> list[RecipientTick]:
+        return list(self._ticks)
+
+    def tick(self, address: str) -> RecipientTick | None:
+        key = address.casefold()
+        return next((tick for tick in self._ticks if tick.address.casefold() == key), None)
+
+    def unticked(self) -> list[str]:
+        return [tick.address for tick in self._ticks if not tick.isChecked()]
+
+    def addresses(self) -> list[str]:
+        return [tick.address for tick in self._ticks]
+
+    def set_ticks_enabled(self, enabled: bool) -> None:
+        for tick in self._ticks:
+            tick.setEnabled(bool(enabled))
+
+    def nudge(self) -> None:
+        for tick in self._ticks:
+            if not tick.isChecked():
+                tick.nudge()
+
+
+class _TickHint(_BreakableLabel):
+    """The card's one helper line about the ticks (Sora 13 with a 16 px glyph before it): amber "Tick
+    dana@example.com first, then Send." while one waits, then "dana@example.com confirmed." in ink-3. It
+    never gets shorter once shown, so ticking never moves the buttons below it."""
+
+    _ICON = 16
+    _GAP = 8
+
+    def __init__(self) -> None:
+        holo = _holo()
+        super().__init__("", holo.font("body_sm"), holo.AMBER, min_word=0)
+        self.setContentsMargins(self._ICON + self._GAP, 8, 0, 0)
+        self._done = False
+        self.hide()
+
+    def set_hint(self, text: str, done: bool) -> None:
+        holo = _holo()
+        self._done = bool(done)
+        set_label_color(self, holo.INK_3 if done else holo.AMBER)
+        self.setText(text)
+        self.setVisible(bool(text))
+        self.update()
+
+    def done(self) -> bool:
+        return self._done
+
+    def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().paintEvent(event)
+        holo = _holo()
+        painter = QPainter(self)
+        try:
+            line = QFontMetricsF(self.font()).lineSpacing()
+            box = QRectF(0, self.contentsMargins().top() + (line - self._ICON) / 2, self._ICON, self._ICON)
+            holo.paint_icon(painter, box, "check" if self._done else "info", holo.INK_3 if self._done else holo.AMBER,
+                            stroke=1.8)
+        finally:
+            painter.end()
+
+
+class _ResultSlot(QWidget):
+    """The card's slot when it is not deciding (HOLOGRAM_SPEC 8): the countdown strip (amber 10 % box, Undo
+    at its left, far from the commit, then the phrase; a 2 px drain bar at the bottom) or a result stamp's
+    disc before the result."""
+
+    STRIP = "strip"
+    STAMP = "stamp"
+    NONE = "none"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._mode = self.NONE
+        self._stamp = ""
+        self._deadline: float | None = None
+        self._seconds = 0.0
+        self._margins = (0, 0, 0, 0)
+        self._drain = QTimer(self)
+        self._drain.timeout.connect(self._on_drain)
+
+    def set_margins(self, margins: tuple[int, int, int, int]) -> None:
+        """The strip's box inside this widget (left, top, right, bottom)."""
+        self._margins = margins
+        self.update()
+
+    def strip_rect(self) -> QRectF:
+        left, top, right, bottom = self._margins
+        rect = QRectF(self.rect()).adjusted(left, top, -right, -bottom)
+        height = max(40.0, min(46.0, rect.height()))
+        return QRectF(rect.left(), rect.top() + (rect.height() - height) / 2, rect.width(), height)
+
+    def set_mode(self, mode: str, stamp: str = "") -> None:
+        self._mode = mode
+        self._stamp = stamp
+        self._sync_drain()
+        self.update()
+
+    def mode(self) -> str:
+        return self._mode
+
+    def stamp(self) -> str:
+        return self._stamp
+
+    def set_deadline(self, deadline: float | None, seconds: float) -> None:
+        """The running countdown's monotonic deadline and length (the drain bar); None: a full bar."""
+        self._deadline = deadline
+        self._seconds = max(0.0, float(seconds))
+        self._sync_drain()
+        self.update()
+
+    def drain_fraction(self) -> float:
+        """How much of the drain bar is left (1 -> 0); per whole second under reduced motion."""
+        if self._deadline is None or self._seconds <= 0:
+            return 1.0
+        left = max(0.0, self._deadline - time.monotonic())
+        if _holo().reduced_motion():
+            left = math.ceil(left)
+        return max(0.0, min(1.0, left / self._seconds))
+
+    def _sync_drain(self) -> None:
+        running = self._mode == self.STRIP and self._deadline is not None and self.isVisible()
+        if running and not self._drain.isActive():
+            self._drain.start(1000 if _holo().reduced_motion() else 66)   # 15 fps, its rect only
+        elif not running:
+            self._drain.stop()
+
+    def _on_drain(self) -> None:
+        rect = self.strip_rect()
+        self.update(QRectF(rect.left(), rect.bottom() - 3, rect.width(), 4).toAlignedRect())
+        if self.drain_fraction() <= 0.0:
+            self._drain.stop()
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._sync_drain()
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().hideEvent(event)
+        self._drain.stop()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        holo = _holo()
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            if self._mode == self.STRIP:
+                rect = self.strip_rect()
+                path = QPainterPath()
+                path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), holo.RADIUS_COUNTDOWN,
+                                    holo.RADIUS_COUNTDOWN)
+                painter.fillPath(path, holo.alpha(holo.AMBER, 0.10))
+                painter.setPen(QPen(holo.alpha(holo.AMBER, 0.35), 1))
+                painter.drawPath(path)
+                painter.save()
+                painter.setClipPath(path)
+                bar = QRectF(rect.left(), rect.bottom() - 2, rect.width() * self.drain_fraction(), 2)
+                painter.fillRect(bar, QColor(holo.AMBER))
+                painter.restore()
+            elif self._mode == self.STAMP and self._stamp:
+                left, top, _right, bottom = self._margins
+                center = QPointF(left + holo.STAMP_DISC / 2, top + (self.height() - top - bottom) / 2)
+                holo.paint_stamp(painter, center, self._stamp)
+        finally:
+            painter.end()
+
+
+class _LockVeil(QWidget):
+    """Dims a locked card to about 45 % (HOLOGRAM_SPEC 5: another approval runs) without an opacity effect:
+    a void wash over the card that lets every click through (a click on a locked button is still seen)."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.hide()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        holo = _holo()
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(holo.alpha(holo.VOID, 0.55))
+            painter.drawRoundedRect(QRectF(self.rect()), holo.RADIUS_TILE_AMBER, holo.RADIUS_TILE_AMBER)
+        finally:
+            painter.end()
+
+
 class ActionCard(QWidget):
     """An approval card: kind, title, detail, then one fixed-height slot with Deny / Approve or the result.
+
+    Round 2 (HOLOGRAM_SPEC 5, 6, 8, 9, 16.2): a hologram tile (amber while a decision waits, the done look
+    once it is carried out, steel when denied, coral when it failed), the kicker with its 7 px dot, the
+    title in the screen-title type, the facts readout, FROM / TO / CC chips, the NEW RECIPIENT ticks
+    (``ticks``, ``tickToggled(action_id, address, ticked)``: Send stays disabled while one is not ticked,
+    the helper line ``tick_hint`` says "Tick <address> first, then Send."), the message, then the action
+    row: the tools slot (Edit / Sign in / Open event) and Deny as amber ghosts, the commit on the right.
+    The countdown strip (the phrase, Undo, the drain bar) and the result stamp replace that row in place.
+    ``set_focal(True)``: the screen's focal card (all four brackets).
 
     Phase 2 additions: ``check_line=True`` reserves three lines under the detail for
     Google's own view of the event (``set_check_line``; whatever arrives by itself
@@ -4956,21 +5487,26 @@ class ActionCard(QWidget):
     undoClicked = Signal(str)
     editClicked = Signal(str)
     signInClicked = Signal(str)
+    tickToggled = Signal(str, str, bool)   # (action id, address, ticked): a NEW RECIPIENT tick on the card
+    changed = Signal()                     # its status, texts, lock or ticks changed (the Approvals queue)
 
-    _PAD_LEFT = 14
-    _PAD_TOP = 10
-    _PAD_RIGHT = 12
-    _PAD_BOTTOM = 10
+    _PAD_LEFT = 22    # HOLOGRAM_SPEC 16.2: the card's padding is 18 22 14
+    _PAD_TOP = 18
+    _PAD_RIGHT = 22
+    _PAD_BOTTOM = 14
+    _RING = 4         # a hologram button's room for its rings (_FaceButton.MARGIN)
     _SLOT_GAP = 8   # between the texts and the buttons / result
     _FAILURE_LINES = 2
     _BODY_LINES = 3
     _MAIL_BODY_LINES = 10   # a Reply / Email card: what Send sends, line breaks kept
-    _BODY_GAP = 4    # above the body preview (on top of the texts' 2 px spacing)
-    _RECIPIENTS_GAP = 4   # above FROM / TO / CC
+    _BODY_GAP = 10   # above the body preview
+    _DIVIDER_GAP = 14   # above and below the hairline over a Reply / Email's message
+    _RECIPIENTS_GAP = 14   # above FROM / TO / CC
     _TOOLS_GAP = 4   # above the tools row
-    _TOOLS_SPACING = 18
+    _TOOLS_SPACING = 8
     _CHECK_LINES = 3   # Google's title and time, then who organizes it and your answer
-    _CHECK_GAP = 4   # above the check line
+    _CHECK_GAP = 8   # above the check line
+    _DOT = 7         # the kicker's dot
 
     def __init__(self, action_id: str, kind: str, title: str, detail: str = "", *,
                  actionable: bool = True, approve_text: str = "Approve", body: str = "",
@@ -4980,6 +5516,7 @@ class ActionCard(QWidget):
                  body_lines: int = 0, body_links: Sequence[tuple[int, int]] = (),
                  approve_alternatives: Sequence[str] = (), parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        holo = _holo()
         self.action_id = action_id
         self._actionable = actionable
         self._status = CARD_PENDING
@@ -4987,26 +5524,32 @@ class ActionCard(QWidget):
         self._result_text = ""
         self._locked = False
         self._lock_tip = ""
+        self._focal = False
         self._title = title
         self._copy_text = copy_text
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         # One line, cut with an ellipsis when an account alias makes it wider than the card; an
         # RSVP / Move / Cancel card's may wrap once, so " \u00b7 EDITED" is never cut (it never
-        # gets shorter again).
-        self.kind_label = _ClampedLabel(mono_font(10, 400, 0.16), AMBER if actionable else TEXT_DIM,
+        # gets shorter again). The 7 px dot before it is painted by the card.
+        self.kind_label = _ClampedLabel(holo.font("label"), holo.AMBER if actionable else holo.INK_4,
                                         max_lines=2 if check_line else 1, grow_only=check_line)
+        self.kind_label.setContentsMargins(self._DOT + 10, 0, 0, 0)
         self.kind_label.set_full_text(kind.upper())
+        title_color = holo.AMBER_TX if actionable else holo.INK_2
         if title_lines > 0:
-            self.title_label: QLabel = _ClampedLabel(body_font(14, 600), AMBER_TEXT, max_lines=title_lines)
+            self.title_label: QLabel = _ClampedLabel(holo.font("screen_title"), title_color, max_lines=title_lines)
             self.title_label.set_full_text(title)
         else:
-            self.title_label = make_label(title, body_font(14, 600), AMBER_TEXT, wrap=True)
-        # Wraps inside long email addresses too (QLabel alone would cut them at the card edge).
-        self.detail_label: QLabel = _BreakableLabel(detail, mono_font(11), AMBER_SUB)
+            self.title_label = make_label(title, holo.font("screen_title"), title_color, wrap=True)
+        self.title_label.setContentsMargins(0, 6, 0, 0)
+        # The facts readout (the time, the event); wraps inside long email addresses too (QLabel alone
+        # would cut them at the card edge).
+        self.detail_label: QLabel = _BreakableLabel(detail, mono_font(12, 400, 0.04), holo.INK_2)
+        self.detail_label.setContentsMargins(0, 10, 0, 0)
         self.detail_label.setVisible(bool(detail))
         # Google's own view of the event (RSVP / Move / Cancel): three lines, reserved from the
         # start so filling it never moves the cards.
-        self.check_label = _ClampedLabel(mono_font(11), TEXT_SOFT, max_lines=self._CHECK_LINES)
+        self.check_label = _ClampedLabel(holo.font("body_sm"), holo.INK_4, max_lines=self._CHECK_LINES)
         self.check_label.setContentsMargins(0, self._CHECK_GAP, 0, 0)
         self.check_label.setFixedHeight(
             self._CHECK_GAP + math.ceil(self._CHECK_LINES * QFontMetricsF(self.check_label.font()).lineSpacing()) + 2)
@@ -5015,12 +5558,17 @@ class ActionCard(QWidget):
         self._check_warn = False
         self._copy_more = f"{copy_text} for the whole text" if copy_text else ""
         self._mail = mail
-        # A Reply / Email card: FROM and the TO / CC chips (set_recipients), and the drafted text
-        # with its own line breaks and highlighted links (body_lines lines, MAIL_BODY_LINES by default).
+        # A Reply / Email card: FROM and the TO / CC chips (set_recipients), the NEW RECIPIENT ticks and
+        # their helper line, and the drafted text with its own line breaks and highlighted links (body_lines
+        # lines, MAIL_BODY_LINES by default) under a hairline.
         self.recipients = RecipientChips(top_margin=self._RECIPIENTS_GAP)
-        self.mail_body = _MailBody(body_font(12), TEXT_SOFT, ACCENT, body_lines or self._MAIL_BODY_LINES,
-                                   top_margin=self._BODY_GAP)
-        self.body_label = _ClampedLabel(body_font(12), TEXT_SOFT, max_lines=body_lines or self._BODY_LINES,
+        self.ticks = RecipientTicks(indent=RecipientChips._CAPTION_COLUMN + RecipientChips._CAPTION_GAP
+                                    - RecipientTick.LEAD)
+        self.ticks.tickToggled.connect(self._on_tick)
+        self.tick_hint = _TickHint()
+        self.mail_body = _MailBody(holo.font("body"), holo.INK_1, holo.HOLO, body_lines or self._MAIL_BODY_LINES,
+                                   top_margin=2 * self._DIVIDER_GAP + 1)
+        self.body_label = _ClampedLabel(holo.font("body_sm"), holo.INK_2, max_lines=body_lines or self._BODY_LINES,
                                         grow_only=True)
         self.body_label.setContentsMargins(0, self._BODY_GAP, 0, 0)
         self.body_label.set_full_text(" ".join(body.split()),
@@ -5029,14 +5577,16 @@ class ActionCard(QWidget):
         if mail:
             self.mail_body.set_text(body, body_links, plain_tooltip(_capped_tip_text(body, self._copy_more)))
         self.mail_body.setVisible(mail and bool(body.strip()))
-        self.source_button: HudButton = _ToolLink(open_text or "Open")
-        self.copy_button: HudButton = _ToolLink(copy_text or "Copy")
-        self.edit_button: HudButton = _ToolLink(edit_text or EDIT_TEXT)
-        self.sign_in_button: HudButton = _ToolLink(sign_in_text or SIGN_IN_TEXT)
-        self.event_button: HudButton = _ToolLink(event_text or OPEN_EVENT_TEXT)
+        # Hand-offs (Open thread, Copy) are text links; the tools slot (Edit, Sign in, Open event) and
+        # Deny are amber ghosts in the action row; the commit is amber (Cancel event: danger).
+        self.source_button: HudButton = _FaceButton(open_text or "Open", holo.LINK)
+        self.copy_button: HudButton = _FaceButton(copy_text or "Copy", holo.LINK)
+        self.edit_button: HudButton = _FaceButton(edit_text or EDIT_TEXT, holo.AMBER_GHOST, icon="edit")
+        self.sign_in_button: HudButton = _FaceButton(sign_in_text or SIGN_IN_TEXT, holo.AMBER_GHOST)
+        self.event_button: HudButton = _FaceButton(event_text or OPEN_EVENT_TEXT, holo.AMBER_GHOST)
         self._make_tools(kind, title, open_text, copy_text, edit_text, sign_in_text, event_text)
-        self.deny_button = _DecisionButton(deny_text or "Deny", DENY, compact=True)
-        self.approve_button = _DecisionButton(approve_text or "Approve", APPROVE, compact=True)
+        self.deny_button = _DecisionButton(deny_text or "Deny", holo.AMBER_GHOST)
+        self.approve_button = _DecisionButton(approve_text or "Approve", _commit_face(approve_text or "Approve"))
         # Like Undo's: a screen reader says which card a decision button decides ("Add block (...)").
         self._decides = f"{kind.upper()}: {title}"
         self.deny_button.setAccessibleName(f"{self.deny_button.text()} ({self._decides})")
@@ -5045,22 +5595,29 @@ class ActionCard(QWidget):
         # Cancel card may also read Sign in or Done; a Reply / Email card Send or Done).
         self._fit_approve_width((approve_text or "Approve", RETRY_TEXT)
                                 + ((SIGN_IN_TEXT, "Done") if check_line else ()) + tuple(approve_alternatives))
-        self.result_label = _ClampedLabel(mono_font(11, 400, 0.12), GREEN)
-        self.result_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.open_button = HudButton("Open", LINK)
-        self.open_button.set_link_color(ACCENT)
-        self.undo_button = HudButton(UNDO_TEXT, SECONDARY, compact=True)
+        # The result stamp's readout ("SENT", "ADDED"; the disc is painted before it) and, during the
+        # undo countdown, the strip's phrase ("Sending from work in 7 s") with Undo before it (left).
+        self.result_label = _ClampedLabel(holo.font("readout"), holo.OK)
+        self.result_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.countdown_label = QLabel()
+        self.countdown_label.setTextFormat(Qt.TextFormat.RichText)
+        self.countdown_label.setFont(display_font(14, 400, 0.02))
+        set_label_color(self.countdown_label, "#FFE9C6")
+        self.countdown_label.hide()
+        self.open_button = _FaceButton("Open", holo.LINK_CYAN)
+        self.undo_button = _FaceButton(UNDO_TEXT, holo.LINK)
         self.undo_button.setAccessibleName(f"{UNDO_TEXT} ({kind.upper()}: {title})")
         # Two lines at most (hover for the whole reason): a 200-character Google
         # error would otherwise push the cards below down by about a card's
         # height and slide another card's Approve under the mouse.
-        self.failure_label = _GrowOnlyLabel(mono_font(11, 400, 0.12), RED, Qt.AlignmentFlag.AlignRight,
+        self.failure_label = _GrowOnlyLabel(holo.font("body_sm"), holo.ALERT_TX, Qt.AlignmentFlag.AlignLeft,
                                             max_lines=self._FAILURE_LINES)
-        self.note_label = _GrowOnlyLabel(mono_font(11), AMBER, Qt.AlignmentFlag.AlignLeft)
+        self.note_label = _GrowOnlyLabel(holo.font("body_sm"), holo.AMBER, Qt.AlignmentFlag.AlignLeft)
         self.deny_button.clicked.connect(self._on_deny)
         self.approve_button.clicked.connect(self._on_approve)
         self.deny_button.disabledClicked.connect(self._on_locked_click)
-        self.approve_button.disabledClicked.connect(self._on_locked_click)
+        self.approve_button.disabledClicked.connect(self._on_approve_disabled)
+        self._veil = _LockVeil(self)
         self.open_button.clicked.connect(self._on_open)
         self.source_button.clicked.connect(self._on_source)
         self.copy_button.clicked.connect(self._on_copy)
@@ -5083,6 +5640,9 @@ class ActionCard(QWidget):
         self._tools = QWidget()
         tools = FlowLayout(self._tools, h_spacing=self._TOOLS_SPACING, v_spacing=2)
         tools.setContentsMargins(0, self._TOOLS_GAP, 0, 0)
+        self._slot_row = QHBoxLayout()     # the action row's place for Edit / Sign in / Open event
+        self._slot_row.setContentsMargins(0, 0, 0, 0)
+        self._slot_row.setSpacing(0)
         self._slot_buttons = {TOOL_EDIT: self.edit_button, TOOL_SIGN_IN: self.sign_in_button,
                               TOOL_OPEN: self.event_button}
         self._slot_texts = {mode: text for mode, text in ((TOOL_EDIT, edit_text), (TOOL_SIGN_IN, sign_in_text),
@@ -5108,8 +5668,11 @@ class ActionCard(QWidget):
             button.setMinimumWidth(slot_width if in_slot else width)
             button.setAccessibleName(f"{text} ({kind.upper()}: {title})")
             button.setVisible(bool(text) and button is not self.sign_in_button and button is not self.event_button)
-            tools.addWidget(button)
-        self._tools.setVisible(bool(open_text or copy_text or edit_text or sign_in_text or event_text))
+            if button in self._slot_buttons.values():
+                self._slot_row.addWidget(button)
+            else:
+                tools.addWidget(button)
+        self._tools.setVisible(bool(open_text or copy_text))
 
     def set_tool_slot(self, mode: str) -> None:
         """What the tools row's last place shows: TOOL_EDIT ("Edit"), TOOL_SIGN_IN ("Sign in": the
@@ -5169,9 +5732,11 @@ class ActionCard(QWidget):
         button.set_width_hints(hint, tight)
 
     def set_approve_text(self, text: str) -> None:
-        """Rename the right-hand button ("Accept" -> "Retry"); Deny never moves."""
+        """Rename the right-hand button ("Accept" -> "Retry"); Deny never moves. Cancel event is the danger
+        commit, every other one the amber commit."""
         self._fit_approve_width((text,))
         self.approve_button.setText(text)
+        self.approve_button.set_face(_commit_face(text))
         self.approve_button.setAccessibleName(f"{text} ({self._decides})")
 
     def approve_text(self) -> str:
@@ -5187,7 +5752,8 @@ class ActionCard(QWidget):
         self.check_label.set_full_text(text, tooltip=plain_tooltip(tooltip or text))
         if warn != self._check_warn:
             self._check_warn = warn
-            set_label_color(self.check_label, AMBER if warn else TEXT_SOFT)
+            holo = _holo()
+            set_label_color(self.check_label, holo.AMBER if warn else holo.INK_4)
 
     def check_warns(self) -> bool:
         """The check line is drawn in amber (set_check_line(warn=True))."""
@@ -5227,9 +5793,50 @@ class ActionCard(QWidget):
         return title_cut or (not self.mail_body.isHidden() and self.mail_body.is_cut())
 
     def set_recipients(self, sender: str, to: Sequence[RecipientChip], cc: Sequence[RecipientChip] = ()) -> None:
-        """A Reply / Email card's FROM line and TO / CC chips (see RecipientChips): the card may
-        grow, never shrink."""
+        """A Reply / Email card's FROM line and TO / CC chips (see RecipientChips), and a tick for each new
+        recipient (ticked once it is RECIPIENT_CONFIRMED): the card may grow, never shrink. Send waits until
+        every new recipient is ticked."""
         self.recipients.set_rows(sender, to, cc)
+        seen: set[str] = set()
+        ticks = []
+        for chip in (*to, *cc):
+            key = chip.address.casefold()
+            if chip.state in (RECIPIENT_NEW, RECIPIENT_CONFIRMED) and key not in seen:
+                seen.add(key)
+                ticks.append((chip.address, chip.state == RECIPIENT_CONFIRMED))
+        self.ticks.set_ticks(ticks)
+        self._sync_tick_hint()
+        self._sync_buttons()
+        self.changed.emit()
+
+    def needs_tick(self) -> list[str]:
+        """The new recipients not ticked yet (Send is disabled while there is one)."""
+        return self.ticks.unticked()
+
+    def _sync_tick_hint(self) -> None:
+        addresses = self.ticks.addresses()
+        if not addresses:
+            if self.tick_hint.text():
+                self.tick_hint.set_hint("", False)
+                self.tick_hint.show()   # it keeps its room (a card never shrinks under the mouse)
+            return
+        waiting = self.ticks.unticked()
+        if waiting:
+            self.tick_hint.set_hint(tick_first_text(waiting), False)
+        else:
+            self.tick_hint.set_hint(ticked_text(addresses), True)
+
+    def _on_tick(self, address: str, ticked: bool) -> None:
+        self._sync_tick_hint()
+        self._sync_buttons()
+        self.tickToggled.emit(self.action_id, address, bool(ticked))
+
+    def _on_approve_disabled(self) -> None:
+        """A click on the disabled Send: the unticked boxes ring (or, locked, the caller hears of it)."""
+        if self._buttons_shown() and not self._locked and self.needs_tick():
+            self.ticks.nudge()
+            return
+        self._on_locked_click()
 
     def mail_text(self) -> str:
         """The drafted text of a Reply / Email card exactly as set (line breaks kept)."""
@@ -5268,28 +5875,41 @@ class ActionCard(QWidget):
         self.copy_button.setText(self._copy_text)
 
     def _build_layout(self) -> None:
+        ring = self._RING
         self._texts = QVBoxLayout()
-        self._texts.setSpacing(2)
+        self._texts.setSpacing(0)
+        self._texts.setContentsMargins(ring, 0, self._PAD_RIGHT, 0)
         for label in (self.kind_label, self.title_label, self.detail_label, self.check_label, self.recipients,
-                      self.body_label, self.mail_body):
+                      self.ticks, self.body_label, self.mail_body, self.tick_hint):
             self._texts.addWidget(label)
-        self._texts.addWidget(self._tools)
-        # Both slot pages reach the card's right and bottom edges (their margins
-        # are the card padding) so the Approve glow is not clipped.
+        self.body_label.setContentsMargins(0, self._BODY_GAP, 0, 0)
+        # The action row (HOLOGRAM_SPEC 16.2): Edit / Sign in / Open event and Deny as amber ghosts, the
+        # commit pushed right. The buttons' rings fit in the card's padding.
         self._buttons = QWidget()
         buttons = QHBoxLayout(self._buttons)
-        buttons.setContentsMargins(0, self._SLOT_GAP, self._PAD_RIGHT, self._PAD_BOTTOM)
-        buttons.setSpacing(6)
-        buttons.addStretch(1)
+        buttons.setContentsMargins(0, self._SLOT_GAP, self._PAD_RIGHT - ring, self._PAD_BOTTOM - ring)
+        buttons.setSpacing(8 - 2 * ring)   # 8 px between the drawn buttons (each has its ring room)
+        buttons.addLayout(self._slot_row)
         buttons.addWidget(self.deny_button)
+        buttons.addStretch(1)
         buttons.addWidget(self.approve_button)
-        self._result = QWidget()
+        # The countdown strip / the result stamp, in the same place and height (HOLOGRAM_SPEC 8).
+        self._result = _ResultSlot()
         result = QHBoxLayout(self._result)
-        result.setContentsMargins(0, self._SLOT_GAP, self._PAD_RIGHT, self._PAD_BOTTOM)
-        result.setSpacing(10)
-        result.addWidget(self.undo_button, 0, Qt.AlignmentFlag.AlignVCenter)   # left: far from Approve
-        result.addWidget(self.result_label, 1)
+        self._result_layout = result
+        result.setContentsMargins(ring, self._SLOT_GAP, self._PAD_RIGHT - ring, self._PAD_BOTTOM - ring)
+        result.setSpacing(8)
+        # Undo at the strip's LEFT end, far from the commit: a burst of clicks on Send (or Accept, Add ...)
+        # never reaches it, so it can never undo and approve again (the existing rule "left: far from
+        # Approve", kept on purpose: HOLOGRAM_SPEC 8 draws it at the right).
+        result.addWidget(self.undo_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        # The stamp: its readout, then its one link right after it (never under the commit's centre: a
+        # second click where Send / Approve was never opens anything).
+        self.result_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        result.addWidget(self.result_label, 0)
         result.addWidget(self.open_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        result.addWidget(self.countdown_label, 10)
+        result.addStretch(1)
         self.undo_button.hide()
         # One slot, one height: the result takes the buttons' place (up to two lines).
         self._slot = QWidget()
@@ -5303,15 +5923,16 @@ class ActionCard(QWidget):
         # Under the slot: the FAILED reason and the note (they only ever add height).
         self._extra = QWidget()
         extra = QVBoxLayout(self._extra)
-        extra.setContentsMargins(0, 0, self._PAD_RIGHT, self._PAD_BOTTOM)
+        extra.setContentsMargins(ring, 0, self._PAD_RIGHT, self._PAD_BOTTOM)
         extra.setSpacing(4)
         extra.addWidget(self.failure_label)
         extra.addWidget(self.note_label)
         self._extra.hide()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(self._PAD_LEFT, self._PAD_TOP, 0, 0)
+        layout.setContentsMargins(self._PAD_LEFT - ring, self._PAD_TOP, 0, 0)
         layout.setSpacing(0)
         layout.addLayout(self._texts)
+        layout.addWidget(self._tools)
         layout.addWidget(self._slot)
         layout.addWidget(self._extra)
 
@@ -5361,7 +5982,8 @@ class ActionCard(QWidget):
         self._status = status if status in CARD_STATUSES else CARD_PENDING
         self._link = link
         self.open_button.setText(link_text or "Open")
-        text, color = _CARD_RESULTS.get(self._status, ("", TEXT_DIM))
+        text, _old_color = _CARD_RESULTS.get(self._status, ("", TEXT_DIM))
+        color, stamp = _result_look(self._status)
         if self._status in (CARD_FAILED, CARD_UNKNOWN) and message:
             text = f"{text}: {message}"
         elif message and self._status != CARD_PENDING:
@@ -5383,8 +6005,26 @@ class ActionCard(QWidget):
         self.result_label.set_full_text("" if failed else _keep_last_words(text))
         set_label_color(self.result_label, color)
         self.open_button.setVisible(self._status in _LINK_STATUSES and bool(link))
-        self.undo_button.setVisible(self._status == CARD_COUNTDOWN)
-        self.failure_label.set_color(AMBER if self._status == CARD_UNKNOWN else RED)
+        counting = self._status == CARD_COUNTDOWN
+        self.undo_button.setVisible(counting)
+        self.result_label.setVisible(not counting)
+        self.countdown_label.setVisible(counting)
+        self.countdown_label.setText(_countdown_phrase(message or text) if counting else "")
+        ring = self._RING
+        if counting:
+            self._result.set_mode(_ResultSlot.STRIP)
+            self._result.set_margins((ring, self._SLOT_GAP + 1, self._PAD_RIGHT, self._PAD_BOTTOM - 1))
+            # Undo first (its own 8 px padding and ring room), then the phrase.
+            self._result_layout.setContentsMargins(ring + 1, self._SLOT_GAP, self._PAD_RIGHT - ring + 1,
+                                                   self._PAD_BOTTOM - ring)
+        else:
+            self._result.set_deadline(None, 0)
+            self._result.set_mode(_ResultSlot.STAMP if stamp else _ResultSlot.NONE, stamp)
+            self._result.set_margins((ring, self._SLOT_GAP, self._PAD_RIGHT, self._PAD_BOTTOM - ring))
+            lead = _holo().STAMP_DISC + 9 if stamp else 0
+            self._result_layout.setContentsMargins(ring + lead, self._SLOT_GAP, self._PAD_RIGHT - ring,
+                                                   self._PAD_BOTTOM - ring)
+        self.failure_label.set_color(_holo().AMBER if self._status == CARD_UNKNOWN else _holo().ALERT_TX)
         self.failure_label.set_line(text if failed else "")
         self._stack.setCurrentWidget(self._buttons if show_buttons else self._result)
         self._sync_buttons()
@@ -5401,8 +6041,52 @@ class ActionCard(QWidget):
         if not retry:
             self.set_note("")
         self._sync_extra()
+        self._sync_look()
         name = f"{self.kind_label.full_text()}: {self._title}"
         self.setAccessibleName(f"{name}, {text}" if text else name)
+        self.changed.emit()
+
+    def set_countdown(self, deadline: float | None, seconds: float) -> None:
+        """The running undo countdown's monotonic deadline and length: the strip's drain bar."""
+        self._result.set_deadline(deadline, seconds)
+
+    def set_focal(self, focal: bool) -> None:
+        """The Approvals screen's focal card (the one it opened on, or picked in the queue): all four
+        brackets."""
+        if bool(focal) != self._focal:
+            self._focal = bool(focal)
+            self.update()
+
+    def is_focal(self) -> bool:
+        return self._focal
+
+    def is_mail(self) -> bool:
+        """A Reply / Email card (its FROM, chips and message)."""
+        return self._mail
+
+    def tile_state(self) -> str:
+        """The hologram tile this card is drawn as (holo.TILE_*), from its status."""
+        holo = _holo()
+        if not self._actionable:
+            return holo.TILE_INFO
+        status = self._status
+        if status in (CARD_ADDED, CARD_EXISTS, CARD_SENT, CARD_DONE):
+            return holo.TILE_DONE
+        if status == CARD_DENIED:
+            return holo.TILE_STEEL
+        if status == CARD_FAILED:
+            return holo.TILE_ERROR
+        if status == CARD_COUNTDOWN:
+            return holo.TILE_COUNTING
+        return holo.TILE_NEEDS_FOCUS if self._focal else holo.TILE_NEEDS
+
+    def _sync_look(self) -> None:
+        """The kicker's and the title's colours follow the tile (HOLOGRAM_SPEC 5)."""
+        holo = _holo()
+        style = holo.TILE_STYLES[self.tile_state()]
+        set_label_color(self.kind_label, style.kicker)
+        set_label_color(self.title_label, style.title)
+        self.update()
 
     def set_note(self, text: str) -> None:
         """An amber note under the buttons (e.g. "Google Calendar is not set up yet...")."""
@@ -5428,8 +6112,10 @@ class ActionCard(QWidget):
 
     def _sync_buttons(self) -> None:
         enabled = self._buttons_shown() and not self._locked
+        waiting = self.needs_tick() if enabled else []
         focus = QApplication.focusWidget()
-        if not enabled and focus is not None and self._buttons.isAncestorOf(focus):
+        if focus is not None and ((not enabled and self._buttons.isAncestorOf(focus))
+                                  or (waiting and focus is self.approve_button)):
             # Qt would hand the focus to the next widget in the chain (another card's
             # button); keep it on this card instead, so a second Space decides nothing.
             self.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -5437,6 +6123,15 @@ class ActionCard(QWidget):
             button.setEnabled(enabled)
             button.setToolTip(self._lock_tip)
             button.setAccessibleDescription(self._lock_tip)
+        if waiting:   # a NEW RECIPIENT is not ticked: Send waits for it (the owner's decision)
+            tip = tick_tip_text(waiting)
+            self.approve_button.setEnabled(False)
+            self.approve_button.setToolTip(tip)
+            self.approve_button.setAccessibleDescription(tip)
+        self.ticks.set_ticks_enabled(enabled)
+        self._veil.setVisible(self._locked and self._buttons_shown())
+        if self._veil.isVisible():
+            self._veil.raise_()
 
     def _on_locked_click(self) -> None:
         if self._locked and self._buttons_shown():
@@ -5461,25 +6156,75 @@ class ActionCard(QWidget):
     def _sync_extra(self) -> None:
         self._extra.setVisible(self.failure_label.used() or self.note_label.used())
 
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._veil.setGeometry(self.rect())
+
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        holo = _holo()
         painter = QPainter(self)
         try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            strength = 1.0 if self._actionable else 0.5
-            if self.flashing():
-                strength = 2.5
-            gradient = QLinearGradient(rect.topLeft(), rect.topRight())
-            gradient.setColorAt(0.0, rgba(AMBER, 0.08 * strength))
-            gradient.setColorAt(1.0, rgba(AMBER, 0.025 * strength))
-            painter.fillRect(rect, gradient)
-            # A hairline round the whole card, button row included, so the
-            # buttons read as this card's and not the next one's.
-            painter.setPen(QPen(rgba(AMBER, 0.22 * strength), 1))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
-            painter.fillRect(QRectF(0, 0, 2, rect.height()), rgba(AMBER, 1.0 if self._actionable else 0.35))
+            state = self.tile_state()
+            style = holo.paint_tile(painter, rect, state)
+            if self.flashing():   # a follow-up's "Show the draft": the frame lights up for a moment
+                painter.setPen(QPen(QColor(holo.AMBER), 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), style.radius, style.radius)
+            # The kicker's 7 px dot (amber while a decision waits; the tile's colour after).
+            label = self.kind_label.geometry()
+            line = QFontMetricsF(self.kind_label.font()).lineSpacing()
+            center = QPointF(label.left() + self._DOT / 2, label.top() + line / 2)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(holo.STEEL if state == holo.TILE_STEEL else style.kicker))
+            painter.drawEllipse(center, self._DOT / 2, self._DOT / 2)
+            if self.mail_body.isVisible():   # the hairline over the message
+                y = self.mail_body.geometry().top() + self._DIVIDER_GAP + 0.5
+                tone = holo.AMBER if state in (holo.TILE_NEEDS, holo.TILE_NEEDS_FOCUS, holo.TILE_COUNTING) \
+                    else holo.HOLO
+                painter.setPen(QPen(holo.alpha(tone, 0.18), 1))
+                painter.drawLine(QPointF(self._PAD_LEFT, y), QPointF(rect.width() - self._PAD_RIGHT, y))
         finally:
             painter.end()
+
+
+def _commit_face(text: str) -> str:
+    """The commit button's hologram variant: danger for Cancel event (approving a cancellation), else amber."""
+    holo = _holo()
+    return holo.DANGER if text.strip().casefold() == "cancel event" else holo.AMBER_COMMIT
+
+
+def _result_look(status: str) -> tuple[str, str]:
+    """(readout colour, stamp disc) of a card status (HOLOGRAM_SPEC 8)."""
+    holo = _holo()
+    if status in (CARD_ADDED, CARD_EXISTS, CARD_SENT, CARD_DONE):
+        return holo.OK, holo.STAMP_OK
+    if status == CARD_DENIED:
+        return holo.INK_4, holo.STAMP_STEEL
+    if status in (CARD_WORKING, CARD_SIGNIN):
+        return holo.HOLO, holo.STAMP_HOLO
+    if status == CARD_COUNTDOWN:
+        return holo.AMBER, ""
+    if status == CARD_FAILED:
+        return holo.ALERT_TX, ""
+    if status == CARD_UNKNOWN:
+        return holo.AMBER, ""
+    return holo.INK_3, ""
+
+
+def _countdown_phrase(message: str) -> str:
+    """The strip's phrase as rich text: "Sending from work in 7 s" in sentence case, the number in JetBrains
+    Mono (tabular), never wrapped before the "s"."""
+    text = " ".join(str(message).split())
+    if text.isupper():
+        text = text[:1] + text[1:].lower()
+    match = re.search(r"(\d+)\s*s$", text, re.IGNORECASE)
+    if match is None:
+        return html.escape(text)
+    head = html.escape(text[:match.start()])
+    number = html.escape(match.group(1))
+    return (f'{head}<span style="font-family:\'{MONO_FAMILY}\'">{number}</span>&nbsp;s')
 
 
 class GroupHeader(QWidget):
@@ -5534,27 +6279,58 @@ class GroupHeader(QWidget):
             painter.end()
 
 
+class _EmptyState(QLabel):
+    """The Approvals screen with nothing to decide (HOLOGRAM_SPEC 16.2): a 40 px ok disc, then the line in
+    caption-sm type, centred."""
+
+    _DISC = 40
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        holo = _holo()
+        self.setFont(holo.font("caption_sm"))
+        set_label_color(self, holo.INK_1)
+        self.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        self.setWordWrap(True)
+        self.setContentsMargins(0, 70 + self._DISC + 18, 0, 0)
+
+    def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().paintEvent(event)
+        holo = _holo()
+        painter = QPainter(self)
+        try:
+            center = QPointF(self.width() / 2, 70 + self._DISC / 2)
+            holo.paint_stamp(painter, center, holo.STAMP_OK, size=self._DISC)
+        finally:
+            painter.end()
+
+
 class ActionList(QScrollArea):
-    """Scrollable column of ActionCards with an empty-state line.
+    """Scrollable column of ActionCards with an empty state.
 
     Its size hint follows the cards' height up to ``max_height``, so a panel
     holding it shrinks to its content and scrolls beyond that. ``CARD_GAP``
     px of empty space separate the cards, so a card's buttons never sit
     right on top of the next card's title. ``add_group_header(title, count)``
     puts a GroupHeader ("ASK \u00b7 2") before the cards added after it.
+    Round 2: ``set_focal(action_id)`` marks the screen's focal card (kept when the cards are built again),
+    ``scroll_to(card)`` brings a card to the top, ``changed`` fires when a card is added, removed or changes
+    (the Approvals queue follows it).
     """
 
     CARD_GAP = 14
+    changed = Signal()
 
-    def __init__(self, empty_text: str = "Nothing needs your OK", *, max_height: int = 460,
+    def __init__(self, empty_text: str = "Nothing needs your OK, sir.", *, max_height: int = 460,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         content = _transparent_scroll(self)
         self._max_height = max_height
+        self._focal = ""
         self._layout = QVBoxLayout(content)
         self._layout.setContentsMargins(0, 0, 4, 0)   # keeps the cards' outline off the scroll bar
         self._layout.setSpacing(self.CARD_GAP)
-        self.empty_label = make_label(empty_text, mono_font(11, 400, 0.08), TEXT_DIM)
+        self.empty_label = _EmptyState(empty_text)
         self._layout.addWidget(self.empty_label)
         self._layout.addStretch(1)
         self._cards: list[ActionCard] = []
@@ -5569,8 +6345,26 @@ class ActionList(QScrollArea):
         self._items.append(card)
         self._cards.append(card)
         self.empty_label.setVisible(False)
+        card.set_focal(card.action_id == self._focal)
+        card.changed.connect(self.changed)
         self.updateGeometry()
+        self.changed.emit()
         return card
+
+    def set_focal(self, action_id: str) -> None:
+        """The screen's focal card (all four brackets); "" for none."""
+        self._focal = action_id or ""
+        for card in self._cards:
+            card.set_focal(card.action_id == self._focal)
+
+    def focal_id(self) -> str:
+        return self._focal
+
+    def scroll_to(self, card: ActionCard) -> None:
+        """Bring ``card`` to the top of the column (as far as the scroll range allows)."""
+        bar = self.verticalScrollBar()
+        self.widget().layout().activate()
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), card.y())))
 
     def add_group_header(self, title: str, count: int) -> GroupHeader:
         """A group title ("ASK \u00b7 2") before the cards added from now on."""
@@ -5608,6 +6402,7 @@ class ActionList(QScrollArea):
         self._cards = []
         self.empty_label.setVisible(True)
         self.updateGeometry()
+        self.changed.emit()
 
     def _content_height(self, width: int) -> int:
         layout = self.widget().layout()
@@ -5765,21 +6560,20 @@ class _GrowingTextEdit(QPlainTextEdit):
 
 
 class _RecipientBadge(QWidget):
-    """A recipient's badge in the Edit dialog, drawn as on the card: NEW RECIPIENT filled red while
-    its "Send to" tick is not set, outlined "NEW \u00b7 CONFIRMED" once it is (as wide as the wider
-    text from the start, so a tick never moves Remove); SENDING ACCOUNT on the account's own
-    address (it has no tick: only Remove)."""
+    """A recipient's badge in the Edit dialog, drawn as on the card: NEW RECIPIENT filled coral while it is
+    not ticked on the card, outlined "NEW \u00b7 CONFIRMED" once it is (as wide as the wider text from the
+    start, so a change never moves Remove); SENDING ACCOUNT on the account's own address (only Remove)."""
 
-    _PAD = 4
+    _PAD = 7
 
     def __init__(self, state: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._font = mono_font(9, 600, 0.08)
+        self._font = _badge_font()
         self._own = state == RECIPIENT_OWN
         self._state = RECIPIENT_OWN if self._own else RECIPIENT_NEW
         texts = (OWN_RECIPIENT_TEXT,) if self._own else (NEW_RECIPIENT_TEXT, CONFIRMED_RECIPIENT_TEXT)
         width = max(_text_advance(self._font, text) for text in texts)
-        self.setFixedSize(math.ceil(width) + 2 * self._PAD, math.ceil(QFontMetricsF(self._font).lineSpacing()) + 4)
+        self.setFixedSize(math.ceil(width) + 2 * self._PAD, 22)
         self.set_state(state)
 
     def set_state(self, state: str) -> None:
@@ -5817,37 +6611,18 @@ class _AddressEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
-class _TickLabel(_BreakableLabel):
-    """The address after a "Send to" tick (it wraps, a checkbox's own text can't): a click on it
-    toggles the tick too."""
-
-    def __init__(self, text: str, font: QFont, color: str | QColor, box: QCheckBox, *,
-                 min_word: int = _LONG_WORD) -> None:
-        super().__init__(text, font, color, min_word=min_word)
-        self._box = box
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-    def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        if event.button() == Qt.MouseButton.LeftButton and self._box.isEnabled():
-            self._box.toggle()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-
 class _RecipientRow(QWidget):
-    """One recipient in the Edit dialog: the address (red with a NEW RECIPIENT badge when Jarvis
-    has not sent to it before, or SENDING ACCOUNT when it is the account itself), Remove, and for
-    a new one a "Send to <address>" tick."""
+    """One recipient in the Edit dialog: the address (coral with a NEW RECIPIENT badge when Jarvis has not
+    sent to it before and it is not ticked on the card, "NEW \u00b7 CONFIRMED" once it is, SENDING ACCOUNT
+    when it is the account itself) and Remove. The tick itself is on the card (the owner's decision of
+    2026-10-12): Edit changes the message and its recipients, never a confirmation."""
 
     removeClicked = Signal(str)
-    toggled = Signal()
 
     def __init__(self, address: str, state: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.address = address
         self.state = state
-        new = state in (RECIPIENT_NEW, RECIPIENT_CONFIRMED)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
@@ -5855,10 +6630,11 @@ class _RecipientRow(QWidget):
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(8)
         red = state in _RED_RECIPIENTS
-        self.address_label = _BreakableLabel(address, mono_font(12), RED if red else TEXT_BODY, min_word=0)
+        self.address_label = _BreakableLabel(address, mono_font(12), _holo().ALERT_TX2 if red else TEXT_BODY,
+                                             min_word=0)
         top.addWidget(self.address_label, 1)
         self.badge: _RecipientBadge | None = None
-        if red:
+        if state in (RECIPIENT_NEW, RECIPIENT_CONFIRMED, RECIPIENT_OWN):
             self.badge = _RecipientBadge(state)
             top.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignTop)
         self.remove_button = _ToolLink(REMOVE_TEXT)
@@ -5867,36 +6643,13 @@ class _RecipientRow(QWidget):
         self.remove_button.clicked.connect(self._on_remove)
         top.addWidget(self.remove_button, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(top)
-        self.confirm_box: QCheckBox | None = None
-        self.confirm_label: QLabel | None = None
-        if new:
-            tick = QHBoxLayout()
-            tick.setContentsMargins(0, 0, 0, 0)
-            tick.setSpacing(6)
-            self.confirm_box = QCheckBox("Send to")
-            self.confirm_box.setFont(body_font(13))
-            self.confirm_box.setChecked(state == RECIPIENT_CONFIRMED)
-            self.confirm_box.setAccessibleName(f"Send to {address} (new recipient)")
-            self.confirm_box.toggled.connect(self._on_toggled)
-            self.confirm_label = _TickLabel(address, body_font(13), TEXT_BODY, self.confirm_box, min_word=0)
-            tick.addWidget(self.confirm_box, 0, Qt.AlignmentFlag.AlignTop)
-            tick.addWidget(self.confirm_label, 1)
-            layout.addLayout(tick)
-
-    def confirmed(self) -> bool:
-        return self.confirm_box is not None and self.confirm_box.isChecked()
 
     def _on_remove(self) -> None:
         self.removeClicked.emit(self.address)
 
     def focus_chain(self) -> list[QWidget]:
-        """The row's keyboard stops in reading order: Remove (top line), then the tick."""
-        return [self.remove_button] + ([self.confirm_box] if self.confirm_box is not None else [])
-
-    def _on_toggled(self, checked: bool) -> None:
-        if self.badge is not None:
-            self.badge.set_state(RECIPIENT_CONFIRMED if checked else RECIPIENT_NEW)
-        self.toggled.emit()
+        """The row's keyboard stop: Remove."""
+        return [self.remove_button]
 
 
 class _RecipientList(QWidget):
@@ -5956,9 +6709,6 @@ class _RecipientList(QWidget):
         chain = [widget for row in self.rows for widget in row.focus_chain()]
         return chain + [self.add_edit, self.add_button]
 
-    def confirmed(self) -> list[str]:
-        return [row.address for row in self.rows if row.confirmed()]
-
     def own(self) -> list[str]:
         """The rows that are the sending account itself (Save refuses while one is left)."""
         return [row.address for row in self.rows if row.state == RECIPIENT_OWN]
@@ -5992,7 +6742,6 @@ class _RecipientList(QWidget):
     def _add_row(self, address: str, state: str) -> None:
         row = _RecipientRow(address, state)
         row.removeClicked.connect(self._remove)
-        row.toggled.connect(self.changed)
         self.rows.append(row)
         self._rows_layout.addWidget(row)
 
@@ -6027,11 +6776,11 @@ class EditDialog(QDialog):
     or cancel's note is not sent by Google Calendar, which the dialog says).
     A Reply / Email (EDIT_MAIL_KINDS) shows FROM (read only), the To and Cc
     recipients (Remove; Add checks the address with ``normalize`` and
-    ``classify``; a new recipient is red with a NEW RECIPIENT badge and a "Send
-    to <address>" tick), the subject (an Email's can be changed; a reply keeps
-    its thread's) and the message exactly as it will be sent, its links
-    highlighted (``find_links``). ``banner`` is an amber line at the top (why
-    the dialog opened: new recipients to confirm, a long message to read).
+    ``classify``; a new recipient is coral with its NEW RECIPIENT badge: it is
+    ticked on the card, never here), the subject (an Email's can be changed; a
+    reply keeps its thread's) and the message exactly as it will be sent, its
+    links highlighted (``find_links``). ``banner`` is an amber line at the top
+    (why the dialog opened: a long message to read).
     The subject and the message are shown whole (their fields grow with the
     text). The dialog always fits the screen's available area
     (QScreen.availableGeometry, at any display scale): when its content is
@@ -6044,8 +6793,7 @@ class EditDialog(QDialog):
     Remove it).
     Save emits ``saved(action_id, values)`` with the fields as typed (``values()``:
     answer, notify ("all" / "external" / "none"), date, start, end, note; or for
-    a Reply / Email: to, cc, subject, body, confirmed (the ticked new
-    recipients)); the caller checks them and either closes the dialog
+    a Reply / Email: to, cc, subject, body); the caller checks them and either closes the dialog
     (``accept()``) or keeps it open with ``show_error(text)``. Save never sends
     anything. Every text is plain text; nothing is read as HTML.
     """
@@ -6307,13 +7055,11 @@ class EditDialog(QDialog):
 
     def values(self) -> dict[str, Any]:
         """The fields as typed: answer, notify, date, start, end, note; or for a Reply / Email:
-        to, cc (lists of addresses), subject, body and confirmed (the ticked new recipients)."""
+        to, cc (lists of addresses), subject and body (a new recipient is ticked on the card)."""
         if self.mail:
-            lists = [recipients for recipients in (self.to_list, self.cc_list) if recipients is not None]
             return {"to": self.to_list.addresses() if self.to_list is not None else [],
                     "cc": self.cc_list.addresses() if self.cc_list is not None else [],
-                    "subject": self.subject_edit.text(), "body": self.body_edit.toPlainText(),
-                    "confirmed": [address for recipients in lists for address in recipients.confirmed()]}
+                    "subject": self.subject_edit.text(), "body": self.body_edit.toPlainText()}
         if self.notify_box.isChecked():
             notify = "external" if self._notify == "external" else "all"
         else:
@@ -6564,15 +7310,10 @@ class EditDialog(QDialog):
         self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
         self._keep_on_screen()
         super().open()
-        if self.mail:   # a new recipient's tick first (why Send opened the dialog), else the message
-            boxes = [row.confirm_box for recipients in (self.to_list, self.cc_list) if recipients is not None
-                     for row in recipients.rows if row.confirm_box is not None and not row.confirm_box.isChecked()]
-            target = boxes[0] if boxes else self.body_edit
-            target.setFocus(Qt.FocusReason.OtherFocusReason)
+        if self.mail:   # the message (the new recipients' ticks are on the card)
+            self.body_edit.setFocus(Qt.FocusReason.OtherFocusReason)
             if self.fields_scroll is not None:
                 self.fields_scroll.verticalScrollBar().setValue(0)   # the dialog opens at its top
-                if boxes:
-                    self.fields_scroll.ensureWidgetVisible(target)
             self._relayout()   # also looks whether everything is on screen
 
 
