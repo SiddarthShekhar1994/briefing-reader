@@ -25,7 +25,7 @@ from unittest import mock
 
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import ask_ui, hud, live, pictures, snapshots, ui
+from briefing_reader import ask_ui, hud, live, live_view, pictures, snapshots, ui
 from briefing_reader.actions import IDN_WARNING, SOURCE_ASK, STATUS_DENIED, STATUS_DONE
 from briefing_reader.ask import planner as ask_planner
 from briefing_reader.ask.research_validate import entry_text
@@ -134,8 +134,9 @@ class WebRequestTests(ResearchAppCase):
         row = search_row()
         self.assertEqual(log.task_widget(task_id).view.kind, live.TASK_WEB)
         self.assertEqual(row.view.status, live.STATUS_RUNNING)       # while Claude Code runs it
-        self.assertTrue(row.is_open())
-        self.assertEqual(row.details.fields.value_widget("Query (exact)").plain_text(), RESEARCH_QUERY)
+        self.assertFalse(row.is_open())                              # one line: the focal frame shows it
+        self.assertEqual(self.reading.live_stage.focal.frame.step_id(), row.view.id)
+        self.assertIn(f"Query (exact): {RESEARCH_QUERY}", live_view.exact_text(row.view))
         self.assertEqual(self.reading.live_status.state(), hud.LIVE_WORKING)
         gate.set()
         outcome = self.finish()
@@ -493,41 +494,46 @@ class PagePictureTests(ResearchAppCase):
         self.assertEqual(snaps.threads, ["ask", "ask"])                # asked from the Ask's thread
         step = self.fetch_step(task_id)
         self.assertEqual((step.view.status, step.view.picture.state), (live.STATUS_OK, live.PICTURE_PENDING))
-        self.assertTrue(step.is_open())                                # a step with a picture starts open
-        thumbnail = step.picture_widget()
-        self.assertTrue(thumbnail is not None and thumbnail.isVisibleTo(self.reading.live_log) and thumbnail.pending())
-        self.assertIn(snapshots.NOTE_OPENING, thumbnail.accessibleName())
+        # One line in the timeline (the owner's choice): picked, the page's picture is the focal frame's.
+        self.assertFalse(step.is_open())
+        self.assertIsNone(step.picture_widget())                       # no thumbnail
+        frame = self.reading.live_stage.focal.frame
+        step.row.click()
+        settle()
+        self.assertEqual((frame.step_id(), frame.state()), (step.view.id, live_view.PENDING))
+        self.assertIn(snapshots.NOTE_OPENING, frame.accessibleName())
         snaps.complete(0)
         self.drained()
         step = self.fetch_step(task_id)
         self.assertEqual(step.view.picture.state, live.PICTURE_READY)
-        thumbnail = step.picture_widget()
-        self.assertTrue(thumbnail.ready())
-        self.assertEqual(thumbnail.picture().caption, pictures.page_caption("www.example.org"))
-        self.assertTrue(self.reading.live_log.open_picture(step.view.id))   # Enter / click: larger, inside Jarvis
+        self.assertEqual((frame.step_id(), frame.state()), (step.view.id, live_view.READY))
+        self.assertEqual(frame.step().picture.caption, pictures.page_caption("www.example.org"))
+        frame.click()                                                  # Enter / click: larger, inside Jarvis
+        settle()
         viewer = self.reading.live_log.picture_viewer()
         self.assertTrue(viewer is not None and viewer.isVisible())
+        self.assertEqual(viewer.step_id(), step.view.id)
         viewer.close()
         settle()
         # The cited source: its own step with its picture; the check's "Picture [2]" link shows it.
         card = self.reading.live_log.task_widget(task_id)
         source = next(step for step in card.step_widgets() if step.view.kind == live.WEB_SOURCE)
         self.assertEqual(source.view.title, "Source [2]: museum.example.net")
-        self.assertTrue(source.is_open() and source.picture_widget().pending())
+        self.assertEqual(source.view.picture.state, live.PICTURE_PENDING)
+        self.assertFalse(source.is_open())
         check = next(step for step in card.step_widgets() if step.view.kind == live.RESEARCH_VALIDATE)
-        check.set_open(True)
-        settle()
-        link = check.details.fields.value_widget("Picture [2]")
-        self.assertIsInstance(link, hud._WrapLink)
-        link.click()                                                   # not READY yet: the step comes into view
+        link = next(field.link for field in check.view.fields if field.label == "Picture [2]")
+        self.assertEqual(link, f"{live.PICTURE_LINK}{source.view.id}")
+        self.reading.live_log.follow_link(link)                        # not READY yet: the step is the focal one
         settle()
         self.assertFalse(viewer.isVisible())
+        self.assertEqual(frame.step_id(), source.view.id)
+        self.assertFalse(source.is_open())
         snaps.complete(1)
         self.drained()
-        link = check.details.fields.value_widget("Picture [2]")
         outside: list[str] = []
         self.reading.live_log.linkClicked.connect(outside.append)
-        link.click()                                                   # READY: shown larger, inside Jarvis
+        self.reading.live_log.follow_link(link)                        # READY: shown larger, inside Jarvis
         settle()
         self.assertEqual(outside, [])                                  # an internal link: it never leaves LIVE
         self.assertTrue(viewer.isVisible())

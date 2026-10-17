@@ -21,7 +21,7 @@ from PySide6.QtGui import QColor, QFontMetricsF, QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPlainTextEdit
 
-from briefing_reader import dock, hud, live, ui
+from briefing_reader import dock, hud, live, live_view, ui
 from briefing_reader.actions import parse_action_line
 from briefing_reader.ask.planner import STDIN_PENDING, STDIN_SENT
 from tests.ask_fakes import FakeProcess
@@ -823,9 +823,14 @@ class AutoOpenTests(AppCase):
         card = log.task_widget(task_id)
         planner = next(step for step in card.step_widgets() if step.view.kind == live.PLANNER_RUN)
         self.assertEqual(planner.view.status, live.STATUS_RUNNING)
-        self.assertTrue(planner.is_open())
-        self.assertIn(STDIN_SENT, planner.details.blocks)
-        self.assertNotIn(STDIN_PENDING, planner.details.blocks)
+        # One line in the timeline (the owner's choice): the running planner is the focal frame instead.
+        self.assertFalse(planner.is_open())
+        self.assertIsNone(planner.details)
+        self.assertEqual(self.reading.live_stage.focal.frame.step_id(), planner.view.id)
+        self.assertTrue(planner.row.is_selected())
+        labels = [block.label for block in planner.view.blocks]
+        self.assertIn(STDIN_SENT, labels)
+        self.assertNotIn(STDIN_PENDING, labels)
         self.assertEqual(self.reading.live_status.state(), hud.LIVE_WORKING)
         self.assertEqual(self.reading.live_summary_text(), "1 task - 1 running")
         gate.set()
@@ -928,8 +933,16 @@ class AutoOpenTests(AppCase):
         card = self.reading.live_log.task_widget(task_id)
         call = next(step for step in card.step_widgets() if step.view.kind == live.ACTION_CALL)
         self.assertEqual(call.row.word(), "SENT")
-        call.set_open(True)
-        self.assertEqual(call.details.fields.value_widget("Gmail message id").plain_text(), "m1")
+        payload = next(step for step in card.step_widgets() if step.view.kind == live.ACTION_PAYLOAD)
+        self.assertFalse(payload.is_open())                            # the hold is over: one line again
+        call.row.click()                                               # the call: the focal frame, its exact text
+        settle()
+        focal = self.reading.live_stage.focal
+        self.assertEqual(focal.frame.step_id(), call.view.id)
+        self.assertFalse(call.is_open())
+        self.assertIn("Gmail message id: m1", live_view.exact_text(call.view))
+        focal.exact.set_open(True)
+        self.assertIn("Gmail message id: m1", focal.exact.text())
         self.assertEqual(len(self.app.senders["work"].sent), 1)
 
     def test_while_the_briefing_plays_the_tab_stays_and_live_gets_the_dot(self) -> None:
@@ -1248,8 +1261,9 @@ class FeedTests(AppCase):
         self.assertLess(max(lateness), 0.25, f"worst {max(lateness) * 1000:.0f} ms")
         self.assertLessEqual(log.apply_count - applies, 15 * max(1.0, spent) + 1, f"{spent:.2f} s")
         self.drained()
-        notes = log.step_widget(steps[0].id).details.notes.plain_text()
-        self.assertIn("note 4996", notes)
+        step = log.step_widget(steps[0].id)
+        self.assertIsNone(step.details)                                # one line: no details made
+        self.assertIn("note 4996", [note.text for note in step.view.notes])
         self.assertGreaterEqual(feed.drains, 1)
 
 

@@ -750,6 +750,9 @@ class ReadingViewScreenTests(unittest.TestCase):
         self.assertTrue(reading.live_log.isVisible())
         self.assertTrue(reading.activity_panel.isVisible())       # ACTIVITY's rows stay on Live (spec 11.7)
         self.assertTrue(stage.timeline.isAncestorOf(reading.activity_panel))
+        self.assertIsInstance(reading.activity_panel, live_view.ActivityPanel)   # in the hologram look
+        self.assertTrue(reading.activity_panel.isAncestorOf(reading.activity))
+        self.assertTrue(reading.live_log.folded())                # one line per step (the owner's choice)
         self.assertFalse(reading.transcript_panel.isVisible())
         self.assertFalse(reading.conversation.isVisible())
         self.assertTrue(stage.strip.isAncestorOf(reading.live_status))

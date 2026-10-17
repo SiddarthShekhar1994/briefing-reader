@@ -170,6 +170,7 @@ Widgets
     ``ActivityLog``: ``add(tag, message, sub="", when=None)`` newest first,
         at most ``ActivityLog.MAX_ENTRIES``; tags ``TAG_RUN``, ``TAG_DONE``,
         ``TAG_WAIT``, ``TAG_STOP``, ``TAG_ASK``; ``entries()``; ``set_hour24(bool)``.
+        Its rows are in the hologram look (``activity_tag_color``: never amber).
     ``TabStrip(live=False)``: the JARVIS / BRIEFING folder tabs above the
         centre panel (``TAB_JARVIS``, ``TAB_BRIEFING``; ``currentChanged(int)``,
         ``set_current``, ``current()``, ``set_badge(bool)`` = the amber NEW
@@ -217,6 +218,9 @@ Widgets
         close gives the focus back to the link, scrolled into view), or that
         step (``reveal_step``) while its picture is not READY (the keyboard
         focus the link had goes along, to that step's picture).
+        ``fold=True`` (the Live screen and its pop-out): every step is one
+        line and a click only makes it the focal step; only a hidden hold's
+        payload step opens (``folded()``).
     LIVE pictures (pictures.py's data, drawn in the HUD theme at the size
         shown): ``picture_height(picture, width, stamp=, max_height=)``,
         ``paint_picture(painter, rect, picture, stamp=, max_height=)``,
@@ -7896,43 +7900,51 @@ TAG_DONE = "done"
 TAG_WAIT = "wait"
 TAG_STOP = "stop"
 TAG_ASK = "ask"
-TAG_COLORS = {TAG_RUN: ACCENT, TAG_DONE: GREEN, TAG_WAIT: AMBER, TAG_STOP: RED, TAG_ASK: PINK}
+# The tags' tones in the hologram look (holo token names; HOLOGRAM_SPEC 1). Never amber: amber means a
+# decision waits, and a decision waits on its approval card, not in this log (a WAIT here is "not yet").
+TAG_TONES = {TAG_RUN: "HOLO", TAG_DONE: "OK", TAG_WAIT: "INK_3", TAG_STOP: "ALERT_TX", TAG_ASK: "HOLO"}
+
+
+def activity_tag_color(tag: str) -> str:
+    """An ACTIVITY tag's colour (holo; ``ink-3`` for a tag it does not know)."""
+    return str(getattr(_holo(), TAG_TONES.get(tag, "INK_3")))
 
 
 class _ActivityRow(QWidget):
-    """One log row. On the 24-hour clock the time and tag columns are 38 and 44 px wide.
+    """One log row in the hologram look (HOLOGRAM_SPEC 2): the time a readout (JetBrains Mono 12,
+    ``ink-3``), the tag a label (JetBrains Mono 11, caps, its tone: activity_tag_color), the message
+    (Sora 13, ``ink-2``) and its sub line (Sora 13, ``ink-3``); the time and the tag centre on the
+    message's first line.
 
-    The 12-hour clock sizes them from the font instead: the time column fits
-    the widest time ("12:59 PM", right-aligned so the colons and AM / PM line
-    up) and the tag column the widest tag, which gives the message back most
-    of the width the longer times take.
+    The columns are sized from their fonts: the time column fits the widest time on the clock
+    ("12:59 PM", right-aligned so the colons and AM / PM line up; "23:59") and the tag column the
+    widest tag, which gives the message back most of the width.
     """
 
-    _TIME_WIDTH_24H = 38
-    _TAG_WIDTH_24H = 44
-    _PAD = 3          # after the widest time and the widest tag on the 12-hour clock
+    _PAD = 3          # after the widest time and the widest tag
 
     def __init__(self, when: str, tag: str, message: str, sub: str, hour24: bool = False) -> None:
         super().__init__()
-        font = mono_font(11)
+        holo = _holo()
+        time_font, tag_font, text_font = holo.font("readout"), holo.font("label"), holo.font("body_sm")
+        line = holo.line_height("body_sm")
         self.entry = (when, tag, message, sub)
-        time_label = make_label(when, font, TEXT_TIME)
-        tag_label = make_label(tag, font, TAG_COLORS.get(tag, TEXT_MUTED))
-        if hour24:
-            time_label.setFixedWidth(self._TIME_WIDTH_24H)
-            tag_label.setFixedWidth(self._TAG_WIDTH_24H)
-        else:
-            time_label.setFixedWidth(math.ceil(_clock_width(font, False)) + self._PAD)
-            time_label.setContentsMargins(0, 0, self._PAD, 0)
-            time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            widest_tag = max(_text_advance(font, text) for text in (*TAG_COLORS, tag))
-            tag_label.setFixedWidth(math.ceil(widest_tag) + self._PAD)
+        time_label = make_label(when, time_font, holo.INK_3)
+        tag_label = make_label(holo.role_text("label", tag), tag_font, activity_tag_color(tag))
+        time_label.setFixedWidth(math.ceil(_clock_width(time_font, hour24)) + self._PAD)
+        time_label.setContentsMargins(0, 0, self._PAD, 0)
+        time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        widest_tag = max(_text_advance(tag_font, holo.role_text("label", text)) for text in (*TAG_TONES, tag))
+        tag_label.setFixedWidth(math.ceil(widest_tag) + self._PAD)
+        tag_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        for label in (time_label, tag_label):
+            label.setFixedHeight(line)
         texts = QVBoxLayout()
         texts.setContentsMargins(0, 0, 0, 0)
         texts.setSpacing(0)
-        texts.addWidget(make_label(message, font, TEXT_BODY, wrap=True))
+        texts.addWidget(make_label(message, text_font, holo.INK_2, wrap=True))
         if sub:
-            texts.addWidget(make_label(sub, font, TEXT_SUB, wrap=True))
+            texts.addWidget(make_label(sub, text_font, holo.INK_3, wrap=True))
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -11228,7 +11240,10 @@ class _LiveStepRow(_LiveButton):
 
 class _LiveStep(QWidget):
     """One step: its row and, below it, its details (made on the first open). The details follow
-    the step's ``open_hint`` until the owner opens or closes them; then his choice sticks."""
+    the step's ``open_hint`` until the owner opens or closes them; then his choice sticks. In a folded
+    log (``LiveLog(fold=True)``, the Live screen and its pop-out) the step is its row alone: a click
+    makes it the focal step, and only what a Send or Cancel will send or change (its payload step)
+    opens, by itself, during its hidden hold (``held``, from its task)."""
 
     def __init__(self, log: LiveLog) -> None:
         super().__init__()
@@ -11238,6 +11253,7 @@ class _LiveStep(QWidget):
         self.details: _LiveDetails | None = None
         self.view: live_events.StepView | None = None
         self._user_open: bool | None = None
+        self._held = False
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
@@ -11252,13 +11268,19 @@ class _LiveStep(QWidget):
         view = self.view
         if view is None or not self.has_details(view):
             return False
+        if self._log.folded():
+            # One line each (the focal frame shows the step): only what is about to go out, during its hold.
+            return self._held and view.kind == live_events.ACTION_PAYLOAD
         if self._user_open is not None:
             return self._user_open
         return view.open_hint and self._log.hints()
 
-    def set_view(self, view: live_events.StepView, now: float) -> bool:
-        """Show ``view``; True when focusable widgets came or went."""
+    def set_view(self, view: live_events.StepView, now: float, held: bool | None = None) -> bool:
+        """Show ``view`` (``held``: its task is in a Send's or Cancel's hidden hold; None keeps what it
+        was); True when focusable widgets came or went."""
         self.view = view
+        if held is not None:
+            self._held = bool(held)
         open_ = self.is_open()
         changed = False
         if open_:
@@ -11275,15 +11297,15 @@ class _LiveStep(QWidget):
             if not self.details.isHidden():
                 self.details.hide()
                 changed = True
-        self.row.set_view(view, now, open_, self.has_details(view))
+        self.row.set_view(view, now, open_, self.has_details(view) and not self._log.folded())
         self.row.set_selected(view.id == self._log.focal_step())
         return changed
 
     def toggle(self) -> None:
         if self.view is not None:
             self._log.step_clicked(self.view.id)   # the Live screen makes it the focal step
-        if self.view is None or not self.has_details(self.view):
-            return
+        if self.view is None or not self.has_details(self.view) or self._log.folded():
+            return   # folded: the click only picks the focal step (its picture and exact text are there)
         self._user_open = not self.is_open()
         self.set_view(self.view, self._log.now())
         self._log._structure_changed()
@@ -11576,6 +11598,7 @@ class _LiveTaskCard(QWidget):
         self._steps: dict[int, _LiveStep] = {}
         self._order: list[int] = []
         self._user_expanded: bool | None = None
+        self._held = False   # in a Send's or Cancel's hidden hold (its payload step opens in a folded log)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(2)
@@ -11597,6 +11620,10 @@ class _LiveTaskCard(QWidget):
         self.view = view
         changed = False
         expanded = self.expanded()
+        held = (view.kind == live_events.TASK_ACTION and view.status == live_events.STATUS_RUNNING
+                and not view.pinned and _running_hold(view) is not None)
+        # The hold ending changes the hold step, not the payload: the payload is shown again then too.
+        held_changed, self._held = held != self._held, held
         if expanded or self._steps:
             ids = [step.id for step in view.steps]
             for step_view in view.steps:
@@ -11604,9 +11631,10 @@ class _LiveTaskCard(QWidget):
                 if widget is None:
                     widget = self._steps[step_view.id] = _LiveStep(self._log)
                     self._steps_layout.addWidget(widget)
-                    changed |= widget.set_view(step_view, now) or True
-                elif widget.view is None or widget.view.revision != step_view.revision:
-                    changed |= widget.set_view(step_view, now)
+                    changed |= widget.set_view(step_view, now, held) or True
+                elif (widget.view is None or widget.view.revision != step_view.revision
+                      or (held_changed and step_view.kind == live_events.ACTION_PAYLOAD)):
+                    changed |= widget.set_view(step_view, now, held)
             for step_id in [step_id for step_id in self._steps if step_id not in ids]:
                 widget = self._steps.pop(step_id)
                 self._steps_layout.removeWidget(widget)
@@ -11728,7 +11756,10 @@ class LiveLog(QScrollArea):
     the view is hidden or minimized).
     ``hints=False`` (the pop-out: "details collapsed") opens a step's details only when the owner does;
     ``thumb=(w, h)`` draws the pictures in the details as thumbnails at most that big (the focal frame
-    shows them large).
+    shows them large). ``fold=True`` (the Live screen and its pop-out, the owner's choice): every step
+    is one line (status mark, title, time) and a click, Space or Enter on it only makes it the focal
+    step (its picture and exact text are the focal frame's); the one step that opens, by itself, is
+    what a Send or Cancel will send or change (its payload step) during its hidden hold.
     """
 
     linkClicked = Signal(str)
@@ -11741,7 +11772,7 @@ class LiveLog(QScrollArea):
     _CHANGE_MARGIN = 24   # px kept under a calendar picture's change when a hold scrolls to it
 
     def __init__(self, parent: QWidget | None = None, *, clock: Callable[[], float] = time.monotonic,
-                 hints: bool = True, thumb: tuple[int, int] | None = None) -> None:
+                 hints: bool = True, thumb: tuple[int, int] | None = None, fold: bool = False) -> None:
         super().__init__(parent)
         _LiveFonts.get()
         content = _transparent_scroll(self)
@@ -11750,6 +11781,7 @@ class LiveLog(QScrollArea):
         self._layout.setSpacing(8)
         self.empty_label = make_label(LIVE_EMPTY_TEXT, body_font(13), _holo().INK_3, wrap=True)
         self._hints = bool(hints)
+        self._fold = bool(fold)
         self._thumb = thumb
         self._focal = 0
         self._layout.addWidget(self.empty_label)
@@ -11849,6 +11881,10 @@ class LiveLog(QScrollArea):
         """Steps open their details by the stream's hint (False: only by the owner's click)."""
         return self._hints
 
+    def folded(self) -> bool:
+        """Every step is one line; only a hidden hold's payload step opens (``fold=True``)."""
+        return self._fold
+
     def focal_step(self) -> int:
         return self._focal
 
@@ -11938,10 +11974,11 @@ class LiveLog(QScrollArea):
         self.linkClicked.emit(link)
 
     def reveal_step(self, step_id: int, focus: Qt.FocusReason | None = None) -> bool:
-        """Scroll to step ``step_id`` with its details open (its task opened too); False when it is
-        not shown. The view then holds there like after the owner's own scroll. With ``focus`` (the
-        link followed here had the keyboard focus) the step's picture (its row when it shows none)
-        takes the focus for that reason once in view, while the focus is still in this log."""
+        """Scroll to step ``step_id`` with its details open (its task opened too; folded: it becomes the
+        focal step instead); False when it is not shown. The view then holds there like after the
+        owner's own scroll. With ``focus`` (the link followed here had the keyboard focus) the step's
+        picture (its row when it shows none) takes the focus for that reason once in view, while the
+        focus is still in this log."""
         card = next((card for card in self._cards.values() if card.step_widget(step_id) is not None), None)
         if card is None:
             return False
@@ -11949,7 +11986,10 @@ class LiveLog(QScrollArea):
         step = card.step_widget(step_id)
         if step is None:
             return False
-        step.set_open(True)
+        if self._fold:
+            self.step_clicked(step_id)
+        else:
+            step.set_open(True)
         self._user_scrolled_at = time.monotonic()
         self._follow = False
         self.widget().layout().activate()

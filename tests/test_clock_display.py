@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from PySide6.QtGui import QFontMetricsF
 from PySide6.QtWidgets import QApplication, QLabel
 
-from briefing_reader import config, hud, ui
+from briefing_reader import config, holo, hud, ui
 from briefing_reader.models import BriefingHeader
 
 PDT = timezone(timedelta(hours=-7))
@@ -129,21 +129,27 @@ class ActivityLogTests(unittest.TestCase):
             widths.append((time_label.maximumWidth(), tag_label.maximumWidth()))
         return [entry[0] for entry in log.entries()], widths
 
-    def test_12_hour_stamps_and_columns_from_the_font(self) -> None:
-        stamps, widths = self.columns(False)
-        self.assertEqual(stamps, ["12:00 AM", "12:59 PM", "9:05 AM"])
-        metrics = QFontMetricsF(hud.mono_font(11))
+    def check_columns(self, hour24: bool, widest_time: str) -> None:
+        """The hologram look (HOLOGRAM_SPEC 2): the time a readout, the tag a caps label; both columns
+        from their fonts, the same on every row."""
+        _stamps, widths = self.columns(hour24)
         time_width, tag_width = widths[0]
         self.assertEqual(set(widths), {(time_width, tag_width)})        # every row has the same columns
-        self.assertGreaterEqual(time_width, metrics.horizontalAdvance("12:59 PM"))
-        widest_tag = max(metrics.horizontalAdvance(tag) for tag in hud.TAG_COLORS)
+        self.assertGreaterEqual(time_width, QFontMetricsF(holo.font("readout")).horizontalAdvance(widest_time))
+        label = QFontMetricsF(holo.font("label"))
+        widest_tag = max(label.horizontalAdvance(tag.upper()) for tag in hud.TAG_TONES)
         self.assertGreaterEqual(tag_width, widest_tag)
-        self.assertLessEqual(tag_width, math.ceil(widest_tag) + 3)       # not the fixed 44 px column
+        self.assertLessEqual(tag_width, math.ceil(widest_tag) + 3)
 
-    def test_24_hour_keeps_the_fixed_columns(self) -> None:
-        stamps, widths = self.columns(True)
+    def test_12_hour_stamps_and_columns_from_the_font(self) -> None:
+        stamps, _widths = self.columns(False)
+        self.assertEqual(stamps, ["12:00 AM", "12:59 PM", "9:05 AM"])
+        self.check_columns(False, "12:59 PM")
+
+    def test_24_hour_stamps_and_columns_from_the_font(self) -> None:
+        stamps, _widths = self.columns(True)
         self.assertEqual(stamps, ["00:00", "12:59", "09:05"])
-        self.assertEqual(set(widths), {(38, 44)})
+        self.check_columns(True, "23:59")
 
 
 class HeaderClockTests(unittest.TestCase):

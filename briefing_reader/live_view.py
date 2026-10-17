@@ -14,6 +14,14 @@ Public API
     ``away_label``, ``show_button``, ``back_button``). Signals: ``popOutClicked``, ``clearClicked``,
     ``showWindowClicked``, ``bringBackClicked``.
 
+    The app's timeline is folded (``hud.LiveLog(fold=True)``, the owner's choice): every step is one line
+    (status mark, title, time) and a click, Space or Enter on it makes it the focal step; no details or
+    thumbnails open in it but what a Send or Cancel will send or change, during its hidden hold.
+
+``ActivityPanel()``
+    The ACTIVITY panel under the timeline (``set_activity``) in the hologram look: an information-only
+    tile (spec 5), its ``ACTIVITY`` label and ``body_layout`` (the hud.ActivityLog rows). Never amber.
+
 ``FocalView(log)``
     Follows ``log``: the focal step is the one the owner clicked (until it goes, or ``follow()`` /
     "Follow live"), else during an approved card's hidden hold what it sends or changes (its payload
@@ -91,6 +99,7 @@ FRAME_BRACKET = 14
 FRAME_EMPTY_H = 180
 THUMB = (160, 100)            # the timeline's picture thumbnails (spec 10)
 EXACT_MAX_H = 240             # the open exact text grows to this, then scrolls
+EXACT_MIN_H = 48              # ... and keeps at least this (3 lines) when the screen is short, then scrolls
 
 SHOW_EXACT = "Show the exact text"
 HIDE_EXACT = "Hide the exact text"
@@ -109,6 +118,8 @@ CLOSE_LABEL = "Close: LIVE goes back into the main window"
 READ_IN_FULL = "READ IN FULL"
 CITED_NOT_READ = "CITED, NOT READ"
 SEE_LARGER = "Press Enter to see it larger"
+ACTIVITY_TITLE = "Activity"
+ACTIVITY_META = "Live"
 DOT = hud.MIDDLE_DOT
 
 # Steps whose text is other people's words (an email Jarvis read or searched, the web): the mark shows.
@@ -873,8 +884,8 @@ class _ExactToggle(QAbstractButton):
 
 class _ExactPlain(QPlainTextEdit):
     """The exact text: read only, plain text (nothing is a link, nothing loads), mono 12, selectable,
-    wrapped at its width; as tall as its text up to EXACT_MAX_H, then it scrolls. Tab leaves it; its
-    context menu has Copy and Select All only."""
+    wrapped at its width; as tall as its text up to EXACT_MAX_H, then it scrolls (on a short screen it
+    gives way down to EXACT_MIN_H). Tab leaves it; its context menu has Copy and Select All only."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -892,9 +903,14 @@ class _ExactPlain(QPlainTextEdit):
         self.setStyleSheet("QPlainTextEdit { color: %s; background: transparent; border: none; "
                            "selection-background-color: rgba(60, 211, 238, 82); selection-color: %s; }"
                            % (holo.INK_2, holo.INK_1))
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(40)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self._height = 40
+        self.setMinimumHeight(20)
+        self.setMaximumHeight(self._height)
         self._text = ""
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(super().sizeHint().width(), self._height)
 
     def text(self) -> str:
         return self._text
@@ -915,8 +931,11 @@ class _ExactPlain(QPlainTextEdit):
             total += self.blockBoundingRect(block).height()
             block = block.next()
         height = max(20, min(EXACT_MAX_H, math.ceil(total) + 4))
-        if height != self.height():
-            self.setFixedHeight(height)
+        if height != self._height:
+            self._height = height
+            self.setMinimumHeight(min(height, EXACT_MIN_H))
+            self.setMaximumHeight(height)
+            self.updateGeometry()
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -981,6 +1000,13 @@ class ExactText(QWidget):
     def set_open(self, open_: bool) -> None:
         self.toggle.setChecked(bool(open_))
 
+    def open_min_height(self) -> int:
+        """The least the open box takes (its padding, the mark's line, EXACT_MIN_H of text) and its gap."""
+        box = self.box.layout()
+        margins = box.contentsMargins()
+        return (margins.top() + margins.bottom() + self.mark.sizeHint().height() + 2 * box.spacing()
+                + EXACT_MIN_H + self.layout().spacing())
+
     def others(self) -> bool:
         return others_text(self._view)
 
@@ -1044,6 +1070,7 @@ class FocalView(QWidget):
         log.changed.connect(self.sync)
         log.stepSelected.connect(self.select)
         log.ticked.connect(self.frame.tick)
+        self.exact.toggle.toggled.connect(lambda _open: self._fit_frame())
         self.sync()
 
     # ---- API ------------------------------------------------------------------------------------
@@ -1061,6 +1088,8 @@ class FocalView(QWidget):
         if self._fit_height and self.height() > 0:
             toggle = self.exact.toggle
             room = self.height() - (toggle.sizeHint().height() + 8 if not toggle.isHidden() else 0)
+            if self.exact.is_open() and not toggle.isHidden():
+                room -= self.exact.open_min_height()   # the open exact text keeps its least; the frame gives way
             height = max(120, min(height, room))
         self.frame.set_max_size(QSize(self._max_width, height))
 
@@ -1127,6 +1156,7 @@ class FocalView(QWidget):
         step, task = focal if focal is not None else (None, None)
         self.frame.set_step(step, step is not None and task is hold_task and hold is not None)
         self.exact.set_step(step)
+        self._fit_frame()   # the toggle may have come or gone
         focal_id = step.id if step is not None else 0
         self._log.set_focal_step(focal_id)
         if focal_id != self._focal:
@@ -1151,6 +1181,43 @@ class _Strip(QWidget):
         painter = QPainter(self)
         try:
             painter.fillRect(QRectF(0, self.height() - 1, self.width(), 1), holo.LINE_FAINT)
+        finally:
+            painter.end()
+
+
+class ActivityPanel(QWidget):
+    """The ACTIVITY panel under the Live timeline (spec 11.7: its rows stay on Live) in the hologram look:
+    an information-only tile (spec 5: the ``tile`` fill, a ``line-faint`` border, radius 10; no brackets
+    and no scanlines: it is no step and asks nothing), its label (spec 2: ``ACTIVITY`` in ``ink-kicker``,
+    ``LIVE`` in ``ink-4`` at its right) and ``body_layout`` under it (the hud.ActivityLog rows). Never
+    amber: a decision waits on its approval card, not here."""
+
+    STATE = holo.TILE_INFO
+
+    def __init__(self, title: str = ACTIVITY_TITLE, meta: str = ACTIVITY_META,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        font = _font("label")
+        self.title_label = hud.make_label(holo.role_text("label", title), font, holo.INK_KICKER)
+        self.meta_label = hud.make_label(holo.role_text("label", meta), font, holo.INK_4)
+        self.meta_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(holo.SPACE["s"])
+        header.addWidget(self.title_label)
+        header.addStretch(1)
+        header.addWidget(self.meta_label)
+        pad_v, pad_h = holo.TILE_PAD_COMPACT
+        self.body_layout = QVBoxLayout(self)
+        self.body_layout.setContentsMargins(pad_h, pad_v, pad_h, pad_v)
+        self.body_layout.setSpacing(holo.SPACE["s"])
+        self.body_layout.addLayout(header)
+        self.setAccessibleName(title)
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            holo.paint_tile(painter, self.rect(), self.STATE)
         finally:
             painter.end()
 

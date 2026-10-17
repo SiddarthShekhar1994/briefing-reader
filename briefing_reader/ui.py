@@ -1240,7 +1240,8 @@ class ReadingView(QWidget):
         ``live_clear_button``, ``live_away`` / ``live_away_label`` / ``live_show_button`` /
         ``live_back_button`` (while the pop-out shows the steps) and ``live_page`` (the stage)."""
         self._live_summary = ""
-        self.live_log = hud.LiveLog(thumb=live_view.THUMB)
+        # One line per step (the owner's choice): the focal frame shows the step; a hold's payload opens.
+        self.live_log = hud.LiveLog(thumb=live_view.THUMB, fold=True)
         self.live_log.linkClicked.connect(self.liveLink)
         self.live_stage = stage = live_view.LiveStage(self.live_log)
         self.live_page = stage
@@ -1282,7 +1283,7 @@ class ReadingView(QWidget):
         self.approvals = hud.ActionList(max_height=_LIST_HEIGHT_MAX)
         self.approvals_stage = approvals_view.ApprovalsStage(self.approvals)
         self.approvals_queue = self.approvals_stage.queue
-        self.activity_panel = hud.ChamferPanel("Activity", "live", border_alpha=0.18, spacing=8)
+        self.activity_panel = live_view.ActivityPanel()   # under Live's timeline, in the hologram look
         self.activity = hud.ActivityLog()
         self.activity_panel.body_layout.addWidget(self.activity, 1)
 
@@ -3207,7 +3208,7 @@ class LiveWindow(hud.HudWindowFrame):
         self.clear_button = self.header.clear_button
         self.clear_button.setToolTip(CLEAR_TIP)
         self.clear_button.clicked.connect(lambda: self.clearRequested.emit())
-        self.log = hud.LiveLog(hints=False, thumb=live_view.THUMB)
+        self.log = hud.LiveLog(hints=False, thumb=live_view.THUMB, fold=True)   # as the Live screen's
         self.log.linkClicked.connect(self.linkClicked)
         self.content = live_view.PopOutBody(self.log)
         self.focal = self.content.focal

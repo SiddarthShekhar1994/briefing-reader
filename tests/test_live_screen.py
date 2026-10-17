@@ -13,8 +13,9 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest import mock
 
-from PySide6.QtCore import QPoint, QSize
+from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QColor
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from briefing_reader import holo, hud, live, live_view, ui
@@ -44,13 +45,13 @@ class Clock:
 
 
 class StageCase(unittest.TestCase):
-    """A LiveStage around its own LiveLog (thumbnails as on the Live screen), fed from a stream."""
+    """A LiveStage around its own LiveLog (folded, thumbnails as on the Live screen), fed from a stream."""
 
     def setUp(self) -> None:
         self.clock = Clock()
         self.stream = live.LiveStream(clock=self.clock, wall=lambda: AT)
         self.version = 0
-        self.log = hud.LiveLog(clock=self.clock, thumb=live_view.THUMB)
+        self.log = hud.LiveLog(clock=self.clock, thumb=live_view.THUMB, fold=True)
         self.stage = live_view.LiveStage(self.log)
         self.host = QWidget()
         self.host.resize(1040, 640)
@@ -124,17 +125,110 @@ class LayoutTests(StageCase):
         self.assertLessEqual(frame.height(), live_view.FOCAL_MAX_H)
         self.assertFalse(self.stage.grab().toImage().isNull())
 
-    def test_the_timeline_draws_pictures_as_thumbnails(self) -> None:
-        _task, _request, step = self.ask()
+    def test_every_step_is_one_line_without_details_or_a_thumbnail(self) -> None:
+        """The owner's choice (spec 16.3): the focal frame shows the step, so the timeline opens no
+        details and draws no thumbnail - not for a running step, a picture, a warning or a planner run."""
+        self.assertTrue(self.log.folded())
+        task, request, search = self.ask()
+        warned = task.step(live.ASK_CHECKS, "Checks", status=live.STATUS_WARN, summary="1 check to look at",
+                           fields=[("Checked", "2 cards")])
+        planner = task.step(live.PLANNER_RUN, "Planner run 1")
+        planner.block("Text given to the planner", f"line one {MARKER}")
         self.apply()
-        widget = self.log.step_widget(step.id)
-        self.assertTrue(widget.is_open())                       # running: its details open
-        picture = widget.picture_widget()
-        self.assertIsNotNone(picture)
-        w, h = picture._thumb(picture.width())
-        self.assertLessEqual(w, live_view.THUMB[0])
-        self.assertLessEqual(h, live_view.THUMB[1])
-        self.assertFalse(picture.grab().toImage().isNull())
+        for step in (request, search, warned, planner):
+            with self.subTest(step=step.id):
+                widget = self.log.step_widget(step.id)
+                self.assertTrue(live.open_hint(widget.view.kind, widget.view.status, widget.view.items,
+                                               widget.view.picture) or step is request)
+                self.assertFalse(widget.is_open())
+                self.assertIsNone(widget.details)                       # never made: nothing of it kept
+                self.assertIsNone(widget.picture_widget())              # no thumbnail
+                self.assertEqual(widget.row.heightForWidth(widget.row.width()), 36)   # one line
+                self.assertEqual(widget.row.accessibleDescription(), "")             # no caret to open
+                self.assertEqual(widget.focusables(), [widget.row])
+        self.assertEqual(self.stage.focal.frame.step_id(), planner.id)  # the planner run: the focal frame
+        self.assertTrue(self.log.step_widget(planner.id).row.is_selected())
+        self.assertFalse(self.log.grab().toImage().isNull())
+
+    def test_a_click_space_or_enter_picks_the_focal_step_and_opens_nothing(self) -> None:
+        task, request, search = self.ask()
+        search.done(live.STATUS_OK)
+        self.apply()
+        frame = self.stage.focal.frame
+        request_step = self.log.step_widget(request.id)
+        request_step.row.click()
+        settle()
+        self.assertEqual(frame.step_id(), request.id)
+        self.assertFalse(request_step.is_open())
+        self.assertIsNone(request_step.details)
+        # The keyboard: Tab walks the rows in the order shown; Enter or Space on a row makes it focal.
+        self.host.activateWindow()
+        header = self.log.task_widget(task.id).header
+        header.setFocus(Qt.FocusReason.TabFocusReason)
+        order = [QApplication.focusWidget()]
+        for _ in range(2):
+            QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Tab)
+            order.append(QApplication.focusWidget())
+        search_row = self.log.step_widget(search.id).row
+        self.assertEqual(order, [header, request_step.row, search_row])
+        QTest.keyClick(search_row, Qt.Key.Key_Return)
+        settle()
+        self.assertEqual(frame.step_id(), search.id)
+        self.assertTrue(search_row.is_selected() and not request_step.row.is_selected())
+        self.assertFalse(self.log.step_widget(search.id).is_open())
+        QTest.keyClick(request_step.row, Qt.Key.Key_Space)
+        settle()
+        self.assertEqual(frame.step_id(), request.id)
+        self.assertFalse(request_step.is_open())
+        QTest.keyClick(search_row, Qt.Key.Key_Return)
+        settle()
+        # Enter on the focal frame: its picture larger; closed, the focus is back on the frame.
+        self.assertEqual(frame.state(), live_view.READY)
+        frame.setFocus(Qt.FocusReason.TabFocusReason)
+        QTest.keyClick(frame, Qt.Key.Key_Return)
+        settle()
+        viewer = self.log.picture_viewer()
+        self.assertTrue(viewer is not None and viewer.isVisible())
+        self.assertEqual(viewer.step_id(), search.id)
+        viewer.close()
+        settle()
+        self.assertIs(QApplication.focusWidget(), frame)
+        self.assertFalse(self.log.step_widget(search.id).is_open())
+
+    def test_only_a_holds_payload_opens_by_itself(self) -> None:
+        """The one exception: during a Send's or Cancel's hidden hold, what will go out opens in the
+        timeline too (and is the focal frame); once the hold is over it is one line again."""
+        task, payload, hold = self.action(seconds=4.5)
+        self.apply()
+        step = self.log.step_widget(payload.id)
+        self.assertTrue(step.is_open())
+        self.assertTrue(step.details is not None and step.details.isVisible())
+        self.assertIsNotNone(step.details.fields.value_widget("To"))
+        self.assertIn("Message", step.details.blocks)
+        self.assertEqual(self.stage.focal.frame.step_id(), payload.id)
+        for other in self.log.task_widget(task.id).step_widgets():
+            if other is not step:
+                self.assertFalse(other.is_open())
+        step.row.click()                                              # a click picks it: it stays open
+        settle()
+        self.assertTrue(step.is_open())
+        self.clock.t += 3.0
+        self.log.tick()
+        self.assertTrue(step.is_open())                               # the whole hold
+        hold.done(live.STATUS_OK, status_text="SENT")
+        task.finish(live.STATUS_OK, status_text="SENT")
+        self.apply()
+        self.assertFalse(step.is_open())                              # it went: one line again
+        self.assertTrue(step.details.isHidden())
+        self.assertEqual(step.row.heightForWidth(step.row.width()), 36)
+        cancel, cancel_payload, cancel_hold = self.action(seconds=4.5)   # a second approval: its hold
+        self.apply()
+        self.assertTrue(self.log.step_widget(cancel_payload.id).is_open())
+        self.assertFalse(step.is_open())
+        cancel_hold.done(live.STATUS_CANCELLED, status_text="UNDONE")
+        cancel.finish(live.STATUS_CANCELLED, status_text="UNDONE")
+        self.apply()
+        self.assertFalse(self.log.step_widget(cancel_payload.id).is_open())
 
 
 class ReadoutTests(unittest.TestCase):
@@ -334,6 +428,31 @@ class ExactTextTests(StageCase):
         self.assertTrue(exact.toggle.isHidden())
         self.assertIn(search.id, [step.view.id for step in self.log.task_widget(_task.id).step_widgets()])
 
+    def test_the_open_exact_text_fits_a_short_screen(self) -> None:
+        """With every step one line, the exact text is where a step's words are read: open on a short
+        screen it keeps at least EXACT_MIN_H (then scrolls) and the frame gives way - nothing spills."""
+        task = self.stream.task(live.TASK_ASK, "Long")
+        step = task.step(live.PLANNER_RUN, "Planner run 1", status=live.STATUS_OK,
+                         fields=[("Account", "work"), ("Why", "found")])
+        step.block("Text given to the planner", "\n".join(f"line {number} {MARKER}" for number in range(40)))
+        self.apply()
+        self.host.resize(900, 420)
+        self.stage.resize(900, 420)
+        settle(4)
+        focal = self.stage.focal
+        focal.select(step.id)
+        focal.exact.set_open(True)
+        settle(6)
+        exact, box = focal.exact, focal.exact.box
+        self.assertTrue(box.isVisible())
+        self.assertGreaterEqual(exact.text_edit.height(), live_view.EXACT_MIN_H)
+        self.assertLessEqual(exact.text_edit.geometry().bottom(), box.height())          # inside its box
+        self.assertLessEqual(exact.mapTo(focal, QPoint(0, exact.height())).y(), focal.height() + 1)
+        self.assertGreaterEqual(focal.frame.height(), 120)
+        focal.exact.set_open(False)
+        settle(4)
+        self.assertGreater(focal.frame.max_size().height(), 120)                         # room back for the frame
+
     def test_cut_and_not_kept_blocks_say_so(self) -> None:
         view = SimpleNamespace(fields=(live.Field("Model", "sonnet"),),
                                items=(live.Item("Card - Email", live.STATUS_OK),), items_more=2,
@@ -360,6 +479,7 @@ class PopOutTests(unittest.TestCase):
         self.assertIs(window.dock_button, window.header.back_button)
         self.assertEqual(window.dock_button.text(), "Bring it back")
         self.assertFalse(window.log.hints())                           # details collapsed
+        self.assertTrue(window.log.folded())                           # one line per step, as on Live
         self.assertEqual(window.log.thumb_size(), live_view.THUMB)
         task = stream.task(live.TASK_ASK, "Pop-out")
         step = task.step(live.WEB_SEARCH, "Web search 1", fields=[("Query (exact)", QUERY, True)])
@@ -455,6 +575,47 @@ class TimelineLookTests(StageCase):
         image = self.log.grab().toImage()
         self.assertFalse(image.isNull())
         self.assertNotEqual(QColor(image.pixel(5, 5)).alpha(), -1)
+
+
+class ActivityLookTests(unittest.TestCase):
+    def test_the_activity_panel_in_the_hologram_look(self) -> None:
+        """ACTIVITY under the timeline (spec 5 / 2): an information-only tile, its caps label, the rows'
+        times as readouts and tags as labels - and never amber (no decision waits in it)."""
+        panel = live_view.ActivityPanel()
+        self.addCleanup(panel.deleteLater)
+        log = hud.ActivityLog()
+        panel.body_layout.addWidget(log, 1)
+        panel.resize(300, 220)
+        for tag in hud.TAG_TONES:
+            log.add(tag, "Waiting for the PM briefing", "checks again at 6:05 PM", when=AT)
+        self.assertEqual(panel.STATE, holo.TILE_INFO)
+        self.assertEqual(panel.accessibleName(), "Activity")
+        for label, text, color in ((panel.title_label, "ACTIVITY", holo.INK_KICKER),
+                                   (panel.meta_label, "LIVE", holo.INK_4)):
+            self.assertEqual(label.text(), text)
+            self.assertEqual(label.font().family(), holo.font("label").family())
+            self.assertEqual(label.font().pixelSize(), holo.ROLES["label"].px)
+            self.assertEqual(label.palette().windowText().color().name(), color.lower())
+        self.assertEqual({tag: hud.activity_tag_color(tag) for tag in hud.TAG_TONES},
+                         {hud.TAG_RUN: holo.HOLO, hud.TAG_DONE: holo.OK, hud.TAG_WAIT: holo.INK_3,
+                          hud.TAG_STOP: holo.ALERT_TX, hud.TAG_ASK: holo.HOLO})
+        for row in log._rows:
+            time_label, tag_label = (row.layout().itemAt(i).widget() for i in (0, 1))
+            self.assertEqual(time_label.text(), "1:12 PM")
+            self.assertEqual((time_label.font().family(), time_label.font().pixelSize()),
+                             (holo.font("readout").family(), holo.ROLES["readout"].px))
+            self.assertEqual(tag_label.text(), row.entry[1].upper())
+            self.assertEqual(tag_label.font().pixelSize(), holo.ROLES["label"].px)
+            self.assertNotEqual(tag_label.palette().windowText().color().name(), holo.AMBER.lower())
+        image = panel.grab().toImage()
+        self.assertEqual(QColor(image.pixel(150, image.height() - 6)).name(), holo.TILE.lower())   # the tile
+        amber = QColor(holo.AMBER)
+        for y in range(0, image.height(), 2):
+            for x in range(0, image.width(), 2):
+                pixel = QColor(image.pixel(x, y))
+                if (abs(pixel.red() - amber.red()) < 24 and abs(pixel.green() - amber.green()) < 24
+                        and abs(pixel.blue() - amber.blue()) < 24):
+                    self.fail(f"an amber pixel at {x}, {y}")
 
 
 if __name__ == "__main__":
