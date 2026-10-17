@@ -58,7 +58,7 @@ import ssl
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -188,11 +188,17 @@ class CalendarUnknownOutcome(CalendarError):
     it may or may not have happened. Never retried by itself."""
 
 
+class EventChanged(CalendarError):
+    """An Undo found the event gone, or changed since Jarvis's change (its etag / updated stamp is
+    not the one Jarvis's change left): nothing was changed."""
+
+
 @dataclass(frozen=True)
 class EventResult:
     event_id: str
     link: str            # htmlLink
     existed: bool        # True when a matching event was already on the calendar (nothing created)
+    stamp: str = ""      # the new event's etag (else its updated time) as Google answered ("" = unknown)
 
 
 @dataclass(frozen=True)
@@ -250,6 +256,7 @@ class EventDetails:
     organizer: str = ""            # the organizer's name or address ("" when unknown)
     self_comment: str = ""         # your note on your answer, if any
     organizer_email: str = ""      # the organizer's address ("" when unknown)
+    stamp: str = ""                # the event's etag (else its updated time); an Undo compares it
 
     @property
     def account_email(self) -> str:
@@ -267,6 +274,10 @@ class ChangeResult:
     event_id: str
     link: str
     already: bool        # nothing needed changing (already answered / at that time / cancelled)
+    stamp: str = ""      # the event's etag (else its updated time) right after the change ("" = unknown)
+    # Google's own view of the event right before the change (an Undo puts back what it held): an RSVP's
+    # answer and note, a Move's start and end. Not part of equality.
+    before: EventDetails | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -858,7 +869,7 @@ class GoogleCalendar:
             event_id = str(created.get("id") or "")
             logger.info("Google Calendar: created event %s", event_id or "(no id returned)")
             return EventResult(event_id=event_id, link=str(created.get("htmlLink") or ""),
-                               existed=False)
+                               existed=False, stamp=_stamp(created))
 
     def list_events(self, start: datetime, end: datetime,
                     calendar_ids: Sequence[str] | str = ("primary",)) -> list[CalendarEvent]:
@@ -1034,7 +1045,7 @@ class GoogleCalendar:
             result = result if isinstance(result, dict) else {}
             logger.info("%s: answered the invitation (event %s)", self._log_name(), event_id)
             return ChangeResult(event_id=event_id, link=str(result.get("htmlLink") or details.link),
-                                already=False)
+                                already=False, stamp=_stamp(result), before=details)
 
     def move(self, event_id: str, start: datetime, end: datetime, *, send_updates: str = "all",
              calendar_id: str | None = None, now: datetime | None = None,
@@ -1081,7 +1092,7 @@ class GoogleCalendar:
             result = result if isinstance(result, dict) else {}
             logger.info("%s: moved event %s", self._log_name(), event_id)
             return ChangeResult(event_id=event_id, link=str(result.get("htmlLink") or details.link),
-                                already=False)
+                                already=False, stamp=_stamp(result), before=details)
 
     def cancel(self, event_id: str, *, send_updates: str = "all",
                calendar_id: str | None = None, interactive: bool = True,
@@ -1116,6 +1127,136 @@ class GoogleCalendar:
                 return ChangeResult(event_id=event_id, link="", already=True)
             logger.info("%s: cancelled event %s", self._log_name(), event_id)
             return ChangeResult(event_id=event_id, link="", already=False)
+
+    # ---- Undo: reverse exactly Jarvis's own change (only on the owner's click on that card's Undo) ----
+
+    def _unchanged(self, event_id: str, calendar: str, stamp: str, *, uncertain: bool) -> EventDetails | None:
+        """Google's view of the event while it is still exactly as Jarvis's change left it (its stamp is
+        ``stamp``). EventChanged when it is gone or changed since; None (nothing to do) when
+        ``uncertain`` (an earlier Undo may have happened) and it is gone."""
+        try:
+            details = self.get_event(event_id, calendar_id=calendar, interactive=False)
+        except EventGone:
+            if uncertain:
+                return None
+            raise EventChanged("The event is gone since Jarvis's change") from None
+        if not stamp or details.stamp != stamp:
+            raise EventChanged("The event changed since Jarvis's change")
+        return details
+
+    def undo_create(self, event_id: str, *, stamp: str, send_updates: str = "none",
+                    calendar_id: str | None = None, uncertain: bool = False,
+                    on_request: RequestHook | None = None) -> ChangeResult:
+        """Delete the event Jarvis created (exactly ``event_id``) unless it is gone or changed since
+        (EventChanged). ``send_updates``: the insert's own policy (it told nobody: "none"). Never
+        signs in. ``uncertain``: an earlier Undo may already have deleted it (gone counts as done)."""
+        updates = _send_updates(send_updates)
+        calendar = calendar_id or self._calendar_id
+        with self._guarded():
+            details = self._unchanged(event_id, calendar, stamp, uncertain=uncertain)
+            if details is None:
+                logger.info("%s: the created event is gone already (event %s)", self._log_name(), event_id)
+                return ChangeResult(event_id=event_id, link="", already=True)
+            service = self._get_service(interactive=False)
+            self._require_change_allowed()
+            request = service.events().delete(calendarId=calendar, eventId=event_id, sendUpdates=updates)
+            _tell_request(on_request, "events.delete", {"calendarId": calendar, "eventId": event_id,
+                                                        "sendUpdates": updates})
+            self._execute(request, "removing the event", mutation=True, event_call=True)
+            logger.info("%s: removed event %s (undo)", self._log_name(), event_id)
+            return ChangeResult(event_id=event_id, link="", already=False)
+
+    def undo_respond(self, event_id: str, response: str, *, comment: str = "", stamp: str,
+                     send_updates: str = "all", calendar_id: str | None = None, uncertain: bool = False,
+                     on_request: RequestHook | None = None) -> ChangeResult:
+        """Put your answer to an invitation back to ``response`` (Google's own word from before Jarvis's
+        answer: needsAction / accepted / declined / tentative) and your note back to ``comment``, with
+        the answer's own ``send_updates``; only your attendee entry is sent. EventChanged when the
+        event is gone or changed since. Never signs in."""
+        if response not in ("needsAction", "accepted", "declined", "tentative"):
+            raise CalendarError("There is no earlier answer to put back")
+        updates = _send_updates(send_updates)
+        calendar = calendar_id or self._calendar_id
+        with self._guarded():
+            try:
+                details = self._unchanged(event_id, calendar, stamp, uncertain=False)
+            except EventChanged:
+                if uncertain and self._answer_is(event_id, calendar, response, comment):
+                    return ChangeResult(event_id=event_id, link="", already=True)
+                raise
+            if details is None or not details.self_email:
+                raise EventChanged("You are no longer on this event's guest list")
+            attendee: dict[str, Any] = {"email": details.self_email, "responseStatus": response,
+                                        "comment": comment}
+            service = self._get_service(interactive=False)
+            self._require_change_allowed()
+            body = {"attendeesOmitted": True, "attendees": [attendee]}
+            request = service.events().patch(calendarId=calendar, eventId=event_id, sendUpdates=updates, body=body)
+            _tell_request(on_request, "events.patch", {"calendarId": calendar, "eventId": event_id,
+                                                       "sendUpdates": updates, "body": body})
+            result = self._execute(request, "putting your answer back", mutation=True, event_call=True)
+            result = result if isinstance(result, dict) else {}
+            logger.info("%s: put the answer back (event %s, undo)", self._log_name(), event_id)
+            return ChangeResult(event_id=event_id, link=str(result.get("htmlLink") or details.link),
+                                already=False, stamp=_stamp(result))
+
+    def _answer_is(self, event_id: str, calendar: str, response: str, comment: str) -> bool:
+        try:
+            details = self.get_event(event_id, calendar_id=calendar, interactive=False)
+        except EventGone:
+            return False
+        return details.self_response == response and details.self_comment == comment
+
+    def undo_move(self, event_id: str, start: datetime, end: datetime, *, time_zone: str = "", stamp: str,
+                  send_updates: str = "all", calendar_id: str | None = None, uncertain: bool = False,
+                  on_request: RequestHook | None = None) -> ChangeResult:
+        """Move the event back to ``start`` / ``end`` (aware: the times Google had before Jarvis's move,
+        kept in ``time_zone`` when known), with the move's own ``send_updates``. EventChanged when it
+        is gone or changed since. Never signs in."""
+        updates = _send_updates(send_updates)
+        calendar = calendar_id or self._calendar_id
+        with self._guarded():
+            try:
+                details = self._unchanged(event_id, calendar, stamp, uncertain=False)
+            except EventChanged:
+                if uncertain and self._time_is(event_id, calendar, start, end):
+                    return ChangeResult(event_id=event_id, link="", already=True)
+                raise
+            if details is None:
+                raise EventChanged("The event is gone since Jarvis's change")
+            service = self._get_service(interactive=False)
+            self._require_change_allowed()
+            body = {"start": _instant_body(start, time_zone), "end": _instant_body(end, time_zone)}
+            request = service.events().patch(calendarId=calendar, eventId=event_id, sendUpdates=updates, body=body)
+            _tell_request(on_request, "events.patch", {"calendarId": calendar, "eventId": event_id,
+                                                       "sendUpdates": updates, "body": body})
+            result = self._execute(request, "moving the event back", mutation=True, event_call=True)
+            result = result if isinstance(result, dict) else {}
+            logger.info("%s: moved event %s back (undo)", self._log_name(), event_id)
+            return ChangeResult(event_id=event_id, link=str(result.get("htmlLink") or details.link),
+                                already=False, stamp=_stamp(result))
+
+    def _time_is(self, event_id: str, calendar: str, start: datetime, end: datetime) -> bool:
+        try:
+            details = self.get_event(event_id, calendar_id=calendar, interactive=False)
+        except EventGone:
+            return False
+        return details.start == _as_aware(start) and details.end == _as_aware(end)
+
+
+def _stamp(item: Any) -> str:
+    """An event's version as Google answered it: its etag, else its updated time ("" when neither)."""
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("etag") or item.get("updated") or "")
+
+
+def _instant_body(moment: datetime, time_zone: str) -> dict[str, str]:
+    """An event's start or end as Google takes it back: the exact instant, in ``time_zone`` when known."""
+    body = {"dateTime": _rfc3339(moment)}
+    if time_zone:
+        body["timeZone"] = time_zone
+    return body
 
 
 RequestHook = Callable[[str, dict[str, Any]], None]
@@ -1175,7 +1316,8 @@ def _event_details(item: dict, event_id: str, calendar_id: str) -> EventDetails:
         attendee_count=len(attendees), recurring_instance=bool(item.get("recurringEventId")),
         series=bool(item.get("recurrence")), time_zone=str(start.get("timeZone") or ""),
         link=str(item.get("htmlLink") or ""), organizer=" ".join(str(name).split()),
-        self_comment=str(me.get("comment") or ""), organizer_email=str(organizer.get("email") or ""))
+        self_comment=str(me.get("comment") or ""), organizer_email=str(organizer.get("email") or ""),
+        stamp=_stamp(item))
 
 
 # --------------------------------------------------------------------------

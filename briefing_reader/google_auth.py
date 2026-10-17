@@ -626,7 +626,7 @@ class GoogleAccount:
 
     def needs_confirmation(self) -> bool:
         """The alias has no binding you confirmed: its next sign-in leaves one to confirm first
-        (so a click that would sign in asks before any countdown). False for the one-account
+        (so a click that would sign in asks before anything is sent or changed). False for the one-account
         setup "" (no bindings)."""
         return self._bindings is not None and not self.binding_confirmed()
 

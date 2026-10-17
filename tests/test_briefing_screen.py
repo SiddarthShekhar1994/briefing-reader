@@ -265,19 +265,19 @@ class ApprovalsScreenTests(unittest.TestCase):
         self.assertTrue(reading.approvals_queue.tile("a1")._dimmed)
         self.assertFalse(reading.approvals_queue.tile("a0")._dimmed)
 
-    def test_the_countdown_strip_replaces_the_action_row_and_drains(self) -> None:
+    def test_the_confirmed_stamp_and_its_undo_replace_the_action_row(self) -> None:
         card = self.cards[0]
         self.reading.set_tab(ui.SCREEN_APPROVALS)
         settle()
-        card.set_status(hud.CARD_COUNTDOWN, "Adding in 10 s")
-        card.set_countdown(time.monotonic() + 5.0, 10.0)
+        card.set_status(hud.CARD_ADDED, "Added \u00b7 2:41 PM")   # at once: no strip, no drain bar, no number
+        card.set_undo("Undo")
         settle()
         slot = card._result
-        self.assertEqual(slot.mode(), slot.STRIP)
-        self.assertAlmostEqual(slot.drain_fraction(), 0.5, delta=0.05)
+        self.assertEqual(slot.mode(), slot.STAMP)
+        self.assertFalse(hasattr(slot, "drain_fraction"))
         self.assertFalse(card.approve_button.isVisible() or card.deny_button.isVisible())
         self.assertTrue(card.undo_button.isVisible())
-        card.set_status(hud.CARD_ADDED, "ADDED")
+        card.set_undo("")                                            # 10 minutes later
         settle()
         self.assertEqual(slot.mode(), slot.STAMP)
         self.assertFalse(card.undo_button.isVisible())

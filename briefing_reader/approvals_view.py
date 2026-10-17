@@ -46,8 +46,7 @@ QUEUE_TITLE = "NEEDS YOUR OK"
 DECIDED_TITLE = "Decided today"
 EMPTY_TEXT = "Nothing needs your OK, sir."
 # Card statuses that still wait for the owner (a queue tile) and those already decided (Decided today).
-WAITING = (hud.CARD_PENDING, hud.CARD_FAILED, hud.CARD_UNKNOWN, hud.CARD_COUNTDOWN, hud.CARD_WORKING,
-           hud.CARD_SIGNIN)
+WAITING = (hud.CARD_PENDING, hud.CARD_FAILED, hud.CARD_UNKNOWN, hud.CARD_WORKING, hud.CARD_SIGNIN)
 DECIDED = (hud.CARD_ADDED, hud.CARD_EXISTS, hud.CARD_SENT, hud.CARD_DONE, hud.CARD_DENIED)
 
 

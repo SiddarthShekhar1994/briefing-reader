@@ -5,8 +5,8 @@ briefing your own cloud routine writes twice a day and reads it aloud when you
 press Play. You type what you need ("move my project sync to Friday and tell
 Ana"), your own Claude Code plans it on your claude.ai plan, and Jarvis lines
 up the replies, invitation answers and calendar changes for you to approve:
-nothing is sent or changed until you click that card and its 10-second undo
-runs out. Every step he takes can be watched live, he answers in a calm
+nothing is sent or changed until you click that card, and each card you
+approve keeps an **Undo** beside its result. Every step he takes can be watched live, he answers in a calm
 British voice, and he runs on your own accounts, with no paid API calls.
 
 This is a personal Windows project, built with Claude Code and shared as is
@@ -46,9 +46,11 @@ your own scheduled routine (see
   **Maybe** an invitation; **Move** or **Cancel event** for a meeting you
   organize; **Approve** a calendar event; **Add block** puts time to work on a
   to-do on your calendar. **Edit** changes exactly what a card will do. Each
-  one happens only after your click on that card and a 10-second countdown
-  you can **Undo**; a new recipient needs your tick first, and he never sends
-  or changes anything on his own. Share requests, Slack replies and links are
+  one happens only after your click on that card, with no countdown to watch:
+  a calendar change happens at once and its card offers **Undo** for 10
+  minutes; a reply, email or cancellation shows **Sent** with **Undo** at once
+  and goes out a few seconds later. A new recipient needs your tick first, and
+  he never sends or changes anything on his own. Share requests, Slack replies and links are
   hand-offs (**Open**, **Copy**). See
   [Calendar actions](#calendar-actions),
   [Invitations, moves and cancellations](#invitations-moves-and-cancellations),
@@ -63,8 +65,8 @@ your own scheduled routine (see
   him, and everything he says is also written in the **JARVIS** tab. See
   [Jarvis talks](#jarvis-talks).
 - **LIVE view.** The **LIVE** tab shows every step he takes, as it happens:
-  what he read, the exact text he gave Claude Code, each check, what will be
-  sent during the countdown and what Google answered. **Pop out** puts it in a
+  what he read, the exact text he gave Claude Code, each check, exactly what
+  is sent and what Google answered. **Pop out** puts it in a
   window of its own, for a second screen. It only shows, and only on screen:
   nothing of it is saved or logged. See
   [LIVE: watch Jarvis work](#live-watch-jarvis-work).
@@ -132,9 +134,23 @@ orb in the middle and a rail of screens at its left edge (see
   [instructions](#instructions-for-the-claude-briefing-task) tell it never to
   send or change anything and to write proposals instead. Deny, Skip or not
   deciding at all contacts nobody.
-- **Your click, then an undo.** A card is carried out only after your click
-  on that card and a countdown (10 seconds, `[actions] undo_seconds`) that
-  **Undo**, minimizing or closing the window stops. One card at a time, with
+- **Your click, then an Undo.** A card is carried out only after your click
+  on that card; there is no visible countdown anywhere. **Approve**, **Add
+  block**, **Accept** / **Decline** / **Maybe** and **Move** act at once; the
+  card then shows ADDED / ACCEPTED / MOVED with the time and an **Undo** beside
+  it for 10 minutes (or until the card is cleared). That Undo reverses exactly
+  Jarvis's change through the same account (the added event is deleted, your
+  earlier answer is put back, the event moves back to its old time), telling
+  guests as the change did; it first reads the event again and, when it is gone
+  or was changed since, leaves it as it is and says "Changed since - left as it
+  is.". **Send** and **Cancel event** (Google emails people at once) show
+  **Sent** / **Cancelled** with **Undo** at once while the real call waits a
+  short hidden hold (5 seconds, `[actions] undo_seconds`); Undo during the hold
+  sends nothing ("Not sent - undone."). The hold goes on when the window is
+  minimised or locked; closing Jarvis during it sends it at once (and if that
+  cannot finish, the next start shows the card as "Not sent - Jarvis closed
+  first"). An Undo is a new outside action: only your click on that card's
+  Undo, never voice and never by itself. One card at a time, with
   one call to Google that is never repeated by itself: an unclear answer shows
   UNKNOWN. A calendar card's Retry looks in Google first, so it is never done
   twice; an email's Retry sends again without checking, so look in that
@@ -161,7 +177,7 @@ orb in the middle and a rail of screens at its left edge (see
   sentence built from times and counts. Until you click the link nothing is
   read from your mail, no Claude request runs and nothing is sent or added;
   the click then runs the plan or the brief like a typed request, and every
-  block or draft still waits for its own click and undo. Jarvis's own reads
+  block or draft still waits for its own click (and keeps its Undo). Jarvis's own reads
   for the offers are of your calendar only (titles, times and guests, on this
   PC, kept in memory) and are shown in LIVE.
 - **Mail Jarvis reads on his own is headers only (sender, recipients, subject,
@@ -692,7 +708,7 @@ cd "<project folder>"
    Jarvis sends nothing and changes nothing for that name (no reply or email,
    no answer, move or cancel, no event or to-do block); reading its calendar
    (TODAY, DEADLINES, the cards' check lines) goes on. The question always comes
-   before any countdown: a Calendar event's or a to-do block's **Approve** on a
+   before anything is sent or changed: a Calendar event's or a to-do block's **Approve** on a
    name that has no confirmed account asks first, and when that name is not
    signed in yet it signs in before asking ("Finish the Google sign-in in your
    browser; nothing is added"); after Yes the card says "Confirmed - click
@@ -738,9 +754,9 @@ cd "<project folder>"
 
    | Scope | Why |
    |---|---|
-   | `https://www.googleapis.com/auth/calendar.events` | Add the event you approved, and first look for the same event (same title and start) so it is not added twice; read your events of today (or tomorrow) and the next 14 days for TODAY and DEADLINES; read one event by its id for an invitation, move or cancel card. Only after your click on that card and its undo countdown: answer an invitation (only your own answer is sent), move an event you organize (or may change as a guest) or cancel an event you organize, always telling the guests as the card says ("guests notified" by default). It never changes or deletes anything else. |
+   | `https://www.googleapis.com/auth/calendar.events` | Add the event you approved, and first look for the same event (same title and start) so it is not added twice; read your events of today (or tomorrow) and the next 14 days for TODAY and DEADLINES; read one event by its id for an invitation, move or cancel card. Only after your click on that card (a cancellation after its short hold): answer an invitation (only your own answer is sent), move an event you organize (or may change as a guest) or cancel an event you organize, always telling the guests as the card says ("guests notified" by default); and only on your click on that card's **Undo**, reverse exactly that change (delete the event Jarvis added, put your earlier answer back, move the event back), unless it was changed since. It never changes or deletes anything else. |
    | `https://www.googleapis.com/auth/calendar.settings.readonly` | Read your calendar's time zone, so that "15:00" means 15:00 where your calendar is. |
-   | `https://www.googleapis.com/auth/gmail.send` | Only for an account with `"gmail_send"` in its features (step 8b). Only after your click on **Send** on that card and its undo countdown: send that one reply or email, exactly as the card shows it. It cannot read, search, change or delete any mail. |
+   | `https://www.googleapis.com/auth/gmail.send` | Only for an account with `"gmail_send"` in its features (step 8b). Only after your click on **Send** on that card and its short hold: send that one reply or email, exactly as the card shows it. It cannot read, search, change or delete any mail. |
    | `https://www.googleapis.com/auth/gmail.readonly` | Asked for at every sign-in of an account with `"gmail_read"` in its features (the shipped `config.toml` has it on both accounts), **even while Ask Jarvis is off**; remove `"gmail_read"` if you do not use Ask (step 8c). Used only while Ask Jarvis is on: read the Gmail threads one request is about (at most 3, each read only when you ask Jarvis something); with the productivity bundle on, also a [meeting brief](#meeting-prep)'s reads, only after your typed "prep me ..." or your click: one lookup per guest of that meeting on the meeting's account, from the **last 14 days**, at most one thread per guest and 3 in all; also the [follow-up list](#follow-ups-and-nudges)'s header scan (while the reading screen is visible, every 30 minutes: sender, recipients, subject, date and labels of the **last 14 days**, never the text) and a draft's read (after your click on Draft a reply / Draft a nudge: that one thread). Read only: it cannot send, change or delete any mail; the text is used for that one request and never saved or logged. |
    | `openid`, `https://www.googleapis.com/auth/userinfo.email` | Learn which Google account a sign-in is (its address and account id), to bind the account name to it (see above). Nothing else. |
 
@@ -968,10 +984,9 @@ list.
   from there; **Sections** lists them) and **Read everything**, **Play** /
   **Pause** / **Replay** / **Retry**, **Skip section** and **Open in Notion**.
 - **Approvals** (**Ctrl+3**, an amber count on its glyph) holds the NEEDS YOUR
-  OK cards, the one that waits first, with the queue beside it. A card's undo
-  countdown keeps running when you go to another screen (to ask something,
-  say): the header then shows it, SENDING IN 7 S in amber, with its own
-  **Undo**. Minimizing still stops it (nothing is sent). A NEW RECIPIENT is
+  OK cards, the one that waits first, with the queue beside it. While a Send's
+  hidden hold runs and you are on another screen (to ask something, say), the
+  header shows a short "SENT" with its own **Undo** (never a number). A NEW RECIPIENT is
   ticked right on its card (**Send to <address>**): Send stays disabled until
   it is ticked ("Tick dana@example.com first, then Send.").
 - **Live** (**Ctrl+4**) shows every step Jarvis takes, as it happens, with
@@ -1090,11 +1105,10 @@ Buttons:
 - **Done** is the header's close button: it closes the app.
 
 Minimizing the reading screen (the minimize button in its header) keeps the
-briefing playing; TODAY waits until the window is visible again. An undo
-countdown on a card stops when the window is minimized, because its **Undo**
-would be out of sight: nothing is sent, the card waits for your decision again
-and the activity log says "Undone". Click the window's taskbar button, the tray
-icon or press the hotkey to bring it back.
+briefing playing; TODAY waits until the window is visible again. A Send's hidden
+hold goes on while the window is minimised or the session locked (you already
+approved it and saw Sent). Click the window's taskbar button, the tray icon or
+press the hotkey to bring it back.
 
 If the speech for a section could not be generated, that section is skipped: its
 row in SECTIONS says "no audio", and the Briefing screen's line and ACTIVITY
@@ -1145,9 +1159,9 @@ itself, and none adds a new moment when he speaks or shows something):
   - "Claude Code isn't signed in." **How to fix** shows the sign-in help in
     the tile (`claude auth login --claudeai`); nothing is run.
   - "Gmail refused the reply." **Retry** only opens that same card on
-    Approvals. Nothing is sent from the tile: the card's own Retry starts its
-    undo countdown again, with its Undo, as every Send does. The tile goes when
-    the card is no longer failed.
+    Approvals. Nothing is sent from the tile: the card's own Retry sends it
+    again (Sent with its Undo, as every Send). The tile goes when the card is
+    no longer failed.
 
 ### Jarvis talks
 
@@ -1171,7 +1185,7 @@ voice when the online one cannot be reached), politely and to the point:
   sir - that took too long. Nothing was proposed."); the details stay under the
   bar.
 - **After an approved card was carried out**, and only then: never at your
-  click and never during the undo countdown, but once Google has answered.
+  click and never during a Send's hidden hold, but once Google has answered.
   "Done, sir - I've added 'Study block' to your calendar for tomorrow at 7 PM.",
   "Done, sir - I've moved 'Project sync' to Friday at 2 PM.", "Done, sir - I've
   accepted 'Lab meeting'.", "Sent, sir - your reply to 'Budget review' is on its
@@ -1227,8 +1241,8 @@ voice when the online one cannot be reached), politely and to the point:
   title, a guest or anything read. At most one sentence per offer, never two
   offers within 5 minutes, never from 22:00 to 08:00 (`[productivity]
   quiet_from` / `quiet_until`), never while muted, during a meeting with
-  guests (prep offers), while the briefing plays, during an undo countdown or
-  while Jarvis plans or speaks: some of those wait for a quieter moment,
+  guests (prep offers), while the briefing plays, while a card is being
+  carried out (a Send's hold included) or while Jarvis plans or speaks: some of those wait for a quieter moment,
   others leave the offer as text only (the table under Offers says which).
 
 Everything he says is also written in the JARVIS tab. While he speaks the orb
@@ -1281,20 +1295,21 @@ card, newest at the bottom:
   happen; and the check of the answer (each source kept or left out, each
   suggestion made into a card or left out, with the reason). See [Web
   research](#web-research).
-- **A card you approved**: what you approved, **what will be sent or changed,
-  exactly**, during the undo countdown ("SENDING IN 7 S"): first as a picture
-  (the email as it goes out, or the change drawn on its day; see [Pictures in
-  LIVE](#pictures-in-live)), then the exact fields under it (an email's From,
-  To, Cc, subject and body; an event's id, the change and who Google emails).
-  The picture stays in view while the countdown runs, even if you had scrolled
-  the view (in a short LIVE tab, the part of a calendar picture that changes);
-  with pictures off, the fields do. Then the last checks, the one call to Google with the exact
-  request (for a calendar change its body, checked against what the countdown
-  showed: a difference is marked CHECK) and what came back (Gmail's message id
-  and a link to the thread, the event's id and link), or FAILED / UNKNOWN.
-  When Google already had the change (the event was already there, at that
-  time, answered, or gone) nothing is sent and the steps say NOTHING SENT and
-  ALREADY ...; Undo shows UNDONE: nothing was sent.
+- **A card you approved**: what you approved, **what is sent or changed,
+  exactly**: first as a picture (the email as it goes out, or the change drawn
+  on its day; see [Pictures in LIVE](#pictures-in-live)), then the exact fields
+  under it (an email's From, To, Cc, subject and body; an event's id, the
+  change and who Google emails). During a Send's hidden hold the task says
+  SENDING (the truth, never a number) in the confirmed look, and the picture
+  stays in view even if you had scrolled the view (in a short LIVE tab, the
+  part of a calendar picture that changes); with pictures off, the fields do.
+  Then the last checks, the one call to Google with the exact request (for a
+  calendar change its body, checked against what the card showed: a
+  difference is marked CHECK) and what came back (Gmail's message id and a
+  link to the thread, the event's id and link), or FAILED / UNKNOWN. When
+  Google already had the change (the event was already there, at that time,
+  answered, or gone) nothing is sent and the steps say NOTHING SENT and
+  ALREADY ...; an Undo during the hold shows UNDONE: nothing was sent.
 - **A briefing fetch** from Notion, and one compact **Background reads** row
   (the agenda, the cards' event checks, sign-ins, Claude Code checks; `[live]
   background = false` leaves it out).
@@ -1356,8 +1371,8 @@ card, newest at the bottom:
   of the draft ("A denied draft for this message was replaced" when you
   drafted it again).
 
-The panel's strip shows what Jarvis is doing (IDLE, WORKING 0:12, SENDING IN 7
-S), then **Pop out** and **Clear** (in a narrow window Clear is in the pop-out
+The panel's strip shows what Jarvis is doing (IDLE, WORKING 0:12, SENDING),
+then **Pop out** and **Clear** (in a narrow window Clear is in the pop-out
 window only). Every step has a status (a blinking square while it runs, DONE,
 CHECK, BLOCKED, FAILED, CANCELLED) and its time. Click a step, or press Space or Enter on it, to
 show or hide its details; the steps that need a look (running, a warning, a
@@ -1562,13 +1577,15 @@ nothing goes on your calendar until you click **Add block** on a card.
   serves**. Asking again replaces only the earlier blocks of that day that
   overlap the new hours and that you have not decided, edited or started:
   `plan my morning` then `plan my afternoon` keeps both.
-- **Add block** starts the usual 10-second countdown with **Undo**, then adds
-  the block to your personal calendar with the line "Added by Jarvis from your
-  day plan." in its description (LIVE shows it in the preview too). A block
+- **Add block** adds the block to your personal calendar at once, with the
+  line "Added by Jarvis from your day plan." in its description (LIVE shows it
+  in the preview too); the block then shows as a solid cyan event, ADDED with
+  the time, and an **Undo** beside it for 10 minutes that deletes exactly that
+  event again. A block
   whose start has passed is refused at the click: "This block's time has passed
   - plan again". Once a block is added, the to-do it serves shows "Planned
   10:30-12:00 today (day plan)" and the next plan of that day leaves it out.
-  When the countdown ends, the keyboard focus moves to the next block's **Add
+  When the block is added, the keyboard focus moves to the next block's **Add
   block** only when it was on the finished card's button, inside NEEDS YOUR
   OK or nowhere (never out of the command bar, a text field, a dialog or
   another part of the window); when you were using the keyboard the button
@@ -1781,7 +1798,7 @@ the offer's time; text only: never said, even after the reason ends):
 | Visible, nothing else going on | entry, then the sentence (once the briefing was heard or viewed) | entry and the sentence |
 | AM briefing announced, not yet heard or viewed | entry; sentence held | - |
 | Briefing playing | entry; sentence after playback finished (or a later quiet minute once heard) | entry; sentence at the next quiet minute (until 3 minutes before the start) |
-| Undo countdown, Jarvis planning or speaking | entry; sentence held | entry; sentence held |
+| A card being carried out (a Send's hold), Jarvis planning or speaking | entry; sentence held | entry; sentence held |
 | In a meeting with guests | entry; sentence held until it ends | entry only (text only, no flash) |
 | Quiet hours (22:00-08:00) or muted | entry only (text only) | entry only (text only) |
 | Session locked | entry; sentence after you unlock | entry; sentence after you unlock (up to 3 minutes before the start) |
@@ -1859,7 +1876,7 @@ thread OWED; Bcc'd mail and mail to a group are not "direct".
   your notes, and writes one **Reply** card (a "Nudge . reply" under NEEDS YOUR
   OK) in that thread, to that message's people only: the recipients are NEW
   RECIPIENTs until you tick them (unless Jarvis sent to them before), and it is
-  sent only after your Send and the undo countdown. When the answer needs your
+  sent only after your Send (with its Undo). When the answer needs your
   decision, the draft is a short holding reply and a second entry asks the
   question with **Tell Jarvis what to say**.
 - **Show the draft** replaces Draft while a reply card for that thread waits
@@ -2110,19 +2127,21 @@ decide in Jarvis:
 - **Approve** adds the event to Google Calendar. **Deny** dismisses it. Nothing is
   ever created without Approve; Deny, or not deciding at all, never contacts
   Google.
-- Approve (and a to-do's **Add block**) first starts the same undo countdown as
-  every card Jarvis carries out: the card shows **Undo** on the left and
-  "ADDING IN 10 S" on the right (`[actions] undo_seconds`), and only when it
-  runs out is the event added. **Undo** stops it and nothing is added. After
-  that, to undo it, delete the event in Google Calendar (the card's **Open**
-  link opens it).
+- Approve (and a to-do's **Add block**) adds the event at once: the card shows
+  WORKING..., then ADDED with the time and an **Undo** beside it. For 10
+  minutes (or until the card is cleared) **Undo** deletes exactly that event
+  through the same account; when the event is gone or was changed since (in
+  Google Calendar, say), it is left as it is and the card says "Changed since -
+  left as it is.". When Undo cannot reach Google, the card says so and its Undo
+  reads **Retry** (only your click tries again). After that, delete the event
+  in Google Calendar (the card's **Open** link opens it).
 - A card keeps its size when you click: the result (WORKING..., ADDED, DENIED,
   ...) takes the place of the buttons, so the cards below never slide under
   your mouse. A second Approve or Deny click within 1 second of the previous
   one, on any card, is ignored, so a double click cannot decide two proposals.
-- One approval at a time: while an Approve is running (also during its
-  countdown and while it waits for the Google sign-in), Deny and Approve on the
-  other cards are dimmed and do
+- One approval at a time: while an Approve or an Undo is running (also during a
+  Send's hidden hold and while it waits for the Google sign-in), Deny, Approve
+  and Undo on the other cards are dimmed and do
   nothing; pointing at them says "Finishing the previous approval..." (during a
   Connect sign-in from TODAY: "Finishing the Google sign-in..."). They work
   again as soon as it is done, whether it worked or failed. Clicks on dimmed
@@ -2132,8 +2151,7 @@ decide in Jarvis:
 
 What Approve does:
 
-1. The countdown runs (see above). Undo, quitting the app, closing the
-   reading screen or minimizing the window stops it, and nothing is added.
+1. Nothing to wait out: the click goes to Google at once (see above).
 2. If you have not signed in to Google on this PC yet, your browser opens the
    Google sign-in and the card shows WAITING FOR GOOGLE SIGN-IN (setup step 8).
 3. The app saves "running" for the card in `actions.json`, then looks on your
@@ -2188,7 +2206,7 @@ meeting you organize to move or cancel, a request for access to a file, a Slack
 message to answer, something due soon, or a page to look at. Each one is a line
 in the key=value format (see [the format](#other-proposals-keyvalue-lines)) and
 a card in NEEDS YOUR OK. Invitations, moves, cancellations, replies and emails
-Jarvis can carry out itself, after your click and an undo countdown (see
+Jarvis can carry out itself, after your click, each with its Undo (see
 [Invitations, moves and cancellations](#invitations-moves-and-cancellations)
 and [Replies and emails](#replies-and-emails)). The other cards (share
 requests, Slack messages, to-dos without a block, links) hand the item over to
@@ -2246,10 +2264,10 @@ What they do:
   and the card shows SKIPPED.
 - **Add block** adds a to-do's `block=` time to your Google Calendar as an event
   named after the to-do, with the due time and the link in its description. It
-  is Approve's flow exactly: the same undo countdown, Google sign-in and ALREADY
-  ON CALENDAR check, one at a time with the other cards locked, and the same
-  1-second rule. The card then shows BLOCK ADDED and an **Open event** link to
-  the event.
+  is Approve's flow exactly: at once, the same Google sign-in and ALREADY ON
+  CALENDAR check, one at a time with the other cards locked, and the same
+  1-second rule. The card then shows BLOCK ADDED with the time, an **Open
+  event** link to the event and **Undo** (10 minutes) that deletes it again.
 - Open and Copy are never locked and still work after you decided, so you can
   look at what you did. They never decide a card.
 
@@ -2281,8 +2299,10 @@ replied" and needs no decision.
 
 An `RSVP:`, `Move:` or `Cancel:` card is carried out by Jarvis itself, for the
 account the line names (`acct=work` or `acct=personal`), through Google
-Calendar. Nothing happens before your click on that card, and even then only
-after a countdown you can undo.
+Calendar. Nothing happens before your click on that card. An answer or a move
+happens at once and its card offers **Undo** for 10 minutes; a cancellation
+(Google emails the guests at once) shows **Cancelled** with **Undo** while it
+waits a short hidden hold.
 
 **Google's own view first.** Under the details, the card has a line (up to
 three lines) for what Google itself has for that event, read by its id when the
@@ -2334,17 +2354,28 @@ ahead. The line may also say:
 line's `answer=` says), **Move** (to the card's new time) or **Cancel event**;
 **Skip** on the left drops the card without sending anything (the card shows
 SKIPPED). A click, when the card shows Google's view and that view allows it,
-starts the countdown: the card shows **Undo** on the left and "SENDING IN 10 S"
-on the right, and the other cards are locked meanwhile (their buttons, Edit and
-Sign in, so no dialog or browser sign-in can open over Undo). **Undo** stops it: nothing is
-sent and nothing is saved, and the card waits for your decision again (a click
-on Undo right after the click that started it, as from a double click, is
-ignored). Only when the countdown runs out does Jarvis make the one call to
-Google. The length is `[actions] undo_seconds` (10 by default, 3 to 60).
-Quitting the app, closing or minimizing the reading screen, or a newer briefing
-that drops or changes the proposal also stops a countdown, and nothing is sent.
-The 1-second rule and the lock of [Calendar actions](#calendar-actions) apply as
-well.
+carries it out:
+
+- **Accept** / **Decline** / **Maybe** and **Move** go to Google at once. The
+  card then shows ACCEPTED / DECLINED / MOVED with the time and an **Undo**
+  beside it for 10 minutes (or until the card is cleared). Undo puts your
+  earlier answer (and note) back, or moves the event back to its old start and
+  end, with the same guest notification the change used; when the event is gone
+  or was changed since Jarvis's change (Jarvis compares Google's version stamp),
+  it is left as it is and the card says "Changed since - left as it is.". When
+  the Undo fails the card says so and its Undo reads **Retry**.
+- **Cancel event** shows **Cancelled** with **Undo** at once, while the real
+  call waits a hidden hold (`[actions] undo_seconds`, 5 by default, 3 to 30;
+  no number is shown anywhere). **Undo** during the hold sends nothing and the
+  card waits for your decision again ("Not cancelled - undone."). After the
+  hold the Undo goes and Jarvis makes the one call; if Google refuses, the card
+  turns FAILED. The hold goes on when the window is minimised; quitting the app
+  during it cancels the event at once.
+
+The other cards are locked while one is carried out (their buttons, Edit and
+Sign in, so no dialog or browser sign-in can open over an Undo); a click on
+Undo right after it appeared, as from a double click, is ignored. The 1-second
+rule and the lock of [Calendar actions](#calendar-actions) apply as well.
 
 What is sent:
 
@@ -2408,7 +2439,8 @@ A `Reply:` or `Email:` card is sent by Jarvis itself through Gmail, from the
 account the line names (`acct=`), once that account is set up for it (setup
 step 8b; otherwise the card is a hand-off with Copy and Open, and its
 right-hand button reads **Done**). Nothing is sent before your click on
-**Send** on that card, and even then only after a countdown you can undo.
+**Send** on that card, and the card then shows **Sent** with **Undo** while
+the real send waits a short hidden hold.
 
 The card shows exactly what will be sent:
 
@@ -2434,7 +2466,7 @@ what is next:
 
 1. While the account can't send yet (never signed in, the sign-in expired,
    sending was not allowed, or Jarvis does not know which Google account it
-   is), the click opens the Google sign-in in your browser; no countdown runs.
+   is), the click opens the Google sign-in in your browser; nothing is sent.
    Afterwards the card says "Signed in - this card sends from work
    (ana@example.edu); nothing is sent until you click Send". After a name's
    first sign-in, Jarvis first asks whether it is the right Google account
@@ -2442,8 +2474,8 @@ what is next:
    until you answer Yes, the click asks again and nothing is sent.
 2. While To or Cc names the sending account itself, nothing is sent: the card
    says "This would send to the personal account (ana@example.edu) itself -
-   edit the recipients", and the click only says so again (no dialog, no
-   countdown). Open **Edit** and **Remove** that address.
+   edit the recipients", and the click only says so again (no dialog, nothing
+   sent). Open **Edit** and **Remove** that address.
 3. While a red NEW RECIPIENT is not ticked, **Send** stays disabled and the
    card says "Tick dana@example.com first, then Send.": tick `Send to
    <address>` right on the card under each new address you mean (or remove
@@ -2453,19 +2485,25 @@ what is next:
    counting a long paragraph as the lines it wraps into, or a subject cut at
    two lines), the click opens **Edit** first, with the whole subject and
    message: read it to its end (scroll down when the dialog scrolls). Send
-   counts down only after the dialog has shown exactly this subject and message
+   sends only after the dialog has shown exactly this subject and message
    to its end; a newer briefing with another text for the same card, or a
    dialog closed before its end (for example after ticking new recipients),
    asks again.
-5. Otherwise the countdown starts: **Undo** on the left, "SENDING FROM WORK IN
-   10 S" (the account it sends from) on the right, the other cards locked, as
-   for an invitation. A Send pressed with the keyboard (Space) moves the focus
-   to **Undo**. **Undo**, quitting the app, closing the reading screen or
-   minimizing the window stops it, and nothing is sent. If the account's address
-   changed meanwhile, nothing is sent either.
-6. When it runs out, Jarvis saves "running", then makes the one Gmail call
-   that sends the message, and the card shows SENT with an **Open** link to the
-   thread in Gmail. The recipients are remembered (see below).
+5. Otherwise the card shows **Sent** at once with **Undo** beside it (no
+   number, no bar), the other cards locked, as for an invitation, while the
+   real send waits a hidden hold (`[actions] undo_seconds`, 5 seconds by
+   default). A Send pressed with the keyboard (Space) moves the focus to
+   **Undo**. **Undo** during the hold stops it: nothing is sent and the card
+   says "Not sent - undone.". The hold goes on when you minimise the window or
+   lock the PC. Quitting Jarvis during it sends it at once (you already saw
+   Sent); if that cannot finish, the next start shows the card as "Not sent -
+   Jarvis closed first", so the screen never lies. If the account's address
+   changed meanwhile, nothing is sent and the card says so.
+6. When the hold ends the Undo goes; Jarvis saves "running", then makes the one
+   Gmail call that sends the message, and the card keeps SENT with an **Open**
+   link to the thread in Gmail. If Gmail refuses, the card turns FAILED and
+   Home shows the "Gmail refused" tile. The recipients are remembered (see
+   below).
 
 **What is sent.** A plain-text message (UTF-8) with exactly the card's From,
 To, Cc, subject and text; a reply also with `In-Reply-To` and `References`
@@ -2541,7 +2579,7 @@ every address new again.
 Type a request ("move my project sync to Friday and tell Ana") and Jarvis lines
 up proposals for it under NEEDS YOUR OK. The planner is **your own Claude Code**,
 signed in with **your claude.ai plan**; Jarvis only proposes. Every card goes
-through the same click, undo countdown and checks as the briefing's: nothing is
+through the same click, Undo and checks as the briefing's: nothing is
 moved, answered, cancelled or sent until you click that card. Ask is off until
 you turn it on, and each user of this project installs and signs in to Claude
 Code themselves (Jarvis never handles Claude credentials).
@@ -2624,7 +2662,7 @@ briefing; with the app already open, the same command brings it forward there.
   proposals are at the top of NEEDS YOUR OK under **ASK**, above the
   briefing's own (**BRIEFING**), labelled "ASK · MOVE", "ASK · EMAIL" and so on.
   You decide them exactly like the briefing's: Approve, Move, Send and the
-  others, the undo countdown with Undo, Edit, Deny. A line Jarvis could not
+  others, the result with its Undo, Edit, Deny. A line Jarvis could not
   check (an event it does not know, an address that is not in your calendar,
   briefing, mail or words, a Slack reply) is an information card that says why.
   A proposal the briefing already has says "Already in your list under
@@ -2787,7 +2825,7 @@ address as written, not where it leads. The research may also suggest a to-do
 (its page, if any, must be one of the sources, and the card names the site) or
 a new calendar event for you alone (no guests, no repeat, no link or phone
 number; only the title, time and place it shows go into your calendar):
-ordinary cards with Add block or Approve and the undo countdown. Anything else
+ordinary cards with Add block or Approve and their Undo. Anything else
 it writes (an email, a reply, a move) is left out, and the LIVE tab says why.
 
 **Watching it.** The LIVE tab shows every step as it happens: the exact text
@@ -3124,8 +3162,8 @@ proposals that the user decides one by one.)
    - body= is the complete message exactly as it should be sent: plain text,
      greeting to sign-off, no placeholders such as [Name] or [time], no
      quoted earlier messages. The user reads it on the card and may edit it;
-     the app sends nothing until the user clicks Send on that card and a
-     short countdown runs out.
+     the app sends nothing until the user clicks Send on that card, and the
+     user can still undo it.
    - Propose RSVP only for real calendar invitations, and Move or Cancel only
      for events the user organizes. Times are 24-hour wall-clock times in the
      user's time zone.
@@ -3243,7 +3281,7 @@ log. Changes apply the next time the app starts.
 | `[calendar] calendar_id` | `"primary"` | The calendar new events go to. `"primary"` is your main calendar; another calendar's id is in Google Calendar under that calendar's Settings > Integrate calendar. |
 | `[actions] heading` | `"Proposed actions"` | The heading the proposals are under: one name, or a list such as `["Proposed actions", "Actions"]`. Matching ignores case and a trailing count. |
 | `[actions] link_hosts` | `[]` | Extra web hosts a card's **Open** may open, besides the built-in Google (mail, docs, drive, calendar, meet), Slack (`*.slack.com`) and Canvas (`*.instructure.com`) hosts: an exact name such as `"forms.example.edu"`, or `"*.example.edu"` for every subdomain. https only; an entry that is not a host name is skipped with a warning. Web research cards do not use this list: they follow the web rule (any public https site; see [Web research](#web-research)). |
-| `[actions] undo_seconds` | `10` | Seconds between a click on Approve / Add block / Accept / Decline / Maybe / Move / Cancel event / Send and the call to Google (3-60). Undo works until then and sends nothing. |
+| `[actions] undo_seconds` | `5` | The hidden hold after **Send** or **Cancel event** (3-30 seconds): the card shows Sent / Cancelled with **Undo** at once, no number anywhere, and the call goes when the hold ends; Undo during it sends nothing. Approve, Add block, Accept / Decline / Maybe and Move act at once instead, and their **Undo** reverses the change for 10 minutes. |
 | `[actions] trusted_domains` | `[]` | Email recipient domains that do not get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). An Ask recipient you did not type yourself is the exception: it is new even in these domains. Any other address must be one Jarvis sent to before, or ticked on its card before Send; the sending account's own address is never sent to (see [Replies and emails](#replies-and-emails)). |
 | `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in, and its first sign-in binds the name to it in `accounts.json` (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
 | `[accounts.<name>] backend` | `"google"` | Who carries out the account's actions. Only `"google"` (your own OAuth client) works in this version; `"composio"` is accepted but its cards say "Composio is not built into this version". |
@@ -3587,7 +3625,7 @@ The app talks to these services, all free:
   start, and sends the event (title, times, repeat, place, notes). An
   invitation, move or cancel card reads that one event by its id to show
   Google's view of it; only after your **Accept** / **Decline** / **Maybe**,
-  **Move** or **Cancel event** and its undo countdown does Jarvis send your
+  **Move** or **Cancel event** (a cancellation after its short hold) does Jarvis send your
   answer (and its note), the new times, or the cancellation. Nothing is sent to
   Google before you sign in, and no event is changed or deleted without that
   click on its own card. With the productivity bundle's offers on, Jarvis also
@@ -3598,7 +3636,7 @@ The app talks to these services, all free:
   minimized one hour around a meeting right before its offer (read only, kept
   in memory, never sent anywhere);
 - the Gmail API, only for an account set up for it (step 8b) and only to send:
-  after your **Send** on a card and its undo countdown, the one message that
+  after your **Send** on a card and its short hold, the one message that
   card shows (From, To, Cc, subject, text, and the thread headers of a reply).
   Sending has no permission to read, search or change your mail. With Ask Jarvis
   on and `"gmail_read"` (step 8c), Jarvis also searches and reads the threads one
@@ -3984,7 +4022,7 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   muted", "Say failed (greeting)" when neither the online voice nor the Windows
   voice could make the sentence (check the internet connection and that a
   Windows voice is installed), "Say dropped: stale" when it waited too long, for
-  example behind an undo countdown, and "Could not set up Jarvis's voice" at
+  example behind a Send's hold, and "Could not set up Jarvis's voice" at
   start-up.
 - **The task did not fire**: open Task Scheduler (`taskschd.msc`) > Task Scheduler
   Library > Briefing AM and check Last Run Result and the History tab (if History
@@ -4234,7 +4272,7 @@ briefing_reader/followups.py  the productivity bundle's follow-up list (no Qt): 
 briefing_reader/productivity_ui.py  the productivity bundle in the app: Jarvis's own day read and header scan (its "prod" thread), the offers' timer, the plan and prep offers, the follow-up list
 briefing_reader/persona.py    what Jarvis says on his own: the greetings, "ready to view", the one safe fact, Ask's spoken answer, "Done, sir - ..." after a result, speech scrubbing (no Qt)
 briefing_reader/speech.py     Jarvis's voice: utterance kinds, the Voice interface, the silent default, the queue rules and the "tts-say" worker (no Qt)
-briefing_reader/voice_ui.py   Jarvis's voice in the app: his own player and the voice the controller speaks through (pauses and resumes the briefing, mute, countdown hold)
+briefing_reader/voice_ui.py   Jarvis's voice in the app: his own player and the voice the controller speaks through (pauses and resumes the briefing, mute, the hold during a Send)
 briefing_reader/hotkey.py     global hotkey agent (RegisterHotKey), press handling, activation pipe
 briefing_reader/config.py     .env, environment and config.toml loading, paths, logging with secret redaction
 briefing_reader/models.py     shared data types (flattened lines, script, audio, launch kinds)

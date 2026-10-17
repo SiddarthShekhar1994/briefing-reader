@@ -159,7 +159,8 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
                  f"{getattr(ask, 'max_per_day', 60)} a day"),
                 ("Keyboard shortcut", _combo(getattr(hotkey, "combo", "")) if getattr(hotkey, "enabled", False)
                  else "Off"),
-                ("Time to undo a send", f"{getattr(actions, 'undo_seconds', 10)} seconds")]
+                ("Undo after Send or Cancel event", f"{getattr(actions, 'undo_seconds', 5)} seconds"),
+                ("Undo after a calendar change", "10 minutes")]
     if group == "accounts":
         connected = connected or {}
         aliases = list(getattr(config, "accounts", {}) or {})

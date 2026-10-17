@@ -5,20 +5,20 @@ Follow-ups, flexible space, Settings. Glyphs only; labels show as a tooltip righ
 (after 400 ms of hover, at once on keyboard focus) with the shortcut (``Approvals  CTRL+3``). The
 current slot carries a cyan highlight that slides between slots in 200 ms. Badges: amber counts
 (something waits for the owner: Approvals, Follow-ups) and a cyan dot (new: Briefing, a Memory
-suggestion, Live while Jarvis works; it blinks only during a countdown). Count badges pop in when a
+suggestion, Live while Jarvis works or a Send is in its hidden hold; it never blinks). Count badges pop in when a
 count goes from 0 to more; dots ping three times on arrival (neither in reduced motion).
 
 The Dock is one tab stop (roving focus): Up / Down move between the visible slots, Home / End
 jump, Enter / Space open. Every button's accessible name carries its signal ("Approvals, 2 waiting",
 "Follow-ups, 2 waiting on you", "Briefing, new", "Memory, 1 suggestion", "Live, Jarvis is working",
-"Live, a countdown is running"); the current one's description is "Current screen".
+"Live, Jarvis is sending"); the current one's description is "Current screen".
 
 Public API
 ==========
 
 Constants: slot keys ``HOME``, ``BRIEFING``, ``APPROVALS``, ``LIVE``, ``MEMORY``, ``FOLLOWUPS``,
 ``SETTINGS`` (``SLOTS`` in order), ``LABELS``, ``SHORTCUTS`` (Ctrl+1 .. Ctrl+6, Ctrl+,), ``GLYPHS``;
-Live activity ``LIVE_IDLE``, ``LIVE_WORKING``, ``LIVE_COUNTDOWN``.
+Live activity ``LIVE_IDLE``, ``LIVE_WORKING``, ``LIVE_HOLD``.
 
 ``Dock(parent=None)``
     Signal ``slotActivated(str)``: a slot was clicked, opened with Enter / Space or its shortcut
@@ -36,7 +36,6 @@ Live activity ``LIVE_IDLE``, ``LIVE_WORKING``, ``LIVE_COUNTDOWN``.
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import shiboken6
@@ -63,13 +62,12 @@ GLYPHS = {BRIEFING: "briefing", APPROVALS: "approvals", LIVE: "live", MEMORY: "m
           SETTINGS: "settings"}
 LIVE_IDLE = "idle"
 LIVE_WORKING = "working"
-LIVE_COUNTDOWN = "countdown"
+LIVE_HOLD = "hold"         # a Send's / Cancel's hidden hold (no countdown, no blink)
 
 BUTTON = holo.DOCK_BUTTON
 PAD_X = (holo.DOCK_WIDTH - BUTTON) // 2     # 10
 PAD_Y = 16
 GLYPH = 20
-BLINK_MS = 500
 
 
 def _plural(n: int, one: str, many: str) -> str:
@@ -245,7 +243,7 @@ class DockButton(QAbstractButton):
             center = QPointF(BUTTON - 8 - holo.NEW_DOT / 2, 8 + holo.NEW_DOT / 2)
             if self._ping >= 0.0:
                 holo.paint_ping(painter, center, self._ping)
-            holo.paint_new_dot(painter, center, opacity=self._dock._dot_opacity(self._key))
+            holo.paint_new_dot(painter, center)
 
 
 class DockTooltip(QWidget):
@@ -384,9 +382,6 @@ class Dock(QWidget):
         self._hover_timer.setInterval(holo.TOOLTIP_DELAY_MS)
         self._hover_timer.timeout.connect(self._show_hover_tip)
         self._hover_target: DockButton | None = None
-        self._blink = QTimer(self)
-        self._blink.setInterval(BLINK_MS)
-        self._blink.timeout.connect(lambda: self._buttons[LIVE].update())
         self._sync_roving()
         self._sync_mix()
         for key in SLOTS:
@@ -512,9 +507,8 @@ class Dock(QWidget):
         self._update_name(MEMORY)
 
     def set_live_activity(self, activity: str) -> None:
-        self._live = activity if activity in (LIVE_IDLE, LIVE_WORKING, LIVE_COUNTDOWN) else LIVE_IDLE
+        self._live = activity if activity in (LIVE_IDLE, LIVE_WORKING, LIVE_HOLD) else LIVE_IDLE
         self._buttons[LIVE].set_dot(self._live != LIVE_IDLE, ping=False)
-        self._sync_blink()
         self._buttons[LIVE].update()
         self._update_name(LIVE)
 
@@ -525,20 +519,9 @@ class Dock(QWidget):
         self.mini_orb().set_look(base, muted=muted, offline=offline)
         self._update_name(HOME)
 
-    def _dot_opacity(self, key: str) -> float:
-        if key == LIVE and self._live == LIVE_COUNTDOWN and self._blink.isActive():
-            return 1.0 if (time.monotonic() % 1.0) < 0.5 else 0.25
-        return 1.0
-
-    def _sync_blink(self) -> None:
-        if self._live == LIVE_COUNTDOWN and self.isVisible():
-            if not self._blink.isActive():
-                self._blink.start()
-        elif self._blink.isActive():
-            self._blink.stop()
-
     def blinking(self) -> bool:
-        return self._blink.isActive()
+        """Nothing in the Dock blinks (a Send's hidden hold is a plain dot, like working)."""
+        return False
 
     # ---- accessible names ------------------------------------------------------------------
 
@@ -556,8 +539,8 @@ class Dock(QWidget):
             return f"{label}, new"
         if key == LIVE and self._live == LIVE_WORKING:
             return f"{label}, Jarvis is working"
-        if key == LIVE and self._live == LIVE_COUNTDOWN:
-            return f"{label}, a countdown is running"
+        if key == LIVE and self._live == LIVE_HOLD:
+            return f"{label}, Jarvis is sending"
         return label
 
     def _update_name(self, key: str) -> None:
@@ -691,13 +674,8 @@ class Dock(QWidget):
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return QSize(self.WIDTH, 2 * PAD_Y + 8 * BUTTON)
 
-    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        super().showEvent(event)
-        self._sync_blink()
-
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().hideEvent(event)
-        self._sync_blink()
         self._hide_tip()
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override

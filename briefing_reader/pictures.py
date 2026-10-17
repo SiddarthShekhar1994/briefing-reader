@@ -130,7 +130,7 @@ ROLE_CANCEL = "cancel"   # Cancel: struck through
 ROLE_RSVP = "rsvp"       # RSVP: the event with the answer chip
 
 # stamp() tones
-TONE_WILL = "will"        # amber: what will happen when the countdown runs out
+TONE_WILL = "will"        # amber: what will happen (a proposal not approved yet)
 TONE_DOING = "doing"      # cyan: on its way
 TONE_DONE = "done"        # green
 TONE_FAILED = "failed"    # red
@@ -1370,9 +1370,10 @@ PLAN_STAMP = "PROPOSED - NOT ADDED YET"
 
 def stamp(picture: Any, status: str, status_text: str) -> tuple[str, str]:
     """(words, tone) of the stamp on an outgoing email or a calendar change picture, from its payload
-    step's status and status text: "WILL BE SENT" (will) during the countdown, "SENDING NOW"
-    (doing), "SENT" / "MOVED" / "ANSWERED YES" (done), "MAY HAVE GONE OUT - CHECK" (check), "NOT
-    SENT" (failed), "UNDONE - NOT SENT" (undone) ... ("", "") for other pictures."""
+    step's status and status text: "WILL BE SENT" (will) before the call, "SENDING NOW" (doing: also
+    during a Send's hidden hold, never a number), "SENT" / "MOVED" / "ANSWERED YES" (done), "MAY HAVE
+    GONE OUT - CHECK" (check), "NOT SENT" (failed), "UNDONE - NOT SENT" (undone) ... ("", "") for other
+    pictures."""
     kind = getattr(picture, "kind", "")
     if kind not in (KIND_OUTGOING, KIND_DAY) or getattr(picture, "state", "") != live.PICTURE_READY:
         return "", ""
@@ -1386,7 +1387,7 @@ def stamp(picture: Any, status: str, status_text: str) -> tuple[str, str]:
     text = (status_text or "").upper()
     if status == live.STATUS_RUNNING:
         if text == "CHANGED SINCE":
-            return "NOT WHAT THE COUNTDOWN SHOWED", TONE_CHECK
+            return "NOT WHAT THE CARD SHOWED", TONE_CHECK
         if text == "SENDING":
             if mail:
                 return "SENDING NOW", TONE_DOING

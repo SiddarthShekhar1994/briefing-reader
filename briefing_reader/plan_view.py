@@ -18,21 +18,21 @@ Public API
     one click per block); on the right the compact orb (``orb``), the caption (caption-sm, at most 10 words a
     page) and See every step. ``set_plan(info)``; ``sync_cards(lookup)`` reads each block's approval card
     (``lookup(action_id) -> hud.ActionCard | None``) and shows its state: Add block (off, with the card's
-    reason, while the card's own button is off), the countdown strip "Adding the block in N s" with Undo and
-    the 2 px drain bar, then ADDED and the block as a solid cyan event, or UNDONE / DENIED. A block whose card
-    is gone is not shown. ``addBlock(action_id)`` / ``undoBlock(action_id)`` / ``openLink(url)`` /
-    ``linkClicked(link_id)`` / ``closeRequested()`` (the close button or Esc). Nothing here adds anything: Add
-    block goes through the block's approval card (its guards, the undo countdown and Undo, as on Approvals).
+    reason, while the card's own button is off), ADDING... while it goes to Google (at once: no countdown,
+    no number), then ADDED and the block as a solid cyan event with Undo beside it (while the card offers
+    it: 10 minutes; Retry after a failed reversal), or DENIED. A block whose card is gone is not shown.
+    ``addBlock(action_id)`` / ``undoBlock(action_id)`` / ``openLink(url)`` / ``linkClicked(link_id)`` /
+    ``closeRequested()`` (the close button or Esc). Nothing here adds or removes anything: Add block and
+    Undo go through the block's approval card (its guards and its Undo, as on Approvals).
 
 ``BlockTile``
-    One proposed block (``add_button``, ``undo_button``, ``open_button``; ``mode()`` is "add", "counting",
-    "working", "added", "denied" or "failed").
+    One proposed block (``add_button``, ``undo_button``, ``open_button``; ``mode()`` is "add", "working",
+    "added", "denied" or "failed"; ``undo_text()`` what its Undo says, "" while none shows).
 """
 
 from __future__ import annotations
 
 import math
-import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -63,15 +63,13 @@ UNDO_TEXT = "Undo"
 OPEN_TEXT = "Open"
 SEE_STEPS_TEXT = "See every step"
 CLOSE_NAME = "Close the plan"
-COUNT_PHRASE = "Adding the block in {n} s"
 DOT = "\u00b7"
 _ADD = "add"
-_COUNTING = "counting"
 _WORKING = "working"
 _ADDED = "added"
 _DENIED = "denied"
 _FAILED = "failed"
-MODES = (_ADD, _COUNTING, _WORKING, _ADDED, _DENIED, _FAILED)
+MODES = (_ADD, _WORKING, _ADDED, _DENIED, _FAILED)
 
 
 @dataclass(frozen=True)
@@ -146,8 +144,7 @@ class BlockTile(QWidget):
         self._mode = _ADD
         self._result = ""
         self._link = ""
-        self._deadline: float | None = None
-        self._seconds = 0.0
+        self._undo = ""
         self.add_button = holo.HoloButton(ADD_TEXT, holo.AMBER_COMMIT, size=holo.SIZE_SM, icon="calendar",
                                           parent=self)
         self.add_button.setAccessibleName(f"{ADD_TEXT}: {block.title}, {block.time_text}")
@@ -158,9 +155,6 @@ class BlockTile(QWidget):
         self.add_button.clicked.connect(lambda: self.addClicked.emit(self.block.action_id))
         self.undo_button.clicked.connect(lambda: self.undoClicked.emit(self.block.action_id))
         self.open_button.clicked.connect(lambda: self.openClicked.emit(self._link))
-        self._tick = QTimer(self)
-        self._tick.setInterval(66)               # the drain bar at 15 fps, the number once a second
-        self._tick.timeout.connect(self._on_tick)
         self.setAccessibleName(f"Proposed block: {block.title}, {block.time_text}")
         self._sync_children()
 
@@ -172,13 +166,14 @@ class BlockTile(QWidget):
     def result(self) -> str:
         return self._result
 
+    def undo_text(self) -> str:
+        """What the block's Undo says ("Undo", "Retry"; "" while none shows)."""
+        return self._undo
+
     def set_from_card(self, card: Any) -> None:
         """The block's state from its approval card (hud.ActionCard)."""
         status = card.status()
-        deadline, seconds = card.countdown()
-        if status == hud.CARD_COUNTDOWN:
-            mode = _COUNTING
-        elif status in (hud.CARD_WORKING, hud.CARD_SIGNIN):
+        if status in (hud.CARD_WORKING, hud.CARD_SIGNIN):
             mode = _WORKING
         elif status in (hud.CARD_ADDED, hud.CARD_EXISTS, hud.CARD_DONE, hud.CARD_SENT):
             mode = _ADDED
@@ -189,75 +184,48 @@ class BlockTile(QWidget):
         else:
             mode = _ADD
         button = card.approve_button
+        undo = card.undo_text() if mode == _ADDED else ""
         self.set_state(mode, approve_text=card.approve_text() or ADD_TEXT,
                        enabled=button.isEnabled() and not card.is_locked(), tip=button.toolTip(),
-                       result=card.result_text(), link=card.link(), deadline=deadline, seconds=seconds)
+                       result=card.result_text(), link=card.link(), undo=undo,
+                       undo_enabled=card.undo_button.isEnabled())
 
     def set_state(self, mode: str, *, approve_text: str = ADD_TEXT, enabled: bool = True, tip: str = "",
-                  result: str = "", link: str = "", deadline: float | None = None, seconds: float = 0.0) -> None:
+                  result: str = "", link: str = "", undo: str = "", undo_enabled: bool = True) -> None:
         focus = QApplication.focusWidget()
         add_had_focus = focus is self.add_button
         undo_had_focus = focus is self.undo_button
         self._mode = mode if mode in MODES else _ADD
         self._result = result
         self._link = link
-        self._deadline, self._seconds = (deadline, seconds) if self._mode == _COUNTING else (None, 0.0)
+        self._undo = undo if self._mode == _ADDED else ""
+        if self._undo and self.undo_button.text() != self._undo:
+            self.undo_button.setText(self._undo)
+            self.undo_button.setAccessibleName(f"{self._undo}: {self.block.title}")
+        self.undo_button.setEnabled(undo_enabled)
         if self.add_button.text() != approve_text:
             self.add_button.setText(approve_text)
             self.add_button.setAccessibleName(f"{approve_text}: {self.block.title}, {self.block.time_text}")
         self.add_button.setEnabled(enabled)
         self.add_button.setToolTip(tip if not enabled else "")
         self._sync_children()
-        # The keyboard follows the decision (spec 8): Add block pressed with a key hands the focus to Undo
-        # while the countdown runs, and Undo back to Add block.
-        if add_had_focus and self._mode == _COUNTING:
+        # The keyboard follows the decision (spec 8): Add block pressed with a key hands the focus to the
+        # added block's Undo, and Undo back to Add block.
+        if add_had_focus and self._undo:
             self.undo_button.setFocus(Qt.FocusReason.OtherFocusReason)
         elif undo_had_focus and self._mode in (_ADD, _FAILED) and self.add_button.isEnabled():
             self.add_button.setFocus(Qt.FocusReason.OtherFocusReason)
-        state = {_ADD: "waits for your OK", _COUNTING: "adding", _WORKING: "adding", _ADDED: "added",
+        state = {_ADD: "waits for your OK", _WORKING: "adding", _ADDED: "added",
                  _DENIED: "not added", _FAILED: "failed"}[self._mode]
         self.setAccessibleDescription(f"{state}{': ' + result.lower() if result and self._mode != _ADD else ''}")
         self.update()
 
-    def seconds_left(self) -> int:
-        if self._deadline is None:
-            return 0
-        return max(0, math.ceil(self._deadline - time.monotonic() - 1e-6))
-
-    def phrase(self) -> str:
-        return COUNT_PHRASE.format(n=self.seconds_left())
-
-    def drain(self) -> float:
-        if self._deadline is None or self._seconds <= 0:
-            return 0.0
-        return max(0.0, min(1.0, (self._deadline - time.monotonic()) / self._seconds))
-
     def _sync_children(self) -> None:
         mode = self._mode
         self.add_button.setVisible(mode in (_ADD, _FAILED))
-        self.undo_button.setVisible(mode == _COUNTING)
+        self.undo_button.setVisible(mode == _ADDED and bool(self._undo))
         self.open_button.setVisible(mode == _ADDED and bool(self._link))
-        self._sync_timer()
         self._place()
-
-    def _sync_timer(self) -> None:
-        running = self._mode == _COUNTING and self._deadline is not None and self.isVisible()
-        if running and not self._tick.isActive():
-            self._tick.start()
-        elif not running:
-            self._tick.stop()
-
-    def _on_tick(self) -> None:
-        if shiboken6.isValid(self):
-            self.update(self._strip_rect().toAlignedRect().adjusted(-2, -2, 2, 2))
-
-    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        super().showEvent(event)
-        self._sync_timer()
-
-    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        self._tick.stop()
-        super().hideEvent(event)
 
     # ---- geometry -----------------------------------------------------------------------------
 
@@ -275,12 +243,17 @@ class BlockTile(QWidget):
 
     def _place(self) -> None:
         strip = self._strip_rect()
-        for button in (self.add_button, self.open_button):
+        right = strip.right()
+        # Undo at the right end of an added block (where Add block was: the same click again only lands on
+        # Undo once the block was added), Open just before it.
+        for button in (self.add_button, self.undo_button):
             hint = button.sizeHint()
-            button.setGeometry(round(strip.right() - hint.width() + holo.HoloButton.MARGIN),
+            button.setGeometry(round(right - hint.width() + holo.HoloButton.MARGIN),
                                round(strip.center().y() - hint.height() / 2), hint.width(), hint.height())
-        hint = self.undo_button.sizeHint()
-        self.undo_button.setGeometry(round(strip.right() - 5 - hint.width() + holo.HoloButton.MARGIN),
+        if self.undo_button.isVisibleTo(self):
+            right = self.undo_button.geometry().left() + holo.HoloButton.MARGIN - 4
+        hint = self.open_button.sizeHint()
+        self.open_button.setGeometry(round(right - hint.width() + holo.HoloButton.MARGIN),
                                      round(strip.center().y() - hint.height() / 2), hint.width(), hint.height())
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
@@ -321,15 +294,13 @@ class BlockTile(QWidget):
                 painter.setClipPath(path)
                 painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER))
                 painter.restore()
-                style = Qt.PenStyle.SolidLine if mode in (_COUNTING, _WORKING) else Qt.PenStyle.DashLine
-                painter.setPen(QPen(holo.alpha(holo.AMBER, 0.72 if mode == _COUNTING else 0.6), 1.0, style))
+                style = Qt.PenStyle.SolidLine if mode == _WORKING else Qt.PenStyle.DashLine
+                painter.setPen(QPen(holo.alpha(holo.AMBER, 0.6), 1.0, style))
                 painter.drawPath(path)
                 holo.paint_brackets(painter, rect, holo.AMBER, leg=10, corners=holo.BRACKETS_DIAGONAL,
                                     radius=8)
             self._paint_texts(painter)
-            if mode == _COUNTING:
-                self._paint_strip(painter)
-            elif mode in (_ADDED, _DENIED, _WORKING):
+            if mode in (_ADDED, _DENIED, _WORKING):
                 self._paint_stamp(painter)
             elif mode == _FAILED:
                 self._paint_failed(painter)
@@ -382,37 +353,19 @@ class BlockTile(QWidget):
         painter.drawText(QRectF(left, top + first_h + 3, room, title_h), align,
                          QFontMetricsF(title).elidedText(block.title, Qt.TextElideMode.ElideRight, room))
 
-    def _paint_strip(self, painter: QPainter) -> None:
-        strip = self._strip_rect()
-        path = QPainterPath()
-        path.addRoundedRect(strip.adjusted(0.5, 0.5, -0.5, -0.5), holo.RADIUS_COUNTDOWN, holo.RADIUS_COUNTDOWN)
-        painter.fillPath(path, holo.alpha(holo.AMBER, 0.10))
-        painter.setPen(QPen(holo.alpha(holo.AMBER, 0.35), 1.0))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(path)
-        undo = self.undo_button.geometry()
-        text_rect = QRectF(strip.left() + 12, strip.top(), max(1.0, undo.left() - strip.left() - 12), strip.height())
-        font = holo.font("button")
-        font.setWeight(font.Weight.Normal)
-        painter.setFont(font)
-        painter.setPen(QColor("#FFE9C6"))
-        painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                         QFontMetricsF(font).elidedText(self.phrase(), Qt.TextElideMode.ElideRight, text_rect.width()))
-        painter.save()
-        painter.setClipPath(path)
-        painter.fillRect(QRectF(strip.left(), strip.bottom() - 2, strip.width() * self.drain(), 2), QColor(holo.AMBER))
-        painter.restore()
-
     def _paint_stamp(self, painter: QPainter) -> None:
         strip = self._strip_rect()
         mode = self._mode
         kind = {_ADDED: holo.STAMP_OK, _DENIED: holo.STAMP_STEEL}.get(mode, holo.STAMP_HOLO)
-        right = self.open_button.geometry().left() if self.open_button.isVisible() else strip.right()
-        text = self._result or {_ADDED: "ADDED", _DENIED: "UNDONE " + DOT + " NOTHING WAS ADDED",
-                                _WORKING: "ADDING..."}[mode]
+        shown = [button.geometry().left() for button in (self.open_button, self.undo_button)
+                 if button.isVisibleTo(self)]
+        right = min(shown) if shown else strip.right()
+        text = self._result or {_ADDED: "ADDED", _DENIED: "NOT ADDED", _WORKING: "ADDING..."}[mode]
         readout = holo.font("readout")
         metrics = QFontMetricsF(readout)
         room = max(1.0, right - strip.left() - 30)
+        if metrics.horizontalAdvance(text) > room and f" {DOT} " in text:
+            text = text.split(f" {DOT} ")[0]   # "ADDED" whole rather than "ADDED - 10..." (the card has the time)
         shown = metrics.elidedText(text, Qt.TextElideMode.ElideRight, room)
         width = metrics.horizontalAdvance(shown)
         x = max(strip.left(), right - 8 - width - 28)

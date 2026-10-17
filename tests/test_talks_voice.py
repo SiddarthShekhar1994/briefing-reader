@@ -11,7 +11,7 @@
 * Ask in the conversation: the request as a YOU entry, the JARVIS tab, "One moment, sir." while
   it plans, the whole answer as one JARVIS entry (a 600-character one too), the spoken reply
   (guarded), failures and Cancel.
-* After an approved card: nothing at the click or during the undo countdown, exactly one sentence
+* After an approved card: nothing at the click or during a Send's hidden hold, exactly one sentence
   after the executor's result (Move, Email, Calendar; failed, unknown, not sent), and none of it
   in the logs.
 
@@ -574,17 +574,24 @@ class ResultTests(unittest.TestCase):
     def approve(self, action, *, check: bool = False) -> None:
         if check:
             self.assertTrue(wait_for(lambda: action.id in self.c._checks, 5), "Google's view of the event")
+        said = len(self.voice.said)
         card = self.c.window.reading.action_card(action.id)
+        if not action.held:   # a calendar change goes at once: its sentence comes with Google's answer
+            card.approve_button.click()
+            self.assertEqual(len(self.voice.said), said, "nothing is said at the click")
+            settle()
+            self.assertIsNone(self.c._send_hold)
+            return
         card.approve_button.click()
         settle()
-        self.assertIsNotNone(self.c._countdown, self.c._hints.get(action.id))
-        self.assertEqual(self.voice.said, [], "nothing is said at the click")
+        self.assertIsNotNone(self.c._send_hold, self.c._hints.get(action.id))
+        self.assertEqual(len(self.voice.said), said, "nothing is said at the click")
         pumps = self.voice.pumps
-        self.c._on_countdown_tick()                                    # a tick of the countdown
+        self.c._on_send_hold_tick()                                    # the hold goes on
         settle()
-        self.assertEqual(self.voice.said, [], "nothing is said during the countdown")
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+        self.assertEqual(len(self.voice.said), said, "nothing is said during the hold")
+        self.c._send_hold.deadline = time.monotonic() - 0.001
+        self.c._on_send_hold_tick()
         self.assertGreater(self.voice.pumps, pumps)                    # the voice looked again at the end
 
     def wait_result(self, action) -> None:
@@ -698,7 +705,7 @@ class ResultTests(unittest.TestCase):
 
     def test_an_earlier_done_never_waits_into_the_next_approval(self) -> None:
         # A's "Done, sir" not yet said when B is approved is dropped (its entry stays): said when B's
-        # countdown ends or is undone, it would sound like B's result, which only comes later.
+        # hold ends or is undone, it would sound like B's result, which only comes later.
         calendar = next(action for action in self.c._actions if action.kind == "calendar")
         self.approve(calendar)
         self.wait_result(calendar)
@@ -710,27 +717,40 @@ class ResultTests(unittest.TestCase):
         settle()
         self.c.window.reading.action_card(mail.id).approve_button.click()
         settle()
-        self.assertIsNotNone(self.c._countdown)
+        self.assertIsNotNone(self.c._send_hold)
         self.assertEqual(self.voice.cancelled[cancelled:], ["result"])
         self.assertEqual(len(self.voice.said), 1)          # nothing new at the click
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+        self.c._send_hold.deadline = time.monotonic() - 0.001
+        self.c._on_send_hold_tick()
         self.wait_result(mail)
         self.assertEqual(self.results()[-1], "Sent, sir - your email 'Jarvis test sync moved' is on its way.")
         self.assertEqual(len(self.voice.said), 2)
         self.assertEqual(len(self.c.window.reading.conversation.entries()), entries + 1)
 
     def test_undo_says_nothing(self) -> None:
-        calendar = next(action for action in self.c._actions if action.kind == "calendar")
-        self.c.window.reading.action_card(calendar.id).approve_button.click()
+        mail = parse_action_line(MAIL_LINE)
+        self.c._set_source("briefing", list(self.c._source_lists["briefing"]) + [mail])
         settle()
-        self.c._countdown.started -= 5
+        self.c.window.reading.action_card(mail.id).approve_button.click()
+        settle()
+        self.c._send_hold.started -= 5
         pumps = self.voice.pumps
-        self.c.undo_action(calendar.id)
+        self.c.undo_action(mail.id)
         settle()
-        self.assertIsNone(self.c._countdown)
+        self.assertIsNone(self.c._send_hold)
         self.assertGreater(self.voice.pumps, pumps)
         self.assertEqual(self.voice.said, [])
+        # A calendar change's Undo after its result: nothing more is said either.
+        self.app.calendars["personal"].stamps = True
+        calendar = next(action for action in self.c._actions if action.kind == "calendar")
+        self.approve(calendar)
+        self.wait_result(calendar)
+        said = list(self.voice.said)
+        self.c._undos[calendar.id].shown -= 5
+        self.c.undo_action(calendar.id)
+        self.wait_result(calendar)
+        self.assertNotIn(calendar.id, self.c._undos)
+        self.assertEqual(self.voice.said, said)
 
     def test_speak_results_off_shows_only(self) -> None:
         self.c.config = dataclasses.replace(self.c.config, assistant=dataclasses.replace(

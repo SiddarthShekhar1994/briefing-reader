@@ -27,7 +27,7 @@
                                      typed: the app answers from its follow-up list at once (no run)
 
 The planner only proposes: its cards reach the app through ``outcomeReady`` and then go through the
-same click, undo countdown and executor.run_action path as the briefing's. ``live`` (the app's
+same click, Undo and executor.run_action path as the briefing's. ``live`` (the app's
 live.LiveStream): each accepted Ask is a LIVE view task, from "Your request" (ask.request) through
 the planner's steps to "Answer and cards" (ask.cards), finished when the outcome is handed over
 (or cancelled, or Jarvis closes); ``last_task_id`` is the last finished one. ``context()`` (GUI thread)

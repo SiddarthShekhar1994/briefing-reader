@@ -8,8 +8,8 @@ Settings come from three places:
 * the environment itself;
 * ``config.toml`` in the project root for voice, prompt, polling, section,
   Google Calendar, proposed-action (heading names, the extra hosts a card's
-  Open may open, the undo countdown, the recipient domains that need no extra
-  confirmation), account (``[accounts.<alias>]``: which service acts for
+  Open may open, the hidden Undo hold after Send / Cancel event, the recipient domains that need
+  no extra confirmation), account (``[accounts.<alias>]``: which service acts for
   "work" / "personal" and what it may do), schedule, hotkey,
   agenda, display, Ask Jarvis (``[ask]``, off by default), assistant (``[assistant]``: how
   Jarvis speaks on his own) and LIVE view (``[live]``: the tab that shows every step Jarvis
@@ -84,7 +84,7 @@ BACKEND_GOOGLE = "google"
 BACKEND_COMPOSIO = "composio"     # accepted, but not built into this version
 ACCOUNT_BACKENDS = (BACKEND_GOOGLE, BACKEND_COMPOSIO)
 DEFAULT_ACCOUNT = "personal"
-UNDO_SECONDS_RANGE = (3, 60)
+UNDO_SECONDS_RANGE = (3, 30)
 
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
@@ -164,9 +164,11 @@ class ActionsConfig:
     # Extra https hosts a card's Open may open, besides actions.BUILTIN_LINK_HOSTS:
     # "name.tld" exactly or "*.name.tld" for every subdomain (casefolded).
     link_hosts: tuple[str, ...] = ()
-    # Seconds between a click on Approve / Add block / Accept / Move / Cancel event / Send and the
-    # call to Google (Undo until then).
-    undo_seconds: int = 10
+    # Seconds a Send (Reply / Email) or Cancel event is held after the click before the call to Google:
+    # the card shows "Sent" / "Cancelled" with Undo at once (no number anywhere); Undo during the hold
+    # sends nothing. Calendar changes (Approve, Add block, Accept / Decline / Maybe, Move) act at once
+    # and their Undo reverses them for 10 minutes instead.
+    undo_seconds: int = 5
     # Recipient domains whose addresses never need the NEW RECIPIENT confirmation ("example.edu"
     # covers its subdomains too); casefolded. Empty by default.
     trusted_domains: tuple[str, ...] = ()

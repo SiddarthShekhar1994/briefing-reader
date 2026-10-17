@@ -705,7 +705,7 @@ class LivePictureTests(LogCase):
         payload = task.step(live.ACTION_PAYLOAD, "Will change exactly this", status_text="PREVIEW",
                             fields=[("Event", "Project sync"), ("New time", "Fri Oct 9 3:00-4:00 PM")])
         payload.picture(picture)
-        task.step(live.ACTION_COUNTDOWN, "Undo countdown", status_text="SENDING", deadline=self.clock.t + 10)
+        task.step(live.ACTION_HOLD, "Undo countdown", status_text="SENDING", deadline=self.clock.t + 10)
         self.apply()
         settle(6)
         log.scroll_to_newest()

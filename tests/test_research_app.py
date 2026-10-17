@@ -5,8 +5,8 @@ page read as it happens; the JARVIS entry is the answer with its numbered source
 counts and "See every step"; Jarvis says the answer without its [n] marks; ACTIVITY gets counts
 only. The sources are ASK cards labelled with their site whose "Open page" opens the page only on
 that click and only after the web rule is checked again (a tampered link is refused); Done / Deny
-record the decision; a research Todo's block is added only after the undo countdown (Undo sends
-nothing). What the research found never reaches a later Ask (T-ISO-4). A request the planner hands
+record the decision; a research Todo's block is added only on its Add block click (at once, then its Undo
+deletes exactly that event). What the research found never reaches a later Ask (T-ISO-4). A request the planner hands
 over stays in its ASK task. The logs never hold the question, a query, an address, a site, a title
 or the answer. A page the research read gets its picture in LIVE through the app's page
 snapshotter (tests.ui_fakes.FakeSnapshotter here: no web engine, no page is opened).
@@ -320,38 +320,33 @@ class SourceCardTests(ResearchAppCase):
         pending = [action.id for action in self.c._pending_actions()]
         self.assertFalse(set(ids) & set(pending))
 
-    def test_a_research_todo_adds_its_block_only_after_the_countdown(self) -> None:
-        import time
-
+    def test_a_research_todo_adds_its_block_only_on_its_click(self) -> None:
         todo = self.card("Visit the Example Museum")
         personal = self.app.calendars["personal"]
+        self.assertNotIn(("create", "Visit the Example Museum"), personal.calls)   # nothing by itself
         todo.approve_button.click()
         settle()
-        self.assertIsNotNone(self.c._countdown)
-        self.assertEqual(todo.status(), hud.CARD_COUNTDOWN)
-        self.assertNotIn(("create", "Visit the Example Museum"), personal.calls)   # nothing before it runs out
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+        self.assertIsNone(self.c._send_hold)                                     # no countdown: at once
         self.assertTrue(wait_for(lambda: ("create", "Visit the Example Museum") in personal.calls, 5))
         self.assertEqual(personal.calls.count(("create", "Visit the Example Museum")), 1)
 
-    def test_undo_adds_nothing(self) -> None:
+    def test_undo_deletes_exactly_the_added_block(self) -> None:
         todo = self.card("Visit the Example Museum")
+        personal = self.app.calendars["personal"]
+        personal.stamps = True                                 # Google answers with its version: Undo is offered
         todo.approve_button.click()
-        settle()
-        self.assertIsNotNone(self.c._countdown)
-        self.c._countdown.started -= 5
-        self.c.undo_action(todo.action_id)
-        settle()
-        self.assertIsNone(self.c._countdown)
-        self.assertFalse([call for call in self.app.calendars["personal"].calls if call[0] == "create"])
+        self.assertTrue(wait_for(lambda: todo.status() == hud.CARD_ADDED and todo.undo_text() == "Undo", 5))
+        (event_id,) = [key for key in personal.events if key.startswith("evt-new")]
+        self.c._undos[todo.action_id].shown -= 5
+        todo.undo_button.click()
+        self.assertTrue(wait_for(lambda: todo.status() == hud.CARD_PENDING, 5))
+        self.assertEqual([call for call in personal.calls if call[0] == "undo_create"], [("undo_create", event_id)])
+        self.assertEqual(personal.calls.count(("create", "Visit the Example Museum")), 1)
 
 
 class CalendarSuggestionTests(ResearchAppCase):
 
-    def test_a_research_event_is_added_only_after_approve_and_the_countdown(self) -> None:
-        import time
-
+    def test_a_research_event_is_added_only_on_approve(self) -> None:
         line = "Calendar: Example Museum visit | 2026-10-10 10:00-12:00 |  | Example Museum | from the web"
         self.make(answer_with([{"title": "Visit", "url": VISIT_URL}], [line], answer="It opens at 10 AM [1]."))
         self.submit()
@@ -371,10 +366,7 @@ class CalendarSuggestionTests(ResearchAppCase):
         self.assertNotIn(("create", "Example Museum visit"), personal.calls)   # nothing by itself
         event.approve_button.click()
         settle()
-        self.assertIsNotNone(self.c._countdown)
-        self.assertNotIn(("create", "Example Museum visit"), personal.calls)   # nothing during the countdown
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+        self.assertIsNone(self.c._send_hold)                                     # no countdown: at once
         self.assertTrue(wait_for(lambda: ("create", "Example Museum visit") in personal.calls, 5))
         self.assertEqual(personal.calls.count(("create", "Example Museum visit")), 1)
         # Only what the card showed went into the calendar: the place, never the web's notes.

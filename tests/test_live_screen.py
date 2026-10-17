@@ -82,9 +82,8 @@ class StageCase(unittest.TestCase):
         payload = task.step(live.ACTION_PAYLOAD, "Will send exactly this", status_text="PREVIEW",
                             fields=[("To", "ana@example.edu"), ("Subject", "Re: Budget review")])
         payload.block("Message", "Hi Ana,\nFriday works.", start_open=True)
-        countdown = task.step(live.ACTION_COUNTDOWN, "Undo countdown", status_text="SENDING",
-                              deadline=self.clock.t + seconds)
-        return task, payload, countdown
+        hold = task.step(live.ACTION_HOLD, "Undo hold", status_text="SENDING", deadline=self.clock.t + seconds)
+        return task, payload, hold
 
 
 class LayoutTests(StageCase):
@@ -150,14 +149,15 @@ class ReadoutTests(unittest.TestCase):
         self.assertEqual(readout.text(), "WORKING 12 s")              # hud.LiveStatus's texts, unchanged
         self.assertEqual(readout.parts(), ("WORKING", "12 s"))
         self.assertEqual(readout.color(), holo.HOLO)
-        readout.set_state(hud.LIVE_COUNTDOWN, "SENDING", deadline=clock.t + 6.2)
-        self.assertEqual(readout.text(), "SENDING IN 7 S")
-        self.assertEqual(readout.color(), holo.AMBER)
-        self.assertIn("sending in 7 s", readout.accessibleName())
+        readout.set_state(hud.LIVE_HOLD, "SENDING")                    # a Send's hidden hold
+        self.assertEqual(readout.text(), "SENDING")                   # the truth, never a number
+        self.assertEqual(readout.parts(), ("SENDING", ""))
+        self.assertEqual(readout.color(), holo.OK)                    # the confirmed look
+        self.assertEqual(readout.accessibleName(), "Live: sending")
         hint = readout.sizeHint().width()
         clock.t += 6
-        self.assertEqual(readout.text(), "SENDING IN 1 S")
-        self.assertEqual(readout.sizeHint().width(), hint)            # the width never jumps per second
+        self.assertEqual(readout.text(), "SENDING")
+        self.assertEqual(readout.sizeHint().width(), hint)            # nothing counts
         self.assertLess(readout.minimumSizeHint().width(), hint)
         readout.set_state(hud.LIVE_IDLE)
         self.assertEqual(readout.text(), "IDLE")
@@ -214,32 +214,32 @@ class FocalTests(StageCase):
         settle()
         self.assertEqual(self.stage.focal.frame.step_id(), first_search.id)
 
-    def test_a_countdown_shows_what_will_be_sent_with_amber_brackets(self) -> None:
+    def test_a_hold_shows_what_is_sent_in_the_confirmed_look(self) -> None:
         self.ask()
         self.apply()
         _request = self.log.task_widget(self.log.task_ids()[-1]).step_widgets()[0]
         _request.row.click()                                          # a pick before the card is approved
         settle()
         self.assertTrue(self.stage.focal.pinned())
-        task, payload, countdown = self.action(seconds=9.5)
+        task, payload, hold = self.action(seconds=4.5)
         self.apply()
         frame = self.stage.focal.frame
-        self.assertFalse(self.stage.focal.pinned())                    # the countdown comes into view
+        self.assertFalse(self.stage.focal.pinned())                    # the hold comes into view
         self.assertEqual(frame.step_id(), payload.id)
-        self.assertTrue(frame.will_send())
-        self.assertEqual(frame.header_texts()[1], "10 S")
-        self.assertEqual(self.log.ticking(), hud.LiveLog.TICK_COUNTDOWN_MS)
+        self.assertTrue(frame.held())
+        self.assertEqual(frame.header_texts()[1], "SENDING")          # the truth, never a number
+        self.assertEqual(self.log.ticking(), hud.LiveLog.TICK_RUNNING_MS)
         self.clock.t += 3.0
-        self.log.tick()                                                # the log's timer moves the frame on
-        self.assertEqual(frame.header_texts()[1], "7 S")
+        self.log.tick()
+        self.assertEqual(frame.header_texts()[1], "SENDING")
         self.host.hide()                                               # hidden: nothing ticks
         self.assertEqual(self.log.ticking(), 0)
         self.host.show()
         settle()
-        countdown.done(live.STATUS_CANCELLED, status_text="UNDONE")
+        hold.done(live.STATUS_CANCELLED, status_text="UNDONE")
         task.finish(live.STATUS_CANCELLED, status_text="UNDONE")
         self.apply()
-        self.assertFalse(frame.will_send())
+        self.assertFalse(frame.held())
 
     def test_header_labels_by_picture_kind(self) -> None:
         def view(kind: str, picture: object = None) -> SimpleNamespace:
@@ -249,7 +249,7 @@ class FocalTests(StageCase):
         cases = [
             (view(live.MAIL_THREAD, SimpleNamespace(kind=live_pictures.KIND_EMAIL)), False, f"EMAIL {dot} READ"),
             (view(live.ACTION_PAYLOAD, SimpleNamespace(kind=live_pictures.KIND_OUTGOING)), True,
-             f"EMAIL {dot} WILL BE SENT"),
+             f"EMAIL {dot} SENDING"),
             (view(live.ACTION_PAYLOAD, SimpleNamespace(kind=live_pictures.KIND_DAY,
                                                        day=SimpleNamespace(change=live_pictures.CHANGE_MOVE))),
              False, f"CALENDAR {dot} MOVE"),

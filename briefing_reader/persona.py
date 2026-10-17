@@ -422,7 +422,7 @@ def claims_done(text: str, *, first_person_only: bool = False) -> bool:
 
 OUTCOME_GOOD = "good"      # created / sent / already there
 OUTCOME_ERROR = "error"    # failed
-OUTCOME_WARN = "warn"      # unknown, or not sent at the end of the countdown
+OUTCOME_WARN = "warn"      # unknown, or not sent at the end of its hold
 
 _DONE, _EXISTS, _FAILED, _UNKNOWN = "done", "exists", "failed", "unknown"
 _COLUMNS = {"created": _DONE, "sent": _DONE, "exists": _EXISTS, "failed": _FAILED, "unknown": _UNKNOWN}
@@ -555,7 +555,7 @@ def outcome_text(kind: str, status: str, title: str = "", *, when: str = "", ans
 
 
 def not_sent_text(kind: str, subject: str = "", address: str = "sir") -> str:
-    """A Reply / Email that was not sent at the end of its countdown because the sending account
+    """A Reply / Email that was not sent at the end of its hold because the sending account
     changed meanwhile: "Sir, I didn't send 'Lunch Friday': the sending account changed. Please check
     From and try again." """
     return _fill(_NOT_SENT.get(kind, _NOT_SENT["email"]), spoken_subject(subject), "", address)

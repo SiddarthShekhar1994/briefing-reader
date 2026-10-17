@@ -1,7 +1,7 @@
 """Tests for the hologram's states (round 2, part 3b; HOLOGRAM_SPEC 16.7): waiting for the briefing, the toast,
 the offline voice, muted, quiet hours and the error tiles - their words, their looks and that every action only
 opens a screen the app already has (the toast and the tiles never act by themselves; a refused mail's Retry never
-sends: only the card's own button starts its countdown).
+sends: only the card's own button sends it again).
 
 Qt runs offscreen in this process with the bundled fonts and shows nothing; every text is invented.
 """
@@ -348,7 +348,7 @@ class ReadingStatesTests(unittest.TestCase):
         reading.set_tab(ui.SCREEN_HOME)
         reading.set_mail_refused("r2", "reply")
         self.assertEqual(len(reading.errors()), 1)
-        card.set_status(hud.CARD_COUNTDOWN)                                  # the owner's Retry on the card
+        card.set_status(hud.CARD_SENT, "Sent")                               # the owner's Retry on the card
         settle()
         self.assertEqual(reading.errors(), [])                               # the tile goes with the failure
         self.assertEqual(decided, [])

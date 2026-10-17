@@ -5,7 +5,7 @@ An offer never acts: it is one JARVIS entry with one link and at most one locall
 (times and counts only). Nothing is read from mail and nothing runs until the owner clicks.
 
     QuietFacts                         what the app knows at a tick (visible / minimized, locked, the
-                                       voice, the briefing playing, a countdown, a run or Jarvis speaking)
+                                       voice, the briefing playing, a card being carried out, a run or Jarvis speaking)
     in_quiet_hours(now, from, until)   22:00-08:00 by default, wrapping midnight
     in_meeting(day, now, own)          a timed event under way with another guest, not declined
     may_speak(kind, facts, ...)        "" (say it now) or the first reason word, in the spec's order
@@ -36,7 +36,7 @@ from .prep import other_guests
 
 KIND_PLAN, KIND_PREP = "plan", "prep"
 TEXT_ONLY_REASONS = frozenset({"muted", "quiet_hours", "stale"})          # + "meeting" for a prep offer (R37)
-HELD_REASONS = frozenset({"hidden", "locked", "minimized", "not_heard", "playing", "countdown", "busy", "spacing"})
+HELD_REASONS = frozenset({"hidden", "locked", "minimized", "not_heard", "playing", "card_busy", "busy", "spacing"})
 TRANSIENT_PLAN_REASONS = frozenset({"early", "not_ready", "caps", "no_day"})   # R36
 FINAL_PREP_REASONS = frozenset({"late", "all_day", "long", "guests", "declined", "skip_word", "ignored"})
 HEARD_AFTER_MINUTES = 20                                                       # R26 (c)
@@ -59,7 +59,7 @@ class QuietFacts:
     locked: bool = False
     speak_ok: bool = True         # [assistant] speak and speak_replies on, the voice not muted
     playing: bool = False         # the briefing PLAYING or WAITING
-    countdown: bool = False       # an undo countdown or a card job runs
+    card_busy: bool = False       # a Send's hidden hold or a card job (an Undo included) runs
     busy: bool = False            # an Ask or mode run, or Jarvis is speaking
 
 
@@ -125,7 +125,7 @@ def may_speak(kind: str, facts: QuietFacts, *, now: datetime, settings: Any, mee
               last_spoken: datetime | None, heard: bool = True, stale: bool = False) -> str:
     """"" when the offer's sentence may be said now, else the first reason word in the spec's order
     (4.2): muted, quiet_hours, stale (prep), meeting, hidden (the reading screen is not up: never
-    said over the prompt or a hidden wait), locked, minimized, not_heard (plan), playing, countdown,
+    said over the prompt or a hidden wait), locked, minimized, not_heard (plan), playing, card_busy,
     busy, spacing."""
     if not facts.speak_ok:
         return "muted"
@@ -145,8 +145,8 @@ def may_speak(kind: str, facts: QuietFacts, *, now: datetime, settings: Any, mee
         return "not_heard"
     if facts.playing:
         return "playing"
-    if facts.countdown:
-        return "countdown"
+    if facts.card_busy:
+        return "card_busy"
     if facts.busy:
         return "busy"
     if last_spoken is not None and now - _comparable(last_spoken, now) < timedelta(minutes=SPACING_MINUTES):

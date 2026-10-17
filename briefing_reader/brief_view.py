@@ -18,7 +18,7 @@ Public API
     Home's brief moment: a scroll area whose column (at most 640 wide, centred) holds the brief panel (the
     focused tile: ``tile-focus``, all four brackets), then the reply card(s) under it - the very approval
     cards of NEEDS YOUR OK, lent by the app while this shows (``hold(card)`` / ``release(card)`` /
-    ``held()``), so Send, the NEW RECIPIENT tick on the card, Edit, Deny, the undo countdown and Undo work
+    ``held()``), so Send, the NEW RECIPIENT tick on the card, Edit, Deny, Sent and its Undo work
     exactly as there - then See every step. ``set_brief(info)``; ``linkClicked(link_id)``;
     ``closeRequested()`` (the close button or Esc). It never sends, reads or saves anything itself.
 """

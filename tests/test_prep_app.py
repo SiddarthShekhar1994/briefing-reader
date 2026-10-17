@@ -199,9 +199,9 @@ class PrepFlowTests(PrepAppCase):
         settle()
         self.reading.action_card(card.id).approve_button.click()
         settle()
-        self.assertIsNotNone(self.c._countdown)
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+        self.assertIsNotNone(self.c._send_hold)
+        self.c._send_hold.deadline = time.monotonic() - 0.001
+        self.c._on_send_hold_tick()
         self.assertTrue(wait_for(lambda: card.id not in self.c._jobs and app.senders["work"].sent, 10))
         settle()
         self.assertEqual(app.voice.texts()[-1], "Sent, sir - your reply is on its way.")

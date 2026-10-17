@@ -109,9 +109,9 @@ class FollowupsAppCase(unittest.TestCase):
     def send(self, card_id: str) -> None:
         self.reading.action_card(card_id).approve_button.click()
         settle()
-        self.assertIsNotNone(self.c._countdown)
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+        self.assertIsNotNone(self.c._send_hold)
+        self.c._send_hold.deadline = time.monotonic() - 0.001
+        self.c._on_send_hold_tick()
 
 
 class ScanAndDraftTests(FollowupsAppCase):

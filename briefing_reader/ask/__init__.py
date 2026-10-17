@@ -1,6 +1,6 @@
 """Ask Jarvis: a typed request becomes proposals (NEEDS YOUR OK cards), planned by the owner's own
 signed-in Claude Code CLI on the claude.ai plan. Nothing here carries anything out: the cards go
-through the same click, undo countdown and executor.run_action path as the briefing's.
+through the same click, Undo and executor.run_action path as the briefing's.
 
     cli.py       finds claude.exe, probes its flags, checks the sign-in (auth status), builds the
                  child environment from an allowlist, builds the argv; SubprocessRunner (no

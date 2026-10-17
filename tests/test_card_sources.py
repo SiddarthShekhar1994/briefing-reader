@@ -3,15 +3,14 @@
 One list per source, merged ASK then BRIEFING with a group header each (no headers without Ask
 cards, so the briefing's cards look exactly as before), a briefing refresh keeps the Ask cards and
 an Ask keeps the briefing's, an Ask card the briefing also proposes is information only, a card
-counting down keeps its content and its countdown when an Ask arrives, Ask cards are never read
-out in the spoken "Needs your OK", and Approve on an Ask card goes through the same countdown to
-the (fake) calendar. Qt runs offscreen; nothing reaches Google, Notion or claude.exe.
+in its hidden hold keeps its content and its hold when an Ask arrives, Ask cards are never read
+out in the spoken "Needs your OK", and Approve on an Ask card goes to the (fake) calendar at once, as
+the briefing's do. Qt runs offscreen; nothing reaches Google, Notion or claude.exe.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import time
 import unittest
 
 from PySide6.QtWidgets import QApplication
@@ -19,7 +18,7 @@ from PySide6.QtWidgets import QApplication
 from briefing_reader import hud, ui
 from briefing_reader.actions import SOURCE_ASK, SOURCE_BRIEFING, parse_action_line
 from briefing_reader.ask.validate import ALREADY_LISTED
-from tests.ui_fakes import B_CALENDAR, CAL_LINE, MOVE_LINE, AppHarness, fonts, settle, wait_for
+from tests.ui_fakes import B_CALENDAR, CAL_LINE, EMAIL_LINE, MOVE_LINE, AppHarness, fonts, settle, wait_for
 
 _app: QApplication | None = None
 
@@ -95,43 +94,45 @@ class CardSourceTests(unittest.TestCase):
         self.assertEqual({a.source for a in self.c._pending_page_actions()}, {SOURCE_BRIEFING})
         self.assertEqual(len(self.c._pending_actions()), 4)            # they still need your OK
 
-    def test_an_ask_during_a_countdown_keeps_it(self) -> None:
+    def test_an_ask_during_a_hold_keeps_it(self) -> None:
         reading = self.c.window.reading
-        page_card = next(a for a in self.c._actions if a.kind == "calendar")
+        mail = parse_action_line(EMAIL_LINE.replace("sam.example@example.com", "ana@example.edu"))
+        self.c._set_source(SOURCE_BRIEFING, list(self.c._source_lists[SOURCE_BRIEFING]) + [mail])
+        settle()
+        page_card = mail
         reading.action_card(page_card.id).approve_button.click()
         settle()
-        countdown = self.c._countdown
-        self.assertIsNotNone(countdown)
+        hold = self.c._send_hold
+        self.assertIsNotNone(hold)
         self.c._take_ask_cards([ask_card(CAL_LINE)])
         settle()
-        self.assertIs(self.c._countdown, countdown)
-        self.assertEqual(reading.action_card(page_card.id).status(), hud.CARD_COUNTDOWN)
+        self.assertIs(self.c._send_hold, hold)
+        self.assertEqual(reading.action_card(page_card.id).status(), hud.CARD_SENT)
         reading.set_tab(ui.SCREEN_APPROVALS)                     # the cards are on the Approvals screen
         settle()
         self.assertTrue(reading.action_card(page_card.id).undo_button.isVisible())
 
-    def test_an_ask_card_counting_down_keeps_its_content(self) -> None:
-        first = ask_card(CAL_LINE)
+    def test_an_ask_card_in_its_hold_keeps_its_content(self) -> None:
+        first = ask_card(EMAIL_LINE.replace("sam.example@example.com", "ana@example.edu"))
         self.c._take_ask_cards([first])
         self.c.window.reading.action_card(first.id).approve_button.click()
         settle()
-        self.assertIsNotNone(self.c._countdown)
+        self.assertIsNotNone(self.c._send_hold)
         changed = dataclasses.replace(first, title="Something else")   # same id from a newer answer
         self.c._take_ask_cards([changed])
-        self.assertIsNotNone(self.c._countdown)
-        self.assertEqual(self.c._action(first.id).title, "Study block")
+        self.assertIsNotNone(self.c._send_hold)
+        self.assertEqual(self.c._action(first.id).title, "Jarvis test sync moved")
+        self.assertEqual(self.c._shown(first.id).title, "Jarvis test sync moved")   # what goes is what it showed
 
-    def test_approve_on_an_ask_card_goes_through_the_countdown_to_the_calendar(self) -> None:
+    def test_approve_on_an_ask_card_goes_to_the_calendar_at_once(self) -> None:
         card = ask_card(CAL_LINE)
         self.c._take_ask_cards([card])
         widget = self.c.window.reading.action_card(card.id)
+        personal = self.app.calendars["personal"]
+        self.assertNotIn(("create", "Study block"), personal.calls)   # nothing before the click
         widget.approve_button.click()
         settle()
-        personal = self.app.calendars["personal"]
-        self.assertEqual(widget.status(), hud.CARD_COUNTDOWN)
-        self.assertNotIn(("create", "Study block"), personal.calls)   # nothing before the countdown ends
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+        self.assertIsNone(self.c._send_hold)                          # no countdown: it goes at once
         self.assertTrue(wait_for(lambda: ("create", "Study block") in personal.calls))
         self.assertTrue(wait_for(lambda: self.c.window.reading.action_card(card.id).status() == hud.CARD_ADDED))
         self.assertEqual(personal.calls.count(("create", "Study block")), 1)

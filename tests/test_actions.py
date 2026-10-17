@@ -1087,9 +1087,9 @@ class ActionStoreTests(unittest.TestCase):
                 store.set(f"id-{status}", status)
                 self.assertEqual(store.is_decided(f"id-{status}"), decided)
         self.assertEqual(actions.STATUSES, ("created", "exists", "denied", "failed", "done", "sent", "running",
-                                            "unknown"))
+                                            "unknown", "held"))
         self.assertEqual(actions.DECIDED_STATUSES,
-                         frozenset({"created", "exists", "denied", "done", "sent", "running"}))
+                         frozenset({"created", "exists", "denied", "done", "sent", "running", "held"}))
 
     def test_kind_and_account_round_trip(self) -> None:
         store = self.store()
@@ -1132,6 +1132,35 @@ class ActionStoreTests(unittest.TestCase):
         with mock.patch.object(actions.os, "replace") as replace:
             store.prune(60)   # saved once is enough
         replace.assert_not_called()
+
+    def test_a_held_send_jarvis_closed_on_is_not_sent_at_the_next_start(self) -> None:
+        """A Reply / Email / Cancel still "held" (Jarvis closed before its hidden hold could go out) is
+        "failed" with "Not sent - Jarvis closed first" at the next start: the card never says Sent."""
+        self.write_raw(json.dumps({
+            "mail": {"status": "held", "at": NOW.isoformat(), "kind": "email", "account": "work"},
+            "cancel": {"status": "held", "at": NOW.isoformat(), "kind": "cancel", "account": "work"},
+        }))
+        with self.assertLogs(ACTIONS_LOGGER, level="WARNING") as captured:
+            store = self.store()
+        self.assertIn("2 held action(s) were not sent before Jarvis closed; marked failed",
+                      " ".join(captured.output))
+        self.assertEqual((store.get("mail")["status"], store.get("mail")["message"]),
+                         ("failed", "Not sent - Jarvis closed first"))
+        self.assertEqual(store.get("cancel")["message"], "Not cancelled - Jarvis closed first")
+        self.assertFalse(store.is_decided("mail"))   # it waits for a decision again
+        store.prune(60)
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["mail"]["status"], "failed")
+
+    def test_held_is_a_decision_and_forget_only_removes_the_named_statuses(self) -> None:
+        store = self.store()
+        store.set("mail", "held", kind="reply", account="work")
+        self.assertTrue(store.is_decided("mail"))
+        self.assertFalse(store.forget("mail", ("running",)))
+        self.assertEqual(store.get("mail")["status"], "held")
+        self.assertTrue(store.forget("mail", ("held",)))
+        self.assertIsNone(store.get("mail"))
+        self.assertNotIn("mail", json.loads(self.path.read_text(encoding="utf-8")))
+        self.assertFalse(store.forget("missing", ("held",)))
 
     def test_log_line_names_id_kind_account_and_status(self) -> None:
         store = self.store()
@@ -2161,14 +2190,24 @@ class CardViewTests(unittest.TestCase):
 
 
 class CarriedOutKindsTests(unittest.TestCase):
-    """Calendar, Todo blocks, RSVP, Move, Cancel, Reply and Email: carried out by Jarvis after the
-    undo countdown."""
+    """Calendar, Todo blocks, RSVP, Move, Cancel, Reply and Email: carried out by Jarvis after the click,
+    with no countdown: the calendar kinds at once (Undo reverses them), the others after a hidden hold."""
 
-    def test_countdown_kinds(self) -> None:
-        self.assertEqual(actions.COUNTDOWN_KINDS, frozenset({CALENDAR, TODO, RSVP, MOVE, CANCEL, REPLY, EMAIL}))
+    def test_carried_kinds(self) -> None:
+        self.assertEqual(actions.CARRIED_KINDS, frozenset({CALENDAR, TODO, RSVP, MOVE, CANCEL, REPLY, EMAIL}))
+        self.assertEqual(actions.UNDO_KINDS, frozenset({CALENDAR, TODO, RSVP, MOVE}))
+        self.assertEqual(actions.HOLD_KINDS, frozenset({CANCEL, REPLY, EMAIL}))
+        self.assertEqual(actions.UNDO_KINDS | actions.HOLD_KINDS, actions.CARRIED_KINDS)
+        self.assertFalse(actions.UNDO_KINDS & actions.HOLD_KINDS)
+        for action in (example("RSVP"), example("Move"), example("Todo"), parse_action_line(CHESS)):
+            self.assertEqual((action.undoable, action.held), (True, False), action.kind)
+        for action in (example("Cancel"), example("Reply"), example("Email")):
+            self.assertEqual((action.undoable, action.held), (False, True), action.kind)
+        for action in (example("Share"), example("Todo", block="")):
+            self.assertEqual((action.undoable, action.held), (False, False), action.kind)
         self.assertEqual(actions.EVENT_KINDS, frozenset({RSVP, MOVE, CANCEL}))
         self.assertEqual(actions.MAIL_KINDS, frozenset({REPLY, EMAIL}))
-        rows = (  # countdown, changes_event, sends_mail, editable
+        rows = (  # carried, changes_event, sends_mail, editable
             (example("RSVP"), True, True, False, True), (example("Move"), True, True, False, True),
             (example("Cancel"), True, True, False, True), (example("Reply"), True, False, True, True),
             (example("Email"), True, False, True, True), (example("Todo"), True, False, False, False),
@@ -2180,11 +2219,11 @@ class CarriedOutKindsTests(unittest.TestCase):
             (parse_action_line("Reply: Carol about the draft"), False, False, False, False),
             (example("Move", when="2026-10-08"), False, False, False, False),
             (example("Reply", to="bob@"), False, False, False, False))
-        for action, countdown, event, mail, editable in rows:
+        for action, carried, event, mail, editable in rows:
             with self.subTest(kind=action.kind, raw=action.raw[:30]):
-                self.assertEqual((action.countdown, action.changes_event, action.sends_mail, action.editable),
-                                 (countdown, event, mail, editable))
-                self.assertEqual(action.countdown, action.actionable)   # every kind Jarvis carries out
+                self.assertEqual((action.carried, action.changes_event, action.sends_mail, action.editable),
+                                 (carried, event, mail, editable))
+                self.assertEqual(action.carried, action.actionable)   # every kind Jarvis carries out
 
     def test_sent_and_unknown_texts(self) -> None:
         self.assertEqual([result_text(example("RSVP", answer=a), "sent") for a in ("yes", "no", "maybe")],
@@ -2227,7 +2266,7 @@ class CarriedOutKindsTests(unittest.TestCase):
         edited = actions.edit_action(move, start=dt(9, 9), end=dt(9, 10), notify="none", body="New note")
         self.assertEqual((edited.id, edited.start, edited.end, edited.body, edited.field("notify")),
                          (move.id, dt(9, 9), dt(9, 10), "New note", "none"))
-        self.assertTrue(edited.countdown)
+        self.assertTrue(edited.carried)
         with self.assertRaises(actions.EditInvalid):
             actions.edit_action(move, notify="loud")
         with self.assertRaises(actions.EditInvalid):

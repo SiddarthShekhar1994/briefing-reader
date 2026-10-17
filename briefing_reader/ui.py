@@ -33,7 +33,7 @@ The module is organised in three parts:
   click, after the web rule (any public https site, never a local or private
   address) is checked again. ``AppController.live`` is the LIVE
   view's event stream (:mod:`briefing_reader.live`, ``[live]``): every Ask, every
-  approved card (from the click through the undo countdown to Google's answer)
+  approved card (from the click through a Send's hidden hold to Google's answer)
   and every briefing fetch, as it happens; on screen only.
 
 Threading: Qt objects are only touched on the GUI thread. The fetch thread,
@@ -42,8 +42,8 @@ which are queued to the GUI thread where all state lives. Every worker is a daem
 thread, so a stuck network call or a browser sign-in can never block exit
 (only a change already on its way to Google is waited for, at most 5 s). The
 action worker runs one call at a time, so reading the agenda never overlaps a
-sign-in; while an approval, its undo countdown or a sign-in runs, the other
-cards' Deny / Approve are locked.
+sign-in; while an approval (a Send's hidden hold included), an Undo or a sign-in
+runs, the other cards' Deny / Approve are locked.
 """
 
 from __future__ import annotations
@@ -147,10 +147,13 @@ from .actions import (
     STATUS_DONE,
     STATUS_EXISTS,
     STATUS_FAILED,
+    STATUS_HELD,
     STATUS_RUNNING,
     STATUS_SENT,
     STATUS_UNKNOWN,
     TODO,
+    CLOSED_FIRST_CANCEL_MESSAGE,
+    CLOSED_FIRST_MESSAGE,
     ActionStore,
     CardView,
     EditInvalid,
@@ -168,6 +171,7 @@ from .actions import (
     link_host,
     parse_time_range,
     result_text,
+    sent_text,
     web_link_allowed,
     when_text,
     with_error,
@@ -194,6 +198,9 @@ from .executor import (
     STAGE_SIGNED_IN,
     STAGE_SIGNIN,
     STAGE_WORKING,
+    UNDO_CHANGED_TEXT,
+    UNDO_REFUSED,
+    UNDONE,
     ActionEdit,
     EditError,
     EventCheck,
@@ -213,6 +220,7 @@ from .executor import (
     mail_note,
     recipient_history,
     run_action,
+    run_undo,
     sign_in_note,
 )
 from .gcal import (
@@ -1075,8 +1083,8 @@ class ReadingView(QWidget):
     openLink = Signal(str)
     openSource = Signal(str)     # a card's Open (tools row): the action id, never the URL
     copyText = Signal(str)       # a card's Copy (tools row): the action id
-    undoAction = Signal(str)     # a card's Undo during its countdown: the action id
-    countdownUndo = Signal()     # the header's Undo (the running countdown, its card out of sight)
+    undoAction = Signal(str)     # a card's Undo (a hold, or Jarvis's calendar change): the action id
+    holdUndo = Signal()          # the header's Undo (a Send's hidden hold, its card out of sight)
     editAction = Signal(str)     # a card's Edit (tools row): the action id
     recipientTicked = Signal(str, str, bool)   # a NEW RECIPIENT tick on a card: (action id, address, ticked)
     signInAccount = Signal(str)  # a card's Sign in (tools row): the action id
@@ -1315,8 +1323,8 @@ class ReadingView(QWidget):
         self.header = home.HoloHeader()
         self._close_tip = self.header.close_button.toolTip()
         self.header.clockClicked.connect(self.open_day_view)
-        self.header.undoClicked.connect(self.countdownUndo)
-        self._countdown_view: tuple[str, float] | None = None   # (word, deadline) of a running countdown
+        self.header.undoClicked.connect(self.holdUndo)
+        self._hold_word = ""   # "Sent" / "Cancelled" while a Send's hidden hold runs
         self.stage = home.HomeStage()
         self.hero = self.stage.hero
         self.stage.transcript_button.clicked.connect(self.open_transcript)
@@ -1471,23 +1479,22 @@ class ReadingView(QWidget):
             self._set_memory_unread(False)
         elif index == SCREEN_APPROVALS:
             self.approvals_stage.open_first()   # the screen opens on the first undecided card
-        self._sync_header_countdown()
+        self._sync_header_hold()
         self.sections_popover.hide()
         self.tabChanged.emit(index)
 
-    def set_countdown(self, word: str = "", deadline: float | None = None) -> None:
-        """The running undo countdown ("SENDING" / "ADDING", its monotonic deadline; None: none runs)."""
-        self._countdown_view = (word or "SENDING", deadline) if deadline is not None else None
-        self._sync_header_countdown()
+    def set_hold(self, word: str = "") -> None:
+        """A Send's or Cancel's hidden hold runs ("Sent" / "Cancelled"; "" none): never a number."""
+        self._hold_word = word or ""
+        self._sync_header_hold()
 
-    def _sync_header_countdown(self) -> None:
-        """A running undo countdown shows in the header with its Undo on every screen but Approvals
-        (there the card's own strip has it): leaving the card never leaves the Undo out of sight."""
-        view = self._countdown_view
-        if view is None or self._screen == SCREEN_APPROVALS:
-            self.header.set_countdown()
+    def _sync_header_hold(self) -> None:
+        """During a Send's hidden hold the header shows "Sent" with its Undo on every screen but Approvals
+        (there the card itself has it): leaving the card never leaves the Undo out of sight."""
+        if not self._hold_word or self._screen == SCREEN_APPROVALS:
+            self.header.set_hold()
         else:
-            self.header.set_countdown(view[0], view[1])
+            self.header.set_hold(self._hold_word)
 
     def _place_agenda(self, slot: QVBoxLayout, mode: str) -> None:
         """The agenda panel: in the Day view's drawer (TODAY / DEADLINES)."""
@@ -1696,8 +1703,9 @@ class ReadingView(QWidget):
 
     def set_mail_refused(self, action_id: str, what: str = "reply") -> None:
         """Gmail refused a Reply / Email (nothing was sent; its card says why): Home's error tile "Gmail refused
-        the reply." with Retry, which only opens that same card on Approvals - its own Retry starts the undo
-        countdown again; nothing is ever sent from the tile. It goes once the card is no longer failed."""
+        the reply." with Retry, which only opens that same card on Approvals - its own Retry sends it again
+        (Sent with Undo, as every Send); nothing is ever sent from the tile. It goes once the card is no longer
+        failed."""
         card = self.approvals.card(action_id)
         if card is None or card.status() != hud.CARD_FAILED:
             return
@@ -1863,7 +1871,7 @@ class ReadingView(QWidget):
 
     def _sync_brief_cards(self) -> None:
         """The brief's reply cards are NEEDS YOUR OK's own cards: lent while the brief shows on Home, back in
-        their place otherwise (so Send, the tick, the countdown and Undo are the same everywhere)."""
+        their place otherwise (so Send, the tick, Sent and its Undo are the same everywhere)."""
         wanted = self._moment == MOMENT_BRIEF and self._screen == SCREEN_HOME
         ids = self.brief_stage.card_ids() if wanted else ()
         for card in self.brief_stage.held():
@@ -1878,8 +1886,8 @@ class ReadingView(QWidget):
                 self.brief_stage.hold(card)
 
     def _on_plan_add(self, action_id: str) -> None:
-        """A block's Add block: the click of that block's own approval card (its guards, the undo countdown
-        and Undo, exactly as on Approvals). A locked card only says so (as a click on its dimmed button)."""
+        """A block's Add block: the click of that block's own approval card (its guards, ADDED and its Undo,
+        exactly as on Approvals). A locked card only says so (as a click on its dimmed button)."""
         card = self.approvals.card(action_id)
         if card is None:
             return
@@ -2181,8 +2189,8 @@ class ReadingView(QWidget):
         return self._memory_unread
 
     def set_live_activity(self, activity: str) -> None:
-        """The Live slot's dot: hud.ACTIVITY_WORKING while Jarvis works (still; it blinks while a
-        countdown runs); "" or hud.ACTIVITY_UNREAD show none (the Dock has no unread dot)."""
+        """The Live slot's dot: hud.ACTIVITY_WORKING while Jarvis works (still; never blinking); "" or
+        hud.ACTIVITY_UNREAD show none (the Dock has no unread dot)."""
         self._live_activity = activity or ""
         self._sync_live_dot()
 
@@ -2192,8 +2200,8 @@ class ReadingView(QWidget):
     def _sync_live_dot(self) -> None:
         if self._live_activity != hud.ACTIVITY_WORKING:
             self.dock.set_live_activity(dock_mod.LIVE_IDLE)
-        elif self._live_state == hud.LIVE_COUNTDOWN:
-            self.dock.set_live_activity(dock_mod.LIVE_COUNTDOWN)
+        elif self._live_state == hud.LIVE_HOLD:
+            self.dock.set_live_activity(dock_mod.LIVE_HOLD)
         else:
             self.dock.set_live_activity(dock_mod.LIVE_WORKING)
 
@@ -2221,10 +2229,9 @@ class ReadingView(QWidget):
     def live_summary_text(self) -> str:
         return self._live_summary
 
-    def set_live_state(self, state: str, text: str | None = None, *, since: float | None = None,
-                       deadline: float | None = None) -> None:
+    def set_live_state(self, state: str, text: str | None = None, *, since: float | None = None) -> None:
         """The Live strip's readout (hud.LiveStatus.set_state's arguments)."""
-        self.live_stage.set_state(state, text, since=since, deadline=deadline)
+        self.live_stage.set_state(state, text, since=since)
         self._live_state = state
         self._sync_live_dot()
 
@@ -3033,8 +3040,7 @@ class LiveSummary:
     tasks: int = 0                        # the tasks shown (not the pinned "Background reads")
     running: int = 0                      # Asks and approved cards still running
     working_since: float | None = None    # the oldest of those started (monotonic)
-    countdown_deadline: float | None = None   # an approved card's undo countdown runs out then
-    countdown_word: str = ""              # "SENDING" / "ADDING"
+    hold_word: str = ""                   # "SENDING" while a Send's / Cancel's hidden hold runs ("" none)
     attention: bool = False               # this update brought steps of an Ask or an approved card
 
     def text(self) -> str:
@@ -3144,16 +3150,16 @@ class _LiveFeed(QObject):
         shown = [view for view in self._tasks.values() if not view.pinned]
         running = [view for view in self._tasks.values()
                    if view.kind in _live.ATTENTION_KINDS and view.status == _live.STATUS_RUNNING]
-        deadline, word = None, ""
+        word = ""
         for view in running:
             step = next((step for step in reversed(view.steps)
                          if step.status == _live.STATUS_RUNNING and step.deadline is not None), None)
             if step is not None:
-                deadline, word = step.deadline, step.status_text or "SENDING"
+                word = step.status_text or "SENDING"
                 break
         return LiveSummary(tasks=len(shown), running=len(running),
                            working_since=min((view.started for view in running), default=None),
-                           countdown_deadline=deadline, countdown_word=word, attention=attention)
+                           hold_word=word, attention=attention)
 
     def stop(self) -> None:
         """Shutdown: no more drains, no views."""
@@ -3250,10 +3256,10 @@ class LiveWindow(hud.HudWindowFrame):
 
 
 def _show_live_state(set_state: Callable[..., None], summary: LiveSummary) -> None:
-    """The strip's / pop-out's status tag (``set_state`` as hud.LiveStatus.set_state's): SENDING IN
-    7 S, WORKING 0:12 or IDLE."""
-    if summary.countdown_deadline is not None:
-        set_state(hud.LIVE_COUNTDOWN, summary.countdown_word or "SENDING", deadline=summary.countdown_deadline)
+    """The strip's / pop-out's status tag (``set_state`` as hud.LiveStatus.set_state's): SENDING (a hidden
+    hold: never a number), WORKING 0:12 or IDLE."""
+    if summary.hold_word:
+        set_state(hud.LIVE_HOLD, summary.hold_word)
     elif summary.running:
         set_state(hud.LIVE_WORKING, since=summary.working_since)
     else:
@@ -3336,20 +3342,40 @@ _STEP_WINDOW = 5                         # section chips shown above the transcr
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
-# Action worker stages (the card shows WORKING / WAITING FOR GOOGLE SIGN-IN), and the undo
-# countdown before an RSVP, Move or Cancel goes to Google.
+# Action worker stages (the card shows WORKING / WAITING FOR GOOGLE SIGN-IN), a Reply's, Email's or
+# Cancel's hidden hold (the card shows SENT / CANCELLED with Undo; nothing has gone to Google yet) and
+# an Undo on its way (the card shows WORKING). There is no countdown anywhere (the owner's decision of
+# 2026-10-17).
 _STAGE_WORKING = STAGE_WORKING
 _STAGE_SIGNIN = STAGE_SIGNIN
 _STAGE_SIGNED_IN = STAGE_SIGNED_IN
-_STAGE_COUNTDOWN = "countdown"           # "SENDING IN 9 S" + Undo: nothing has been sent yet
+_STAGE_HOLD = "hold"                     # "SENT" + Undo: nothing has been sent yet ([actions] undo_seconds)
+_STAGE_UNDOING = "undoing"               # the card's Undo is on its way to Google
 _RESULT_KEY = "result"                   # the voice key of every "Done, sir" / "Sent, sir" sentence
 _SIGN_IN_CHECK = "sign-in check"         # action worker job: report which accounts are signed in
 _CARD_FOR_STATUS = {STATUS_CREATED: hud.CARD_ADDED, STATUS_EXISTS: hud.CARD_EXISTS,
                     STATUS_DENIED: hud.CARD_DENIED, STATUS_FAILED: hud.CARD_FAILED,
                     STATUS_DONE: hud.CARD_DONE, STATUS_SENT: hud.CARD_SENT,
-                    STATUS_UNKNOWN: hud.CARD_UNKNOWN, STATUS_RUNNING: hud.CARD_WORKING}
-# The undo countdown ([actions] undo_seconds): how often the card's "SENDING IN n S" is updated.
-_COUNTDOWN_TICK_MS = 200
+                    STATUS_UNKNOWN: hud.CARD_UNKNOWN, STATUS_RUNNING: hud.CARD_WORKING,
+                    STATUS_HELD: hud.CARD_SENT}
+# The hidden hold ([actions] undo_seconds): how often its end is looked for (nothing on screen counts).
+_HOLD_TICK_MS = 200
+# A calendar change's Undo (delete the added event, put the answer back, move the event back) stays this
+# long, or until its card is cleared.
+UNDO_WINDOW_S = 600
+_UNDO_TICK_MS = 1000
+UNDO_TEXT = hud.UNDO_TEXT
+HOLD_UNDONE_NOTE = "Not sent - undone."            # a Reply's / Email's Undo during its hold
+HOLD_UNDONE_CANCEL_NOTE = "Not cancelled - undone."   # a Cancel's
+# A calendar change Jarvis's Undo reversed: the card waits again and says so.
+UNDONE_NOTES = {CALENDAR: "Undone - the event was removed from your calendar.",
+                TODO: "Undone - the block was removed from your calendar.",
+                RSVP: "Undone - your answer is back as it was.",
+                MOVE: "Undone - the event is back at its old time."}
+UNDO_FAILED_NOTE = "Undo didn't go through: {reason} - Retry tries again"
+UNDO_UNKNOWN_NOTE = "Undo may or may not have gone through - Retry checks the event first"
+UNDO_GONE_SUB = {CALENDAR: "removed from your calendar", TODO: "removed from your calendar",
+                 RSVP: "your answer is back as it was", MOVE: "back at its old time"}
 _GROUP_TITLES = {SOURCE_ASK: "Ask", SOURCE_BRIEFING: "Briefing"}   # the NEEDS YOUR OK group headers
 _ASK_CARDS_MAX = 16                    # Ask cards kept (this run, memory only); the oldest go first
 # A planner mode's cards (the productivity bundle) say which mode proposed them ("Plan - block").
@@ -3427,8 +3453,9 @@ _VERBS = {RSVP: "answer", MOVE: "move", CANCEL: "cancel"}
 # Sign-in problems of an account (google_auth PROBLEM_*): the card offers Sign in again.
 _SIGN_IN_PROBLEMS = (PROBLEM_SIGNED_OUT, PROBLEM_EXPIRED, PROBLEM_BLOCKED, PROBLEM_DENIED, PROBLEM_SCOPE,
                      PROBLEM_TIMEOUT, PROBLEM_IDENTITY)
-# A Reply / Email card: its Send signs the account in first (no countdown), opens Edit to read a
-# long message, and only then counts down; a NEW RECIPIENT is ticked on the card itself (Send stays
+# A Reply / Email card: its Send signs the account in first (nothing is sent), opens Edit to read a
+# long message, and only then sends (the card shows Sent with Undo at once; the call waits a hidden
+# hold); a NEW RECIPIENT is ticked on the card itself (Send stays
 # disabled until it is: the owner's decision of 2026-10-12). The card's amber note says what the
 # last click on Send needs next.
 # The notes never say "above": on a short window the card's FROM line may be scrolled out of view.
@@ -3437,7 +3464,7 @@ MAIL_SIGNED_IN_NOTE = "Signed in - this card sends from {sender}; nothing is sen
 REVIEW_NOTE = "Read the whole message in Edit, then click Send again"
 REVIEW_BANNER = ("The card doesn't show all of this message. Read all of it here, to its end; Save keeps any "
                  "change. Nothing is sent until you click Send again.")
-FROM_CHANGED_NOTE = ("The sending account changed during the countdown; nothing was sent - check From and click "
+FROM_CHANGED_NOTE = ("The sending account changed before it went; nothing was sent - check From and click "
                      "Send again")
 # A new binding (an alias's first sign-in): is it the right Google account? Nothing is sent or
 # changed for the alias until you answer Yes in the dialog (hud.AccountDialog).
@@ -3455,7 +3482,7 @@ ACCOUNT_RECONNECT_NOTE = ("Pick the right Google account for {alias} in your bro
 ACCOUNT_UNKNOWN_NOTE = ("Jarvis doesn't know which Google account {alias} is signed in as - pick it in your browser; "
                         "nothing is changed until you confirm it")
 # A Calendar event's or Todo block's Approve while its account has no confirmed Google account: the
-# sign-in and the question come before the countdown (nothing is counted down that can't be added).
+# sign-in and the question come first (nothing is added before the account is confirmed).
 ADD_SIGN_IN_FIRST_NOTE = ("Finish the Google sign-in in your browser; nothing is added - then confirm the account "
                           "and click {button} again")
 ADD_SIGNED_IN_NOTE = "Signed in - click {button} again to add it"
@@ -3530,15 +3557,28 @@ class _AgendaJob:
 
 @dataclasses.dataclass(frozen=True)
 class _ExecJob:
-    """Carry out one approved proposal (executor.run_action). ``writes_running``: its undo
-    countdown ran out; "running" is saved right before its call to Google and the result right
-    after, by the worker. ``expected_from``: a Reply / Email goes out only from this address (the
-    one its card showed when the countdown started)."""
+    """Carry out one approved proposal (executor.run_action). ``writes_running``: the click (a
+    calendar change) or the end of its hidden hold (a Reply, Email or Cancel); "running" is saved
+    right before its call to Google and the result right after, by the worker. ``expected_from``: a
+    Reply / Email goes out only from this address (the one its card showed at the Send). ``flush``:
+    Jarvis is closing during the hold, so it goes now (the owner already saw "Sent"): it runs even
+    though the worker is stopping, never signs in, and sets ``done`` when it is over."""
 
     action: ProposedAction
     writes_running: bool
     expected_from: str = ""
     live: Any = None                    # the card's LIVE view task (live.LiveTask), None without one
+    flush: bool = False
+    done: threading.Event | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _UndoJob:
+    """Reverse Jarvis's own change of one card (executor.run_undo): only ever the owner's click on that
+    card's Undo."""
+
+    action: ProposedAction
+    record: Any                         # executor.UndoRecord
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3574,6 +3614,7 @@ class _Bridge(QObject):
     accountStatus = Signal(object)                    # {alias: (signed in, PROBLEM_* or "", message)}
     actionProgress = Signal(str, str)                 # action id, _STAGE_*
     actionResult = Signal(str, object, object, str)   # action id, ExecResult | None, ExecError | None, status
+    undoResult = Signal(str, object)                  # action id, executor.RunOutcome of its Undo
     eventPeek = Signal(int, object)                   # request id, {action id: (EventDetails | None, error | None)}
     agendaResult = Signal(int, object, str, str)      # request id, events | None, _PROBLEM_* or "", message
     accountConnect = Signal(str, str, str, str)       # alias, _CONNECT_* stage, failure message, PROBLEM_*
@@ -3615,16 +3656,17 @@ class _ActionWorker:
     """Runs Google calls one at a time on a daemon thread named "calendar".
 
     Jobs: a sign-in check (the header chip and the cards' Sign in links), an
-    approved proposal whose undo countdown ran out (``_ExecJob`` through
+    approved proposal (``_ExecJob`` through
     executor.run_action: a Calendar event, a Todo's block, an RSVP, Move or
     Cancel signs its account in first when needed; then "running" is saved
     right before the one call and the result right after, on this thread, so
     the result is kept even when the app quits meanwhile; a Reply or Email
     goes out only when its account still is the one its card showed), reading
-    the agenda and the cards' events (never a sign-in), and the browser
-    sign-in of one account (a Reply / Email's through executor.sign_in). One
-    at a time, so nothing is read while a sign-in runs. Results only go
-    through the bridge.
+    the agenda and the cards' events (never a sign-in), the browser sign-in of
+    one account (a Reply / Email's through executor.sign_in) and a card's Undo
+    (``_UndoJob`` through executor.run_undo). One at a time, so nothing is read
+    while a sign-in runs. Results only go through the bridge. Once stopped it
+    takes no new job but a hold Jarvis sends because it is closing (``flush``).
     """
 
     def __init__(self, executor: Executor, calendars: Mapping[str, Any], store: ActionStore,
@@ -3646,14 +3688,21 @@ class _ActionWorker:
         self._jobs.put(_SIGN_IN_CHECK)
 
     def approve(self, action: ProposedAction) -> None:
-        """A Calendar event or a Todo's block the older way (no countdown, nothing saved before
-        the call). The app itself always uses execute."""
+        """A Calendar event or a Todo's block the older way (nothing saved before the call). The app
+        itself always uses execute."""
         self._jobs.put(_ExecJob(action, writes_running=False))
 
-    def execute(self, action: ProposedAction, expected_from: str = "", live: Any = None) -> None:
-        """A proposal whose countdown ran out: "running", the one call, the result. A Reply /
-        Email goes out only from ``expected_from``. ``live``: its LIVE view task (finished here)."""
-        self._jobs.put(_ExecJob(action, writes_running=True, expected_from=expected_from, live=live))
+    def execute(self, action: ProposedAction, expected_from: str = "", live: Any = None, *,
+                flush: bool = False, done: threading.Event | None = None) -> None:
+        """An approved proposal: "running", the one call, the result. A Reply / Email goes out only
+        from ``expected_from``. ``live``: its LIVE view task (finished here). ``flush``: Jarvis is
+        closing during its hold (see _ExecJob)."""
+        self._jobs.put(_ExecJob(action, writes_running=True, expected_from=expected_from, live=live,
+                                flush=flush, done=done))
+
+    def undo(self, action: ProposedAction, record: Any) -> None:
+        """The owner's click on that card's Undo: reverse exactly Jarvis's own change (executor.run_undo)."""
+        self._jobs.put(_UndoJob(action, record))
 
     def list_agenda(self, job: _AgendaJob) -> None:
         self._jobs.put(job)
@@ -3682,8 +3731,10 @@ class _ActionWorker:
         while True:
             job = self._jobs.get()
             with self._taking:
-                if job is None or self._stop.is_set():
+                if job is None:
                     return
+                if self._stop.is_set() and not (isinstance(job, _ExecJob) and job.flush):
+                    continue   # closing: only a hold the owner already saw as "Sent" still goes
                 self._idle.clear()
             try:
                 self._dispatch(job)
@@ -3697,7 +3748,13 @@ class _ActionWorker:
         if isinstance(job, _AgendaJob):
             self._list(job)
         elif isinstance(job, _ExecJob):
-            self._exec(job)
+            try:
+                self._exec(job)
+            finally:
+                if job.done is not None:
+                    job.done.set()
+        elif isinstance(job, _UndoJob):
+            self._undo(job)
         elif isinstance(job, _PeekJob):
             self._peek(job)
         elif isinstance(job, _ConnectJob):
@@ -3848,6 +3905,13 @@ class _ActionWorker:
         def on_stage(stage: str) -> None:
             self._emit("actionProgress", action.id, stage)
 
+        if job.flush and not self._executor.signed_in(action):
+            # Closing: no browser sign-in may open now, so it is not sent (the card says so next time).
+            logger.info("Action %s (%s, %s) not sent: Jarvis closed first", action.id, action.kind,
+                        logged_alias(action.account))
+            self._store.set(action.id, STATUS_FAILED, message=closed_first_text(action), kind=action.kind,
+                            account=action.account)
+            return
         if job.writes_running and action.sends_mail:
             problem = _mail_from_problem(self._executor, action, job.expected_from)
             if problem:   # never from another account than the card showed: nothing is sent
@@ -3858,11 +3922,16 @@ class _ActionWorker:
                 self._emit("actionResult", action.id, None, ExecError(problem), STATUS_FAILED)
                 return
         extra = {"live": job.live} if job.live is not None else {}
+        proceed = (lambda: True) if job.flush else (lambda: not self._stop.is_set())
         outcome = run_action(self._executor, action, store=self._store if job.writes_running else None,
-                             writes_running=job.writes_running, on_stage=on_stage,
-                             proceed=lambda: not self._stop.is_set(), **extra)
+                             writes_running=job.writes_running, on_stage=on_stage, proceed=proceed, **extra)
         _live_exec_finished(task, action, outcome)
         self._emit("actionResult", action.id, outcome.result, outcome.error, outcome.status)
+
+    def _undo(self, job: _UndoJob) -> None:
+        """One Undo: executor.run_undo (it never raises; "running" is saved first)."""
+        outcome = run_undo(self._executor, job.action, job.record, store=self._store)
+        self._emit("undoResult", job.action.id, outcome)
 
     def _emit(self, signal_name: str, *args: Any) -> None:
         _emit_from_worker(self._bridge, signal_name, self._stop, *args)
@@ -3871,9 +3940,14 @@ class _ActionWorker:
 _CalendarWorker = _ActionWorker   # its name before it also answered, moved and cancelled events
 
 
+def closed_first_text(action: ProposedAction) -> str:
+    """What a card says when Jarvis closed before its hold could go out (nothing was sent)."""
+    return CLOSED_FIRST_CANCEL_MESSAGE if action.kind == CANCEL else CLOSED_FIRST_MESSAGE
+
+
 def _mail_from_problem(executor: Executor, action: ProposedAction, expected: str) -> str:
-    """Why a Reply / Email may not go out now from ``expected`` (the address its card showed when
-    the countdown started): "" when the account is ready and still that address."""
+    """Why a Reply / Email may not go out now from ``expected`` (the address its card showed at the
+    Send): "" when the account is ready and still that address."""
     try:
         status = executor.mail_status(action)
     except Exception as exc:  # noqa: BLE001 - treated as not ready: nothing is sent
@@ -4057,15 +4131,29 @@ def _for_button(note: str, button: str) -> str:
 
 
 @dataclasses.dataclass
-class _Countdown:
-    """The undo countdown of one approved card; nothing is sent before it runs out."""
+class _SendHold:
+    """The hidden hold of one approved Reply, Email or Cancel: its card shows "Sent" / "Cancelled" with
+    Undo at once, and nothing goes to Google before the hold ends ([actions] undo_seconds; no number is
+    ever shown). It goes on while the window is minimised or the session locked."""
 
     action: ProposedAction       # exactly what will be carried out (the Edit dialog's changes included)
-    deadline: float              # time.monotonic() when it runs out
+    deadline: float              # time.monotonic() when it ends
     started: float               # time.monotonic() of the click that started it (Undo's double-click guard)
-    shown: int = -1              # the seconds the card shows
     sender: str = ""             # a Reply / Email: the From address its card showed (it goes out only from it)
     task: Any = _live.NO_TASK    # its LIVE view task (live.LiveTask)
+
+
+@dataclasses.dataclass
+class _UndoOffer:
+    """A calendar change Jarvis made (an added event or block, an answer, a move) whose card offers Undo:
+    for UNDO_WINDOW_S or until the card is cleared. Memory only."""
+
+    action: ProposedAction       # what was carried out
+    record: Any                  # executor.UndoRecord: exactly what the Undo reverses
+    until: float                 # time.monotonic() when the Undo goes
+    shown: float                 # time.monotonic() when it appeared (Undo's double-click guard)
+    at: datetime                 # when the change was made (the card's "ADDED - 2:41 PM")
+    note: str = ""               # why the last Undo did not go through (its Undo then says Retry)
 
 
 def _action_phrase(action: ProposedAction) -> str:
@@ -4104,7 +4192,7 @@ def _card_detail(action: ProposedAction, view: CardView, today: Any) -> str:
 
 
 def _adds_event(action: ProposedAction) -> bool:
-    """A Calendar event or a Todo's block (added to the personal calendar after the countdown)."""
+    """A Calendar event or a Todo's block (added to the personal calendar)."""
     return action.kind in (CALENDAR, TODO)
 
 
@@ -4189,17 +4277,15 @@ def _live_action_title(action: ProposedAction) -> str:
 
 
 @_live.quiet()
-def _live_countdown_ran_out(countdown: _Countdown) -> None:
-    verb = "adding" if _adds_event(countdown.action) else "sending"
-    countdown.task.find(_live.ACTION_COUNTDOWN).done(_live.STATUS_OK, summary=f"ran out - {verb} now")
+def _live_hold_ended(hold: _SendHold, summary: str = "sending now") -> None:
+    hold.task.find(_live.ACTION_HOLD).done(_live.STATUS_OK, summary=summary)
 
 
 @_live.quiet()
-def _live_countdown_end(countdown: _Countdown, status: str, word: str, summary: str, *,
-                        task_summary: str = "") -> None:
-    """The countdown ended without a call (Undo, a stop, the sending account changed, Jarvis closed)."""
-    task = countdown.task
-    task.find(_live.ACTION_COUNTDOWN).done(status, status_text=word, summary=summary)
+def _live_hold_end(hold: _SendHold, status: str, word: str, summary: str, *, task_summary: str = "") -> None:
+    """The hold ended without a call (Undo, the sending account changed, Jarvis closed)."""
+    task = hold.task
+    task.find(_live.ACTION_HOLD).done(status, status_text=word, summary=summary)
     task.finish(status, status_text=word, summary=task_summary or summary)
 
 
@@ -4243,16 +4329,22 @@ class AppController(QObject):
     """State machine behind the window: prompt -> (snoozed ->) reading -> quit.
 
     A launch for a newer run takes the reading screen back to the prompt once
-    nothing is playing there. Proposed actions are shown as cards. Every card
-    Jarvis carries out starts an undo countdown first (``[actions]
-    undo_seconds``; Undo sends nothing) and only its end queues the one call:
-    Approve creates an event, Add block a Todo's block, Accept / Decline /
-    Maybe, Move and Cancel event answer an invitation, move or cancel an event
-    (only after the card shows Google's own view of that event, its check
-    line read by id, and that view allows it), and Send sends a Reply or Email
-    through Gmail (only once its account is signed in and its card shows From,
-    every new recipient was ticked in Edit and a long message was read in
-    Edit). "running" is saved before that call; a call that may or may not
+    nothing is playing there. Proposed actions are shown as cards. There is no
+    visible countdown (the owner's decision of 2026-10-17): Approve creates an
+    event, Add block a Todo's block, Accept / Decline / Maybe and Move answer
+    an invitation or move an event at once, and the card then shows its result
+    (ADDED / ACCEPTED / MOVED and the time) with Undo beside it for 10 minutes
+    or until the card is cleared; Undo reverses exactly that change through
+    the same account (only the owner's click on it; never voice, never by
+    itself), unless the event is gone or changed since. Send (a Reply or
+    Email) and Cancel event show Sent / Cancelled with Undo at once while the
+    call waits a hidden hold (``[actions] undo_seconds``); Undo during the hold
+    sends nothing; the hold goes on when the window is minimised, and Jarvis
+    closing sends it at once. An event change goes only after the card shows
+    Google's own view of that event, its check line read by id, and that view
+    allows it; a Reply or Email only once its account is signed in and its
+    card shows From, every new recipient was ticked on the card and a long
+    message was read in Edit. "running" is saved before that call; a call that may or may not
     have happened shows UNKNOWN with Retry and is never retried by itself.
     Each account signs in only on a click (a card's Sign in, Approve or Send,
     the agenda's Connect). Edit changes such a card in memory, and what the
@@ -4281,7 +4373,7 @@ class AppController(QObject):
     the reading screen and a ``claude`` chip to its header. Its proposals are
     cards like the briefing's (an ASK group above the BRIEFING one; one list
     per source, merged for the cards), never read out with the briefing, and
-    carried out only through the same click, undo countdown and executor path.
+    carried out only through the same click, Undo and executor path.
     ``ask_factory(config, calendars, senders, accounts)`` builds the planner
     (tests inject a fake; the app's runs the owner's own Claude Code).
     ``ask_mode`` (``--ask``): open the reading screen with the bar focused,
@@ -4532,9 +4624,11 @@ class AppController(QObject):
         self._reading_settled = False              # this reading answered its scheduled slot (Read now, Play)
         self._actions_key = ""                   # content key of the page the actions came from
         self._actions_lines: tuple = ()
-        self._jobs: dict[str, str] = {}            # action id -> _STAGE_* while counting down, queued or running
+        self._jobs: dict[str, str] = {}            # action id -> _STAGE_* while held, queued, running or undoing
         self._running: dict[str, tuple[ProposedAction, bool]] = {}   # id -> (what was sent, writes_running)
-        self._countdown: _Countdown | None = None  # at most one: the other cards are locked meanwhile
+        self._send_hold: _SendHold | None = None   # at most one: the other cards are locked meanwhile
+        self._undos: dict[str, _UndoOffer] = {}    # action id -> the Undo its card offers (calendar changes)
+        self._result_notes: dict[str, str] = {}    # action id -> why its Undo left the change as it is
         self._calendar_signed_in = False
         self._decision_clicked_at = -math.inf      # click clock of the last Approve / Deny click
         self._source_opened_at: dict[str, float] = {}   # action id -> click clock of its last Open
@@ -4630,9 +4724,11 @@ class AppController(QObject):
         # Only while the reading screen is visible (no timer at all while hidden).
         self._agenda_timer = self._make_timer(self._on_agenda_tick, single_shot=False,
                                               interval_ms=_AGENDA_TICK_MS)
-        # Only while a card counts down to its call to Google.
-        self._countdown_timer = self._make_timer(self._on_countdown_tick, single_shot=False,
-                                                 interval_ms=_COUNTDOWN_TICK_MS)
+        # Only while a Send's or Cancel's hidden hold runs (it goes on when minimised or locked).
+        self._send_hold_timer = self._make_timer(self._on_send_hold_tick, single_shot=False,
+                                                 interval_ms=_HOLD_TICK_MS)
+        # Only while a card offers Undo (it goes after UNDO_WINDOW_S).
+        self._undo_timer = self._make_timer(self._on_undo_tick, single_shot=False, interval_ms=_UNDO_TICK_MS)
         # The opening greeting waits at most this long for the first fetch answer.
         self._greeting_timer = self._make_timer(self._finish_greeting, single_shot=True,
                                                 interval_ms=_GREETING_WAIT_MS)
@@ -4658,6 +4754,7 @@ class AppController(QObject):
         bridge.accountStatus.connect(self._on_account_status, queued)
         bridge.actionProgress.connect(self._on_action_progress, queued)
         bridge.actionResult.connect(self._on_action_result, queued)
+        bridge.undoResult.connect(self._on_undo_result, queued)
         bridge.eventPeek.connect(self._on_event_peek, queued)
         bridge.agendaResult.connect(self._on_agenda_result, queued)
         bridge.accountConnect.connect(self._on_account_connect, queued)
@@ -4678,7 +4775,7 @@ class AppController(QObject):
         reading.openSource.connect(self.open_action_source)
         reading.copyText.connect(self.copy_action_text)
         reading.undoAction.connect(self.undo_action)
-        reading.countdownUndo.connect(self._undo_running_countdown)
+        reading.holdUndo.connect(self._undo_send_hold)
         reading.editAction.connect(self.edit_action)
         reading.recipientTicked.connect(self.tick_recipient)
         reading.signInAccount.connect(self.sign_in_account)
@@ -4911,7 +5008,7 @@ class AppController(QObject):
         worker = SayWorker(factory, on_result)
         player = voice_ui.UtterancePlayer(self, volume=self._volume)
         voice = voice_ui.AssistantVoice(worker=worker, player=player, briefing_player=lambda: self.player,
-                                        countdown_active=lambda: self._countdown is not None,
+                                        hold_active=lambda: self._send_hold is not None,
                                         prefs=self._prefs_store(), parent=self)
         bridge.sayResult.connect(voice.on_audio, Qt.ConnectionType.QueuedConnection)
         voice.speakingChanged.connect(self._on_voice_speaking)
@@ -5351,11 +5448,11 @@ class AppController(QObject):
 
     def _take_ask_cards(self, cards: Sequence[ProposedAction], replace_mode: str = "", window: Any = None,
                         thread: tuple[str, str] | None = None) -> None:
-        """An Ask's cards, above the earlier Ask cards. A card counting down, queued or on its way
+        """An Ask's cards, above the earlier Ask cards. A card in its hidden hold, queued or on its way
         keeps its content (the same id from the new answer is left out); at most _ASK_CARDS_MAX
         stay, the oldest that is not on its way going first. ``replace_mode`` "plan" with the new
         plan's ``window`` (dayplan.PlanWindow): the earlier plan cards that are still undecided,
-        unedited, not counting down or on their way, on that day and overlapping its hours go (R39);
+        unedited, not held or on their way, on that day and overlapping its hours go (R39);
         every other earlier plan card stays ("plan my morning" then "plan my afternoon" keeps both).
         ``replace_mode`` "nudge" with ``thread`` (account, thread id): a "Tell Jarvis what to say" draft
         replaces only the unedited, undecided nudge card of that thread (R31)."""
@@ -5386,22 +5483,22 @@ class AppController(QObject):
         self._set_source(SOURCE_ASK, merged)
 
     def _replaceable_nudge_card(self, action: ProposedAction, thread: tuple[str, str]) -> bool:
-        """An unedited, undecided nudge card of ``thread`` (account, thread id), not counting down or on its
-        way: what a "Tell Jarvis what to say" draft replaces (R31)."""
+        """An unedited, undecided nudge card of ``thread`` (account, thread id), not held or on its way: what
+        a "Tell Jarvis what to say" draft replaces (R31)."""
         if action.mode != MODE_NUDGE or (action.account, action.field("thread")) != thread:
             return False
         if action.id in self._jobs or self._store.is_decided(action.id) or self._is_edited(action):
             return False
-        return not (self._countdown is not None and self._countdown.action.id == action.id)
+        return not (self._send_hold is not None and self._send_hold.action.id == action.id)
 
     def _replaceable_plan_card(self, action: ProposedAction, window: Any) -> bool:
-        """An earlier plan card a new plan of ``window`` replaces (R39): undecided, unedited, not in a
-        countdown or job, on the window's day and overlapping its hours."""
+        """An earlier plan card a new plan of ``window`` replaces (R39): undecided, unedited, not held or in a
+        job, on the window's day and overlapping its hours."""
         if action.mode != MODE_PLAN or action.start is None or action.end is None:
             return False
         if action.id in self._jobs or self._store.is_decided(action.id) or self._is_edited(action):
             return False
-        if self._countdown is not None and self._countdown.action.id == action.id:
+        if self._send_hold is not None and self._send_hold.action.id == action.id:
             return False
         start, end = action.start.replace(tzinfo=None), action.end.replace(tzinfo=None)
         return start.date() == window.day and start < window.end and window.start < end
@@ -5425,8 +5522,8 @@ class AppController(QObject):
         return self._effective(action) if action is not None else None
 
     def _shown(self, action_id: str) -> ProposedAction | None:
-        """The proposal as its card shows it: while its countdown ran out and the call is queued or
-        on its way, and after Jarvis carried it out, exactly what was sent (a newer page with the
+        """The proposal as its card shows it: while it is held, queued or on its way, and after Jarvis
+        carried it out, exactly what was sent (a newer page with the
         same id never changes that card); otherwise as _current."""
         running = self._running.get(action_id)
         if running is not None and running[1]:
@@ -5462,12 +5559,19 @@ class AppController(QObject):
             return
         self._actions = list(actions)
         ids = {action.id for action in self._actions}
-        for kept in (self._edits, self._checks, self._hints, self._carried, self._mismatch_seen, self._reviewed):
+        for kept in (self._edits, self._checks, self._hints, self._carried, self._mismatch_seen, self._reviewed,
+                     self._result_notes):
             for action_id in [key for key in kept if key not in ids]:
                 del kept[action_id]
-        countdown = self._countdown
-        if countdown is not None and self._current(countdown.action.id) != countdown.action:
-            self._cancel_countdown("the briefing changed")   # never send what the card no longer shows
+        for action_id in [key for key in self._undos if key not in ids]:
+            # Its card was cleared: its Undo goes (logged by id only).
+            del self._undos[action_id]
+            logger.info("Undo of action %s is no longer offered (its card was cleared)", action_id)
+        self._sync_undo_timer()
+        hold = self._send_hold
+        if hold is not None and hold.action.id not in ids:
+            # Its card goes away during the hold: the owner already saw "Sent", so it goes now.
+            self._finish_send_hold()
         if self._dialog is not None and self._dialog.action_id not in ids:
             self._dialog.reject()
         reading = self.window.reading
@@ -5493,7 +5597,7 @@ class AppController(QObject):
         self._request_peeks()
 
     def _show_card_state(self, action_id: str) -> None:
-        """The card's status from the countdown, the running job or the saved decision.
+        """The card's status from its hold, the running job (an Undo included) or the saved decision.
 
         While the card waits for a decision (pending, or failed / unknown and kept for
         a retry) its note is shown again: WORKING... clears the note. An RSVP, Move or
@@ -5513,7 +5617,7 @@ class AppController(QObject):
         mail = action is not None and action.sends_mail
         mail_status = self._mail_status(action) if mail else None
         if event:
-            self._sync_countdown_card(card, action, status, stage)
+            self._sync_event_card(card, action, status, stage)
         elif mail and mail_status is not None:
             self._sync_mail_card(card, action, status, stage, mail_status)
         elif action is not None and _adds_event(action) and stage is None:
@@ -5521,11 +5625,12 @@ class AppController(QObject):
             # (Google is asked for the existing event first, so a retry never adds a second one).
             approve = card_view(action, self._now().date()).approve_text or "Approve"
             card.set_approve_text(RETRY_TEXT if status == STATUS_UNKNOWN else approve)
-        if stage == _STAGE_COUNTDOWN:
-            card.set_status(hud.CARD_COUNTDOWN, self._countdown_text())
-            countdown = self._countdown
-            if countdown is not None and countdown.action.id == action_id:   # the strip's drain bar
-                card.set_countdown(countdown.deadline, countdown.deadline - countdown.started)
+        running = self._running.get(action_id)
+        if action is not None and (stage == _STAGE_HOLD or (action.held and stage == _STAGE_WORKING
+                                                              and running is not None and running[1])):
+            # A Send / Cancel: "Sent" at once (its hidden hold, then its call); Undo only during the hold.
+            card.set_status(hud.CARD_SENT, sent_text(action) or "Sent")
+            card.set_undo(UNDO_TEXT if stage == _STAGE_HOLD else "")
             return
         if stage is not None:
             if stage == _STAGE_SIGNIN:
@@ -5538,7 +5643,7 @@ class AppController(QObject):
             # A Reply / Email that failed was certainly not sent: say that on the result line (two
             # lines at most); Gmail's reason goes into the note, which shows all of it.
             message = MAIL_FAILED_TEXT if mail else entry.get("message", "")
-        elif status == STATUS_UNKNOWN and action is not None and action.countdown:
+        elif status == STATUS_UNKNOWN and action is not None and action.carried:
             message = UNKNOWN_MAIL_CARD_TEXT if mail else UNKNOWN_CARD_TEXT
         elif status == STATUS_SENT:
             message = entry.get("message", "") or (result_text(action, status) if action is not None else "")
@@ -5547,11 +5652,23 @@ class AppController(QObject):
         shown = _CARD_FOR_STATUS.get(status, hud.CARD_PENDING)
         block = action is not None and action.kind == TODO
         link_text = _BLOCK_LINK_TEXT if block else (_EVENT_LINK_TEXT if event else "")
+        offer = self._undos.get(action_id)
+        if offer is not None and shown in (hud.CARD_ADDED, hud.CARD_SENT):
+            # The confirmed state with the time of the change while its Undo is offered ("ADDED - 2:41 PM").
+            when = _clock_text(offer.at, self._now(), self.config.display.hour24)
+            message = f"{message or result_text(offer.action, status) or 'Added'} {DOT} {when}"
         card.set_status(shown, message, entry.get("link", ""), link_text)
         if action is None or shown not in (hud.CARD_PENDING, hud.CARD_FAILED, hud.CARD_UNKNOWN):
+            if offer is not None and shown in (hud.CARD_ADDED, hud.CARD_SENT):
+                card.set_undo(RETRY_TEXT if offer.note else UNDO_TEXT, "Reverses exactly this change")
+                card.set_note(offer.note)
+            else:   # no Undo (any more): 10 minutes passed, it was reversed or refused, or none was offered
+                card.set_undo("")
+                if self._result_notes.get(action_id):
+                    card.set_note(self._result_notes[action_id])
             return
         if event:
-            card.set_note(self._countdown_note(action, status, entry))
+            card.set_note(self._event_note(action, status, entry))
         elif mail and mail_status is not None:
             card.set_note(self._mail_card_note(action, status, entry, mail_status))
         elif status == STATUS_UNKNOWN and _adds_event(action):
@@ -5567,8 +5684,8 @@ class AppController(QObject):
             if note or card.note().startswith(_ACCOUNT_NOTE_PREFIXES):
                 card.set_note(note)
 
-    def _sync_countdown_card(self, card: hud.ActionCard, action: ProposedAction, status: str,
-                             stage: str | None) -> None:
+    def _sync_event_card(self, card: hud.ActionCard, action: ProposedAction, status: str,
+                         stage: str | None) -> None:
         """An RSVP, Move or Cancel card's check line, tools row (Edit / Sign in / Open event,
         Copy) and button text."""
         decided = self._store.is_decided(action.id)
@@ -5707,9 +5824,9 @@ class AppController(QObject):
         return hud.TOOL_EDIT
 
     def _tools_enabled(self, action_id: str) -> bool:
-        """Edit and Sign in open a dialog or the browser: only while nothing else runs (no
-        countdown, job or sign-in on any card), so nothing ever covers a running card's Undo."""
-        return (self.state != STATE_QUITTING and not self._jobs and self._countdown is None
+        """Edit and Sign in open a dialog or the browser: only while nothing else runs (no hold,
+        job or sign-in on any card), so nothing ever covers a held card's Undo."""
+        return (self.state != STATE_QUITTING and not self._jobs and self._send_hold is None
                 and not self._connect_running and not self._store.is_decided(action_id))
 
     def _copy_label(self, action: ProposedAction) -> str:
@@ -5788,7 +5905,7 @@ class AppController(QObject):
         text = AFTER_PREFIX + f" {DOT} ".join(part for part in (title, what) if part)
         return text, "", False
 
-    def _countdown_note(self, action: ProposedAction, status: str, entry: Mapping[str, Any]) -> str:
+    def _event_note(self, action: ProposedAction, status: str, entry: Mapping[str, Any]) -> str:
         """The amber note of an RSVP, Move or Cancel card: what the last click on it needs next,
         why its outcome is unknown, then the line's own warnings."""
         parts = [self._hints.get(action.id, "")]
@@ -5815,7 +5932,7 @@ class AppController(QObject):
             self._hints.pop(action_id, None)
         self._show_card_state(action_id)
 
-    def _refresh_countdown_cards(self) -> None:
+    def _refresh_editable_cards(self) -> None:
         """Check lines, links, buttons and notes of every RSVP, Move and Cancel card, and the FROM
         line, chips and notes of every Reply / Email card (a sign-in changes them)."""
         for action in self._actions:
@@ -5866,8 +5983,8 @@ class AppController(QObject):
         return LOCK_TIP if self._jobs else ""
 
     def _sync_card_locks(self) -> None:
-        """Lock every card but the one being approved while an approval (its countdown included)
-        or a sign-in runs."""
+        """Lock every card but the one being approved while an approval (a Send's hidden hold included),
+        an Undo or a sign-in runs."""
         tip = self._lock_tip()
         for card in self.window.reading.approvals.cards():
             card.set_locked(bool(tip) and card.action_id not in self._jobs, tip)
@@ -5984,18 +6101,18 @@ class AppController(QObject):
     def approve_action(self, action_id: str) -> None:
         """The card's right-hand button.
 
-        Approve (a Calendar event) and Add block (a Todo's block) start the undo
-        countdown; at its end the action worker signs in when needed and adds
-        the event. Accept / Decline / Maybe, Move and Cancel event (and Retry)
-        start the countdown once the card shows Google's own view of its event
-        and that view allows it; before that the click signs the account in or
-        checks the event, and the card says to click again. Send (a Reply or
-        Email) signs its account in first, opens Edit to confirm new recipients
-        or to read a long message, and otherwise starts the countdown. Done
+        Approve (a Calendar event) and Add block (a Todo's block) go to the action
+        worker at once (it signs in when needed and adds the event; the card then
+        offers Undo). Accept / Decline / Maybe and Move (and Retry) go at once,
+        and Cancel event starts its hidden hold, once the card shows Google's own
+        view of its event and that view allows it; before that the click signs the
+        account in or checks the event, and the card says to click again. Send (a
+        Reply or Email) signs its account in first, opens Edit to read a long
+        message, and otherwise shows Sent with Undo while its hidden hold runs. Done
         (cards Jarvis does not carry out, or whose event Jarvis may not change,
         or a message it can't send) records that you handled it.
 
-        A day plan's Add block is refused when the block's start has passed (no countdown), and a
+        A day plan's Add block is refused when the block's start has passed (nothing added), and a
         key press on a plan card within a second of Jarvis moving the focus there never approves
         it (R1 / R25).
         """
@@ -6020,7 +6137,7 @@ class AppController(QObject):
             if self._approve_text(action, status) == DONE_TEXT:   # what the button says
                 self._mark_done(action)
                 return
-            self._approve_countdown(action)
+            self._approve_event(action)
             return
         if action.sends_mail:
             self._approve_mail(action)
@@ -6038,8 +6155,8 @@ class AppController(QObject):
         alias = account_of(action)
         unknown = self._account_unknown(alias)
         if unknown or (not self._account_signed_in(alias) and self._account_unconfirmed(alias)):
-            # Its sign-in binds a Google account to confirm first: sign in and ask before the
-            # countdown, so a countdown never runs for an event that can't be added.
+            # Its sign-in binds a Google account to confirm first: sign in and ask before anything is
+            # added, so nothing goes for an event that can't be added.
             logger.info("Approve %s: signing in to the %s account first (its Google account is confirmed before "
                         "anything is added)", action_id, logged_alias(alias))
             button = self._confirm_button(action_id)
@@ -6051,14 +6168,15 @@ class AppController(QObject):
             logger.info("Approve %s: asking first whether the %s account is the right Google account", action_id,
                         logged_alias(alias))
             return
-        self._start_countdown(action)   # a Todo's block keeps the Todo's id, so the result lands on its card
+        self._carry_out(action)   # a Todo's block keeps the Todo's id, so the result lands on its card
 
     def _approve_mail(self, action: ProposedAction) -> None:
         """Send / Retry on a Reply or Email: refuse while a NEW RECIPIENT is not ticked on the card (Send
-        is disabled then; nothing is sent, no dialog opens), sign in first (no countdown) while its
+        is disabled then; nothing is sent, no dialog opens), sign in first (nothing is sent) while its
         account can't send, ask whether a new binding is the right Google account, refuse while a
         recipient is the sending account itself (the note says so; Edit fixes it), open Edit while a
-        long message was not read there, else count down. Done (Jarvis can't send it here) records
+        long message was not read there, else show Sent with Undo and hold it. Done (Jarvis can't send
+        it here) records
         that you handled it."""
         action_id = action.id
         mail = self._mail_status(action)
@@ -6107,7 +6225,7 @@ class AppController(QObject):
         if not mail.ready:
             self._hint(action_id, mail.note or NOT_READY_NOTE)
             return
-        self._start_countdown(action, sender=mail.sender)
+        self._start_send_hold(action, sender=mail.sender)
 
     def _unread(self, action: ProposedAction) -> bool:
         """A Reply / Email whose card does not show all of its subject or message (cut at the card's
@@ -6117,8 +6235,9 @@ class AppController(QObject):
         cut = body_needs_review(action) or card is None or card.mail_cut()
         return cut and self._reviewed.get(action.id) != _review_digest(action.title, action.body)
 
-    def _approve_countdown(self, action: ProposedAction) -> None:
-        """Accept / Move / Cancel event / Retry: sign in or check first when needed, else count down."""
+    def _approve_event(self, action: ProposedAction) -> None:
+        """Accept / Move / Cancel event / Retry: sign in or check first when needed, else carry it out (an
+        RSVP or Move at once; a Cancel after its hidden hold)."""
         action_id = action.id
         card = self.window.reading.action_card(action_id)
         button = card.approve_text() if card is not None else "Approve"
@@ -6157,43 +6276,73 @@ class AppController(QObject):
             self._hint(action_id, MISMATCH_NOTE.format(what=_MISMATCH_WHAT.get(check.mismatch, "other details"),
                                                        button=button))
             return
-        self._start_countdown(action)
+        if action.held:
+            self._start_send_hold(action)
+        else:
+            self._carry_out(action)
 
-    # ---- the undo countdown --------------------------------------------------------------
+    # ---- carrying out: at once (calendar changes) or after a hidden hold (Send, Cancel event) ----------
 
-    def _start_countdown(self, action: ProposedAction, *, sender: str = "") -> None:
-        """Count down to the one call (Undo until then). ``sender``: a Reply / Email's From address
-        as its card shows it; it goes out only from that address."""
-        seconds = int(self.config.actions.undo_seconds)
-        now = time.monotonic()
+    def _carry_out(self, action: ProposedAction) -> None:
+        """A Calendar event, Todo block, RSVP or Move: to the action worker at once (nothing to wait out). Its card
+        shows WORKING, then the result with Undo beside it (the result brings the UndoRecord)."""
+        worker = self._calendar_worker
+        if worker is None or self.state == STATE_QUITTING:
+            return
         self._hints.pop(action.id, None)
-        self._countdown = _Countdown(action, deadline=now + seconds, started=now, sender=sender)
-        self._countdown.task = self._live_action_task(action, seconds, now + seconds)
-        self._live_auto_open(_live.TASK_ACTION, self._countdown.task.id)
-        self._jobs[action.id] = _STAGE_COUNTDOWN
-        self.window.reading.set_countdown("ADDING" if _adds_event(action) else "SENDING", now + seconds)
-        logger.info("Approved action %s (%s, %s): %s in %d s unless undone", action.id, action.kind,
-                    logged_alias(account_of(action)), "adding" if _adds_event(action) else "sending", seconds)
+        self._result_notes.pop(action.id, None)
+        task = self._live_action_task(action)
+        self._live_auto_open(_live.TASK_ACTION, task.id)
+        self._jobs[action.id] = _STAGE_WORKING
+        self._running[action.id] = (action, True)
+        logger.info("Approved action %s (%s, %s): carrying it out now", action.id, action.kind,
+                    logged_alias(account_of(action)))
         self._show_card_state(action.id)
         self._sync_card_locks()
         if action.kind == CALENDAR:
-            self._activity(hud.TAG_RUN, f"Adding in {seconds} s: {_activity_title(action)}", "Google Calendar")
+            self._activity(hud.TAG_RUN, f"Adding {_activity_title(action)}", "Google Calendar")
         elif action.kind == TODO:
-            self._activity(hud.TAG_RUN, f"Adding in {seconds} s: a block for {_activity_title(action)}",
-                           "Google Calendar")
+            self._activity(hud.TAG_RUN, f"Adding a block for {_activity_title(action)}", "Google Calendar")
         else:
-            self._activity(hud.TAG_RUN, f"Sending in {seconds} s: {_action_phrase(action)}",
-                           self._activity_sub(action))
-        self._countdown_timer.start()
+            self._activity(hud.TAG_RUN, f"Sending: {_action_phrase(action)}", self._activity_sub(action))
         # An earlier card's "Done, sir" that has not started yet is dropped (its entry is shown):
         # said after this approval it would sound like this card's result, which only comes later.
         self._voice_call("cancel_key", _RESULT_KEY)
-        self._pump_voice()   # nothing Jarvis says starts during the countdown
+        worker.execute(action, live=task if task is not _live.NO_TASK else None)
+
+    def _start_send_hold(self, action: ProposedAction, *, sender: str = "") -> None:
+        """A Reply, Email or Cancel event: its card shows Sent / Cancelled with Undo at once, while the call
+        waits the hidden hold ([actions] undo_seconds; no number anywhere). "held" is saved, so a Jarvis
+        that closes before it could go shows the card as not sent next time. ``sender``: a Reply / Email's
+        From address as its card shows it; it goes out only from that address."""
+        seconds = int(self.config.actions.undo_seconds)
+        now = time.monotonic()
+        self._hints.pop(action.id, None)
+        self._result_notes.pop(action.id, None)
+        self._send_hold = _SendHold(action, deadline=now + seconds, started=now, sender=sender)
+        self._send_hold.task = self._live_action_task(action, hold_end=now + seconds)
+        self._live_auto_open(_live.TASK_ACTION, self._send_hold.task.id)
+        self._jobs[action.id] = _STAGE_HOLD
+        self._running[action.id] = (action, True)   # the card shows exactly this, whatever the page says now
+        self._store.set(action.id, STATUS_HELD, kind=action.kind, account=action.account)
+        self.window.reading.set_hold(sent_text(action) or "Sent")
+        logger.info("Approved action %s (%s, %s): shown as done, held before the call", action.id, action.kind,
+                    logged_alias(account_of(action)))
+        self._show_card_state(action.id)
+        self._sync_card_locks()
+        self._activity(hud.TAG_RUN, f"Sending: {_action_phrase(action)}", self._activity_sub(action))
+        self._send_hold_timer.start()
+        # An earlier card's "Done, sir" that has not started yet is dropped (its entry is shown):
+        # said after this approval it would sound like this card's result, which only comes later.
+        self._voice_call("cancel_key", _RESULT_KEY)
+        self._pump_voice()   # nothing Jarvis says starts during the hold
+        self._refresh_actions_ui()
 
     @_live.quiet(_live.NO_TASK)
-    def _live_action_task(self, action: ProposedAction, seconds: int, deadline: float) -> Any:
-        """An approved card's LIVE view task: "You approved", what it will send or change exactly
-        (Executor.preview: no network) and the undo countdown."""
+    def _live_action_task(self, action: ProposedAction, *, hold_end: float | None = None) -> Any:
+        """An approved card's LIVE view task: "You approved", what it sends or changes exactly
+        (Executor.preview: no network) and, for a Send / Cancel, its hidden hold ("SENDING": the truth,
+        never a number)."""
         if not self.live.enabled:
             return _live.NO_TASK
         saved = self._store.get(action.id) or {}
@@ -6215,12 +6364,13 @@ class AppController(QObject):
         task.step(_live.ACTION_APPROVED, "You approved", status=_live.STATUS_OK, fields=fields)
         preview = self._executor.preview(action)
         if preview is not None:
-            payload = task.step(_live.ACTION_PAYLOAD, preview.title, status_text="PREVIEW")
+            payload = task.step(_live.ACTION_PAYLOAD, preview.title, status_text="SENDING")
             payload.show(preview)   # a Reply / Email's picture comes with it
             if action.kind in (CALENDAR, TODO, MOVE, CANCEL, RSVP):
                 payload.picture(self._live_day_picture(action))
-        task.step(_live.ACTION_COUNTDOWN, "Undo countdown", status_text="ADDING" if _adds_event(action) else "SENDING",
-                  deadline=deadline, fields=[("Length", f"{seconds} s"), ("Undo", "on the card")])
+        if hold_end is not None:
+            task.step(_live.ACTION_HOLD, "Undo hold (the card already shows it as done)", status_text="SENDING",
+                      deadline=hold_end, fields=[("Undo", "on the card until it goes")])
         return task
 
     def _activity_sub(self, action: ProposedAction) -> str:
@@ -6232,119 +6382,201 @@ class AppController(QObject):
         count = len(review.recipients) if review is not None else len(action.mail_recipients())
         return f"{label} {DOT} {_recipient_count(count)}"
 
-    def _countdown_text(self) -> str:
-        countdown = self._countdown
-        if countdown is None:
-            return ""
-        seconds = max(0, math.ceil(countdown.deadline - time.monotonic()))
-        countdown.shown = seconds
-        if countdown.action.sends_mail:   # the FROM line may be scrolled out of view: say which account
-            return f"Sending from {countdown.action.account} in {seconds} s"
-        return f"{'Adding' if _adds_event(countdown.action) else 'Sending'} in {seconds} s"
+    def _on_send_hold_tick(self) -> None:
+        hold = self._send_hold
+        if hold is None:
+            self._send_hold_timer.stop()
+            return
+        if hold.deadline - time.monotonic() <= 0:
+            self._finish_send_hold()
 
-    def _on_countdown_tick(self) -> None:
-        countdown = self._countdown
-        if countdown is None:
-            self._countdown_timer.stop()
+    def _finish_send_hold(self) -> None:
+        """The hold ended (or its card went away): queue the one call (the worker saves "running" right
+        before it). The card keeps saying Sent; its Undo goes."""
+        hold, self._send_hold = self._send_hold, None
+        self._send_hold_timer.stop()
+        self.window.reading.set_hold()
+        self._pump_voice()   # what waited for the hold may be said now (never "Done": the result says that)
+        if hold is None:
             return
-        remaining = countdown.deadline - time.monotonic()
-        if remaining <= 0:
-            self._finish_countdown()
-            return
-        if math.ceil(remaining) != countdown.shown:
-            card = self.window.reading.action_card(countdown.action.id)
-            if card is not None:
-                card.set_status(hud.CARD_COUNTDOWN, self._countdown_text())
-
-    def _finish_countdown(self) -> None:
-        """The countdown ran out: queue the one call (the worker saves "running" right before it)."""
-        countdown, self._countdown = self._countdown, None
-        self._countdown_timer.stop()
-        self.window.reading.set_countdown()
-        self._pump_voice()   # what waited for the countdown may be said now (never "Done": the result says that)
-        if countdown is None:
-            return
-        action = countdown.action
+        action = hold.action
         worker = self._calendar_worker
         if self.state == STATE_QUITTING or worker is None:
-            self._jobs.pop(action.id, None)
-            _live_countdown_end(countdown, _live.STATUS_CANCELLED, "", "Jarvis closed - nothing was sent")
-            return
+            return   # shutdown sends a hold itself
         if action.sends_mail:
-            problem = _mail_from_problem(self._executor, action, countdown.sender)
-            if problem:   # the account (or its address) changed under the countdown: nothing is sent
-                _live_countdown_end(countdown, _live.STATUS_BLOCKED, "",
-                                    "the sending account changed during the countdown - nothing was sent")
+            problem = _mail_from_problem(self._executor, action, hold.sender)
+            if problem:   # the account (or its address) changed under the hold: nothing is sent
+                _live_hold_end(hold, _live.STATUS_BLOCKED, "",
+                               "the sending account changed before it went - nothing was sent")
                 self._jobs.pop(action.id, None)
-                logger.info("Action %s (%s, %s) not sent: the sending account changed during the countdown",
+                self._running.pop(action.id, None)
+                self._store.set(action.id, STATUS_FAILED, message=problem, kind=action.kind, account=action.account)
+                logger.info("Action %s (%s, %s) not sent: the sending account changed during the hold",
                             action.id, action.kind, logged_alias(action.account))
                 self._activity(hud.TAG_STOP, f"Not sent: {_kind_title(action)}", _short(problem))
-                self._hint(action.id, problem)
+                self._show_card_state(action.id)
                 self._sync_card_locks()
                 self._refresh_actions_ui()
+                # The card said Sent: it flips to the error tile path (nothing was sent).
+                self.window.reading.set_mail_refused(action.id, "reply" if action.kind == REPLY else "email")
                 self._tell_not_sent(action)
                 return
         self._jobs[action.id] = _STAGE_WORKING
         self._running[action.id] = (action, True)
         self._show_card_state(action.id)
-        if action.kind == CALENDAR:
-            self._activity(hud.TAG_RUN, f"Adding {_activity_title(action)}", "Google Calendar")
-        elif action.kind == TODO:
-            self._activity(hud.TAG_RUN, f"Adding a block for {_activity_title(action)}", "Google Calendar")
-        else:
-            self._activity(hud.TAG_RUN, f"Sending: {_action_phrase(action)}", self._activity_sub(action))
-        _live_countdown_ran_out(countdown)
-        task = countdown.task
-        worker.execute(action, expected_from=countdown.sender, live=task if task is not _live.NO_TASK else None)
+        _live_hold_ended(hold)
+        task = hold.task
+        worker.execute(action, expected_from=hold.sender, live=task if task is not _live.NO_TASK else None)
 
-    def _undo_running_countdown(self) -> None:
-        """The header's Undo: the running countdown's card is on Approvals, out of sight."""
-        if self._countdown is not None:
-            self.undo_action(self._countdown.action.id)
+    def _undo_send_hold(self) -> None:
+        """The header's Undo: the held card is on another screen than Approvals."""
+        if self._send_hold is not None:
+            self.undo_action(self._send_hold.action.id)
 
     def undo_action(self, action_id: str) -> None:
-        """Undo during the countdown: nothing is sent and nothing is saved; the card waits again.
+        """A card's Undo (on Approvals, Home's plan block or brief reply card, or the header's): only ever the
+        owner's click on it, never voice, never by itself.
 
-        A click in the first double-click interval after the approval is
-        ignored, so a double click on Accept never undoes it at once.
+        During a Send's / Cancel's hidden hold: nothing is sent, "held" is forgotten and the card waits again
+        ("Not sent - undone."). After a calendar change (10 minutes, until the card is cleared): the worker
+        reverses exactly that change (run_undo; "running" first) unless the event is gone or changed since.
+        A click in the first double-click interval after the Undo appeared is ignored, so a double click on
+        Accept never undoes it at once; while another card's approval runs, an Undo waits for it (ignored).
         """
-        countdown = self._countdown
-        if countdown is None or countdown.action.id != action_id or self.state == STATE_QUITTING:
+        if self.state == STATE_QUITTING:
             return
-        if (time.monotonic() - countdown.started) * 1000 < QApplication.doubleClickInterval():
+        hold = self._send_hold
+        if hold is not None and hold.action.id == action_id:
+            if (time.monotonic() - hold.started) * 1000 < QApplication.doubleClickInterval():
+                logger.info("Ignored an Undo click right after the approval")
+                return
+            action = hold.action
+            self._cancel_send_hold("undone")
+            self._activity(hud.TAG_STOP, f"Undone: {_action_phrase(action)}",
+                           f"{kind_label(action).upper()} {DOT} nothing was sent")
+            self._refresh_actions_ui()
+            return
+        offer = self._undos.get(action_id)
+        if offer is None:
+            return
+        now = time.monotonic()
+        if now >= offer.until:
+            self._expire_undos()
+            return
+        if (now - offer.shown) * 1000 < QApplication.doubleClickInterval():
             logger.info("Ignored an Undo click right after the approval")
             return
-        action = countdown.action
-        self._cancel_countdown("undone")
-        nothing = "nothing was created" if _adds_event(action) else "nothing was sent"
-        self._activity(hud.TAG_STOP, f"Undone: {_action_phrase(action)}",
-                       f"{kind_label(action).upper()} {DOT} {nothing}")
+        if self._jobs or self._connect_running or self._send_hold is not None:
+            logger.info(_LOCKED_MESSAGE)
+            return
+        worker = self._calendar_worker
+        if worker is None:
+            return
+        action = offer.action
+        self._jobs[action_id] = _STAGE_UNDOING
+        logger.info("Undo of action %s (%s, %s) asked for", action_id, action.kind,
+                    logged_alias(account_of(action)))
+        self._show_card_state(action_id)
+        self._sync_card_locks()
+        self._activity(hud.TAG_RUN, f"Undoing: {_action_phrase(action)}", kind_label(action).upper())
+        worker.undo(action, offer.record)
+
+    def _on_undo_result(self, action_id: str, outcome: Any) -> None:
+        """A card's Undo came back: UNDONE (the card waits again and says so), UNDO_REFUSED (gone or changed
+        since: left as it is, the card says so in one sentence) or a failure (the card keeps its result and
+        its Undo reads Retry)."""
+        if self.state == STATE_QUITTING:
+            return
+        self._jobs.pop(action_id, None)
+        offer = self._undos.get(action_id)
+        action = offer.action if offer is not None else self._shown(action_id)
+        status = getattr(outcome, "status", "")
+        if action is None:
+            self._undos.pop(action_id, None)
+        elif status == UNDONE:
+            self._undos.pop(action_id, None)
+            self._carried.pop(action_id, None)
+            self._hints[action_id] = UNDONE_NOTES.get(action.kind, "Undone.")
+            self._activity(hud.TAG_STOP, f"Undone: {_action_phrase(action)}",
+                           f"{kind_label(action).upper()} {DOT} {UNDO_GONE_SUB.get(action.kind, 'undone')}")
+            if action.mode == MODE_PLAN and action.serves:
+                self._planned_todos.pop(action.serves, None)
+                self._planned_notes.pop(action.serves, None)
+                self._show_card_state(action.serves)
+            if account_of(action) == DEFAULT_ACCOUNT:
+                self._request_agenda()   # the agenda may show the change
+        elif status == UNDO_REFUSED:
+            self._undos.pop(action_id, None)
+            self._result_notes[action_id] = UNDO_CHANGED_TEXT
+            self._activity(hud.TAG_WAIT, f"Not undone: {_action_phrase(action)}", "changed since - left as it is")
+        elif offer is not None:
+            error = getattr(outcome, "error", None)
+            if status == STATUS_UNKNOWN:
+                offer.note = UNDO_UNKNOWN_NOTE
+                offer.record = dataclasses.replace(offer.record, uncertain=True)
+            else:
+                reason = _short(_CHECK_BEFORE_RETRY_RE.sub("", str(error or "")) or "unknown error")
+                offer.note = UNDO_FAILED_NOTE.format(reason=reason.rstrip("."))
+            self._activity(hud.TAG_STOP, f"Couldn't undo: {_action_phrase(action)}", _short(str(error or "")))
+        self._sync_undo_timer()
+        self._show_card_state(action_id)
+        self._sync_card_locks()
         self._refresh_actions_ui()
 
-    def _cancel_countdown(self, reason: str) -> None:
-        countdown, self._countdown = self._countdown, None
-        self._countdown_timer.stop()
-        self.window.reading.set_countdown()
-        self._pump_voice()
-        if countdown is None:
-            return
-        action_id = countdown.action.id
-        self._jobs.pop(action_id, None)
-        logger.info("Action %s undone (%s); nothing was sent", action_id, reason)
-        nothing = "nothing was created" if _adds_event(countdown.action) else "nothing was sent"
-        if reason == "undone":
-            _live_countdown_end(countdown, _live.STATUS_CANCELLED, "UNDONE", nothing,
-                                task_summary=f"Undone - {nothing}")
+    def _offer_undo(self, action: ProposedAction, record: Any) -> None:
+        """Jarvis's calendar change can be reversed: its card's Undo, for UNDO_WINDOW_S or until it is cleared."""
+        now = time.monotonic()
+        self._undos[action.id] = _UndoOffer(action, record, until=now + UNDO_WINDOW_S, shown=now, at=self._now())
+        self._result_notes.pop(action.id, None)
+        self._sync_undo_timer()
+
+    def _on_undo_tick(self) -> None:
+        self._expire_undos()
+
+    def _expire_undos(self) -> None:
+        """Offers older than UNDO_WINDOW_S go (their cards keep the result, without Undo)."""
+        now = time.monotonic()
+        for action_id in [key for key, offer in self._undos.items()
+                          if now >= offer.until and self._jobs.get(key) != _STAGE_UNDOING]:
+            del self._undos[action_id]
+            logger.info("Undo of action %s is no longer offered (10 minutes passed)", action_id)
+            self._show_card_state(action_id)
+        self._sync_undo_timer()
+
+    def _sync_undo_timer(self) -> None:
+        if self._undos and self.state != STATE_QUITTING:
+            if not self._undo_timer.isActive():
+                self._undo_timer.start()
         else:
-            _live_countdown_end(countdown, _live.STATUS_CANCELLED, "STOPPED", f"{reason} - {nothing}")
+            self._undo_timer.stop()
+
+    def _cancel_send_hold(self, reason: str) -> None:
+        """The hold ends without a call (the owner's Undo): nothing is sent, "held" is forgotten and the card
+        waits again ("Not sent - undone.")."""
+        hold, self._send_hold = self._send_hold, None
+        self._send_hold_timer.stop()
+        self.window.reading.set_hold()
+        self._pump_voice()
+        if hold is None:
+            return
+        action = hold.action
+        action_id = action.id
+        self._jobs.pop(action_id, None)
+        self._running.pop(action_id, None)
+        self._store.forget(action_id, (STATUS_HELD,))
+        logger.info("Action %s undone (%s); nothing was sent", action_id, reason)
+        self._hints[action_id] = HOLD_UNDONE_CANCEL_NOTE if action.kind == CANCEL else HOLD_UNDONE_NOTE
+        _live_hold_end(hold, _live.STATUS_CANCELLED, "UNDONE", "nothing was sent",
+                       task_summary="Undone - nothing was sent")
         self._show_card_state(action_id)
         self._sync_card_locks()
 
     def _send_in_flight(self) -> bool:
-        """A call is queued or on its way to Google ("running" is or is about to be saved); not
-        while its account's browser sign-in waits (nothing was sent then)."""
-        return any(writes and self._jobs.get(action_id) == _STAGE_WORKING
-                   for action_id, (_action, writes) in self._running.items())
+        """A call (or an Undo) is queued or on its way to Google ("running" is or is about to be saved);
+        not while its account's browser sign-in waits (nothing was sent then)."""
+        return (any(writes and self._jobs.get(action_id) == _STAGE_WORKING
+                    for action_id, (_action, writes) in self._running.items())
+                or _STAGE_UNDOING in self._jobs.values())
 
     # ---- other decisions and the tools row -----------------------------------------------------
 
@@ -6480,9 +6712,9 @@ class AppController(QObject):
         Save keeps the changes on the card (memory only, same id); nothing is sent."""
         if self.state == STATE_QUITTING or self._dialog is not None or self._account_dialog is not None:
             return
-        if self._countdown is not None or self._jobs or self._connect_running:
-            # The dialog is window-modal: beside another card's countdown it would cover that
-            # card's Undo while the countdown runs out.
+        if self._send_hold is not None or self._jobs or self._connect_running:
+            # The dialog is window-modal: beside another card's hold it would cover that card's Undo
+            # while the hold runs out.
             logger.info("Ignored Edit of action %s: another card's approval or sign-in is running", action_id)
             return
         action = self._current(action_id)
@@ -6624,7 +6856,7 @@ class AppController(QObject):
             if not signed_in and not problem and previous is not None and not previous[0]:
                 problem, message = previous[1], previous[2]   # keep why the last sign-in failed
             self._accounts_state[alias] = (bool(signed_in), problem or "", message or "")
-        self._refresh_countdown_cards()
+        self._refresh_editable_cards()
         self._update_service_chips()
         self._request_peeks()
         self._refresh_ask()   # which accounts' mail Ask may read
@@ -6684,7 +6916,7 @@ class AppController(QObject):
                 self._checks[action_id] = check_failure(action, error)
             logger.info("Could not check the event of action %s (%s)", action_id, type(error).__name__)
         self._live_peeks_done(results)
-        self._refresh_countdown_cards()
+        self._refresh_editable_cards()
         if accounts_changed:
             self._update_service_chips()
 
@@ -6719,11 +6951,15 @@ class AppController(QObject):
         self._jobs.pop(action_id, None)
         running = self._running.pop(action_id, None)
         action = running[0] if running is not None else self._current(action_id)
-        writes_running = running[1] if running is not None else bool(action is not None and action.countdown)
+        writes_running = running[1] if running is not None else bool(action is not None and action.carried)
         if writes_running and action is not None and not _adds_event(action):
-            self._countdown_result(action, result, error, status)
-        else:   # the worker saved a countdown's result itself (writes_running)
+            self._carried_result(action, result, error, status)
+        else:   # the worker saved the result itself (writes_running)
             self._calendar_result(action_id, action, result, error, status, saved=writes_running)
+        record = getattr(result, "undo", None) if error is None else None
+        if action is not None and action.undoable and record is not None and status in (STATUS_CREATED,
+                                                                                         STATUS_SENT):
+            self._offer_undo(action, record)
         plan_block = action is not None and action.mode == MODE_PLAN
         if plan_block and result is not None and error is None and status in (STATUS_CREATED, STATUS_EXISTS):
             self._note_served_todo(action)
@@ -6748,7 +6984,7 @@ class AppController(QObject):
     def _calendar_result(self, action_id: str, action: ProposedAction | None, result: ExecResult | None,
                          error: ExecError | None, status: str, *, saved: bool = False) -> None:
         """A Calendar event or a Todo's block: created / exists / failed / unknown. ``saved``: the
-        worker saved it already (after the countdown); else it is saved here (the older way)."""
+        worker saved it already; else it is saved here (the older way)."""
         title = _activity_title(action) if action is not None else "the event"
         today = self._now().date()
         block = action is not None and action.kind == TODO
@@ -6778,8 +7014,8 @@ class AppController(QObject):
                 self._activity(hud.TAG_STOP, failed, _short(message))
             self._tell_result(action, STATUS_UNKNOWN if status == STATUS_UNKNOWN else STATUS_FAILED)
 
-    def _countdown_result(self, action: ProposedAction, result: ExecResult | None, error: ExecError | None,
-                          status: str) -> None:
+    def _carried_result(self, action: ProposedAction, result: ExecResult | None, error: ExecError | None,
+                        status: str) -> None:
         """An RSVP, Move, Cancel, Reply or Email: the worker saved sent / failed / unknown over
         "running"."""
         self._hints.pop(action.id, None)
@@ -6811,7 +7047,7 @@ class AppController(QObject):
             self._accounts_state[action.account] = (False, "" if problem == PROBLEM_SIGNED_OUT else problem,
                                                     "" if problem == PROBLEM_SIGNED_OUT else message)
             self._update_service_chips()
-            self._refresh_countdown_cards()   # every card of that account: Sign in, and why
+            self._refresh_editable_cards()   # every card of that account: Sign in, and why
         if status == STATUS_UNKNOWN:
             self._activity(hud.TAG_WAIT, f"Unknown: {_action_phrase(action)}", UNKNOWN_CARD_TEXT)
         else:
@@ -6840,7 +7076,7 @@ class AppController(QObject):
 
     def connect_calendar(self) -> None:
         """The agenda's Connect link: the personal account's Google sign-in, only on this click."""
-        if self.state != STATE_READING or self._signing_in() or self._countdown is not None:
+        if self.state != STATE_READING or self._signing_in() or self._send_hold is not None:
             return
         if self._start_calendar() is None:
             self._render_agenda()
@@ -6850,7 +7086,7 @@ class AppController(QObject):
 
     def sign_in_account(self, action_id: str) -> None:
         """A card's Sign in link: that account's Google sign-in in the browser, only on this click."""
-        if self.state == STATE_QUITTING or self._signing_in() or self._countdown is not None or self._jobs:
+        if self.state == STATE_QUITTING or self._signing_in() or self._send_hold is not None or self._jobs:
             return
         action = self._current(action_id)
         if action is None or not action.changes_event or self._store.is_decided(action_id):
@@ -6881,7 +7117,7 @@ class AppController(QObject):
         if alias == DEFAULT_ACCOUNT and action is None:
             self._connect_note = ""
         self._sync_card_locks()
-        self._refresh_countdown_cards()
+        self._refresh_editable_cards()
         self._update_service_chips()
         self._live_background().step(_live.ACCOUNT_SIGNIN, f"Google sign-in for {alias} in your browser",
                                      key=f"signin:{alias}", fields=[("Account", alias)])
@@ -6932,7 +7168,7 @@ class AppController(QObject):
         if card_id:
             self._hints[card_id] = ACCOUNT_CONFIRM_NOTE.format(alias=alias)
             self._show_card_state(card_id)   # a Calendar event's or Todo's card too
-        self._refresh_countdown_cards()
+        self._refresh_editable_cards()
         logger.info("Asking whether the %s account's Google account is the right one", logged_alias(alias))
         self._activity(hud.TAG_WAIT, f"Is this the right Google account? ({alias} account)",
                        "answer in the dialog - nothing is sent until you do")
@@ -6977,9 +7213,9 @@ class AppController(QObject):
                 self._hints[card_id] = ACCOUNT_RECONNECT_NOTE.format(alias=alias, button=button)
             mail = action if action is not None and action.sends_mail else None
             self._start_sign_in(alias, card_id=card_id, action=mail, disconnect=True)
-        if card_id:   # a Calendar event's or Todo's card is not among the countdown cards
+        if card_id:   # a Calendar event's or Todo's card is not among the editable cards
             self._show_card_state(card_id)
-        self._refresh_countdown_cards()
+        self._refresh_editable_cards()
         self._update_service_chips()
         self._render_agenda()
 
@@ -7001,7 +7237,7 @@ class AppController(QObject):
         if self.state != STATE_QUITTING:
             if card_id:
                 self._show_card_state(card_id)
-            self._refresh_countdown_cards()
+            self._refresh_editable_cards()
             self._sync_card_locks()
 
     def _on_account_connect(self, alias: str, stage: str, message: str, problem: str) -> None:
@@ -7057,10 +7293,10 @@ class AppController(QObject):
                     button=card.approve_text())
             self._request_peeks([self._effective(action) for action in self._actions
                                  if action.account == alias], force=True)
-        if card_id:   # a Calendar event's or Todo's card is not among the countdown cards
+        if card_id:   # a Calendar event's or Todo's card is not among the editable cards
             self._show_card_state(card_id)
         self._sync_card_locks()
-        self._refresh_countdown_cards()
+        self._refresh_editable_cards()
         self._update_service_chips()
         self._render_agenda()
         if stage in (_CONNECT_SIGNED_IN, _CONNECT_READY):   # a first sign-in: is it the right Google account?
@@ -7079,7 +7315,7 @@ class AppController(QObject):
         if self._calendar_worker is not None:
             self._calendar_worker.check_sign_in()
         self._sync_card_locks()
-        self._refresh_countdown_cards()
+        self._refresh_editable_cards()
         self._update_service_chips()
         self._render_agenda()
 
@@ -7108,7 +7344,7 @@ class AppController(QObject):
         if self._calendar_worker is not None:
             self._calendar_worker.check_sign_in()
         self._sync_card_locks()
-        self._refresh_countdown_cards()
+        self._refresh_editable_cards()
         self._update_service_chips()
         self._render_agenda()
         if stage == _CONNECT_SIGNED_IN:   # a first sign-in: is it the right Google account?
@@ -7569,8 +7805,8 @@ class AppController(QObject):
             self._say(KIND_REPLY, reply.text)
 
     def _on_ask_outcome(self, outcome: Any) -> None:
-        """A finished Ask: its cards go under ASK (above the briefing's; a countdown on another
-        card goes on), the conversation gets the whole answer (and Jarvis says it), and ACTIVITY
+        """A finished Ask: its cards go under ASK (above the briefing's; a hold on another card goes
+        on), the conversation gets the whole answer (and Jarvis says it), and ACTIVITY
         gets one row of counts (never the request or the answer)."""
         if self.state == STATE_QUITTING:
             return
@@ -7967,7 +8203,7 @@ class AppController(QObject):
             logger.info("Ask: the mail sign-in waits for the running Ask")
             self._flash_note(ASK_MAIL_WAIT)
             return
-        if self._signing_in() or self._countdown is not None or self._jobs:
+        if self._signing_in() or self._send_hold is not None or self._jobs:
             self.window.reading.command_bar.set_status(ASK_MAIL_BUSY, hud.TONE_WARN)
             return
         if self._start_calendar() is None:
@@ -8123,7 +8359,7 @@ class AppController(QObject):
         busy = bool(self.ask is not None and self.ask.busy) or speaking or bool(self._utterance)
         return QuietFacts(activity=self._prod_activity(), locked=self._locked_now(),
                           speak_ok=bool(assistant.speak and assistant.speak_replies) and not muted, playing=playing,
-                          countdown=self._countdown is not None or bool(self._jobs), busy=busy)
+                          card_busy=self._send_hold is not None or bool(self._jobs), busy=busy)
 
     def _prod_ask_state(self) -> tuple[bool, bool, float]:
         """(Claude Code ready, the cached caps allow a bundle run, the caps' age in seconds): memory
@@ -8550,7 +8786,7 @@ class AppController(QObject):
 
     def _on_followup_draft(self, row_id: str) -> None:
         """The open row's Draft a reply / Draft a nudge (or Show the draft while a draft for its thread waits):
-        what the row menu's first item does. A draft is only a draft (its card, the approval, the countdown)."""
+        what the row menu's first item does. A draft is only a draft (its card, the approval, its Undo)."""
         controller = self.productivity
         item = controller.item(row_id) if controller is not None else None
         if item is None or self.state == STATE_QUITTING:
@@ -9440,8 +9676,8 @@ class AppController(QObject):
             logger.warning("Jarvis's voice failed (%s)", type(exc).__name__)
 
     def _pump_voice(self) -> None:
-        """The voice looks again whether it may start the next utterance (a countdown started or
-        ended, the briefing's playback changed)."""
+        """The voice looks again whether it may start the next utterance (a hold started or ended, the
+        briefing's playback changed)."""
         self._voice_call("pump")
 
     def _owner_playback(self) -> None:
@@ -9501,7 +9737,7 @@ class AppController(QObject):
     def _tell_result(self, action: ProposedAction | None, status: str) -> None:
         """One sentence after the executor's result for an approved card (created / exists / sent,
         failed, unknown): a JARVIS entry, spoken unless [assistant] speak_results is off. Never at
-        the click or during the countdown: only here. Titles and subjects only; never the error
+        the click or during a hold: only here. Titles and subjects only; never the error
         message (the card says why), a body or a recipient."""
         if action is None or self.state == STATE_QUITTING:
             return
@@ -9519,7 +9755,7 @@ class AppController(QObject):
                     "spoken" if spoken else "text only")
 
     def _tell_not_sent(self, action: ProposedAction) -> None:
-        """A Reply / Email not sent at the end of its countdown (the sending account changed)."""
+        """A Reply / Email not sent at the end of its hold (the sending account changed)."""
         if self.state == STATE_QUITTING:
             return
         assistant = self.config.assistant
@@ -9645,7 +9881,7 @@ class AppController(QObject):
         if kind == _live.TASK_ACTION and self.player.state in (PLAYING, WAITING):
             return False   # the briefing plays on BRIEFING: the tab stays, LIVE gets its working dot
         if kind == _live.TASK_ACTION and self.window.reading.current_tab() == SCREEN_APPROVALS:
-            return False   # the owner decides cards there (countdown, Undo, the next card): Live gets its dot
+            return False   # the owner decides cards there (Sent, Undo, the next card): Live gets its dot
         if kind == _live.TASK_ACTION and self.window.reading.current_tab() == SCREEN_HOME \
                 and self.window.reading.moment():
             return False   # ... and on Home's plan or brief (a block's Add block, the reply's Send): the same
@@ -10194,7 +10430,9 @@ class AppController(QObject):
 
     def _reset_reading(self, reason: str) -> None:
         """Clear the reading screen for another briefing (nothing is playing)."""
-        self._cancel_countdown(reason)   # never send from a card that goes away
+        if self._send_hold is not None:   # the owner already saw "Sent": it goes now
+            logger.info("Leaving the reading screen (%s) during a hold: sending it now", reason)
+            self._finish_send_hold()
         if self._dialog is not None:
             self._dialog.reject()
         if self._account_dialog is not None:
@@ -10416,10 +10654,8 @@ class AppController(QObject):
             self._on_restored()
 
     def _on_minimized(self) -> None:
-        """Out of sight, nothing is decided for you: an undo countdown stops (its Undo would be out of
-        sight too) and a prompt asks again after the short Later, from its taskbar button. The
-        reading keeps playing."""
-        self._stop_countdown_out_of_sight("the window was minimized", "window minimized")
+        """A prompt asks again after the short Later, from its taskbar button. The reading keeps playing,
+        and a Send's hidden hold goes on (it was approved and shows Sent; nothing waits to be watched)."""
         if self.state == STATE_PROMPT and not self.startup_error:
             minutes = self.config.prompt.later_short_minutes
             self._stop_prompt_timers()
@@ -10427,19 +10663,6 @@ class AppController(QObject):
             at = format_time(self._now() + timedelta(minutes=minutes))
             self._update_tray(f"Briefing: asking again at {at}")
             logger.info("Prompt minimized: asking again at %s unless it is restored first", at)
-
-    def _stop_countdown_out_of_sight(self, reason: str, words: str) -> None:
-        """A running undo countdown stops when its Undo goes out of sight (the window minimized; on
-        another screen the header shows the countdown with its Undo): nothing is sent or changed."""
-        countdown = self._countdown
-        if countdown is None or self.state == STATE_QUITTING:
-            return
-        action = countdown.action
-        self._cancel_countdown(reason)
-        nothing = "nothing was created" if _adds_event(action) else "nothing was sent"
-        self._activity(hud.TAG_STOP, f"Undone: {_action_phrase(action)}",
-                       f"{kind_label(action).upper()} {DOT} {words}, {nothing}")
-        self._refresh_actions_ui()
 
     def _on_restored(self) -> None:
         """A prompt restored by hand waits for an answer again, with a new countdown."""
@@ -11308,15 +11531,39 @@ class AppController(QObject):
     def quit(self) -> None:
         self.shutdown()
 
+    def _flush_send_hold(self) -> threading.Event | None:
+        """Jarvis is closing during a Send's / Cancel's hidden hold: the owner approved it and saw Sent, so
+        it goes now (the worker sends it even though it is stopping; never a sign-in). The event is set when
+        the worker is done with it; None when no hold ran. Without a worker the card is marked not sent."""
+        hold, self._send_hold = self._send_hold, None
+        if hold is None:
+            return None
+        self._send_hold_timer.stop()
+        action = hold.action
+        worker = self._calendar_worker
+        if worker is None:
+            self._store.set(action.id, STATUS_FAILED, message=closed_first_text(action), kind=action.kind,
+                            account=action.account)
+            return None
+        logger.info("Action %s (%s, %s): Jarvis is closing during its hold; sending it now", action.id,
+                    action.kind, logged_alias(account_of(action)))
+        _live_hold_ended(hold, "Jarvis is closing - sending it now")
+        done = threading.Event()
+        self._jobs[action.id] = _STAGE_WORKING
+        self._running[action.id] = (action, True)
+        worker.execute(action, expected_from=hold.sender, flush=True, done=done)
+        return done
+
     def shutdown(self) -> None:
         """Stop everything and quit the event loop. Safe to call more than once.
 
-        A running Google sign-in or event insert is not waited for: its thread
-        is a daemon and its result is dropped. An undo countdown is cancelled
-        (nothing is sent). An answer, move or cancel already on its way to
-        Google is waited for at most 5 s, with the window already hidden, so
-        its result is saved; after that the app exits regardless and the next
-        start shows that card as UNKNOWN.
+        A running Google sign-in is not waited for: its thread is a daemon
+        and its result is dropped. A Send's or Cancel's hidden hold is sent now
+        (the owner already approved it and saw Sent; it never signs in then);
+        it and any change (or Undo) already on its way to Google are waited for
+        at most 5 s, with the window already hidden, so the result is saved.
+        After that the app exits regardless: the next start shows a card still
+        held as "Not sent - Jarvis closed first", one mid-call as UNKNOWN.
         """
         if self._shut_down:
             return
@@ -11326,17 +11573,14 @@ class AppController(QObject):
         self._live_feed.stop()
         if self._on_shutdown is not None:
             self._on_shutdown()
+        flushed = self._flush_send_hold()   # before the worker stops: the owner already saw "Sent"
         self.state = STATE_QUITTING
         self._closing.set()
         for timer in (self._ignore_timer, self._tick_timer, self._snooze_timer, self._note_timer,
-                      self._recheck_timer, self._agenda_timer, self._countdown_timer, self._greeting_timer,
-                      self._held_timer):
+                      self._recheck_timer, self._agenda_timer, self._send_hold_timer, self._undo_timer,
+                      self._greeting_timer, self._held_timer):
             timer.stop()
-        countdown, self._countdown = self._countdown, None
-        if countdown is not None:
-            self._jobs.pop(countdown.action.id, None)
-            logger.info("Action %s undone (app closed); nothing was sent", countdown.action.id)
-            _live_countdown_end(countdown, _live.STATUS_CANCELLED, "", "Jarvis closed - nothing was sent")
+        self._undos.clear()
         if self.ask is not None:
             self.ask.shutdown()   # a running Ask is cancelled: nothing is proposed
         if self.productivity is not None:
@@ -11361,7 +11605,12 @@ class AppController(QObject):
         if self._tts is not None:
             self._tts.stop()
         if self._calendar_worker is not None:
-            if self._send_in_flight():
+            if flushed is not None:
+                logger.info("Waiting up to %d s for the held send", int(_QUIT_SEND_WAIT_S))
+                finished = flushed.wait(_QUIT_SEND_WAIT_S)
+                logger.info("The held send %s", "finished" if finished
+                            else "did not finish in time; the next start shows its card as not sent or unknown")
+            elif self._send_in_flight():
                 logger.info("Waiting up to %d s for a change on its way to Google", int(_QUIT_SEND_WAIT_S))
                 finished = self._calendar_worker.wait_idle(_QUIT_SEND_WAIT_S)
                 logger.info("The change on its way to Google %s", "finished" if finished

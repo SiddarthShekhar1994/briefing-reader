@@ -2,7 +2,7 @@
 
 A new recipient is confirmed with a tick box right on its card: Send stays disabled until it is ticked
 ("Tick <address> first, then Send."), a programmatic approve sends nothing and opens nothing, a ticked
-card counts down and sends once, the address is known afterwards (no tick on the next card), unticking
+card shows Sent and sends once after its hidden hold, the address is known afterwards (no tick on the next card), unticking
 returns it to NEW, Edit still edits the message and a recipient added there needs its own tick, the
 sending account itself is refused, and no address reaches a log. AppHarness: fake senders that only
 record, Qt offscreen; every name and address is invented.
@@ -59,9 +59,9 @@ class RecipientTickTests(unittest.TestCase):
         return {chip.address: chip.state for chip in (*to, *cc)}
 
     def send_now(self, action_id: str) -> None:
-        self.assertIsNotNone(self.c._countdown)
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+        self.assertIsNotNone(self.c._send_hold)
+        self.c._send_hold.deadline = time.monotonic() - 0.001
+        self.c._on_send_hold_tick()
         self.assertTrue(wait_for(lambda: action_id not in self.c._jobs and bool(self.sender.sent), 10))
         settle()
 
@@ -78,7 +78,7 @@ class RecipientTickTests(unittest.TestCase):
         with self.assertLogs("briefing_reader", level="INFO") as logs:
             self.c.approve_action(action.id)   # a key or a program: refused, nothing opens
             settle()
-        self.assertIsNone(self.c._countdown)
+        self.assertIsNone(self.c._send_hold)
         self.assertIsNone(self.c._dialog)
         self.assertEqual(self.sender.sent, [])
         self.assertTrue(card.ticks.tick(DANA).nudging())   # the empty box rings
@@ -86,10 +86,10 @@ class RecipientTickTests(unittest.TestCase):
         self.assertFalse(any(DANA in line or "Dana" in line for line in logs.output))   # ids and counts only
         QTest.mouseClick(card.approve_button, Qt.MouseButton.LeftButton)   # disabled: still nothing
         settle()
-        self.assertIsNone(self.c._countdown)
+        self.assertIsNone(self.c._send_hold)
         self.assertEqual(self.sender.sent, [])
 
-    def test_a_ticked_card_counts_down_sends_once_and_the_address_is_known_afterwards(self) -> None:
+    def test_a_ticked_card_shows_sent_sends_once_and_the_address_is_known_afterwards(self) -> None:
         self.make(EMAIL, EMAIL_TOO)
         action, card = self.card("Study group notes")
         other, other_card = self.card("Room for Tuesday")
@@ -108,8 +108,8 @@ class RecipientTickTests(unittest.TestCase):
         card.approve_button.click()
         settle()
         self.assertIsNone(self.c._dialog)
-        self.assertEqual(card.status(), hud.CARD_COUNTDOWN)
-        self.assertEqual(self.sender.sent, [])   # nothing during the countdown
+        self.assertEqual((card.status(), card.result_text(), card.undo_text()), (hud.CARD_SENT, "SENT", "Undo"))
+        self.assertEqual(self.sender.sent, [])   # nothing during the hidden hold
         self.send_now(action.id)
         self.assertEqual(len(self.sender.sent), 1)
         self.assertEqual(card.status(), hud.CARD_SENT)
@@ -136,7 +136,7 @@ class RecipientTickTests(unittest.TestCase):
         self.assertEqual(card.tick_hint.text(), f"Tick {DANA} first, then Send.")
         self.c.approve_action(action.id)
         settle()
-        self.assertIsNone(self.c._countdown)
+        self.assertIsNone(self.c._send_hold)
         self.assertEqual(self.sender.sent, [])
 
     def test_space_ticks_the_box_from_the_keyboard(self) -> None:
@@ -180,7 +180,7 @@ class RecipientTickTests(unittest.TestCase):
         self.assertEqual(card.tick_hint.text(), f"Tick {EVE} first, then Send.")
         self.c.approve_action(action.id)
         settle()
-        self.assertIsNone(self.c._countdown)
+        self.assertIsNone(self.c._send_hold)
         self.assertEqual(self.sender.sent, [])
         card.ticks.tick(EVE).click()
         settle()
@@ -204,13 +204,13 @@ class RecipientTickTests(unittest.TestCase):
         self.assertEqual(card.ticks.addresses(), [])   # no tick can make it sendable
         self.c.approve_action(action.id)
         settle()
-        self.assertIsNone(self.c._countdown)
+        self.assertIsNone(self.c._send_hold)
         self.assertEqual(self.sender.sent, [])
         self.c.tick_recipient(action.id, OWN, True)    # even a forged tick changes nothing
         settle()
         self.c.approve_action(action.id)
         settle()
-        self.assertIsNone(self.c._countdown)
+        self.assertIsNone(self.c._send_hold)
         self.assertEqual(self.sender.sent, [])
 
     def test_a_tick_is_ignored_while_another_approval_counts_down(self) -> None:
@@ -221,13 +221,13 @@ class RecipientTickTests(unittest.TestCase):
         settle()
         first_card.approve_button.click()
         settle()
-        self.assertIsNotNone(self.c._countdown)
+        self.assertIsNotNone(self.c._send_hold)
         self.assertFalse(second_card.ticks.tick(DANA).isEnabled())   # locked with its card
         self.c.tick_recipient(second.id, DANA, True)                  # a program: ignored
         settle()
         self.assertEqual(self.c._effective(second).confirmed, frozenset())
         self.assertFalse(second_card.ticks.tick(DANA).isChecked())
-        self.c._undo_running_countdown()
+        self.c._undo_send_hold()
         settle()
 
 

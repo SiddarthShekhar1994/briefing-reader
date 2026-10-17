@@ -743,7 +743,7 @@ class StampTests(unittest.TestCase):
         self.assertEqual(stamp(self.move, live.STATUS_RUNNING, "SENDING"), ("CHANGING NOW", pictures.TONE_DOING))
         self.assertEqual(stamp(self.add, live.STATUS_RUNNING, "SENDING"), ("ADDING NOW", pictures.TONE_DOING))
         self.assertEqual(stamp(self.mail, live.STATUS_RUNNING, "CHANGED SINCE"),
-                         ("NOT WHAT THE COUNTDOWN SHOWED", pictures.TONE_CHECK))
+                         ("NOT WHAT THE CARD SHOWED", pictures.TONE_CHECK))
         self.assertEqual(stamp(self.mail, live.STATUS_OK, "SENT EXACTLY THIS"), ("SENT", pictures.TONE_DONE))
         self.assertEqual(stamp(self.add, live.STATUS_OK, "ADDED"), ("ADDED", pictures.TONE_DONE))
         self.assertEqual(stamp(self.move, live.STATUS_OK, "CHANGED"), ("MOVED", pictures.TONE_DONE))
@@ -753,7 +753,7 @@ class StampTests(unittest.TestCase):
         self.assertEqual(stamp(self.move, live.STATUS_OK, "SENT - NO CHANGE"), ("NOTHING CHANGED", pictures.TONE_DONE))
         self.assertEqual(stamp(self.mail, live.STATUS_WARN, "UNKNOWN"),
                          ("MAY HAVE GONE OUT - CHECK", pictures.TONE_CHECK))
-        # CHECK: it went out but not as the countdown showed, or Google had it already (see the note).
+        # CHECK: it went out but not as the card showed, or Google had it already (see the note).
         self.assertEqual(stamp(self.mail, live.STATUS_WARN, "CHECK"), ("CHECK THE NOTE", pictures.TONE_CHECK))
         self.assertEqual(stamp(self.move, live.STATUS_WARN, "CHECK"), ("CHECK THE NOTE", pictures.TONE_CHECK))
         self.assertEqual(stamp(self.mail, live.STATUS_FAILED, "NOT SENT"), ("NOT SENT", pictures.TONE_FAILED))

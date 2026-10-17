@@ -20,7 +20,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from briefing_reader import dock, holo, home, hud, offer_view, orb, ui
-from tests.ui_fakes import AppHarness, fonts, settle
+from tests.ui_fakes import EMAIL_LINE, AppHarness, fonts, settle, wait_for
 
 _app: QApplication | None = None
 SPEC_ANSWER = ("Three things tomorrow, sir. Your AI-Trader check-in at 10, the Project Development check-in at "
@@ -254,8 +254,8 @@ class HomeWindowTests(unittest.TestCase):
         self.assertEqual(reading.dock.accessible_name(dock.APPROVALS), "Approvals, 3 waiting")
         reading.set_live_activity(hud.ACTIVITY_WORKING)
         self.assertEqual(reading.dock.live_activity(), dock.LIVE_WORKING)
-        reading.set_live_state(hud.LIVE_COUNTDOWN, "SENDING", deadline=time.monotonic() + 5)
-        self.assertEqual(reading.dock.live_activity(), dock.LIVE_COUNTDOWN)
+        reading.set_live_state(hud.LIVE_HOLD, "SENDING")
+        self.assertEqual(reading.dock.live_activity(), dock.LIVE_HOLD)
         reading.set_live_activity(hud.ACTIVITY_UNREAD)
         self.assertEqual(reading.dock.live_activity(), dock.LIVE_IDLE)    # the Dock has no unread dot
         reading.set_memory_available(True)
@@ -447,15 +447,17 @@ class HomeWindowTests(unittest.TestCase):
             settle()
             self.assertLessEqual(header.clock.geometry().right(), header.width())        # nothing pushed out
             self.assertGreaterEqual(header.clock.geometry().left(), note.geometry().right())
-        # The smallest window with a countdown too: the note keeps its dot (and its name for screen readers).
+        # The smallest window with a hold's short "SENT - Undo" too: the note stays (its dot at least, and its
+        # name for screen readers) and nothing is pushed out.
         window.resize(ui.READING_MIN_SIZE)
-        self.reading.set_countdown("SENDING", time.monotonic() + 9.5)
+        self.reading.set_hold("Sent")
         settle()
-        self.assertTrue(note.is_compact() and note.isVisible())
+        self.assertTrue(note.isVisible())
         self.assertLessEqual(header.layout().minimumSize().width(), header.width())
+        self.assertLessEqual(header.hold.geometry().right(), header.undo_button.geometry().left())
         self.assertLessEqual(header.undo_button.geometry().right(), header.clock.geometry().left())
         self.assertEqual(note.accessibleName(), "Google Calendar: sign in again")
-        self.reading.set_countdown()
+        self.reading.set_hold()
         settle()
         self.assertFalse(note.is_compact())
 
@@ -587,25 +589,24 @@ class ControllerHomeTests(unittest.TestCase):
 
     def test_an_approved_card_keeps_the_owner_on_approvals(self) -> None:
         # [live] auto_open = "tab" brings LIVE up for an Ask, but a card the owner approves on the Approvals
-        # screen keeps him there (its countdown, Undo and the next card); the Dock's Live slot gets its dot.
+        # screen keeps him there (its result, Undo and the next card); the Dock's Live slot gets its dot.
         app = AppHarness(self, ask=False)
         app.reading(autoplay=False)
         c, reading = app.c, app.c.window.reading
         c.isActiveWindow = lambda: True
         reading.set_tab(ui.SCREEN_APPROVALS)
         settle()
+        app.calendars["personal"].stamps = True   # Google answers with the event's version: Undo is offered
         card = next(card for card in reading.approvals.cards() if card.actionable)
         card.approve_button.click()
+        self.assertTrue(wait_for(lambda: card.status() == hud.CARD_ADDED))
         settle()
-        self.assertIsNotNone(c._countdown)
         self.assertTrue(card.undo_button.isVisible())
-        c._countdown.deadline = time.monotonic() - 0.001
-        c._on_countdown_tick()
-        settle()
         self.assertEqual(reading.current_tab(), ui.SCREEN_APPROVALS)
 
-    def test_a_countdown_left_on_approvals_keeps_its_undo_in_the_header(self) -> None:
-        app = AppHarness(self, ask=False)
+    def test_a_hold_left_on_approvals_keeps_its_undo_in_the_header(self) -> None:
+        mail = EMAIL_LINE.replace("sam.example@example.com", "ana@example.edu")
+        app = AppHarness(self, ask=False, lines=(mail,))
         app.reading(autoplay=False)
         c, reading = app.c, app.c.window.reading
         c.isActiveWindow = lambda: True
@@ -614,18 +615,19 @@ class ControllerHomeTests(unittest.TestCase):
         card = next(card for card in reading.approvals.cards() if card.actionable)
         card.approve_button.click()
         settle()
-        self.assertEqual(reading.header.countdown_text(), "")         # the card's own strip has it
+        self.assertEqual(reading.header.hold_text(), "")              # the card itself has it
         reading.set_tab(ui.SCREEN_HOME)                               # e.g. to ask something meanwhile
         settle()
-        self.assertIsNotNone(c._countdown)
-        self.assertRegex(reading.header.countdown_text(), r"^(SENDING|ADDING) IN \d+ S$")
+        self.assertIsNotNone(c._send_hold)
+        self.assertEqual(reading.header.hold_text(), "SENT")          # never a number
         self.assertTrue(reading.header.undo_button.isVisible())
-        c._countdown.started -= 5
+        c._send_hold.started -= 5
         reading.header.undo_button.click()
         settle()
-        self.assertIsNone(c._countdown)
-        self.assertEqual(reading.header.countdown_text(), "")
-        self.assertTrue(card.actionable)                              # it waits for a decision again
+        self.assertIsNone(c._send_hold)
+        self.assertEqual(reading.header.hold_text(), "")
+        self.assertEqual(card.status(), hud.CARD_PENDING)             # it waits for a decision again
+        self.assertEqual(app.senders["work"].sent, [])
 
     def test_settings_open_the_files_on_this_pc(self) -> None:
         app = AppHarness(self, ask=False)

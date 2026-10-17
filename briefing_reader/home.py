@@ -28,8 +28,8 @@ Public API
     The 52 px title bar of the main window (drag area): the ``J.A.R.V.I.S.`` wordmark and the state
     readout (7 px dot + mono word, ``set_state_word(word, tone)``), a note per service that is not
     OK (``set_service(name, status, tooltip)``: dot + mono name, the service chip's text as tooltip and
-    accessible name; until round 2's error tiles), a running undo countdown away from its card
-    (``set_countdown(word, deadline)``: amber "SENDING IN 7 S" and an **Undo** link, ``undoClicked``),
+    accessible name; until round 2's error tiles), a Send's or Cancel's hidden hold away from its card
+    (``set_hold(word)``: the confirmed "SENT" with an **Undo** link, ``undoClicked``; never a number),
     then the clock button (opens the
     Day view: ``clockClicked``), a divider, mute (``muteClicked``; ``set_mute_visible``,
     ``set_muted``), minimize (``minimizeClicked``) and close = Done (``closeClicked``).
@@ -730,63 +730,40 @@ class _ServiceNote(QWidget):
             painter.end()
 
 
-class _CountdownNote(QWidget):
-    """An undo countdown out of its card's sight: the amber dot and "SENDING IN 7 S" (as LIVE's strip
-    says it, spec 8). Screen readers hear its start once, never each second (spec 15.6)."""
+class _HoldNote(QWidget):
+    """A Send's or Cancel's hidden hold out of its card's sight: the confirmed dot and "SENT" (or
+    "CANCELLED"), never a number (the owner's decision of 2026-10-17: no countdown anywhere). Screen readers
+    hear it once: "Sent. Undo is available."."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._word = "SENDING"
-        self._deadline: float | None = None
-        self._timer = QTimer(self)
-        self._timer.setInterval(250)
-        self._timer.timeout.connect(self.update)
+        self._word = "SENT"
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-    def set_countdown(self, word: str, deadline: float | None) -> None:
-        started = deadline is not None and self._deadline is None
-        self._word, self._deadline = (word or "SENDING").upper(), deadline
-        if started:
-            self.setAccessibleName(f"{self._word.capitalize()} in {self.seconds()} seconds. Undo is available.")
-        self._sync_timer()
+    def set_word(self, word: str) -> None:
+        self._word = (word or "Sent").upper()
+        self.setAccessibleName(f"{self._word.capitalize()}. Undo is available.")
         self.updateGeometry()
         self.update()
 
-    def seconds(self) -> int:
-        return max(0, math.ceil(self._deadline - time.monotonic())) if self._deadline is not None else 0
-
     def text(self) -> str:
-        return f"{self._word} IN {self.seconds()} S"
-
-    def _sync_timer(self) -> None:
-        if self._deadline is not None and self.isVisible():
-            self._timer.start()
-        else:
-            self._timer.stop()
-
-    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        super().showEvent(event)
-        self._sync_timer()
-
-    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        super().hideEvent(event)
-        self._timer.stop()
+        return self._word
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
         metrics = QFontMetricsF(holo.font("label"))
-        return QSize(math.ceil(13 + metrics.horizontalAdvance(f"{self._word} IN 88 S")) + 6, 20)
+        return QSize(math.ceil(13 + metrics.horizontalAdvance(self._word)) + 6, 20)
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(holo.AMBER))
+            painter.setBrush(QColor(holo.OK))
             painter.drawEllipse(QPointF(3.5, self.height() / 2), 3.5, 3.5)
             painter.setFont(holo.font("label"))
-            painter.setPen(QColor(holo.AMBER))
+            painter.setPen(QColor(holo.OK))
             painter.drawText(QRectF(13, 0, self.width() - 13, self.height()),
-                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.text())
+                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self._word)
         finally:
             painter.end()
 
@@ -902,7 +879,7 @@ class HoloHeader(QWidget):
     """The main window's 52 px title bar; see the module docstring."""
 
     clockClicked = Signal()
-    undoClicked = Signal()               # the countdown's Undo (while ``set_countdown`` shows one)
+    undoClicked = Signal()               # the hold's Undo (while ``set_hold`` shows one)
     muteClicked = Signal()
     minimizeClicked = Signal()
     closeClicked = Signal()
@@ -922,8 +899,8 @@ class HoloHeader(QWidget):
         self._service_row = QHBoxLayout()
         self._service_row.setContentsMargins(12, 0, 0, 0)      # apart from the state word
         self._service_row.setSpacing(12)
-        self.countdown = _CountdownNote()
-        self.countdown.hide()
+        self.hold = _HoldNote()
+        self.hold.hide()
         self.undo_button = holo.HoloButton("Undo", holo.LINK, size=holo.SIZE_SM)
         self.undo_button.setAccessibleName("Undo, nothing is sent")
         self.undo_button.clicked.connect(self.undoClicked)
@@ -947,7 +924,7 @@ class HoloHeader(QWidget):
         row.addWidget(self.readout, 1, Qt.AlignmentFlag.AlignVCenter)
         row.addLayout(self._service_row)
         row.addSpacing(12)
-        row.addWidget(self.countdown, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.hold, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.undo_button, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addSpacing(8)
         row.addWidget(self.clock, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -984,17 +961,18 @@ class HoloHeader(QWidget):
         note.show()
         self._fit_notes()
 
-    def set_countdown(self, word: str = "", deadline: float | None = None) -> None:
-        """A running undo countdown (``deadline``, monotonic seconds) whose card is out of sight: its
-        readout and an Undo link; ``deadline`` None hides both."""
-        self.countdown.set_countdown(word, deadline)
-        shown = deadline is not None
-        self.countdown.setVisible(shown)
+    def set_hold(self, word: str = "") -> None:
+        """A Send's or Cancel's hidden hold whose card is out of sight: "Sent" (``word``: "Sent" /
+        "Cancelled") and an Undo link; "" hides both. Never a number."""
+        shown = bool(word)
+        if shown:
+            self.hold.set_word(word)
+        self.hold.setVisible(shown)
         self.undo_button.setVisible(shown)
         self._fit_notes()
 
     def _fit_notes(self) -> None:
-        """Too narrow for every note's name (the smallest window, a countdown showing): their dots only."""
+        """Too narrow for every note's name (the smallest window, a hold showing): their dots only."""
         notes = [note for note in self._services.values() if not note.isHidden()]
         layout = self.layout()
         for compact in (False, True):
@@ -1008,9 +986,9 @@ class HoloHeader(QWidget):
         super().resizeEvent(event)
         self._fit_notes()
 
-    def countdown_text(self) -> str:
-        """What the header's countdown says ("" while none shows)."""
-        return self.countdown.text() if not self.countdown.isHidden() else ""
+    def hold_text(self) -> str:
+        """What the header's hold note says ("SENT", "CANCELLED"; "" while none shows)."""
+        return self.hold.text() if not self.hold.isHidden() else ""
 
     def service_notes(self) -> list[tuple[str, str, str]]:
         """(name, status, tooltip) of the notes shown, in the order they first appeared."""

@@ -26,14 +26,19 @@ goes through the Calendar / free-text path exactly as before.
     email_address(text)        one address as Jarvis sends to it ("" when it is not one)
     due_words(action, today)   "due today" / "due Wed Oct 7, 11:59 PM" (a Reply / Email card's detail)
     ActionStore(path)          persisted decisions (created / exists / denied / done /
-                               failed / sent / running / unknown)
+                               failed / sent / held / running / unknown)
 
-Jarvis carries out these kinds after Approve (COUNTDOWN_KINDS): a Calendar line
+Jarvis carries out these kinds after Approve (CARRIED_KINDS): a Calendar line
 (create the event), a Todo with a block= time (add that block), an RSVP, Move
 or Cancel (answer the invitation, move or cancel the event; EVENT_KINDS), and a
-Reply or Email (send it through Gmail; MAIL_KINDS). Each goes through the undo
-countdown first and has "running" saved right before its one call
-(executor.py, ui.py). The other kinds are hand-offs: their cards open the
+Reply or Email (send it through Gmail; MAIL_KINDS). There is no visible countdown
+(the owner's decision of 2026-10-17). The reversible calendar kinds (UNDO_KINDS:
+Calendar, Todo block, RSVP, Move) act at once on the click and their card offers
+Undo for 10 minutes, which reverses exactly Jarvis's change. A Reply, Email or
+Cancel (HOLD_KINDS: Google emails people at once) shows "Sent" / "Cancelled"
+with Undo at once while the real call waits a hidden hold ([actions]
+undo_seconds; "held" is saved meanwhile). Each has "running" saved right before
+its one call (executor.py, ui.py). The other kinds are hand-offs: their cards open the
 source link, copy the drafted text and record Done or Deny, and nothing is
 sent. Free-text lines and lines that cannot be read stay informational;
 ``error`` says why a line could not be read. Nothing here talks to Google:
@@ -77,9 +82,16 @@ TODO = "todo"         # something due, optionally with a calendar block to work 
 OPEN = "open"         # a page to look at
 UNKNOWN = "unknown"
 STRUCTURED_KINDS = frozenset({REPLY, EMAIL, RSVP, MOVE, CANCEL, SHARE, SLACK, TODO, OPEN})
-# Kinds Jarvis carries out after Approve: the undo countdown ([actions] undo_seconds) first, then
-# "running" is saved right before the one call; never retried by itself (executor.run_action).
-COUNTDOWN_KINDS = frozenset({CALENDAR, TODO, RSVP, MOVE, CANCEL, REPLY, EMAIL})
+# Calendar kinds that act at once on Approve and whose Undo reverses exactly Jarvis's change for
+# 10 minutes (delete the created event, put the answer back, move the event back).
+UNDO_KINDS = frozenset({CALENDAR, TODO, RSVP, MOVE})
+# Kinds Google tells other people about at once (an email, guests told of a cancellation): the card
+# shows "Sent" / "Cancelled" with Undo at once and the real call waits a hidden hold ([actions]
+# undo_seconds); Undo during the hold sends nothing.
+HOLD_KINDS = frozenset({CANCEL, REPLY, EMAIL})
+# Kinds Jarvis carries out after Approve: "running" is saved right before the one call; never retried
+# by itself (executor.run_action).
+CARRIED_KINDS = UNDO_KINDS | HOLD_KINDS
 # Change an existing event of the line's account: the card checks Google's own view of it first.
 EVENT_KINDS = frozenset({RSVP, MOVE, CANCEL})
 # Sent from the line's account through Gmail (gmail.send only); recipients are checked first.
@@ -103,14 +115,18 @@ STATUS_DENIED = "denied"     # Deny (shown as "dismissed" on cards without an Ap
 STATUS_FAILED = "failed"     # not final: the proposal stays pending and can be retried
 STATUS_DONE = "done"         # you handled it yourself (a card without an Approve)
 STATUS_SENT = "sent"         # Jarvis carried it out (an invitation answered, an event moved or cancelled)
-STATUS_RUNNING = "running"   # written right before the call to Google of a countdown kind
+STATUS_RUNNING = "running"   # written right before the call to Google of a kind Jarvis carries out
 STATUS_UNKNOWN = "unknown"   # stopped or timed out mid-call; never retried by itself
+STATUS_HELD = "held"         # a Reply / Email / Cancel approved and shown as done, in its hidden hold
 STATUSES = (STATUS_CREATED, STATUS_EXISTS, STATUS_DENIED, STATUS_FAILED, STATUS_DONE, STATUS_SENT,
-            STATUS_RUNNING, STATUS_UNKNOWN)
+            STATUS_RUNNING, STATUS_UNKNOWN, STATUS_HELD)
 # FAILED and UNKNOWN are not decisions: the card keeps its buttons.
 DECIDED_STATUSES = frozenset({STATUS_CREATED, STATUS_EXISTS, STATUS_DENIED, STATUS_DONE, STATUS_SENT,
-                              STATUS_RUNNING})
+                              STATUS_RUNNING, STATUS_HELD})
 INTERRUPTED_MESSAGE = "Jarvis stopped while this was running; check before retrying"
+# A hold Jarvis could not finish before it closed (the next start shows the card as not sent).
+CLOSED_FIRST_MESSAGE = "Not sent - Jarvis closed first"
+CLOSED_FIRST_CANCEL_MESSAGE = "Not cancelled - Jarvis closed first"
 
 _WEEKDAY_SHORT = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _WEEKDAY_LONG = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
@@ -219,10 +235,22 @@ class ProposedAction:
         return self.decidable and bool(approve_label(self))
 
     @property
-    def countdown(self) -> bool:
-        """Approve starts the undo countdown first and "running" is saved before the call
-        (COUNTDOWN_KINDS: every kind Jarvis carries out)."""
-        return self.kind in COUNTDOWN_KINDS and self.actionable
+    def carried(self) -> bool:
+        """Approve makes Jarvis make the one call, with "running" saved before it (CARRIED_KINDS:
+        every kind Jarvis carries out)."""
+        return self.kind in CARRIED_KINDS and self.actionable
+
+    @property
+    def held(self) -> bool:
+        """A Reply, Email or Cancel Jarvis carries out: Approve shows the done state with Undo at once
+        and the call waits the hidden hold (HOLD_KINDS)."""
+        return self.kind in HOLD_KINDS and self.actionable
+
+    @property
+    def undoable(self) -> bool:
+        """A Calendar event, Todo block, RSVP or Move Jarvis carries out: it acts at once and its
+        Undo reverses the change for 10 minutes (UNDO_KINDS)."""
+        return self.kind in UNDO_KINDS and self.actionable
 
     @property
     def changes_event(self) -> bool:
@@ -2271,7 +2299,7 @@ def result_text(action: ProposedAction, status: str) -> str:
         return SKIPPED_TEXT
     if status == STATUS_SENT:
         return sent_text(action)
-    if status == STATUS_UNKNOWN and action.countdown:
+    if status == STATUS_UNKNOWN and action.carried:
         return UNKNOWN_MAIL if action.kind in MAIL_KINDS else UNKNOWN_CALENDAR
     return ""
 
@@ -2547,7 +2575,10 @@ class ActionStore:
     "failed" is remembered (for the card's message) but is not a decision: the
     proposal stays pending and can be approved again; so is "unknown". An
     entry still "running" when the file is read (Jarvis stopped mid-call)
-    becomes "unknown", and the next ``prune()`` saves that. A corrupt or
+    becomes "unknown"; one still "held" (Jarvis closed before the hidden hold
+    of a Reply, Email or Cancel could finish: nothing was sent) becomes
+    "failed" with "Not sent - Jarvis closed first"; the next ``prune()`` saves
+    that. A corrupt or
     unreadable file is logged and treated as empty; a failed write is logged
     and the decision is kept in memory for this run. Writes are atomic
     (temporary file + os.replace), so a crash never leaves half a file.
@@ -2588,6 +2619,19 @@ class ActionStore:
     def is_decided(self, action_id: str) -> bool:
         entry = self.get(action_id)
         return entry is not None and entry["status"] in DECIDED_STATUSES
+
+    def forget(self, action_id: str, statuses: Collection[str]) -> bool:
+        """Forget a stored decision only when its status is one of ``statuses`` (an Undo during the
+        hidden hold: "held"; a calendar change Jarvis's Undo reversed): True when it was removed. The
+        card then waits for a decision again. The caller logs it."""
+        with self._lock:
+            entry = self._entries.get(action_id)
+            if entry is None or entry.get("status") not in statuses:
+                return False
+            del self._entries[action_id]
+            if _write_entries(self.path, self._entries):
+                self._dirty = False
+        return True
 
     def reopen(self, action_id: str) -> bool:
         """Forget a stored decision, only when it is "denied" (a follow-up draft the owner clicked
@@ -2665,16 +2709,24 @@ def _clean_entry(value: object) -> dict[str, str] | None:
 
 
 def _mark_interrupted(entries: dict[str, dict[str, str]]) -> bool:
-    """"running" entries (Jarvis stopped mid-call) become "unknown"; True when any did."""
-    count = 0
+    """"running" entries (Jarvis stopped mid-call) become "unknown"; "held" ones (Jarvis closed before
+    the hidden hold could finish: nothing was sent) become "failed" with CLOSED_FIRST_MESSAGE, so the
+    card never says "Sent" for a message that did not go. True when any changed."""
+    count = held = 0
     for entry in entries.values():
         if entry["status"] == STATUS_RUNNING:
             entry["status"] = STATUS_UNKNOWN
             entry["message"] = INTERRUPTED_MESSAGE
             count += 1
+        elif entry["status"] == STATUS_HELD:
+            entry["status"] = STATUS_FAILED
+            entry["message"] = CLOSED_FIRST_CANCEL_MESSAGE if entry.get("kind") == CANCEL else CLOSED_FIRST_MESSAGE
+            held += 1
     if count:
         logger.warning("%d action(s) were interrupted; marked unknown", count)
-    return bool(count)
+    if held:
+        logger.warning("%d held action(s) were not sent before Jarvis closed; marked failed", held)
+    return bool(count or held)
 
 
 def _write_entries(path: Path, entries: dict[str, dict[str, str]]) -> bool:

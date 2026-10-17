@@ -108,9 +108,9 @@ Widgets
         approve_text="Approve", body="", title_lines=0, open_text="",
         copy_text="", edit_text="", sign_in_text="", check_line=False)``:
         ``set_status(CARD_*, message="", link="", link_text="")`` (``CARD_DONE``
-        reads DONE and ``CARD_SENT`` its message ("ACCEPTED") in green;
-        ``CARD_COUNTDOWN`` shows Undo on the left and the message ("SENDING IN
-        9 S") on the right; ``CARD_UNKNOWN`` keeps Deny / the right button and
+        reads DONE and ``CARD_SENT`` its message ("ACCEPTED", "SENT") in green;
+        ``set_undo("Undo" | "Retry" | "")`` shows Undo at the left of an ADDED /
+        SENT result (never a countdown or a number); ``CARD_UNKNOWN`` keeps Deny / the right button and
         shows the reason under them in amber; ``link_text`` names the result's
         link, "Open" by default), ``set_approve_text(text)`` ("Retry",
         "Sign in", "Done": a card built with ``check_line=True`` is as wide
@@ -201,16 +201,16 @@ Widgets
         "tab:jarvis"). Plain text only (painted, PlainText labels, a read-only
         QPlainTextEdit); it follows the newest step unless the owner scrolled
         in the last 4 s (what came meanwhile is followed when the hold ends),
-        keeps an approved card's payload in view during its undo countdown
+        keeps an approved card's payload in view during a Send's hidden hold
         (a card just approved comes into view whatever was scrolled), shows its
         empty-state text while only the pinned row is there, and keeps its
-        column at most ``LIVE_CONTENT_MAX_PX`` wide; its timer ticks every
-        250 ms during a countdown, every second while a step runs, never while
+        column at most ``LIVE_CONTENT_MAX_PX`` wide; its timer ticks
+        every second while a step runs, never while
         hidden, minimized or idle; Tab walks the rows in the order they are
         shown. A step with a picture shows it first in its details (a
         thumbnail button: Enter, Space or a click opens it larger);
         ``open_picture(step_id)`` shows a READY picture in the viewer,
-        ``picture_viewer()`` (None until one was opened); during a countdown a
+        ``picture_viewer()`` (None until one was opened); during a hold a
         short view shows the payload picture's changed part. A field's
         "picture:<step id>" link (a research's check pointing at a source's
         picture) is followed here (``follow_link``): that picture larger (its
@@ -238,9 +238,9 @@ Widgets
         email or calendar picture at most ``PICTURE_VIEWER_MODEL_W`` wide, a page
         at most ``PICTURE_VIEWER_PAGE_W``); it keeps nothing once closed.
     ``LiveStatus``: the LIVE page's tag in the strip (``set_state(LIVE_IDLE |
-        LIVE_WORKING | LIVE_COUNTDOWN, text=None, since=, deadline=)``,
-        ``text()``: "IDLE", "WORKING 0:12", "SENDING IN 7 S"); it blinks only
-        while working or counting down. ``paint_status_glyph(painter, rect,
+        LIVE_WORKING | LIVE_HOLD, text=None, since=)``, ``text()``: "IDLE",
+        "WORKING 0:12", "SENDING" (a Send's hidden hold: the confirmed look, never
+        a number)); it blinks only while working or holding. ``paint_status_glyph(painter, rect,
         status, opacity=1.0)`` draws live.STATUS_*'s glyph (running square, ok
         check, warn triangle, blocked octagon, failed cross, cancelled dash);
         ``live_status_color(status)``.
@@ -1746,19 +1746,19 @@ def paint_status_glyph(painter: QPainter, rect: QRectF, status: str, opacity: fl
 
 LIVE_IDLE = "idle"
 LIVE_WORKING = "working"
-LIVE_COUNTDOWN = "countdown"
-LIVE_STATES = (LIVE_IDLE, LIVE_WORKING, LIVE_COUNTDOWN)
-_LIVE_STATE_COLORS = {LIVE_IDLE: TEXT_DIM, LIVE_WORKING: ACCENT, LIVE_COUNTDOWN: AMBER}
+LIVE_HOLD = "hold"         # a Send's / Cancel's hidden hold: "SENDING", the confirmed look, no number
+LIVE_STATES = (LIVE_IDLE, LIVE_WORKING, LIVE_HOLD)
+_LIVE_STATE_COLORS = {LIVE_IDLE: TEXT_DIM, LIVE_WORKING: ACCENT, LIVE_HOLD: GREEN}
 # The widest text of each state (a mono font: the width only depends on the number of characters),
-# so the tag keeps its width while it counts.
-_LIVE_STATE_TEMPLATES = {LIVE_IDLE: "IDLE", LIVE_WORKING: "WORKING 00:00", LIVE_COUNTDOWN: " IN 10 S"}
+# so the tag keeps its width while its time counts.
+_LIVE_STATE_TEMPLATES = {LIVE_IDLE: "IDLE", LIVE_WORKING: "WORKING 00:00", LIVE_HOLD: ""}
 
 
 class LiveStatus(_Blinking):
     """The LIVE page's tag in the centre panel's strip, where the briefing's LiveMarker sits on the
     other tabs (same height): "IDLE" (dim, no blink), "WORKING 0:12" (accent, a blinking square,
-    the time counting from ``since``) or "SENDING IN 7 S" (amber, counting down to ``deadline``).
-    It blinks (and so repaints its time) only while working or counting down."""
+    the time counting from ``since``) or "SENDING" (a Send's or Cancel's hidden hold: the confirmed
+    green, never a number). It blinks (and so repaints its time) only while working or holding."""
 
     def __init__(self, parent: QWidget | None = None, *,
                  clock: Callable[[], float] = time.monotonic) -> None:
@@ -1768,7 +1768,6 @@ class LiveStatus(_Blinking):
         self._state = LIVE_IDLE
         self._word = "IDLE"
         self._since: float | None = None
-        self._deadline: float | None = None
         policy = QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         policy.setRetainSizeWhenHidden(False)
         self.setSizePolicy(policy)
@@ -1778,17 +1777,15 @@ class LiveStatus(_Blinking):
     def state(self) -> str:
         return self._state
 
-    def set_state(self, state: str, text: str | None = None, *, since: float | None = None,
-                  deadline: float | None = None) -> None:
-        """``state`` LIVE_IDLE / LIVE_WORKING / LIVE_COUNTDOWN; ``text`` the word ("WORKING",
-        "SENDING", "ADDING"; the state's own by default)."""
+    def set_state(self, state: str, text: str | None = None, *, since: float | None = None) -> None:
+        """``state`` LIVE_IDLE / LIVE_WORKING / LIVE_HOLD; ``text`` the word ("WORKING", "SENDING";
+        the state's own by default)."""
         state = state if state in LIVE_STATES else LIVE_IDLE
-        default = {LIVE_IDLE: "IDLE", LIVE_WORKING: "WORKING", LIVE_COUNTDOWN: "SENDING"}[state]
+        default = {LIVE_IDLE: "IDLE", LIVE_WORKING: "WORKING", LIVE_HOLD: "SENDING"}[state]
         word = (text or default).upper()
-        changed = (state, word, since, deadline) != (self._state, self._word, self._since, self._deadline)
+        changed = (state, word, since) != (self._state, self._word, self._since)
         self._state, self._word = state, word
         self._since = since if state == LIVE_WORKING else None
-        self._deadline = deadline if state == LIVE_COUNTDOWN else None
         if changed:
             self.set_blinking(state != LIVE_IDLE)
             self.setAccessibleName(f"Live: {self.text().lower()}")
@@ -1796,21 +1793,17 @@ class LiveStatus(_Blinking):
             self.update()
 
     def text(self) -> str:
-        """What the tag says now ("WORKING 0:12", "SENDING IN 7 S", "IDLE")."""
+        """What the tag says now ("WORKING 0:12", "SENDING", "IDLE")."""
         now = self._clock()
         if self._state == LIVE_WORKING and self._since is not None:
             return f"{self._word} {live_events.elapsed_text(now - self._since)}"
-        if self._state == LIVE_COUNTDOWN and self._deadline is not None:
-            return f"{self._word} IN {live_events.countdown_seconds(self._deadline, now)} S"
         return self._word
 
     def color(self) -> str:
         return _LIVE_STATE_COLORS[self._state]
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        template = _LIVE_STATE_TEMPLATES[self._state]
-        if self._state == LIVE_COUNTDOWN:
-            template = self._word + template
+        template = _LIVE_STATE_TEMPLATES[self._state] or self._word
         widest = max(_text_advance(self._font, template), _text_advance(self._font, self.text()))
         return QSize(math.ceil(8 + 7 + 7 + widest + 8), math.ceil(_line_height(self._font)) + 8 + 2)
 
@@ -3875,11 +3868,10 @@ CARD_EXISTS = "exists"
 CARD_DENIED = "denied"
 CARD_FAILED = "failed"
 CARD_DONE = "done"
-CARD_COUNTDOWN = "countdown"   # Undo + "SENDING IN 9 S": nothing has been sent yet
-CARD_SENT = "sent"             # Jarvis carried it out ("ACCEPTED", "MOVED", ...)
+CARD_SENT = "sent"             # Jarvis carried it out ("ACCEPTED", "MOVED", "SENT", ...)
 CARD_UNKNOWN = "unknown"       # may have happened: the reason in amber, Deny / Retry kept
 CARD_STATUSES = (CARD_PENDING, CARD_WORKING, CARD_SIGNIN, CARD_ADDED, CARD_EXISTS, CARD_DENIED, CARD_FAILED,
-                 CARD_DONE, CARD_COUNTDOWN, CARD_SENT, CARD_UNKNOWN)
+                 CARD_DONE, CARD_SENT, CARD_UNKNOWN)
 _CARD_RESULTS: dict[str, tuple[str, str]] = {
     CARD_WORKING: ("WORKING...", ACCENT),
     CARD_SIGNIN: ("WAITING FOR GOOGLE SIGN-IN", ACCENT),
@@ -3888,7 +3880,6 @@ _CARD_RESULTS: dict[str, tuple[str, str]] = {
     CARD_DENIED: ("DENIED", RED),
     CARD_FAILED: ("FAILED", RED),
     CARD_DONE: ("DONE", GREEN),
-    CARD_COUNTDOWN: ("SENDING...", AMBER),
     CARD_SENT: ("DONE", GREEN),
     CARD_UNKNOWN: ("UNKNOWN", AMBER),
 }
@@ -3896,6 +3887,8 @@ _CARD_RESULTS: dict[str, tuple[str, str]] = {
 _DECIDING_STATUSES = (CARD_PENDING, CARD_FAILED, CARD_UNKNOWN)
 # Statuses whose result may have an Open link.
 _LINK_STATUSES = (CARD_ADDED, CARD_EXISTS, CARD_SENT)
+# Statuses that may show Undo beside the result (Jarvis's own change, or a Send in its hidden hold).
+_UNDO_STATUSES = (CARD_ADDED, CARD_SENT)
 COPIED_TEXT = "Copied"
 COPIED_MS = 1500
 UNDO_TEXT = "Undo"
@@ -5057,39 +5050,34 @@ class _TickHint(_BreakableLabel):
 
 
 class _ResultSlot(QWidget):
-    """The card's slot when it is not deciding (HOLOGRAM_SPEC 8): the countdown strip (amber 10 % box, Undo
-    at its left, far from the commit, then the phrase; a 2 px drain bar at the bottom) or a result stamp's
-    disc before the result."""
+    """The card's slot when it is not deciding (HOLOGRAM_SPEC 8): the result stamp's disc right before the
+    result's readout (``set_anchor``: the readout label), with Undo at the slot's left end while Jarvis's change
+    can still be reversed. Never a countdown: there is no number and no drain bar (the owner's decision of
+    2026-10-17)."""
 
-    STRIP = "strip"
     STAMP = "stamp"
     NONE = "none"
+    _DISC_GAP = 8   # between the disc and the readout (the result row's spacing)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._mode = self.NONE
         self._stamp = ""
-        self._deadline: float | None = None
-        self._seconds = 0.0
         self._margins = (0, 0, 0, 0)
-        self._drain = QTimer(self)
-        self._drain.timeout.connect(self._on_drain)
+        self._anchor: QWidget | None = None
+
+    def set_anchor(self, label: QWidget) -> None:
+        """The readout the disc stands right before (wherever Undo puts it)."""
+        self._anchor = label
 
     def set_margins(self, margins: tuple[int, int, int, int]) -> None:
-        """The strip's box inside this widget (left, top, right, bottom)."""
+        """The stamp's box inside this widget (left, top, right, bottom)."""
         self._margins = margins
         self.update()
-
-    def strip_rect(self) -> QRectF:
-        left, top, right, bottom = self._margins
-        rect = QRectF(self.rect()).adjusted(left, top, -right, -bottom)
-        height = max(40.0, min(46.0, rect.height()))
-        return QRectF(rect.left(), rect.top() + (rect.height() - height) / 2, rect.width(), height)
 
     def set_mode(self, mode: str, stamp: str = "") -> None:
         self._mode = mode
         self._stamp = stamp
-        self._sync_drain()
         self.update()
 
     def mode(self) -> str:
@@ -5098,64 +5086,17 @@ class _ResultSlot(QWidget):
     def stamp(self) -> str:
         return self._stamp
 
-    def set_deadline(self, deadline: float | None, seconds: float) -> None:
-        """The running countdown's monotonic deadline and length (the drain bar); None: a full bar."""
-        self._deadline = deadline
-        self._seconds = max(0.0, float(seconds))
-        self._sync_drain()
-        self.update()
-
-    def drain_fraction(self) -> float:
-        """How much of the drain bar is left (1 -> 0); per whole second under reduced motion."""
-        if self._deadline is None or self._seconds <= 0:
-            return 1.0
-        left = max(0.0, self._deadline - time.monotonic())
-        if _holo().reduced_motion():
-            left = math.ceil(left)
-        return max(0.0, min(1.0, left / self._seconds))
-
-    def _sync_drain(self) -> None:
-        running = self._mode == self.STRIP and self._deadline is not None and self.isVisible()
-        if running and not self._drain.isActive():
-            self._drain.start(1000 if _holo().reduced_motion() else 66)   # 15 fps, its rect only
-        elif not running:
-            self._drain.stop()
-
-    def _on_drain(self) -> None:
-        rect = self.strip_rect()
-        self.update(QRectF(rect.left(), rect.bottom() - 3, rect.width(), 4).toAlignedRect())
-        if self.drain_fraction() <= 0.0:
-            self._drain.stop()
-
-    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        super().showEvent(event)
-        self._sync_drain()
-
-    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        super().hideEvent(event)
-        self._drain.stop()
-
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         holo = _holo()
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            if self._mode == self.STRIP:
-                rect = self.strip_rect()
-                path = QPainterPath()
-                path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), holo.RADIUS_COUNTDOWN,
-                                    holo.RADIUS_COUNTDOWN)
-                painter.fillPath(path, holo.alpha(holo.AMBER, 0.10))
-                painter.setPen(QPen(holo.alpha(holo.AMBER, 0.35), 1))
-                painter.drawPath(path)
-                painter.save()
-                painter.setClipPath(path)
-                bar = QRectF(rect.left(), rect.bottom() - 2, rect.width() * self.drain_fraction(), 2)
-                painter.fillRect(bar, QColor(holo.AMBER))
-                painter.restore()
-            elif self._mode == self.STAMP and self._stamp:
+            if self._mode == self.STAMP and self._stamp:
                 left, top, _right, bottom = self._margins
-                center = QPointF(left + holo.STAMP_DISC / 2, top + (self.height() - top - bottom) / 2)
+                x = left + holo.STAMP_DISC / 2
+                if self._anchor is not None:
+                    x = self._anchor.geometry().left() - self._DISC_GAP - holo.STAMP_DISC / 2
+                center = QPointF(x, top + (self.height() - top - bottom) / 2)
                 holo.paint_stamp(painter, center, self._stamp)
         finally:
             painter.end()
@@ -5191,7 +5132,8 @@ class ActionCard(QWidget):
     (``ticks``, ``tickToggled(action_id, address, ticked)``: Send stays disabled while one is not ticked,
     the helper line ``tick_hint`` says "Tick <address> first, then Send."), the message, then the action
     row: the tools slot (Edit / Sign in / Open event) and Deny as amber ghosts, the commit on the right.
-    The countdown strip (the phrase, Undo, the drain bar) and the result stamp replace that row in place.
+    The result stamp (with Undo beside it while Jarvis's change can still be reversed: ``set_undo``)
+    replaces that row in place; there is never a countdown.
     ``set_focal(True)``: the screen's focal card (all four brackets).
 
     Phase 2 additions: ``check_line=True`` reserves three lines under the detail for
@@ -5202,8 +5144,9 @@ class ActionCard(QWidget):
     instead (``sign_in_text``, ``signInClicked``) or an "Open event" link to Google's
     own page of the event (``event_text``, ``sourceClicked``): ``set_tool_slot``; the
     three are equally wide, so switching never moves anything. ``set_copy_text``
-    shows Copy once an edit adds a note; CARD_COUNTDOWN puts an Undo button on the
-    left of the slot, away from Approve (``undoClicked``); CARD_UNKNOWN keeps the
+    shows Copy once an edit adds a note; ``set_undo("Undo")`` shows an Undo button
+    at the left of an ADDED / SENT result, away from Approve (``undoClicked``;
+    ``set_undo("Retry")`` after a failed reversal, ``set_undo("")`` hides it); CARD_UNKNOWN keeps the
     buttons like FAILED, with the reason in amber; ``set_approve_text`` renames the
     right-hand button ("Retry", "Sign in", "Done") without moving the left-hand one
     (the button is as wide as its widest text from the start); ``deny_text`` names
@@ -5351,18 +5294,14 @@ class ActionCard(QWidget):
         # Cancel card may also read Sign in or Done; a Reply / Email card Send or Done).
         self._fit_approve_width((approve_text or "Approve", RETRY_TEXT)
                                 + ((SIGN_IN_TEXT, "Done") if check_line else ()) + tuple(approve_alternatives))
-        # The result stamp's readout ("SENT", "ADDED"; the disc is painted before it) and, during the
-        # undo countdown, the strip's phrase ("Sending from work in 7 s") with Undo before it (left).
+        # The result stamp's readout ("SENT", "ADDED"; the disc is painted before it), its Open link and,
+        # while Jarvis's change can still be reversed, Undo beside it.
         self.result_label = _ClampedLabel(holo.font("readout"), holo.OK)
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.countdown_label = QLabel()
-        self.countdown_label.setTextFormat(Qt.TextFormat.RichText)
-        self.countdown_label.setFont(display_font(14, 400, 0.02))
-        set_label_color(self.countdown_label, "#FFE9C6")
-        self.countdown_label.hide()
         self.open_button = _FaceButton("Open", holo.LINK_CYAN)
         self.undo_button = _FaceButton(UNDO_TEXT, holo.LINK)
         self.undo_button.setAccessibleName(f"{UNDO_TEXT} ({kind.upper()}: {title})")
+        self._undo_text = ""
         # Two lines at most (hover for the whole reason): a 200-character Google
         # error would otherwise push the cards below down by about a card's
         # height and slide another card's Approve under the mouse.
@@ -5520,7 +5459,7 @@ class ActionCard(QWidget):
 
     def set_edit_enabled(self, enabled: bool) -> None:
         """Enable Edit and Sign in (both open something that must not run beside another card's
-        countdown or job); Open event stays usable."""
+        hold or job); Open event stays usable."""
         for button in (self.edit_button, self.sign_in_button):
             button.setEnabled(bool(enabled))
 
@@ -5649,23 +5588,24 @@ class ActionCard(QWidget):
         buttons.addWidget(self.deny_button)
         buttons.addStretch(1)
         buttons.addWidget(self.approve_button)
-        # The countdown strip / the result stamp, in the same place and height (HOLOGRAM_SPEC 8).
+        # The result stamp, in the same place and height (HOLOGRAM_SPEC 8).
         self._result = _ResultSlot()
         result = QHBoxLayout(self._result)
         self._result_layout = result
         result.setContentsMargins(ring, self._SLOT_GAP, self._PAD_RIGHT - ring, self._PAD_BOTTOM - ring)
         result.setSpacing(8)
-        # Undo at the strip's LEFT end, far from the commit: a burst of clicks on Send (or Accept, Add ...)
-        # never reaches it, so it can never undo and approve again (the existing rule "left: far from
-        # Approve", kept on purpose: HOLOGRAM_SPEC 8 draws it at the right).
+        # Undo at the slot's LEFT end, far from the commit: a burst of clicks on Send (or Accept, Add ...)
+        # never reaches it, so it can never undo and approve again (the rule "left: far from Approve").
         result.addWidget(self.undo_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        # The stamp: its readout, then its one link right after it (never under the commit's centre: a
-        # second click where Send / Approve was never opens anything).
+        # The stamp: its disc (painted in this room), its readout, then its one link right after it (never
+        # under the commit's centre: a second click where Send / Approve was never opens anything).
+        self._disc_room = QSpacerItem(0, 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        result.addSpacerItem(self._disc_room)
         self.result_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         result.addWidget(self.result_label, 0)
         result.addWidget(self.open_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        result.addWidget(self.countdown_label, 10)
         result.addStretch(1)
+        self._result.set_anchor(self.result_label)
         self.undo_button.hide()
         # One slot, one height: the result takes the buttons' place (up to two lines).
         self._slot = QWidget()
@@ -5734,7 +5674,6 @@ class ActionCard(QWidget):
         except that a FAILED reason (under the buttons) may add a line or two
         once; the card keeps that room afterwards.
         """
-        entering_countdown = status == CARD_COUNTDOWN and self._status != CARD_COUNTDOWN
         self._status = status if status in CARD_STATUSES else CARD_PENDING
         self._link = link
         self.open_button.setText(link_text or "Open")
@@ -5755,41 +5694,31 @@ class ActionCard(QWidget):
         focus = QApplication.focusWidget()
         undo_had_focus = focus is not None and focus is self.undo_button
         focus_here = focus is not None and (focus is self or self.isAncestorOf(focus))
+        if self._status not in _UNDO_STATUSES:
+            self._undo_text = ""   # Undo only ever stands beside an ADDED / SENT result
         if focus is not None and ((not show_buttons and self._buttons.isAncestorOf(focus))
-                                  or (self._status != CARD_COUNTDOWN and focus is self.undo_button)):
+                                  or (not self._undo_text and focus is self.undo_button)):
             self.setFocus(Qt.FocusReason.OtherFocusReason)
         self.result_label.set_full_text("" if failed else _keep_last_words(text))
         set_label_color(self.result_label, color)
         self.open_button.setVisible(self._status in _LINK_STATUSES and bool(link))
-        counting = self._status == CARD_COUNTDOWN
-        self.undo_button.setVisible(counting)
-        self.result_label.setVisible(not counting)
-        self.countdown_label.setVisible(counting)
-        self.countdown_label.setText(_countdown_phrase(message or text) if counting else "")
+        self.undo_button.setVisible(bool(self._undo_text))
         ring = self._RING
-        if counting:
-            self._result.set_mode(_ResultSlot.STRIP)
-            self._result.set_margins((ring, self._SLOT_GAP + 1, self._PAD_RIGHT, self._PAD_BOTTOM - 1))
-            # Undo first (its own 8 px padding and ring room), then the phrase.
-            self._result_layout.setContentsMargins(ring + 1, self._SLOT_GAP, self._PAD_RIGHT - ring + 1,
-                                                   self._PAD_BOTTOM - ring)
-        else:
-            self._result.set_deadline(None, 0)
-            self._result.set_mode(_ResultSlot.STAMP if stamp else _ResultSlot.NONE, stamp)
-            self._result.set_margins((ring, self._SLOT_GAP, self._PAD_RIGHT, self._PAD_BOTTOM - ring))
-            lead = _holo().STAMP_DISC + 9 if stamp else 0
-            self._result_layout.setContentsMargins(ring + lead, self._SLOT_GAP, self._PAD_RIGHT - ring,
-                                                   self._PAD_BOTTOM - ring)
+        self._result.set_mode(_ResultSlot.STAMP if stamp else _ResultSlot.NONE, stamp)
+        self._result.set_margins((ring, self._SLOT_GAP, self._PAD_RIGHT, self._PAD_BOTTOM - ring))
+        # The disc's room before the readout (the row's 8 px spacing on its right is the disc's gap).
+        self._disc_room.changeSize(_holo().STAMP_DISC + 1 if stamp else 0, 0, QSizePolicy.Policy.Fixed,
+                                   QSizePolicy.Policy.Minimum)
+        self._result_layout.setContentsMargins(ring, self._SLOT_GAP, self._PAD_RIGHT - ring, self._PAD_BOTTOM - ring)
+        self._result_layout.invalidate()
         self.failure_label.set_color(_holo().AMBER if self._status == CARD_UNKNOWN else _holo().ALERT_TX)
         self.failure_label.set_line(text if failed else "")
         self._stack.setCurrentWidget(self._buttons if show_buttons else self._result)
         self._sync_buttons()
-        # The keyboard follows the decision: a Send / Approve pressed with Space hands the focus to
-        # Undo while the countdown runs (only when it starts, so Tab can still move on), and an Undo
-        # back to the right-hand button.
-        if entering_countdown and focus_here:
-            self.undo_button.setFocus(Qt.FocusReason.OtherFocusReason)
-        elif undo_had_focus and show_buttons and self.approve_button.isEnabled():
+        # The keyboard follows the decision: an Undo that took the card back to waiting hands the focus
+        # back to the right-hand button (set_undo hands it to a new Undo).
+        del focus_here
+        if undo_had_focus and show_buttons and self.approve_button.isEnabled():
             self.approve_button.setFocus(Qt.FocusReason.OtherFocusReason)
         slot = self._actionable or bool(text)
         self._slot.setVisible(slot)
@@ -5802,14 +5731,34 @@ class ActionCard(QWidget):
         self.setAccessibleName(f"{name}, {text}" if text else name)
         self.changed.emit()
 
-    def set_countdown(self, deadline: float | None, seconds: float) -> None:
-        """The running undo countdown's monotonic deadline and length: the strip's drain bar."""
-        self._result.set_deadline(deadline, seconds)
+    def set_undo(self, text: str = "", tooltip: str = "") -> None:
+        """Undo beside an ADDED / SENT result while Jarvis's change can still be reversed ("Undo"), "Retry"
+        after a reversal failed, "" to hide it (it went: 10 minutes passed, the card was cleared, the
+        hold ended). Ignored on any other status. A keyboard focus on this card moves to a new Undo, so
+        Space pressed on Send / Approve and again lands on Undo, never on another card."""
+        text = text if self._status in _UNDO_STATUSES else ""
+        focus = QApplication.focusWidget()
+        focus_here = focus is not None and (focus is self or self.isAncestorOf(focus))
+        appearing = bool(text) and not self._undo_text
+        if text == self._undo_text and tooltip == self.undo_button.toolTip():
+            return
+        self._undo_text = text
+        if text:
+            self.undo_button.setText(text)
+            self.undo_button.setAccessibleName(f"{text} ({self._decides})")
+        self.undo_button.setToolTip(tooltip)
+        self.undo_button.setVisible(bool(text))
+        if not text and focus is self.undo_button:
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+        elif appearing and focus_here:
+            self.undo_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._sync_buttons()
+        self._result.update()   # the disc follows the readout
         self.changed.emit()
 
-    def countdown(self) -> tuple[float | None, float]:
-        """(the running countdown's monotonic deadline or None, its length in seconds)."""
-        return self._result._deadline, self._result._seconds
+    def undo_text(self) -> str:
+        """What the Undo beside the result says ("Undo", "Retry"; "" while none shows)."""
+        return self._undo_text
 
     def set_focal(self, focal: bool) -> None:
         """The Approvals screen's focal card (the one it opened on, or picked in the queue): all four
@@ -5837,8 +5786,6 @@ class ActionCard(QWidget):
             return holo.TILE_STEEL
         if status == CARD_FAILED:
             return holo.TILE_ERROR
-        if status == CARD_COUNTDOWN:
-            return holo.TILE_COUNTING
         return holo.TILE_NEEDS_FOCUS if self._focal else holo.TILE_NEEDS
 
     def _sync_look(self) -> None:
@@ -5884,6 +5831,8 @@ class ActionCard(QWidget):
             button.setEnabled(enabled)
             button.setToolTip(self._lock_tip)
             button.setAccessibleDescription(self._lock_tip)
+        # Undo is a new outside action: like a decision, it waits while another card's approval runs.
+        self.undo_button.setEnabled(not self._locked)
         if waiting:   # a NEW RECIPIENT is not ticked: Send waits for it (the owner's decision)
             tip = tick_tip_text(waiting)
             self.approve_button.setEnabled(False)
@@ -5942,8 +5891,7 @@ class ActionCard(QWidget):
             painter.drawEllipse(center, self._DOT / 2, self._DOT / 2)
             if self.mail_body.isVisible():   # the hairline over the message
                 y = self.mail_body.geometry().top() + self._DIVIDER_GAP + 0.5
-                tone = holo.AMBER if state in (holo.TILE_NEEDS, holo.TILE_NEEDS_FOCUS, holo.TILE_COUNTING) \
-                    else holo.HOLO
+                tone = holo.AMBER if state in (holo.TILE_NEEDS, holo.TILE_NEEDS_FOCUS) else holo.HOLO
                 painter.setPen(QPen(holo.alpha(tone, 0.18), 1))
                 painter.drawLine(QPointF(self._PAD_LEFT, y), QPointF(rect.width() - self._PAD_RIGHT, y))
         finally:
@@ -5965,27 +5913,11 @@ def _result_look(status: str) -> tuple[str, str]:
         return holo.INK_4, holo.STAMP_STEEL
     if status in (CARD_WORKING, CARD_SIGNIN):
         return holo.HOLO, holo.STAMP_HOLO
-    if status == CARD_COUNTDOWN:
-        return holo.AMBER, ""
     if status == CARD_FAILED:
         return holo.ALERT_TX, ""
     if status == CARD_UNKNOWN:
         return holo.AMBER, ""
     return holo.INK_3, ""
-
-
-def _countdown_phrase(message: str) -> str:
-    """The strip's phrase as rich text: "Sending from work in 7 s" in sentence case, the number in JetBrains
-    Mono (tabular), never wrapped before the "s"."""
-    text = " ".join(str(message).split())
-    if text.isupper():
-        text = text[:1] + text[1:].lower()
-    match = re.search(r"(\d+)\s*s$", text, re.IGNORECASE)
-    if match is None:
-        return html.escape(text)
-    head = html.escape(text[:match.start()])
-    number = html.escape(match.group(1))
-    return (f'{head}<span style="font-family:\'{MONO_FAMILY}\'">{number}</span>&nbsp;s')
 
 
 class GroupHeader(QWidget):
@@ -6158,7 +6090,7 @@ class ActionList(QScrollArea):
         return True
 
     def lend(self, action_id: str) -> ActionCard | None:
-        """Hand ``action_id``'s card to another view for now (the same card: its buttons, ticks, countdown
+        """Hand ``action_id``'s card to another view for now (the same card: its buttons, ticks, result
         and Undo work as here; ``cards()`` and ``card()`` keep it); None when there is no such card.
         ``take_back(card)`` puts it back in its place."""
         card = self.card(action_id)
@@ -10454,7 +10386,7 @@ def picture_focus(picture: Any, width: int, stamp: tuple[str, str] = _NO_STAMP,
                   max_height: float | None = None) -> tuple[float, float] | None:
     """(top, bottom) of what a READY calendar change picture changes (the ghost and the new time,
     the new block, the struck-through or answered event), drawn ``width`` px wide: what a short
-    view shows first during a countdown. None for other pictures."""
+    view shows first during a hold. None for other pictures."""
     if picture is None or picture.state != live_events.PICTURE_READY or picture.day is None:
         return None
     marks: list[QRectF] = []
@@ -10647,7 +10579,7 @@ class _LivePicture(_LiveButton):
 
     def focus_span(self) -> tuple[float, float] | None:
         """(top, bottom) in this widget of what a calendar change picture changes (None for other
-        pictures): the part a short LIVE view shows during a countdown."""
+        pictures): the part a short LIVE view shows during a hold."""
         if not self.ready() or self._picture.day is None:
             return None
         width = max(1, self.width())
@@ -11247,9 +11179,8 @@ class _LiveStepRow(_LiveButton):
                 summary.draw(painter, QPointF(self._TEXT_X, self._PAD + title.height + 2))
             right_width = self._right_width()
             right = width - self._CARET - 8
-            countdown = view.deadline is not None and running
-            if countdown:
-                color = holo.AMBER
+            if view.deadline is not None and running:   # a Send's hidden hold: the confirmed look
+                color = holo.OK
             elif self._word in self._PLAIN_WORDS:
                 color = holo.HOLO if running else holo.INK_4
             else:
@@ -11364,8 +11295,8 @@ class _LiveStep(QWidget):
 
 class _LiveTaskHeader(_LiveButton):
     """A task's header in the timeline (HOLOGRAM_SPEC 16.3): the kicker, its tag and start time as a
-    cyan readout ("ASK - 2:41 PM"; amber while its undo countdown runs), with the status word on the
-    right ("RUNNING 0:12", "SENDING IN 7 S", "DONE", ...; under the title when the header is too narrow
+    cyan readout ("ASK - 2:41 PM"; the confirmed green during a Send's hidden hold), with the status word on
+    the right ("RUNNING 0:12", "SENDING", "DONE", ...; under the title when the header is too narrow
     for both), the title (Chakra 15, at most two lines; the whole title in a plain tooltip) and the meta
     line ("6 steps - 2 cards"). A closed compact task (a briefing fetch, the background reads) is one
     row: its status mark, the title on one line and the status word. ``meta()`` keeps the time first
@@ -11514,8 +11445,8 @@ class _LiveTaskHeader(_LiveButton):
         view = self._view
         if view is None:
             return holo.INK_4
-        if view.status == live_events.STATUS_RUNNING and not view.pinned and _running_countdown(view) is not None:
-            return holo.AMBER
+        if view.status == live_events.STATUS_RUNNING and not view.pinned and _running_hold(view) is not None:
+            return holo.OK
         if self._word == "IDLE":
             return holo.INK_4
         return live_mark_color(view.status)
@@ -11537,7 +11468,7 @@ class _LiveTaskHeader(_LiveButton):
                 painter.setBrush(holo.alpha(holo.INK_1, 0.05))
                 painter.drawRoundedRect(rect, 8, 8)
             color = self._color()
-            countdown = color == holo.AMBER
+            held = color == holo.OK and view.status == live_events.STATUS_RUNNING
             running = view.status == live_events.STATUS_RUNNING
             opacity = (1.0 if _BlinkClock.is_on() else 0.15) if running else 1.0
             align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -11550,7 +11481,7 @@ class _LiveTaskHeader(_LiveButton):
                 caret_y = center
             else:
                 painter.setFont(fonts.kicker)
-                painter.setPen(QColor(holo.AMBER if countdown else holo.HOLO))
+                painter.setPen(QColor(holo.OK if held else holo.HOLO))
                 text = QFontMetricsF(fonts.kicker).elidedText(self.kicker(), Qt.TextElideMode.ElideRight,
                                                               kicker.width() + 1)
                 painter.drawText(kicker, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
@@ -11582,31 +11513,32 @@ class _LiveTaskHeader(_LiveButton):
         _blink_clock().unregister(self)
 
 
-def _running_countdown(view: live_events.TaskView) -> live_events.StepView | None:
+def _running_hold(view: live_events.TaskView) -> live_events.StepView | None:
+    """The task's running hold step (a Send's or Cancel's hidden hold), if any."""
     return next((step for step in reversed(view.steps)
                  if step.status == live_events.STATUS_RUNNING and step.deadline is not None), None)
 
 
 def _task_word(view: live_events.TaskView, now: float) -> tuple[str, str]:
-    """The task's status pill: "RUNNING 0:12", "SENDING IN 7 S" (a countdown), "DONE", ...; the
-    rolling background task reads "RUNNING" / "IDLE"."""
+    """The task's status pill: "RUNNING 0:12", "SENDING" (a hidden hold: the confirmed green, no number),
+    "DONE", ...; the rolling background task reads "RUNNING" / "IDLE"."""
     if view.pinned:
         if view.status == live_events.STATUS_RUNNING:
             return "RUNNING", ACCENT
         return ("IDLE", TEXT_DIM) if view.status == live_events.STATUS_OK else (live_events.status_word(view),
                                                                                live_status_color(view.status))
     if view.status == live_events.STATUS_RUNNING:
-        countdown = _running_countdown(view)
-        if countdown is not None:
-            return live_events.status_word(countdown, now), AMBER
+        hold = _running_hold(view)
+        if hold is not None:
+            return live_events.status_word(hold), GREEN
         return f"RUNNING {live_events.elapsed_text(view.elapsed(now))}", ACCENT
     return live_events.status_word(view), live_status_color(view.status)
 
 
 class _LiveTaskCard(QWidget):
     """One task as a group of the timeline (HOLOGRAM_SPEC 5 / 16.3): a tile (``tile`` fill, scanlines, a
-    1 px border; a running task's corner brackets; amber while its undo countdown runs, coral when it
-    failed), the header and the steps ("N more steps not shown" past the stream's limit). A compact task
+    1 px border; a running task's corner brackets; the confirmed look during a Send's hidden hold, coral
+    when it failed), the header and the steps ("N more steps not shown" past the stream's limit). A compact task
     (briefing fetch, background reads) is one row without a tile until opened; the owner's choice
     sticks."""
 
@@ -11725,16 +11657,16 @@ class _LiveTaskCard(QWidget):
             path = holo.tile_path(inner, holo.RADIUS_TILE)
             status = view.status
             running = status == live_events.STATUS_RUNNING
-            countdown = running and not view.pinned and _running_countdown(view) is not None
+            held = running and not view.pinned and _running_hold(view) is not None
             failed = status == live_events.STATUS_FAILED
-            painter.fillPath(path, QColor(holo.TILE_AMBER if countdown else holo.TILE_ALERT if failed else holo.TILE))
+            painter.fillPath(path, QColor(holo.TILE_OK if held else holo.TILE_ALERT if failed else holo.TILE))
             if not view.pinned:
                 painter.save()
                 painter.setClipPath(path)
-                painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if countdown else holo.SCAN))
+                painter.fillRect(rect, holo.scan_brush(holo.SCAN))
                 painter.restore()
-            if countdown:
-                border = holo.alpha(holo.AMBER, 0.5)
+            if held:
+                border = holo.alpha(holo.OK, 0.30)
             elif failed:
                 border = holo.alpha(holo.ALERT, 0.5)
             elif view.pinned:
@@ -11745,7 +11677,7 @@ class _LiveTaskCard(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(path)
             if running and not view.pinned:
-                holo.paint_brackets(painter, rect, holo.AMBER if countdown else holo.HOLO, leg=10,
+                holo.paint_brackets(painter, rect, holo.OK if held else holo.HOLO, leg=10,
                                     radius=holo.RADIUS_TILE)
         finally:
             painter.end()
@@ -11761,11 +11693,11 @@ class LiveLog(QScrollArea):
     (``linkClicked(link)``: a Jarvis-made Google result link or an internal id such as
     "tab:jarvis"; a "picture:<step id>" link is followed here: follow_link), and nothing loads
     from anywhere. Details and text blocks are made on their
-    first open. The elapsed times tick with the view's own timer: every 250 ms while a countdown
-    shows, every second while a step runs, never while hidden, minimized or idle; running glyphs
+    first open. The elapsed times tick with the view's own timer: every second while a step runs,
+    never while hidden, minimized or idle; running glyphs
     blink on the shared blink clock. It follows the newest step unless the owner scrolled in the
     last ``SCROLL_HOLD_S`` seconds (a new task is shown from its header; what came during the hold
-    is followed when it ends). While an approved card counts down, what it will send or change
+    is followed when it ends). During a Send's or Cancel's hidden hold, what it will send or change
     (its payload step) stays in view, and a card the owner just approved comes into view whatever
     he scrolled. ``reveal(task_id)`` scrolls to a task and opens it. The empty-state text shows
     while no task but the pinned "Background reads" is there. The column is at most
@@ -11773,8 +11705,8 @@ class LiveLog(QScrollArea):
 
     Round 2 (HOLOGRAM_SPEC 16.3): it is the Live screen's timeline. A click on a step's row also says
     ``stepSelected(step_id)`` (the screen makes it the focal step: ``set_focal_step`` marks its row);
-    ``changed`` follows every apply or clear and ``ticked`` every tick of its timer (the focal frame's
-    countdown moves on with it, so nothing ticks while the view is hidden or minimized).
+    ``changed`` follows every apply or clear and ``ticked`` every tick of its timer (nothing ticks while
+    the view is hidden or minimized).
     ``hints=False`` (the pop-out: "details collapsed") opens a step's details only when the owner does;
     ``thumb=(w, h)`` draws the pictures in the details as thumbnails at most that big (the focal frame
     shows them large).
@@ -11786,9 +11718,8 @@ class LiveLog(QScrollArea):
     ticked = Signal()
     SCROLL_HOLD_S = ConversationLog.SCROLL_HOLD_S
     TICK_RUNNING_MS = 1000
-    TICK_COUNTDOWN_MS = 250
     _GAP = 6
-    _CHANGE_MARGIN = 24   # px kept under a calendar picture's change when the countdown scrolls to it
+    _CHANGE_MARGIN = 24   # px kept under a calendar picture's change when a hold scrolls to it
 
     def __init__(self, parent: QWidget | None = None, *, clock: Callable[[], float] = time.monotonic,
                  hints: bool = True, thumb: tuple[int, int] | None = None) -> None:
@@ -12202,8 +12133,6 @@ class LiveLog(QScrollArea):
             view = card.view
             if view is None or view.status != live_events.STATUS_RUNNING:
                 continue
-            if _running_countdown(view) is not None:
-                return self.TICK_COUNTDOWN_MS
             if not view.pinned or any(step.status == live_events.STATUS_RUNNING for step in view.steps):
                 interval = self.TICK_RUNNING_MS
         return interval
@@ -12216,7 +12145,7 @@ class LiveLog(QScrollArea):
             self._timer.start(interval)
 
     def tick(self) -> None:
-        """Count the running steps' times and the countdowns on (the timer calls it)."""
+        """Count the running steps' times on (the timer calls it)."""
         now = self.now()
         for card in self._cards.values():
             if card.view is not None and card.view.status == live_events.STATUS_RUNNING:
@@ -12249,20 +12178,20 @@ class LiveLog(QScrollArea):
     def _newest_card(self) -> _LiveTaskCard | None:
         return self._cards[self._order[-1]] if self._order else None
 
-    def _countdown_card(self) -> _LiveTaskCard | None:
-        """The newest approved card's task still in its undo countdown (shown, with its steps)."""
+    def _hold_card(self) -> _LiveTaskCard | None:
+        """The newest approved card's task still in its hidden hold (shown, with its steps)."""
         for task_id in reversed(self._order):
             card = self._cards[task_id]
             view = card.view
             if (view is not None and view.kind == live_events.TASK_ACTION and view.status == live_events.STATUS_RUNNING
-                    and _running_countdown(view) is not None and card.expanded() and card.isVisibleTo(self)):
+                    and _running_hold(view) is not None and card.expanded() and card.isVisibleTo(self)):
                 return card
         return None
 
-    def _countdown_target(self, maximum: int) -> int | None:
-        """While an approved card counts down: the whole task when it fits the view, else from what
+    def _hold_target(self, maximum: int) -> int | None:
+        """During an approved card's hidden hold: the whole task when it fits the view, else from what
         it will send or change (its payload step), so that is in view before it goes out."""
-        card = self._countdown_card()
+        card = self._hold_card()
         if card is None or card.height() <= 0 or card.view is None:
             return None
         content = self.widget()
@@ -12300,14 +12229,14 @@ class LiveLog(QScrollArea):
             elif fields is not None and fields.isVisibleTo(self) and fields.height() > 0:
                 fields_top = fields.mapTo(content, QPoint(0, 0)).y()
                 if fields_top + fields.height() + self._GAP > top + view_height - self._GAP:
-                    top = fields_top   # a short view: from the first field (the strip says SENDING IN)
+                    top = fields_top   # a short view: from the first field (the strip says SENDING)
         return max(0, min(maximum, top - self._GAP))
 
     def _newest_target(self, maximum: int) -> int:
         """The bottom, unless the newest task (when it just came) or its newest step is taller than
-        the view: then its top. While an approved card counts down, that card's payload instead
-        (_countdown_target)."""
-        target = self._countdown_target(maximum)
+        the view: then its top. During an approved card's hidden hold, that card's payload instead
+        (_hold_target)."""
+        target = self._hold_target(maximum)
         if target is not None:
             return target
         card = self._newest_card()
@@ -12337,7 +12266,7 @@ class LiveLog(QScrollArea):
             QTimer.singleShot(0, self._scroll_if_following)
         else:
             # Held by the owner's own scroll: what came meanwhile is followed once the hold is over,
-            # even if nothing else changes by then (a countdown changes nothing until it ends).
+            # even if nothing else changes by then (a hold changes nothing until it ends).
             self._missed = True
             self._hold_timer.start(max(0, math.ceil((self.SCROLL_HOLD_S - held) * 1000)) + 50)
 

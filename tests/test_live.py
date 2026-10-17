@@ -104,11 +104,12 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(live.status_word(only(stream).steps[-1]), "SENT")
         step.update(status_text="already there")
         self.assertEqual(only(stream).steps[-1].status_text, "ALREADY THERE")
-        countdown = task.step(live.ACTION_COUNTDOWN, "Undo countdown", status_text="SENDING", deadline=clock() + 6.5)
+        hold = task.step(live.ACTION_HOLD, "Undo hold", status_text="SENDING", deadline=clock() + 6.5)
         view = only(stream).steps[-1]
-        self.assertEqual(live.status_word(view, clock()), "SENDING IN 7 S")
+        self.assertEqual(live.status_word(view, clock()), "SENDING")   # a hidden hold: never a number
         self.assertEqual(live.status_word(view), "SENDING")
-        countdown.done(STATUS_CANCELLED, status_text="UNDONE", summary="nothing was sent")
+        self.assertFalse(hasattr(live, "countdown_seconds"))
+        hold.done(STATUS_CANCELLED, status_text="UNDONE", summary="nothing was sent")
         view = only(stream).steps[-1]
         self.assertEqual((live.status_word(view, clock()), view.deadline), ("UNDONE", None))
 
@@ -666,9 +667,9 @@ class PrivacyTests(unittest.TestCase):
             settle()
             c.window.reading.action_card(mail.id).approve_button.click()
             settle()
-            self.assertIsNotNone(c._countdown)
-            c._countdown.deadline = time.monotonic() - 0.001
-            c._on_countdown_tick()
+            self.assertIsNotNone(c._send_hold)
+            c._send_hold.deadline = time.monotonic() - 0.001
+            c._on_send_hold_tick()
             self.assertTrue(wait_for(lambda: mail.id not in c._jobs and mail.id not in c._running, 5))
             settle()
         self.assertEqual(reader.searches, [f"subject:{self.WORD}"])

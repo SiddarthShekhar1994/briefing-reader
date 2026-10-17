@@ -40,7 +40,7 @@ from briefing_reader.config import AccountConfig, load_config
 from briefing_reader.executor import (
     CALENDAR_SETUP_NOTE,
     COMPOSIO_NOTE,
-    COUNTDOWN_ONLY_MESSAGE,
+    HOLD_ONLY_MESSAGE,
     DISCONNECT_FAILED_MESSAGE,
     MAIL_SETUP_NOTE,
     NEW_RECIPIENTS_MESSAGE,
@@ -1315,12 +1315,12 @@ class MailRunTests(MailTestCase):
         action = example("Reply")
         with self.assertLogs(EXECUTOR_LOGGER, level="INFO"):
             outcome = self.run_mail(action, writes_running=False)
-        self.assertEqual((outcome.status, str(outcome.error)), (STATUS_FAILED, COUNTDOWN_ONLY_MESSAGE))
+        self.assertEqual((outcome.status, str(outcome.error)), (STATUS_FAILED, HOLD_ONLY_MESSAGE))
         for call in (lambda: self.mail_executor().execute(action),
                      lambda: self.mail_executor().execute(action, interactive=True)):
             with self.assertRaises(ExecError) as ctx:
                 call()
-            self.assertEqual(str(ctx.exception), COUNTDOWN_ONLY_MESSAGE)
+            self.assertEqual(str(ctx.exception), HOLD_ONLY_MESSAGE)
         self.assertEqual(self.senders["work"].calls, [])
 
     def test_a_signed_out_account_sends_nothing_and_opens_nothing(self) -> None:
@@ -1507,7 +1507,7 @@ class AccountConfirmationTests(MailTestCase):
             self.assertEqual(run.change_problem("work"), PROBLEM_FAILED)
         self.assertEqual(self.work.changes(), [])
 
-    def test_which_accounts_sign_in_before_the_countdown(self) -> None:
+    def test_which_accounts_sign_in_before_anything_changes(self) -> None:
         self.work = UnknownAccountCalendar(store=self.store)
         self.work.unconfirmed = True
         run = self.executor()
@@ -1678,8 +1678,8 @@ class FailClosedAccountTests(unittest.TestCase):
                     self.assert_nothing_done(PROBLEM_IDENTITY)
 
 
-class CountdownForCalendarTests(ExecutorTestCase):
-    """Calendar events and to-do blocks after the undo countdown: "running" first, no browser after."""
+class CarriedCalendarTests(ExecutorTestCase):
+    """Calendar events and to-do blocks right after the click: "running" first, no browser after."""
 
     def run_job(self, action: ProposedAction) -> RunOutcome:
         self.watch(action)
@@ -1865,7 +1865,7 @@ class LiveRunTests(MailTestCase):
             self.run_mail(action, executor=run, live=task)
         shown = self.step(task, live.ACTION_PAYLOAD)
         self.assertEqual((shown.status, shown.status_text), (live.STATUS_WARN, "CHECK"))
-        self.assertEqual(shown.notes[0].text, "Not what the countdown showed: Message changed")
+        self.assertEqual(shown.notes[0].text, "Not what the card showed: Message changed")
 
     def test_a_mail_payload_carries_the_email_drawn_as_it_goes_out(self) -> None:
         from briefing_reader import pictures
@@ -2005,7 +2005,7 @@ class LiveRunTests(MailTestCase):
         self.run_mail(example("Move"), executor=run, live=task)
         payload = self.step(task, live.ACTION_PAYLOAD)
         self.assertEqual((payload.status, payload.status_text), (live.STATUS_WARN, "CHECK"))
-        self.assertEqual(payload.notes[-1].text, "Not what the countdown showed: Event id differs in the request to "
+        self.assertEqual(payload.notes[-1].text, "Not what the card showed: Event id differs in the request to "
                                                  "Google")
         move = example("Move")
         good = {"calendarId": "primary", "eventId": move.field("event"), "sendUpdates": "all",

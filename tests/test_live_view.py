@@ -112,12 +112,12 @@ class LiveStatusTests(unittest.TestCase):
         self.assertTrue(hud._blink_clock().active())                  # working blinks
         clock.t += 60
         self.assertEqual(status.text(), "WORKING 1:12")
-        status.set_state(hud.LIVE_COUNTDOWN, "SENDING", deadline=clock.t + 6.2)
-        self.assertEqual(status.text(), "SENDING IN 7 S")             # math.ceil, as the card
-        self.assertEqual(status.color(), hud.AMBER)
-        self.assertIn("sending in 7 s", status.accessibleName())
-        status.set_state(hud.LIVE_COUNTDOWN, "ADDING", deadline=clock.t - 1)
-        self.assertEqual(status.text(), "ADDING IN 0 S")
+        status.set_state(hud.LIVE_HOLD, "SENDING")                    # a Send's hidden hold
+        self.assertEqual(status.text(), "SENDING")                    # the truth, never a number
+        self.assertEqual(status.color(), hud.GREEN)                   # the confirmed look, not amber
+        self.assertEqual(status.accessibleName(), "Live: sending")
+        clock.t += 3
+        self.assertEqual(status.text(), "SENDING")
         status.set_state(hud.LIVE_IDLE)
         self.assertEqual(status.text(), "IDLE")
         self.assertFalse(hud._blink_clock().active())
@@ -154,8 +154,8 @@ class LiveLogRenderTests(LogCase):
         self.apply()
         self.assertTrue(card.isVisible())
 
-    def action(self, title: str = "Email work: Budget review", *, countdown: bool = True) -> live.LiveTask:
-        """An approved card's task as AppController makes it: approved, the payload, the countdown."""
+    def action(self, title: str = "Email work: Budget review", *, hold: bool = True) -> live.LiveTask:
+        """An approved card's task as AppController makes it: approved, the payload, a Send's hidden hold."""
         task = self.stream.task(live.TASK_ACTION, title)
         task.step(live.ACTION_APPROVED, "You approved", status=live.STATUS_OK,
                   fields=[("Card", "ASK EMAIL"), ("Account", "work")])
@@ -163,8 +163,8 @@ class LiveLogRenderTests(LogCase):
         payload.show(live.Payload("Will send exactly this", (
             live.Field("From", "me@example.edu", mono=True), live.Field("To", "ana@example.edu"),
             live.Field("Cc", "none"), live.Field("Subject", "Re: Budget review")), "Message", "Hi Ana,\n" * 30))
-        if countdown:
-            task.step(live.ACTION_COUNTDOWN, "Undo countdown", status_text="SENDING", deadline=self.clock.t + 10)
+        if hold:
+            task.step(live.ACTION_HOLD, "Undo hold", status_text="SENDING", deadline=self.clock.t + 10)
         return task
 
     def visible(self, log: hud.LiveLog, widget) -> bool:
@@ -178,7 +178,7 @@ class LiveLogRenderTests(LogCase):
             task.step(live.ASK_REQUEST, "Your request", status=live.STATUS_OK)
             task.finish(live.STATUS_OK)
 
-    def test_a_countdown_keeps_what_it_will_send_in_view(self) -> None:
+    def test_a_hold_keeps_what_it_sends_in_view(self) -> None:
         log = self.log(320, 160)                                       # a short LIVE tab
         self.history()
         task = self.action()
@@ -195,13 +195,13 @@ class LiveLogRenderTests(LogCase):
         self.apply()
         settle(6)
         self.assertEqual(log.verticalScrollBar().value(), payload.mapTo(log.widget(), QPoint(0, 0)).y() - log._GAP)
-        task.find(live.ACTION_COUNTDOWN).done(live.STATUS_OK, status_text="DONE")
+        task.find(live.ACTION_HOLD).done(live.STATUS_OK, status_text="DONE")
         task.step(live.ACTION_CALL, "Gmail: send the message", status=live.STATUS_OK, status_text="SENT")
         later.finish(live.STATUS_OK)
         self.apply()
         settle(6)
         bar = log.verticalScrollBar()
-        self.assertEqual(bar.value(), bar.maximum())                   # the countdown is over: the newest again
+        self.assertEqual(bar.value(), bar.maximum())                   # the hold is over: the newest again
 
     def test_a_card_the_owner_approved_comes_into_view_whatever_he_scrolled(self) -> None:
         log = self.log(320, 200)
@@ -245,7 +245,7 @@ class LiveLogRenderTests(LogCase):
 
     def test_the_column_is_capped_in_a_wide_view(self) -> None:
         log = self.log(1900, 400)
-        task = self.action(countdown=False)
+        task = self.action(hold=False)
         self.apply()
         settle(6)
         card = log.task_widget(task.id)
@@ -398,21 +398,21 @@ class LiveLogRenderTests(LogCase):
         link.click()
         self.assertEqual(links, ["tab:jarvis"])
 
-    def test_elapsed_ticks_with_the_clock_and_countdown_words(self) -> None:
+    def test_elapsed_ticks_with_the_clock_and_a_hold_says_only_sending(self) -> None:
         log = self.log()
         task = self.stream.task(live.TASK_ACTION, "Email work: Budget")
-        countdown = task.step(live.ACTION_COUNTDOWN, "Undo countdown", status_text="SENDING",
-                              deadline=self.clock.t + 9.5)
+        hold = task.step(live.ACTION_HOLD, "Undo hold", status_text="SENDING", deadline=self.clock.t + 4.5)
         self.apply()
-        row = log.step_widget(countdown.id).row
-        self.assertEqual(row.word(), "SENDING IN 10 S")
-        self.assertEqual(log.task_widget(task.id).header.word(), "SENDING IN 10 S")
-        self.assertEqual(log.ticking(), hud.LiveLog.TICK_COUNTDOWN_MS)
+        row = log.step_widget(hold.id).row
+        self.assertEqual(row.word(), "SENDING")                       # never a number
+        self.assertEqual(log.task_widget(task.id).header.word(), "SENDING")
+        self.assertEqual(log.ticking(), hud.LiveLog.TICK_RUNNING_MS)
+        self.assertFalse(hasattr(hud.LiveLog, "TICK_COUNTDOWN_MS"))
         self.clock.t += 3.0
         log.tick()
-        self.assertEqual(row.word(), "SENDING IN 7 S")
+        self.assertEqual(row.word(), "SENDING")
         self.assertEqual(row.elapsed(), "3.0 s")
-        countdown.done(summary="ran out - sending now")
+        hold.done(summary="sending now")
         call = task.step(live.ACTION_CALL, "Gmail: send the message (one call, never retried)")
         self.apply()
         self.assertEqual(log.ticking(), hud.LiveLog.TICK_RUNNING_MS)
@@ -782,7 +782,7 @@ class AppCase(unittest.TestCase):
     def approve(self, action) -> None:
         self.reading.action_card(action.id).approve_button.click()
         settle()
-        self.assertIsNotNone(self.c._countdown, self.c._hints.get(action.id))
+        self.assertIsNotNone(self.c._send_hold, self.c._hints.get(action.id))
 
 
 class GatedProcess(FakeProcess):
@@ -892,13 +892,13 @@ class AutoOpenTests(AppCase):
         self.reading.set_tab(hud.TAB_LIVE)
         self.assertEqual(self.reading.live_activity(), "")
 
-    def test_an_approved_email_shows_its_payload_during_the_countdown(self) -> None:
+    def test_an_approved_email_shows_its_payload_during_its_hold(self) -> None:
         self.make()
         mail = self.add_mail()
         self.approve(mail)
         self.assertEqual(self.reading.current_tab(), hud.TAB_LIVE)
         self.drained()
-        task_id = self.c._countdown.task.id
+        task_id = self.c._send_hold.task.id
         card = self.reading.live_log.task_widget(task_id)
         payload = next(step for step in card.step_widgets() if step.view.kind == live.ACTION_PAYLOAD)
         self.assertTrue(payload.is_open())
@@ -907,22 +907,22 @@ class AutoOpenTests(AppCase):
         self.assertEqual(fields.value_widget("Subject").plain_text(), "Jarvis test sync moved")
         body = payload.details.blocks["Message"]
         self.assertEqual(body.text_edit.toPlainText(), "Hi Sam,\nMoved to Friday at 2 PM.\nThanks\n")
-        self.assertEqual(self.reading.live_status.state(), hud.LIVE_COUNTDOWN)
-        self.assertTrue(self.reading.live_status.text().startswith("SENDING IN "))
-        self.c._countdown.started -= 5
+        self.assertEqual(self.reading.live_status.state(), hud.LIVE_HOLD)
+        self.assertEqual(self.reading.live_status.text(), "SENDING")   # the truth, never a number
+        self.c._send_hold.started -= 5
         self.c.undo_action(mail.id)
         self.drained()
         self.assertEqual(card.view.status, live.STATUS_CANCELLED)
         self.assertEqual(card.header.word(), "UNDONE")
         self.assertEqual(self.app.senders["work"].sent, [])
 
-    def test_a_countdown_that_runs_out_shows_the_call_and_the_message_id(self) -> None:
+    def test_a_hold_that_ends_shows_the_call_and_the_message_id(self) -> None:
         self.make()
         mail = self.add_mail()
         self.approve(mail)
-        task_id = self.c._countdown.task.id
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+        task_id = self.c._send_hold.task.id
+        self.c._send_hold.deadline = time.monotonic() - 0.001
+        self.c._on_send_hold_tick()
         self.assertTrue(wait_for(lambda: mail.id not in self.c._jobs and mail.id not in self.c._running, 5))
         self.drained()
         card = self.reading.live_log.task_widget(task_id)
@@ -951,7 +951,7 @@ class AutoOpenTests(AppCase):
         mail = self.add_mail()
         self.approve(mail)
         self.drained()
-        running_id = self.c._countdown.task.id
+        running_id = self.c._send_hold.task.id
         self.reading.live_clear_button.click()
         self.drained()
         ids = self.reading.live_log.task_ids()
@@ -984,7 +984,7 @@ class AutoOpenShortTests(AppCase):
             self.approve(mail)
         self.assertEqual(self.reading.current_tab(), hud.TAB_LIVE)
         self.assertIsNone(self.c._live_window)
-        self.c._countdown.started -= 5
+        self.c._send_hold.started -= 5
         self.c.undo_action(mail.id)
 
     def test_the_real_page_height_of_a_regular_window(self) -> None:
@@ -1003,11 +1003,11 @@ class LiveWindowHeaderTests(unittest.TestCase):
         self.addCleanup(window.deleteLater)
         window.show()
         header = window.header
-        for size, state in ((ui.LIVE_WINDOW_SIZE, hud.LIVE_IDLE), (ui.LIVE_WINDOW_SIZE, hud.LIVE_COUNTDOWN),
-                            (ui.LIVE_WINDOW_MIN_SIZE, hud.LIVE_COUNTDOWN)):
+        for size, state in ((ui.LIVE_WINDOW_SIZE, hud.LIVE_IDLE), (ui.LIVE_WINDOW_SIZE, hud.LIVE_HOLD),
+                            (ui.LIVE_WINDOW_MIN_SIZE, hud.LIVE_HOLD)):
             with self.subTest(size=size, state=state):
                 window.resize(size)
-                header.set_state(state, deadline=time.monotonic() + 9 if state == hud.LIVE_COUNTDOWN else None)
+                header.set_state(state)
                 settle(6)
                 self.assertEqual(header.height(), 44)
                 self.assertIs(window.status, header.readout)
@@ -1104,10 +1104,10 @@ class PopOutTests(AppCase):
         self.approve(mail)
         self.drained()
         self.assertEqual(self.reading.current_tab(), hud.TAB_JARVIS)
-        self.assertIn(self.c._countdown.task.id, window.log.task_ids())
+        self.assertIn(self.c._send_hold.task.id, window.log.task_ids())
         self.assertEqual(self.reading.live_activity(), "")             # no dot while popped out
-        self.assertEqual(window.status.state(), hud.LIVE_COUNTDOWN)
-        self.c._countdown.started -= 5
+        self.assertEqual(window.status.state(), hud.LIVE_HOLD)
+        self.c._send_hold.started -= 5
         self.c.undo_action(mail.id)
         # Closing (the close button, Alt+F4) docks it: hidden, never quits.
         window.close()
@@ -1148,7 +1148,7 @@ class PopOutTests(AppCase):
         mail = self.add_mail()
         self.approve(mail)
         self.drained()
-        task_id = self.c._countdown.task.id
+        task_id = self.c._send_hold.task.id
         card = window.log.task_widget(task_id)
         payload = next(step for step in card.step_widgets() if step.view.kind == live.ACTION_PAYLOAD)
         self.assertTrue(window.log.open_picture(payload.view.id))
@@ -1163,7 +1163,7 @@ class PopOutTests(AppCase):
         self.assertTrue(viewer.canvas.pixmap().isNull())
         self.assertEqual(window.log.task_ids(), [])   # nor any step of a task Clear may remove
         self.assertIn(task_id, self.reading.live_log.task_ids())
-        self.c._countdown.started -= 5
+        self.c._send_hold.started -= 5
         self.c.undo_action(mail.id)
         self.drained()
         self.c.clear_live()
@@ -1177,8 +1177,8 @@ class PopOutTests(AppCase):
         self.c.pop_out_live(activate=False)
         settle()
         self.assertEqual(window.log.task_ids(), self.reading.live_log.task_ids())
-        self.assertIn(self.c._countdown.task.id, window.log.task_ids())
-        self.c._countdown.started -= 5
+        self.assertIn(self.c._send_hold.task.id, window.log.task_ids())
+        self.c._send_hold.started -= 5
         self.c.undo_action(mail2.id)
         window.dock_button.click()
         settle()

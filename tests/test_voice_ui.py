@@ -3,8 +3,8 @@ and a fake briefing player (offscreen Qt; nothing is synthesized or played, no Q
 
 The voice pauses a playing briefing for an utterance and resumes it 400 ms after the queue ran
 empty, but only if it paused it itself and the owner has not touched playback since; Play (stop)
-ends an utterance at once; no utterance starts while an undo countdown runs and a held one plays
-after the countdown ends; mute stops speaking, drops the queue, refuses new utterances and is
+ends an utterance at once; no utterance starts while a Send's hidden hold runs and a held one plays
+after the hold ends; mute stops speaking, drops the queue, refuses new utterances and is
 remembered in assistant.json; and the log names kinds and lengths, never the text.
 """
 
@@ -122,13 +122,13 @@ class VoiceTestCase(unittest.TestCase):
         self.worker = FakeWorker()
         self.player = FakeUtterancePlayer()
         self.briefing = FakeBriefing()
-        self.countdown = False
+        self.holding = False
         self.spoken: list[str] = []
         self.voice = self.make()
 
     def make(self, **kwargs) -> AssistantVoice:
         voice = AssistantVoice(worker=self.worker, player=self.player, briefing_player=lambda: self.briefing,
-                               countdown_active=lambda: self.countdown, prefs=self.prefs, resume_delay_ms=40,
+                               hold_active=lambda: self.holding, prefs=self.prefs, resume_delay_ms=40,
                                tick_ms=20, **kwargs)
         voice.speakingChanged.connect(self.spoken.append)
         self.addCleanup(voice.shutdown)
@@ -300,37 +300,37 @@ class BriefingTests(VoiceTestCase):
 
 
 class CountdownTests(VoiceTestCase):
-    def test_nothing_starts_during_a_countdown_and_the_held_one_plays_after(self) -> None:
-        self.countdown = True
+    def test_nothing_starts_during_a_hold_and_the_held_one_plays_after(self) -> None:
+        self.holding = True
         seq = self.say(KIND_RESULT, "Done, sir.")
         self.voice.pump()
         time.sleep(0.05)
         settle()
         self.assertEqual(self.player.played, [])
         self.assertFalse(self.voice.speaking)
-        self.countdown = False
-        self.voice.pump()                 # the controller's _cancel_countdown / _finish_countdown
+        self.holding = False
+        self.voice.pump()                 # the controller's _cancel_send_hold / _finish_send_hold
         self.assertEqual(self.player.played, [seq])
 
     def test_one_already_playing_finishes(self) -> None:
         first = self.say(KIND_RESULT, "Done, sir.")
-        self.countdown = True
+        self.holding = True
         second = self.say(KIND_RESULT, "Also done, sir.")
         self.assertEqual(self.player.stops, 0)
         self.player.end()
         self.assertEqual(self.player.played, [first])
-        self.countdown = False
+        self.holding = False
         self.assertTrue(wait_for(lambda: self.player.played == [first, second]))   # the tick looks again
 
     def test_an_earlier_result_dropped_at_the_next_approval_is_never_said(self) -> None:
-        # The controller's _start_countdown drops the waiting "result" sentences: nothing is said when
-        # that countdown ends (or is undone) before its own result.
+        # The controller's _start_send_hold drops the waiting "result" sentences: nothing is said when
+        # that hold ends (or is undone) before its own result.
         seq = self.say(KIND_RESULT, "Sent, sir - your email is on its way.", "result", synthesized=False)
         self.voice.cancel_key("result")
-        self.countdown = True
+        self.holding = True
         self.voice.pump()
         self.voice.on_audio(seq, audio(seq), None)   # the synthesis ends after the drop
-        self.countdown = False
+        self.holding = False
         self.voice.pump()
         time.sleep(0.05)
         settle()
@@ -338,12 +338,12 @@ class CountdownTests(VoiceTestCase):
         self.assertIn(seq, self.worker.forgotten)
         self.assertEqual(self.spoken, [])
 
-    def test_a_failing_countdown_check_holds(self) -> None:
+    def test_a_failing_hold_check_holds(self) -> None:
         def broken() -> bool:
             raise RuntimeError("no controller")
 
         self.voice = self.make()
-        self.voice._countdown_active = broken
+        self.voice._hold_active = broken
         self.say(KIND_RESULT, "Done, sir.")
         self.assertFalse(self.voice.speaking)
 

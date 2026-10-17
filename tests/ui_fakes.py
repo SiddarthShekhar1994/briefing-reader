@@ -30,7 +30,7 @@ from briefing_reader.ask import planner as ask_planner
 from briefing_reader.ask.planner import AskPlanner, ClaudeEngine, GoogleSources
 from briefing_reader.ask.usage import UsageLog
 from briefing_reader.config import ActionsConfig, CalendarConfig, load_config
-from briefing_reader.gcal import ChangeResult, EventBrief, EventDetails, EventGone, EventResult, Guest
+from briefing_reader.gcal import RESPONSES, ChangeResult, EventBrief, EventChanged, EventDetails, EventGone,     EventResult, Guest
 from briefing_reader.gmail import SentMail
 from briefing_reader.notion_client import FixtureSession, NotionClient, fetch_briefing
 from tests.ask_fakes import FakeRunner, plan_stream
@@ -192,11 +192,17 @@ def event(event_id: str, title: str, start: datetime, *, organizer_self: bool = 
 
 class FakeCalendar:
     """gcal.GoogleCalendar's surface for one account (never the network). ``calls`` and ``threads``
-    record what happened where."""
+    record what happened where. ``stamps``: like Google, every change answers with the event's new
+    version stamp (an etag) and Google's view from before it, so the app offers Undo; ``events``
+    then follow every change (an added event, an answer, a move) and the undo_* calls reverse them,
+    refused (EventChanged) when the event is gone or its stamp moved on."""
 
     def __init__(self, alias: str, *, signed_in: bool = True, events: dict | None = None,
-                 guests: dict | None = None) -> None:
+                 guests: dict | None = None, stamps: bool = False) -> None:
         self.alias = alias
+        self.stamps = stamps
+        self.version = 0
+        self.notified: list[tuple[str, str]] = []   # (call, sendUpdates) of every change and Undo
         self.signed_in = signed_in
         self.events = dict(events or {})
         self.guests = dict(guests or {})
@@ -262,14 +268,83 @@ class FakeCalendar:
             raise EventGone("Google has no such event (HTTP 404)", status=404)
         return self.events[event_id]
 
-    def move(self, event_id, start, end, *, send_updates="all", calendar_id=None, now=None, interactive=True):
+    def _stamped(self, event_id: str, **changes: Any) -> EventDetails:
+        """``event_id``'s details with ``changes`` and a new version stamp (stored)."""
+        self.version += 1
+        details = dataclasses.replace(self.events[event_id], stamp=f"etag-{event_id}-{self.version}", **changes)
+        self.events[event_id] = details
+        return details
+
+    def touch(self, event_id: str) -> None:
+        """Someone else changed the event in Google Calendar since (its stamp moves on)."""
+        self._stamped(event_id)
+
+    def move(self, event_id, start, end, *, send_updates="all", calendar_id=None, now=None, interactive=True,
+             **_kw: Any):
         self._note("move", event_id)
+        self.notified.append(("move", send_updates))
+        if not self.stamps:
+            return ChangeResult(event_id=event_id, link="", already=False)
+        before = self.events[event_id]
+        after = self._stamped(event_id, start=start.replace(tzinfo=PDT), end=end.replace(tzinfo=PDT))
+        return ChangeResult(event_id=event_id, link="", already=False, stamp=after.stamp, before=before)
+
+    def respond(self, event_id, answer, *, comment="", send_updates="all", calendar_id=None, interactive=True,
+                **_kw: Any):
+        self._note("respond", event_id, answer)
+        self.notified.append(("respond", send_updates))
+        before = self.events[event_id]
+        if not self.stamps:
+            return ChangeResult(event_id=event_id, link="", already=False)
+        after = self._stamped(event_id, self_response=RESPONSES[answer], self_comment=comment or before.self_comment)
+        return ChangeResult(event_id=event_id, link="", already=False, stamp=after.stamp, before=before)
+
+    def cancel(self, event_id, *, send_updates="all", calendar_id=None, interactive=True, **_kw: Any):
+        self._note("cancel", event_id)
+        self.notified.append(("cancel", send_updates))
+        self.events.pop(event_id, None)
         return ChangeResult(event_id=event_id, link="", already=False)
 
     def create_event(self, action, interactive: bool = True, **kwargs: Any) -> EventResult:
         self._note("create", action.title)
         self.footers.append(kwargs.get("footer", ""))   # "" = the default footer (the keyword is left out)
-        return EventResult(event_id="evt-new", link="https://www.google.com/calendar/event?eid=new", existed=False)
+        link = "https://www.google.com/calendar/event?eid=new"
+        if not self.stamps:
+            return EventResult(event_id="evt-new", link=link, existed=False)
+        event_id = f"evt-new-{self.version + 1}"
+        start = action.start if action.start is not None else NOW
+        self.events[event_id] = event(event_id, action.title, start.replace(tzinfo=PDT))
+        details = self._stamped(event_id)
+        return EventResult(event_id=event_id, link=link, existed=False, stamp=details.stamp)
+
+    def _unchanged(self, event_id: str, stamp: str) -> EventDetails:
+        details = self.events.get(event_id)
+        if details is None or details.stamp != stamp:
+            raise EventChanged("The event changed since Jarvis's change")
+        return details
+
+    def undo_create(self, event_id, *, stamp, send_updates="none", calendar_id=None, uncertain=False, **_kw: Any):
+        self._note("undo_create", event_id)
+        self.notified.append(("undo_create", send_updates))
+        self._unchanged(event_id, stamp)
+        del self.events[event_id]
+        return ChangeResult(event_id=event_id, link="", already=False)
+
+    def undo_respond(self, event_id, response, *, comment="", stamp, send_updates="all", calendar_id=None,
+                     uncertain=False, **_kw: Any):
+        self._note("undo_respond", event_id, response)
+        self.notified.append(("undo_respond", send_updates))
+        self._unchanged(event_id, stamp)
+        after = self._stamped(event_id, self_response=response, self_comment=comment)
+        return ChangeResult(event_id=event_id, link="", already=False, stamp=after.stamp)
+
+    def undo_move(self, event_id, start, end, *, time_zone="", stamp, send_updates="all", calendar_id=None,
+                  uncertain=False, **_kw: Any):
+        self._note("undo_move", event_id)
+        self.notified.append(("undo_move", send_updates))
+        self._unchanged(event_id, stamp)
+        after = self._stamped(event_id, start=start, end=end)
+        return ChangeResult(event_id=event_id, link="", already=False, stamp=after.stamp)
 
 
 class FakeSender:
@@ -573,7 +648,8 @@ class AppHarness:
             c.productivity.join(5)
         if c._snapshots is not None:
             c._snapshots.shutdown()   # a real snapshotter (a harness's) closes its hidden view
-        for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._countdown_timer, c._agenda_timer):
+        for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._send_hold_timer, c._undo_timer,
+                      c._agenda_timer):
             timer.stop()
         if c._calendar_worker is not None:
             c._closing.set()

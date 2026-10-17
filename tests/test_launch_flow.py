@@ -129,7 +129,7 @@ class Flow:
 
     def close(self) -> None:
         c = self.c
-        for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._countdown_timer, c._agenda_timer,
+        for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._send_hold_timer, c._agenda_timer,
                       c._greeting_timer, c._held_timer, c._note_timer, c._recheck_timer):
             timer.stop()
         c.state = ui.STATE_QUITTING

@@ -51,7 +51,7 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(card.id, parse_action_line(f"Open: title=[1] Visit - Example Museum | link={VISIT_URL}",
                                                     link_hosts=("www.example.org",)).id)
         self.assertTrue(card.decidable)
-        self.assertFalse(card.countdown)   # opened on the click only; nothing is carried out
+        self.assertFalse(card.carried)   # opened on the click only; nothing is carried out
         source, = report.sources
         self.assertEqual((source.number, source.title, source.url, source.domain, source.checked, source.card_id),
                          (1, "Visit - Example Museum", VISIT_URL, "www.example.org", True, card.id))
@@ -149,11 +149,11 @@ class SuggestionTests(unittest.TestCase):
         made, report = self.one(TODO_LINE)
         todo, = made
         self.assertEqual((todo.kind, todo.web, todo.source, todo.link, todo.error), (TODO, True, SOURCE_ASK, VISIT_URL, ""))
-        self.assertTrue(todo.countdown)                 # Add block -> the undo countdown, as every block
+        self.assertTrue(todo.carried)                 # Add block -> carried out at once (its Undo after), as every block
         self.assertEqual(todo.id, parse_action_line(TODO_LINE, link_hosts=("www.example.org",)).id)
         self.assertEqual(report.dropped, ())
         plain, _ = self.one("Todo: title=Visit the museum | due=2026-10-10 18:00 | block= | acct= | link=")
-        self.assertEqual((plain[0].web, plain[0].countdown), (False, False))
+        self.assertEqual((plain[0].web, plain[0].carried), (False, False))
         self.assertEqual(self.dropped(TODO_LINE.replace("acct=", "acct=work")), rv.NO_ACCOUNT)
         self.assertEqual(self.dropped(TODO_LINE.replace(VISIT_URL, HOURS_URL)), rv.LINK_NOT_SOURCE)   # seen, not a source
         self.assertEqual(self.dropped(TODO_LINE.replace(VISIT_URL, "https://phish.example.com/login")), rv.LINK_NOT_SOURCE)
@@ -182,7 +182,7 @@ class SuggestionTests(unittest.TestCase):
         event, = made
         self.assertEqual((event.kind, event.web, event.source, event.rrule, event.warnings), (CALENDAR, False, SOURCE_ASK,
                                                                                              "", ()))
-        self.assertTrue(event.countdown)               # Approve -> the undo countdown, as every Calendar card
+        self.assertTrue(event.carried)               # Approve -> carried out at once, as every Calendar card
         self.assertEqual(event.id, parse_action_line(CAL_LINE).id)
         # Only what the card shows reaches the calendar: the place stays, the notes go.
         self.assertEqual((event.title, event.where, event.notes), ("Museum visit", "Example Museum", ""))

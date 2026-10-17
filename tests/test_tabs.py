@@ -796,12 +796,12 @@ class ReadingViewScreenTests(unittest.TestCase):
         settle(4)
         self.assertFalse(reading.live_status.isVisible())
         self.assertFalse(reading.live_pop_button.isVisible() or reading.live_clear_button.isVisible())
-        # The 900 px window counting down: the readout whole, the buttons whole and inside the strip.
+        # The 900 px window during a Send's hold: the readout whole, the buttons whole and inside the strip.
         window.resize(ui.READING_MIN_SIZE)
         reading.set_tab(hud.TAB_LIVE)
-        reading.set_live_state(hud.LIVE_COUNTDOWN, "SENDING", deadline=time.monotonic() + 8)
+        reading.set_live_state(hud.LIVE_HOLD, "SENDING")
         settle(6)
-        self.assertTrue(reading.live_status.text().startswith("SENDING IN "))
+        self.assertEqual(reading.live_status.text(), "SENDING")
         self.assertGreaterEqual(reading.live_status.width(), reading.live_status.sizeHint().width())
         for button in (reading.live_pop_button, reading.live_clear_button):
             self.assertTrue(button.isVisible())

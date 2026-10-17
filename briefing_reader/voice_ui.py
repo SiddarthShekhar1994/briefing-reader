@@ -7,7 +7,7 @@ speaks through (speech.Voice).
         player.BriefingPlayer. ``play(seq, audio)`` plays one utterance's segments back to back;
         ``finished(seq)`` when it ended or could not be played; ``stop()`` ends it quietly.
 
-    AssistantVoice(worker=..., player=..., briefing_player=..., countdown_active=..., prefs=...)
+    AssistantVoice(worker=..., player=..., briefing_player=..., hold_active=..., prefs=...)
         speech.SpeechLane (the queue policy) + speech.SayWorker (the "tts-say" thread; its results
         come back through ``on_audio`` on the GUI thread) + an UtterancePlayer, with these rules:
         * one utterance at a time; synthesis starts at ``say()``, playback when its turn comes;
@@ -16,8 +16,8 @@ speaks through (speech.Voice).
           touched playback since (``owner_acted()``);
         * ``stop()`` (the owner pressed Play, Pause, Skip or a section) ends the utterance now and
           drops the queue;
-        * nothing starts while an undo countdown runs (``countdown_active()``); ``pump()`` looks
-          again (the controller calls it when a countdown starts, ends or is cancelled);
+        * nothing starts while a Send's hidden hold runs (``hold_active()``); ``pump()`` looks
+          again (the controller calls it when a hold starts, ends or is undone);
         * ``set_muted(True)`` stops speaking, drops the queue and is remembered in assistant.json
           (prefs.AssistantPrefs); while muted ``say()`` returns False and nothing is synthesized;
         * every text goes through persona.scrub_for_speech; the log names kinds, lengths, the
@@ -44,7 +44,7 @@ from .speech import SpeechLane, Utterance
 logger = logging.getLogger(__name__)
 
 RESUME_DELAY_MS = 400     # the briefing resumes this long after the last utterance ended
-TICK_MS = 500             # while utterances wait: look again (stale ones go, a countdown ended)
+TICK_MS = 500             # while utterances wait: look again (stale ones go, a hold ended)
 
 _Status = QMediaPlayer.MediaStatus
 _READY_STATUSES = (_Status.LoadedMedia, _Status.BufferingMedia, _Status.BufferedMedia)
@@ -177,7 +177,7 @@ class AssistantVoice(QObject):
     speakingChanged = Signal(str)   # the utterance being said, "" when none
 
     def __init__(self, *, worker: Any, player: Any, briefing_player: Callable[[], Any],
-                 countdown_active: Callable[[], bool] = lambda: False, prefs: Any = None,
+                 hold_active: Callable[[], bool] = lambda: False, prefs: Any = None,
                  muted: bool = False, clock: Callable[[], float] = time.monotonic,
                  resume_delay_ms: int = RESUME_DELAY_MS, tick_ms: int = TICK_MS,
                  parent: QObject | None = None) -> None:
@@ -185,7 +185,7 @@ class AssistantVoice(QObject):
         self._worker = worker
         self._player = player
         self._briefing_player = briefing_player
-        self._countdown_active = countdown_active
+        self._hold_active = hold_active
         self._prefs = prefs
         self._clock = clock
         self._lane = SpeechLane(clock=clock)
@@ -320,8 +320,8 @@ class AssistantVoice(QObject):
 
     def _hold(self) -> bool:
         try:
-            return bool(self._countdown_active())
-        except Exception:  # noqa: BLE001 - unknown: hold (never speak over a countdown by mistake)
+            return bool(self._hold_active())
+        except Exception:  # noqa: BLE001 - unknown: hold (never speak over a hold by mistake)
             return True
 
     def _forget(self, dropped: list[Utterance]) -> None:

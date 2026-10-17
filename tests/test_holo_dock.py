@@ -186,9 +186,9 @@ class DockTests(unittest.TestCase):
         self.assertEqual(names(dock.LIVE), "Live, Jarvis is working")
         self.assertEqual(self.dock.button(dock.APPROVALS).accessibleName(), "Approvals, 2 waiting")
         self.dock.set_memory_suggestions(3)
-        self.dock.set_live_activity(dock.LIVE_COUNTDOWN)
+        self.dock.set_live_activity(dock.LIVE_HOLD)
         self.assertEqual(names(dock.MEMORY), "Memory, 3 suggestions")
-        self.assertEqual(names(dock.LIVE), "Live, a countdown is running")
+        self.assertEqual(names(dock.LIVE), "Live, Jarvis is sending")   # a Send's hidden hold: no countdown
         self.dock.set_approvals(0)
         self.dock.set_live_activity("unknown")
         self.assertEqual((names(dock.APPROVALS), names(dock.LIVE)), ("Approvals", "Live"))
@@ -213,10 +213,8 @@ class DockTests(unittest.TestCase):
         self.assertTrue(self.dock.button(dock.LIVE).has_dot())
         self.assertFalse(self.dock.button(dock.LIVE).is_pinging())
         self.assertFalse(self.dock.blinking())
-        self.dock.set_live_activity(dock.LIVE_COUNTDOWN)
-        self.assertTrue(self.dock.blinking())
-        self.window.hide()
-        settle()
+        self.dock.set_live_activity(dock.LIVE_HOLD)            # a Send's hidden hold: a still dot, no blink
+        self.assertTrue(self.dock.button(dock.LIVE).has_dot())
         self.assertFalse(self.dock.blinking())
 
     def test_home_slot_shows_the_orb_state(self) -> None:

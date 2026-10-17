@@ -3,9 +3,10 @@
 
 The widgets alone (transcript_view, offer_view, plan_view, brief_view) and in the app (AppController with the
 productivity bundle, a steppable clock and fakes only: nothing is sent, nothing reaches Google, Notion or
-Claude). Offers never act before a click; Add block goes through the block's own approval card (its undo
-countdown and Undo); the brief's reply card is NEEDS YOUR OK's own card (the NEW RECIPIENT tick, Send, the
-countdown); no technical readout shows; with the bundle off none of it appears. Every name is invented.
+Claude). Offers never act before a click; Add block goes through the block's own approval card (at once,
+then ADDED with its Undo; no countdown); the brief's reply card is NEEDS YOUR OK's own card (the NEW RECIPIENT
+tick, Send, Sent with its Undo); no technical readout shows; with the bundle off none of it appears. Every name
+is invented.
 """
 
 from __future__ import annotations
@@ -42,11 +43,11 @@ def wall(hour: int, minute: int = 0) -> datetime:
 
 
 def fake_card(status: str = hud.CARD_PENDING, *, enabled: bool = True, locked: bool = False, result: str = "",
-              link: str = "", deadline: float | None = None, approve: str = "Add block") -> SimpleNamespace:
+              link: str = "", undo: str = "", approve: str = "Add block") -> SimpleNamespace:
     button = SimpleNamespace(isEnabled=lambda: enabled, toolTip=lambda: "" if enabled else "Finishing...")
-    return SimpleNamespace(status=lambda: status, countdown=lambda: (deadline, 10.0), approve_button=button,
-                           approve_text=lambda: approve, is_locked=lambda: locked, result_text=lambda: result,
-                           link=lambda: link)
+    return SimpleNamespace(status=lambda: status, approve_button=button, approve_text=lambda: approve,
+                           is_locked=lambda: locked, result_text=lambda: result, link=lambda: link,
+                           undo_text=lambda: undo, undo_button=SimpleNamespace(isEnabled=lambda: not locked))
 
 
 class WindowCase(unittest.TestCase):
@@ -193,24 +194,26 @@ class PlanStageTests(unittest.TestCase):
 
     def test_each_block_follows_its_card(self) -> None:
         stage = self.make()
-        deadline = time.monotonic() + 7.5
-        cards = {"a1": fake_card(hud.CARD_COUNTDOWN, deadline=deadline),
-                 "a2": fake_card(hud.CARD_ADDED, result="ADDED", link="https://calendar.example/e2"),
+        cards = {"a1": fake_card(hud.CARD_WORKING),
+                 "a2": fake_card(hud.CARD_ADDED, result=f"ADDED {DOT} 10:32 AM", link="https://calendar.example/e2",
+                                 undo="Undo"),
                  "a3": fake_card(enabled=False)}
         stage.sync_cards(cards.get)
-        counting, added, locked = stage.tiles()
-        self.assertEqual(counting.mode(), "counting")
-        self.assertEqual(counting.phrase(), "Adding the block in 8 s")
-        self.assertTrue(counting.undo_button.isVisibleTo(stage) and counting.add_button.isHidden())
-        self.assertEqual(added.mode(), "added")
-        self.assertTrue(added.open_button.isVisibleTo(stage))
+        working, added, locked = stage.tiles()
+        self.assertEqual(working.mode(), "working")                       # on its way at once: no countdown
+        self.assertTrue(working.add_button.isHidden() and working.undo_button.isHidden())
+        self.assertFalse(hasattr(working, "phrase"))
+        self.assertEqual((added.mode(), added.result(), added.undo_text()), ("added", f"ADDED {DOT} 10:32 AM", "Undo"))
+        self.assertTrue(added.open_button.isVisibleTo(stage) and added.undo_button.isVisibleTo(stage))
+        self.assertLess(added.open_button.geometry().right(), added.undo_button.geometry().left() + 8)
         self.assertFalse(locked.add_button.isEnabled())
         undone: list[str] = []
         stage.undoBlock.connect(undone.append)
-        counting.undo_button.click()
-        self.assertEqual(undone, ["a1"])
-        stage.sync_cards({"a1": fake_card(hud.CARD_DENIED, result="UNDONE")}.get)   # a2, a3: their cards went
-        self.assertEqual(counting.mode(), "denied")
+        added.undo_button.click()
+        self.assertEqual(undone, ["a2"])
+        stage.sync_cards({"a1": fake_card(hud.CARD_ADDED, result="ADDED")}.get)   # a2, a3: their cards went
+        self.assertEqual((working.mode(), working.undo_text()), ("added", ""))      # 10 minutes later: no Undo
+        self.assertTrue(working.undo_button.isHidden())
         self.assertTrue(added.isHidden() and locked.isHidden())
 
     def test_esc_and_the_close_button_ask_to_close(self) -> None:
@@ -311,29 +314,30 @@ class PlanOfferAppTests(AppCase):
         self.assertEqual(stage.info().label.split(f" {DOT} ")[0], "TODAY")
         self.assertFalse([word for word in READOUTS if word in stage.caption_text().upper()])
         self.assertEqual(self.calendar_writes(), [])
+        personal = app.calendars["personal"]
+        personal.stamps = True                                                 # Google answers with its version
         block.add_button.click()                                               # through the block's own card
         settle()
-        card = reading.action_card(action.id)
-        self.assertEqual(card.status(), hud.CARD_COUNTDOWN)
-        self.assertIsNotNone(c._countdown)
-        self.assertEqual(block.mode(), "counting")
-        self.assertEqual(self.calendar_writes(), [])                          # nothing added during the countdown
-        c._countdown.started -= 1.0                                            # past the double-click guard
-        block.undo_button.click()                                              # Undo: nothing was added
+        self.assertIsNone(c._send_hold)                                        # no countdown: it goes at once
+        self.assertTrue(wait_for(lambda: action.id not in c._jobs, 10))
         settle()
-        self.assertIsNone(c._countdown)
+        card = reading.action_card(action.id)
+        self.assertEqual((card.status(), card.undo_text()), (hud.CARD_ADDED, "Undo"))
+        self.assertEqual((block.mode(), block.undo_text()), ("added", "Undo"))  # the solid cyan event + Undo
+        self.assertTrue(block.result().startswith(f"ADDED {DOT} "), block.result())
+        self.assertEqual(len(self.calendar_writes()), 1)                      # one block, one add
+        c._undos[action.id].shown -= 1.0                                       # past the double-click guard
+        block.undo_button.click()                                              # Undo: that event is deleted
+        self.assertTrue(wait_for(lambda: action.id not in c._jobs, 10))
+        settle()
+        self.assertEqual([call[0] for call in personal.calls].count("undo_create"), 1)
         self.assertEqual(block.mode(), "add")                                  # the block waits again
-        self.assertEqual(self.calendar_writes(), [])
         app.clock.advance(seconds=2)
         block.add_button.click()
-        settle()
-        self.assertEqual(block.mode(), "counting")
-        c._countdown.deadline = time.monotonic() - 0.001
-        c._on_countdown_tick()
         self.assertTrue(wait_for(lambda: action.id not in c._jobs, 10))
         settle()
         self.assertEqual(block.mode(), "added")
-        self.assertEqual(len(self.calendar_writes()), 1)                      # one block, one add
+        self.assertEqual(len(self.calendar_writes()), 2)                      # added again, once
 
     def test_not_now_puts_the_offer_away_on_home_only(self) -> None:
         app = self.make(at(10, 12))
@@ -397,11 +401,11 @@ class PrepAppTests(AppCase):
         self.assertTrue(card.approve_button.isEnabled())
         card.approve_button.click()
         settle()
-        self.assertEqual(card.status(), hud.CARD_COUNTDOWN)                     # the undo countdown, as always
-        c._countdown.started -= 1.0                                            # past the double-click guard
+        self.assertEqual((card.status(), card.undo_text()), (hud.CARD_SENT, "Undo"))   # Sent + Undo, as always
+        c._send_hold.started -= 1.0                                            # past the double-click guard
         card.undo_button.click()
         settle()
-        self.assertIsNone(c._countdown)
+        self.assertIsNone(c._send_hold)
         self.assertEqual([sender.sent for sender in app.senders.values()], [[] for _ in app.senders])   # nothing
         reading.set_tab(ui.SCREEN_APPROVALS)                                    # back in NEEDS YOUR OK
         settle()

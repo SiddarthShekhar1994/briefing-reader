@@ -86,7 +86,7 @@ class MaySpeakTests(unittest.TestCase):
                                 meeting=kw.pop("meeting", False), last_spoken=kw.pop("last_spoken", None), **kw)
 
     def test_every_reason_in_order(self) -> None:
-        everything = facts(activity="minimized", locked=True, speak_ok=False, playing=True, countdown=True, busy=True)
+        everything = facts(activity="minimized", locked=True, speak_ok=False, playing=True, card_busy=True, busy=True)
         late = at(23)
         self.assertEqual(self.may(facts=everything, now=late, meeting=True, stale=True), "muted")
         self.assertEqual(self.may(facts=dataclasses.replace(everything, speak_ok=True), now=late, meeting=True,
@@ -106,8 +106,8 @@ class MaySpeakTests(unittest.TestCase):
         self.assertEqual(self.may(facts=rest, heard=False), "playing")                 # prep: no heard rule
         self.assertEqual(self.may(facts=rest), "playing")
         rest = dataclasses.replace(rest, playing=False)
-        self.assertEqual(self.may(facts=rest), "countdown")
-        rest = dataclasses.replace(rest, countdown=False)
+        self.assertEqual(self.may(facts=rest), "card_busy")
+        rest = dataclasses.replace(rest, card_busy=False)
         self.assertEqual(self.may(facts=rest), "busy")
         rest = dataclasses.replace(rest, busy=False)
         self.assertEqual(self.may(facts=rest, last_spoken=(at(14) - timedelta(minutes=4)).replace(tzinfo=None)),

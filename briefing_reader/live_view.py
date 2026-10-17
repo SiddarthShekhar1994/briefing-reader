@@ -16,15 +16,15 @@ Public API
 
 ``FocalView(log)``
     Follows ``log``: the focal step is the one the owner clicked (until it goes, or ``follow()`` /
-    "Follow live"), else while an approved card counts down what it will send or change (its payload
-    step: the "will be sent" picture, amber brackets and ``7 S``), else the newest step of the newest
+    "Follow live"), else during an approved card's hidden hold what it sends or changes (its payload
+    step: the confirmed look, mint brackets and ``SENDING``, never a number), else the newest step of the newest
     task. ``frame`` (a PictureFrame; a click or Enter on a picture shows it larger in the log's viewer),
     ``exact`` (an ExactText). ``focal_step()``, ``pinned()``, ``select(step_id)``, ``follow()``.
 
 ``PictureFrame``
     The viewfinder (spec 10): a 1 px ``line`` border, radius 6, four 14 px brackets (``holo`` at 70 %;
-    amber while it will be sent), the 28 px header (the kind and verb, ``EMAIL - READ`` / ``CALENDAR -
-    MOVE`` / ``WEB SEARCH`` / ``PAGE - EXAMPLE.ORG``; at the right the account, ``7 S`` or the stamp:
+    mint during a Send's hidden hold), the 28 px header (the kind and verb, ``EMAIL - READ`` / ``CALENDAR -
+    MOVE`` / ``WEB SEARCH`` / ``PAGE - EXAMPLE.ORG``; at the right the account, ``SENDING`` or the stamp:
     ``SENT`` in mint), the picture (a page snapshot at 90 %), and the 26 px footer when needed: ``WRITTEN
     BY OTHER PEOPLE`` on every email, search and page picture and on a step whose text is other people's
     (never left out), a page's ``READ IN FULL`` / ``CITED, NOT READ``. A picture on its way, unavailable
@@ -38,7 +38,7 @@ Public API
 
 ``LiveReadout``
     hud.LiveStatus's states and texts in the hologram readout (the word mono 12; the working time in
-    readout-lg; a blinking 8 px square while working or counting down).
+    readout-lg; a blinking 8 px square while working or during a Send's hidden hold).
 
 ``PopOutHeader``
     The pop-out's 44 px header (spec 16.3): the mini orb, the readout, Clear and "Bring it back" (ghost
@@ -134,7 +134,7 @@ _fonts: dict[tuple[str, int], QFont] = {}
 
 
 def _font(role: str, weight: int | None = None) -> QFont:
-    """holo.font(role), made once (the frame paints often while a countdown runs)."""
+    """holo.font(role), made once (the frame paints often while a step runs)."""
     key = (role, weight or 0)
     font = _fonts.get(key)
     if font is None:
@@ -191,7 +191,7 @@ def kind_words(kind: str) -> str:
     return f" {DOT} ".join(part.upper() for part in parts) or "STEP"
 
 
-def picture_label(view: live_events.StepView | None, will_send: bool = False) -> str:
+def picture_label(view: live_events.StepView | None, sending: bool = False) -> str:
     """The frame's header label: the picture's kind and verb (spec 10), else the step's kind."""
     if view is None:
         return ""
@@ -200,7 +200,7 @@ def picture_label(view: live_events.StepView | None, will_send: bool = False) ->
     if kind == live_pictures.KIND_EMAIL:
         return f"EMAIL {DOT} READ"
     if kind == live_pictures.KIND_OUTGOING:
-        return f"EMAIL {DOT} WILL BE SENT" if will_send else f"EMAIL {DOT} OUTGOING"
+        return f"EMAIL {DOT} SENDING" if sending else f"EMAIL {DOT} OUTGOING"
     if kind == live_pictures.KIND_DAY:
         change = getattr(getattr(picture, "day", None), "change", "")
         return f"CALENDAR {DOT} {_CHANGE_WORDS.get(change, 'CHANGE')}"
@@ -250,7 +250,8 @@ def exact_text(view: live_events.StepView | None) -> str:
     return "\n".join(lines)
 
 
-def _running_countdown(task: live_events.TaskView) -> live_events.StepView | None:
+def _running_hold(task: live_events.TaskView) -> live_events.StepView | None:
+    """The approved card's running hold step (a Send's or Cancel's hidden hold), if any."""
     if task.status != live_events.STATUS_RUNNING:
         return None
     return next((step for step in reversed(task.steps)
@@ -264,8 +265,9 @@ def _running_countdown(task: live_events.TaskView) -> live_events.StepView | Non
 
 class LiveReadout(hud.LiveStatus):
     """The Live strip's readout (HOLOGRAM_SPEC 2 / 16.3): ``IDLE`` in ink-4; ``WORKING`` (cyan, mono 12)
-    and its time in readout-lg; ``SENDING IN 7 S`` in amber. A blinking 8 px square while working or
-    counting down (it repaints only then). hud.LiveStatus's API: ``state()``, ``text()``, ``set_state``."""
+    and its time in readout-lg; ``SENDING`` in the confirmed mint during a Send's hidden hold (never a
+    number). A blinking 8 px square while working or holding (it repaints only then). hud.LiveStatus's
+    API: ``state()``, ``text()``, ``set_state``."""
 
     _SQUARE = 8
     _GAP = 8
@@ -277,10 +279,10 @@ class LiveReadout(hud.LiveStatus):
         self.setSizePolicy(policy)
 
     def color(self) -> str:
-        return {hud.LIVE_WORKING: holo.HOLO, hud.LIVE_COUNTDOWN: holo.AMBER}.get(self.state(), holo.INK_4)
+        return {hud.LIVE_WORKING: holo.HOLO, hud.LIVE_HOLD: holo.OK}.get(self.state(), holo.INK_4)
 
     def parts(self) -> tuple[str, str]:
-        """(word, time): ("WORKING", "0:12"), ("SENDING IN 7 S", ""), ("IDLE", "")."""
+        """(word, time): ("WORKING", "0:12"), ("SENDING", ""), ("IDLE", "")."""
         text = self.text()
         if self.state() == hud.LIVE_WORKING:
             word, _space, elapsed = text.partition(" ")
@@ -295,8 +297,6 @@ class LiveReadout(hud.LiveStatus):
         width = _advance(_font("readout"), word)
         if self.state() == hud.LIVE_WORKING:
             width += 12 + max(_advance(_font("readout_lg"), "88:88"), _advance(_font("readout_lg"), elapsed))
-        elif self.state() == hud.LIVE_COUNTDOWN:
-            width = max(width, _advance(_font("readout"), f"{self._word} IN 88 S"))
         return QSize(math.ceil(self._lead() + width) + 2, self._HEIGHT)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
@@ -395,8 +395,7 @@ class PictureFrame(QAbstractButton):
         self._clock = clock
         self._max = QSize(FOCAL_MAX_W, FOCAL_MAX_H)
         self._view: live_events.StepView | None = None
-        self._deadline: float | None = None
-        self._seconds = ""
+        self._held = False
         self._pixmaps: dict[tuple, Any] = {}
         self._texts: dict[int, tuple[list[tuple[QFont, str, str, float, float]], float]] = {}
         self._heights: dict[int, int] = {}
@@ -428,19 +427,19 @@ class PictureFrame(QAbstractButton):
     def max_size(self) -> QSize:
         return QSize(self._max)
 
-    def set_step(self, view: live_events.StepView | None, deadline: float | None = None) -> None:
-        """Show ``view`` (None: the empty state); ``deadline``: its undo countdown's (the "will be sent"
-        look while it runs)."""
+    def set_step(self, view: live_events.StepView | None, held: bool = False) -> None:
+        """Show ``view`` (None: the empty state); ``held``: its card's Send / Cancel is in its hidden hold
+        (the confirmed look and "SENDING", never a number)."""
         old = self._view
         same = old is not None and view is not None and old.id == view.id and old.revision == view.revision
-        if same and deadline == self._deadline:
+        held = bool(held)
+        if same and held == self._held:
             return
         if not same:
             self._pixmaps.clear()
             self._texts.clear()
             self._heights.clear()
-        self._view, self._deadline = view, deadline
-        self._seconds = self._seconds_text()
+        self._view, self._held = view, held
         ready = self.state() == READY
         self.setCursor(Qt.CursorShape.PointingHandCursor if ready else Qt.CursorShape.ArrowCursor)
         self.setFocusPolicy(Qt.FocusPolicy.TabFocus if ready else Qt.FocusPolicy.NoFocus)
@@ -449,19 +448,15 @@ class PictureFrame(QAbstractButton):
         self.update()
 
     def tick(self) -> None:
-        """The countdown's seconds moved on (the log's timer): repaint the header when they changed."""
-        seconds = self._seconds_text()
-        if seconds != self._seconds:
-            self._seconds = seconds
-            self.update(QRectF(0, 0, self.width(), FRAME_HEADER + 2).toAlignedRect())
+        """The log's timer ticked: nothing in the frame counts (a hold shows no number)."""
 
     def focus_ring(self) -> bool:
         """It has the keyboard focus with its ring (the viewer gives it back the same way)."""
         return self._focus_visible and self.hasFocus()
 
-    def will_send(self) -> bool:
-        """The "will be sent" look: its undo countdown runs."""
-        return self._deadline is not None and self._view is not None
+    def held(self) -> bool:
+        """The confirmed look of a Send's or Cancel's hidden hold ("SENDING")."""
+        return self._held and self._view is not None
 
     def state(self) -> str:
         view = self._view
@@ -480,13 +475,13 @@ class PictureFrame(QAbstractButton):
         return live_pictures.stamp(view.picture, view.status, view.status_text)
 
     def header_texts(self) -> tuple[str, str]:
-        """(left, right): ("EMAIL - WILL BE SENT", "7 S"), ("CALENDAR - MOVE", "MOVED"), ..."""
+        """(left, right): ("EMAIL - SENDING", "SENDING"), ("CALENDAR - MOVE", "MOVED"), ..."""
         view = self._view
         if view is None:
             return "", ""
-        left = picture_label(view, self.will_send())
-        if self.will_send():
-            return left, self._seconds
+        left = picture_label(view, self.held())
+        if self.held():
+            return left, "SENDING"
         words, _tone = self.stamp()
         if words:
             return left, words
@@ -666,7 +661,7 @@ class PictureFrame(QAbstractButton):
 
     def _paint_frame(self, painter: QPainter, frame: QRectF) -> None:
         state = self.state()
-        will = self.will_send()
+        will = self.held()
         inner = frame.adjusted(0.5, 0.5, -0.5, -0.5)
         path = holo.tile_path(inner, holo.RADIUS_FRAME)
         painter.fillPath(path, QColor(holo.PICTURE))
@@ -678,7 +673,7 @@ class PictureFrame(QAbstractButton):
         painter.drawPath(path)
         footer_left, footer_right = self.footer_texts()
         footer = bool(footer_left or footer_right)
-        # The header: kind and verb at the left, the account / seconds / stamp at the right.
+        # The header: kind and verb at the left, the account / SENDING / stamp at the right.
         left, right = self.header_texts()
         header = QRectF(frame.left() + 12, frame.top(), frame.width() - 24, FRAME_HEADER)
         font = hud.mono_font(11, 500, 0.16)
@@ -687,12 +682,12 @@ class PictureFrame(QAbstractButton):
         right_w = metrics.horizontalAdvance(right)
         right_color = holo.INK_KICKER
         if will:
-            right_color = holo.AMBER
+            right_color = holo.OK
         else:
             words, tone = self.stamp()
             if words and right == words:
                 right_color = _TONE_COLORS.get(tone, holo.INK_KICKER)
-        painter.setPen(QColor(holo.AMBER if will else holo.INK_KICKER))
+        painter.setPen(QColor(holo.OK if will else holo.INK_KICKER))
         painter.drawText(QRectF(header.left(), header.top(), max(1.0, header.width() - right_w - 12), FRAME_HEADER),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          metrics.elidedText(left, Qt.TextElideMode.ElideRight, max(1.0, header.width() - right_w - 12)))
@@ -721,7 +716,7 @@ class PictureFrame(QAbstractButton):
             painter.drawText(row, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, footer_left)
             painter.drawText(row, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, footer_right)
         if state not in (PENDING, UNAVAILABLE, DROPPED):
-            color = holo.AMBER if will else holo.alpha(holo.HOLO, 0.70)
+            color = holo.OK if will else holo.alpha(holo.HOLO, 0.70)
             holo.paint_brackets(painter, frame, color, leg=FRAME_BRACKET, radius=holo.RADIUS_FRAME,
                                 corners=holo.BRACKETS_ALL)
         if self._focus_visible and self.hasFocus():
@@ -770,11 +765,6 @@ class PictureFrame(QAbstractButton):
             y += step
 
     # ---- events ---------------------------------------------------------------------------------
-
-    def _seconds_text(self) -> str:
-        if self._deadline is None:
-            return ""
-        return f"{live_events.countdown_seconds(self._deadline, self._clock())} S"
 
     def hitButton(self, pos: QPoint) -> bool:  # noqa: N802 - Qt override
         return self.state() == READY and self.frame_rect().contains(QPointF(pos))
@@ -1034,7 +1024,7 @@ class FocalView(QWidget):
         self._max_height = FOCAL_MAX_H
         self._fit_height = fit_height   # the frame never taller than this view leaves it (the main screen)
         self._pinned = 0
-        self._countdown_task = 0
+        self._hold_task = 0
         self._focal = 0
         self.frame = PictureFrame(clock=log.now)
         self.frame.clicked.connect(self._open_larger)
@@ -1110,35 +1100,32 @@ class FocalView(QWidget):
         if not shiboken6.isValid(self._log):
             return
         tasks = self._log.task_views()
-        countdown_task, countdown = None, None
+        hold_task, hold = None, None
         for task in reversed(tasks):
             if task.kind == live_events.TASK_ACTION and not task.pinned:
-                countdown = _running_countdown(task)
-                if countdown is not None:
-                    countdown_task = task
+                hold = _running_hold(task)
+                if hold is not None:
+                    hold_task = task
                     break
-        new_countdown = countdown_task.id if countdown_task is not None else 0
-        if new_countdown and new_countdown != self._countdown_task:
-            self._pinned = 0   # an approved card counts down: what it will send comes into view
-        self._countdown_task = new_countdown
+        new_hold = hold_task.id if hold_task is not None else 0
+        if new_hold and new_hold != self._hold_task:
+            self._pinned = 0   # an approved card's hidden hold: what it sends comes into view
+        self._hold_task = new_hold
         focal: tuple[live_events.StepView, live_events.TaskView] | None = None
         if self._pinned:
             focal = self._find(self._pinned)
             if focal is None:
                 self._pinned = 0
-        if focal is None and countdown_task is not None:
-            payload = next((step for step in countdown_task.steps if step.kind == live_events.ACTION_PAYLOAD), None)
-            focal = (payload or countdown, countdown_task)
+        if focal is None and hold_task is not None:
+            payload = next((step for step in hold_task.steps if step.kind == live_events.ACTION_PAYLOAD), None)
+            focal = (payload or hold, hold_task)
         if focal is None:
             for task in reversed(tasks):
                 if not task.pinned and task.steps:
                     focal = (task.steps[-1], task)
                     break
         step, task = focal if focal is not None else (None, None)
-        deadline = None
-        if step is not None and task is countdown_task and countdown is not None:
-            deadline = countdown.deadline
-        self.frame.set_step(step, deadline)
+        self.frame.set_step(step, step is not None and task is hold_task and hold is not None)
         self.exact.set_step(step)
         focal_id = step.id if step is not None else 0
         self._log.set_focal_step(focal_id)
@@ -1290,9 +1277,8 @@ class LiveStage(QWidget):
         if self.follow_button.isHidden() == follow:
             self.follow_button.setVisible(follow)
 
-    def set_state(self, state: str, text: str | None = None, *, since: float | None = None,
-                  deadline: float | None = None) -> None:
-        self.readout.set_state(state, text, since=since, deadline=deadline)
+    def set_state(self, state: str, text: str | None = None, *, since: float | None = None) -> None:
+        self.readout.set_state(state, text, since=since)
         self._sync_strip()
 
 
@@ -1348,9 +1334,8 @@ class PopOutHeader(QWidget):
         row.addWidget(self.minimize_button, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
-    def set_state(self, state: str, text: str | None = None, *, since: float | None = None,
-                  deadline: float | None = None) -> None:
-        self.readout.set_state(state, text, since=since, deadline=deadline)
+    def set_state(self, state: str, text: str | None = None, *, since: float | None = None) -> None:
+        self.readout.set_state(state, text, since=since)
         self.orb.set_state(orb_mod.IDLE if state == hud.LIVE_IDLE else orb_mod.THINKING)
         self._fit()
 

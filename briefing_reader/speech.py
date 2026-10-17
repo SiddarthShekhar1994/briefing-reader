@@ -16,7 +16,7 @@ by ``AppController.start()`` when ``[assistant] speak = true``.
   in first out, at most ``QUEUE_CAP`` waiting (the oldest acknowledgement or
   greeting goes first, then the oldest of any kind), each dropped when it is
   too old to start (``STALE_AFTER_S``), a reply drops an acknowledgement that
-  has not started, nothing starts while an undo countdown runs (``hold``) and
+  has not started, nothing starts while a Send's hidden hold runs (``hold``) and
   nothing is queued while muted.
 * :class:`SayWorker` is the daemon thread "tts-say" that owns its own speech
   synthesizer (made by a factory on that thread) and turns ``(seq, text)`` into
@@ -82,7 +82,7 @@ class Voice(Protocol):
         ...
 
     def pump(self) -> None:
-        """Look again whether the next utterance may start (a countdown ended, playback changed)."""
+        """Look again whether the next utterance may start (a hold ended, playback changed)."""
         ...
 
     def owner_acted(self) -> None:
@@ -163,7 +163,7 @@ class SpeechLane:
 
     ``push`` queues (nothing while muted); ``set_audio`` / ``fail`` report the synthesis;
     ``start_next(hold)`` returns the utterance to play now, or None (one is playing, the head is
-    not synthesized yet, ``hold`` - an undo countdown - is on, or nothing is left). Every method
+    not synthesized yet, ``hold`` - a Send's hidden hold - is on, or nothing is left). Every method
     returns or logs what it dropped (kinds only, never the text).
     """
 
@@ -262,7 +262,7 @@ class SpeechLane:
 
     def start_next(self, *, hold: bool = False) -> Utterance | None:
         """The utterance to play now (it becomes ``current``), or None. Stale ones are dropped first;
-        ``hold`` (an undo countdown) starts nothing; the head waits for its audio (first in, first
+        ``hold`` (a Send's hidden hold) starts nothing; the head waits for its audio (first in, first
         out)."""
         if self._current is not None:
             return None

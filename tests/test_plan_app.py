@@ -56,6 +56,18 @@ class PlanAppCase(unittest.TestCase):
         app.c.ask.start()
         self.assertTrue(wait_for(lambda: app.c.ask.ready is not None), "readiness checked")
         self.app, self.c, self.reading = app, app.c, app.c.window.reading
+        # Add block goes to Google at once (no countdown); the fake Google holds each insert until the test
+        # lets it answer (finish), so what happens between the click and the result stays testable.
+        self.google = threading.Event()
+        personal = app.calendars["personal"]
+        insert = personal.create_event
+
+        def held_insert(action, **kwargs):   # type: ignore[no-untyped-def]
+            self.google.wait(10)
+            return insert(action, **kwargs)
+
+        personal.create_event = held_insert   # type: ignore[method-assign]
+        self.addCleanup(self.google.set)
         return app
 
     def type(self, text: str) -> None:
@@ -77,12 +89,13 @@ class PlanAppCase(unittest.TestCase):
         assert card is not None
         return card
 
-    def run_countdown(self, action_id: str) -> None:
-        """The countdown of ``action_id`` runs out; waits for its result."""
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+    def finish(self, action_id: str) -> None:
+        """Google answers ``action_id``'s insert (it went at the click); waits for its result."""
+        self.assertIn(action_id, self.c._jobs)
+        self.google.set()
         self.assertTrue(wait_for(lambda: action_id not in self.c._jobs, 10), "the block's result came back")
         settle()
+        self.google.clear()
 
     def last_entry(self) -> hud._ConversationEntry:
         return self.reading.conversation.entry_widgets()[-1]
@@ -181,27 +194,29 @@ class PlanFlowTests(PlanAppCase):
 
 class ReplanTests(PlanAppCase):
     def test_a_replan_replaces_only_idle_unedited_overlapping_cards(self) -> None:
-        """R39: the counting-down card and an edited one stay; the others of those hours go."""
+        """R39: the card on its way to Google and an edited one stay; the others of those hours go."""
         first = ("Calendar: Block A | 2026-10-04 15:00-16:00 | | | For: t1",
                  "Calendar: Block B | 2026-10-04 16:30-17:00 | | | For: t1",
                  "Calendar: Block C | 2026-10-04 18:00-19:00 | | | For: t1")
         self.make(plan_run(*first), plan_run("Calendar: Block D | 2026-10-04 15:00-15:45 | | | For: t1"))
         self.plan()
         a, b, c = self.plan_cards()
-        self.card(a.id).approve_button.click()                              # counting down
+        self.card(a.id).approve_button.click()                              # on its way to Google
         settle()
-        self.assertIsNotNone(self.c._countdown)
+        self.assertIsNone(self.c._send_hold)                                # no countdown: it went at once
+        self.assertIn(a.id, self.c._jobs)
         edited = c.id
         real = self.c._is_edited
         self.c._is_edited = lambda page: page.id == edited or real(page)   # type: ignore[method-assign]
         with self.assertLogs("briefing_reader.ui", level="INFO") as logs:
             self.plan("plan my day, again")
         titles = [action.title for action in self.plan_cards()]
-        self.assertEqual(titles, ["Block D", "Block A", "Block C"])         # B went; A counts down; C edited
+        self.assertEqual(titles, ["Block D", "Block A", "Block C"])         # B went; A on its way; C edited
         self.assertIn("Plan: replaced 1 earlier plan card(s), kept 2", "\n".join(logs.output))
+        self.finish(a.id)
 
     def test_a_decided_block_stays(self) -> None:
-        """R39 "undecided": a block already added (decided, no countdown, no job) is never replaced."""
+        """R39 "undecided": a block already added (decided, no job) is never replaced."""
         first = ("Calendar: Block A | 2026-10-04 15:00-16:00 | | | For: t1",
                  "Calendar: Block B | 2026-10-04 16:30-17:00 | | | For: t1")
         # t1 is served by A once it is added (R28): the re-plan's block serves the owner's words.
@@ -210,7 +225,7 @@ class ReplanTests(PlanAppCase):
         a, _b = self.plan_cards()
         self.card(a.id).approve_button.click()
         settle()
-        self.run_countdown(a.id)
+        self.finish(a.id)
         self.assertTrue(self.c._store.is_decided(a.id))
         self.assertNotIn(a.id, self.c._jobs)
         with self.assertLogs("briefing_reader.ui", level="INFO") as logs:
@@ -264,7 +279,7 @@ class BlockClickTests(PlanAppCase):
         with self.assertLogs("briefing_reader.ui", level="INFO") as logs:
             self.card(first.id).approve_button.click()
             settle()
-        self.assertIsNone(self.c._countdown)
+        self.assertIsNone(self.c._send_hold)
         self.assertEqual(self.card(first.id).note(), ui.PLAN_BLOCK_PASSED_NOTE)
         self.assertIn(f"Approve {first.id}: a plan block whose time has passed; nothing added",
                       "\n".join(logs.output))
@@ -274,7 +289,7 @@ class BlockClickTests(PlanAppCase):
         _first, second = self.two_blocks()
         self.card(second.id).approve_button.click()
         settle()
-        self.run_countdown(second.id)
+        self.finish(second.id)
         personal = self.app.calendars["personal"]
         self.assertIn(("create", MARK), personal.calls)
         self.assertEqual(personal.footers[-1], "Added by Jarvis from your day plan.")
@@ -291,7 +306,7 @@ class BlockClickTests(PlanAppCase):
         self.app.factory.runner.runs.append(plan_run("Calendar: Gym | 2026-10-04 19:00-20:00 | | | For: words"))
         self.card(first.id).approve_button.click()
         settle()
-        self.run_countdown(first.id)
+        self.finish(first.id)
         self.assertEqual(self.card(todo.id).note(), "Planned 3:00-4:00 PM today (day plan)")
         self.assertFalse(self.c._store.is_decided(todo.id))                 # a note, not a decision
         self.plan("plan my day, gym")
@@ -315,7 +330,7 @@ class FocusTests(PlanAppCase):
         button.setFocus(Qt.FocusReason.TabFocusReason)
         QTest.keyClick(button, Qt.Key.Key_Space)
         settle()
-        self.assertIsNotNone(self.c._countdown)
+        self.assertIn(action_id, self.c._jobs)   # on its way to Google at once (no countdown)
 
     def test_the_focus_moves_to_the_next_block_from_the_finished_card(self) -> None:
         first, second = self.ready()
@@ -323,7 +338,7 @@ class FocusTests(PlanAppCase):
         settle()
         self.c._plan_focus_guard = ("", 0.0)
         self.approve_from_its_button(first.id)
-        self.run_countdown(first.id)
+        self.finish(first.id)
         button = self.card(second.id).approve_button
         self.assertIs(QApplication.focusWidget(), button)
         # A keyboard user sees where the next key lands: the ring shows, and the name says the card.
@@ -335,15 +350,15 @@ class FocusTests(PlanAppCase):
         with self.assertLogs("briefing_reader.ui", level="INFO") as logs:
             QTest.keyClick(self.card(second.id).approve_button, Qt.Key.Key_Space)
             settle()
-        self.assertIsNone(self.c._countdown)
         self.assertNotIn(second.id, self.c._jobs)
+        self.assertFalse(self.c._store.is_decided(second.id))
         self.assertIn(f"Approve {second.id}: ignored a key press right after the focus moved", "\n".join(logs.output))
         # ... a click does, and so does a key once the second is over.
         self.c._plan_focus_guard = (second.id, time.monotonic() - 0.1)
         QTest.keyClick(self.card(second.id).approve_button, Qt.Key.Key_Space)
         settle()
-        self.assertIsNotNone(self.c._countdown)
-        self.assertEqual(self.c._countdown.action.id, second.id)
+        self.assertIn(second.id, self.c._jobs)
+        self.finish(second.id)
 
     def test_typing_in_the_bar_keeps_the_focus_and_enter_approves_nothing(self) -> None:
         first, second = self.ready()
@@ -352,12 +367,12 @@ class FocusTests(PlanAppCase):
         bar = self.reading.command_bar
         bar.input.setFocus(Qt.FocusReason.MouseFocusReason)
         settle()
-        self.run_countdown(first.id)
+        self.finish(first.id)
         self.assertIs(QApplication.focusWidget(), bar.input)
         QTest.keyClick(bar.input, Qt.Key.Key_Return)
         settle()
-        self.assertIsNone(self.c._countdown)
         self.assertNotIn(second.id, self.c._jobs)
+        self.assertFalse(self.c._store.is_decided(second.id))
 
     def test_a_mouse_click_moves_the_focus_without_a_ring(self) -> None:
         first, second = self.ready()
@@ -369,7 +384,7 @@ class FocusTests(PlanAppCase):
         self.card(first.id).approve_button.click()
         settle()
         self.assertIsNone(QApplication.focusWidget())
-        self.run_countdown(first.id)
+        self.finish(first.id)
         button = self.card(second.id).approve_button
         self.assertIs(QApplication.focusWidget(), button)                   # nowhere -> the next block
         self.assertFalse(button._focus_visible)                             # no ring for a mouse user
@@ -383,11 +398,11 @@ class FocusTests(PlanAppCase):
         self.card(first.id).approve_button.click()
         settle()
         field.setFocus(Qt.FocusReason.MouseFocusReason)
-        self.run_countdown(first.id)
+        self.finish(first.id)
         self.assertIsNot(QApplication.focusWidget(), self.card(second.id).approve_button)
 
     def test_an_open_dialog_keeps_the_focus(self) -> None:
-        """A modal dialog (a NudgeWordsDialog stand-in) open when the countdown ends: nothing moves,
+        """A modal dialog (a NudgeWordsDialog stand-in) open when the result comes: nothing moves,
         even from the finished card's own button (which alone would move it)."""
         first, second = self.ready()
         self.c._plan_focus_guard = ("", 0.0)
@@ -396,7 +411,7 @@ class FocusTests(PlanAppCase):
         dialog.setModal(True)
         self.addCleanup(dialog.deleteLater)
         with mock.patch.object(QApplication, "activeModalWidget", return_value=dialog):
-            self.run_countdown(first.id)
+            self.finish(first.id)
         self.assertIsNot(QApplication.focusWidget(), self.card(second.id).approve_button)
         self.assertEqual(self.c._plan_focus_guard, ("", 0.0))              # Jarvis moved nothing
 
@@ -413,7 +428,7 @@ class FocusTests(PlanAppCase):
         settle()
         self.assertIs(QApplication.focusWidget(), outside)
         self.assertFalse(self.reading.approvals.isAncestorOf(outside))
-        self.run_countdown(first.id)
+        self.finish(first.id)
         self.assertIs(QApplication.focusWidget(), outside)
         self.assertEqual(self.c._plan_focus_guard, ("", 0.0))
 

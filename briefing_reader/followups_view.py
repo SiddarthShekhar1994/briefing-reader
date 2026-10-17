@@ -28,7 +28,7 @@ Public API
     ``expanded()``).
 
 Nothing here drafts, sends, hides or opens anything: the buttons only say which row; the app does what it
-did before (a draft is only a draft, on its normal approval card with the undo countdown; Open in Gmail opens
+did before (a draft is only a draft, on its normal approval card with Sent and its Undo; Open in Gmail opens
 the thread link the app builds). Texts from mail are painted as plain text, never as HTML.
 """
 

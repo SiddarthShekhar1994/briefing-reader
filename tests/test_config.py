@@ -392,7 +392,7 @@ class ConfigFileTests(ProjectTestCase):
             client_secret_path=config.PROJECT_ROOT / "google_client_secret.json",
             calendar_id="primary"))
         self.assertEqual(cfg.actions, ActionsConfig(headings=("Proposed actions",)))
-        self.assertEqual(cfg.actions.undo_seconds, 10)
+        self.assertEqual(cfg.actions.undo_seconds, 5)
         # Generic aliases only: which Google account each one is never goes into config.toml.
         self.assertEqual(dict(cfg.accounts), {
             "personal": AccountConfig("personal", features=("calendar", "gmail_send", "gmail_read")),
@@ -634,19 +634,19 @@ class CalendarAndActionsConfigTests(ProjectTestCase):
         cfg = self.load_warning("actions.link_host")
         self.assertEqual(cfg.actions, ActionsConfig())
 
-    # ---- [actions] undo_seconds: the countdown before a change goes to Google ----
+    # ---- [actions] undo_seconds: the hidden hold after Send / Cancel event (no countdown is shown) ----
 
     def test_undo_seconds_default_and_range(self) -> None:
-        self.assertEqual(ActionsConfig().undo_seconds, 10)
-        self.assertEqual(config.UNDO_SECONDS_RANGE, (3, 60))
-        self.assertEqual(self.load_quietly().actions.undo_seconds, 10)
-        for value, expected in (("3", 3), ("25", 25), ("60", 60), ("12.4", 12)):
+        self.assertEqual(ActionsConfig().undo_seconds, 5)
+        self.assertEqual(config.UNDO_SECONDS_RANGE, (3, 30))
+        self.assertEqual(self.load_quietly().actions.undo_seconds, 5)
+        for value, expected in (("3", 3), ("25", 25), ("30", 30), ("12.4", 12)):
             with self.subTest(value=value):
                 self.write_config(f"[actions]\nundo_seconds = {value}\n")
                 self.assertEqual(self.load_quietly().actions.undo_seconds, expected)
 
     def test_undo_seconds_outside_the_range_is_clamped_with_a_warning(self) -> None:
-        for value, expected in (("1", 3), ("0", 3), ("61", 60), ("3600", 60)):
+        for value, expected in (("1", 3), ("0", 3), ("31", 30), ("60", 30), ("3600", 30)):
             with self.subTest(value=value):
                 self.write_config(f"[actions]\nundo_seconds = {value}\n")
                 self.assertEqual(self.load_warning("actions.undo_seconds").actions.undo_seconds, expected)
@@ -679,7 +679,7 @@ class CalendarAndActionsConfigTests(ProjectTestCase):
         for value in ('"ten"', "true", "-5", "nan"):
             with self.subTest(value=value):
                 self.write_config(f"[actions]\nundo_seconds = {value}\n")
-                self.assertEqual(self.load_warning("actions.undo_seconds").actions.undo_seconds, 10)
+                self.assertEqual(self.load_warning("actions.undo_seconds").actions.undo_seconds, 5)
 
 
 class AccountsConfigTests(ProjectTestCase):

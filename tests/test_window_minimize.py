@@ -6,8 +6,8 @@ never a tool window), and the prompt's header still fits its width with both
 buttons. Minimizing the prompt stops its "Asking again" countdown and asks
 again after the short Later (restored on top, without the focus); restoring
 it by hand starts the countdown again. The hotkey's activation restores a
-minimized window, a reading keeps playing while minimized, and an undo
-countdown stops (nothing is sent while its Undo is out of sight).
+minimized window, a reading keeps playing while minimized, and a Send's
+hidden hold goes on (the owner approved it and saw Sent; there is no countdown to watch).
 
 Qt runs offscreen in this process with the bundled fonts and shows nothing;
 no Notion (fetching is stubbed), no Google (calendar off), no audio (a fake
@@ -251,7 +251,7 @@ class ControllerTests(unittest.TestCase):
 
     @staticmethod
     def close(c: ui.AppController) -> None:
-        for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._countdown_timer, c._agenda_timer):
+        for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._send_hold_timer, c._agenda_timer):
             timer.stop()
         c.state = ui.STATE_QUITTING
         c.window.hide()
@@ -359,59 +359,61 @@ class ControllerTests(unittest.TestCase):
         settle()
         self.assertEqual((c.player.state, c.player.stops), ("playing", 0))
 
-    def test_minimizing_stops_an_undo_countdown(self) -> None:
+    def test_minimizing_keeps_a_sends_hidden_hold(self) -> None:
         c = self.prompt()
         c.enter_reading()
         c.window.show()
         settle()
-        action = parse_action_line("Calendar: Dentist | 2026-10-09 15:00-16:00")
+        action = parse_action_line("Email: acct=work | to=ana@example.edu | cc= | subject=Dentist moved | due= | link= | "
+                                   "body=Hi Ana")
         now = time.monotonic()
-        c._countdown = ui._Countdown(action, deadline=now + 30, started=now)
-        c._jobs[action.id] = ui._STAGE_COUNTDOWN
-        c._countdown_timer.start()
+        c._send_hold = ui._SendHold(action, deadline=now + 30, started=now)
+        c._jobs[action.id] = ui._STAGE_HOLD
+        c._send_hold_timer.start()
         with self.assertLogs("briefing_reader.ui", level="INFO") as logs:
             self.minimize(c)
-        self.assertIsNone(c._countdown)
-        self.assertNotIn(action.id, c._jobs)
-        self.assertFalse(c._countdown_timer.isActive())
-        self.assertTrue(any("undone (the window was minimized); nothing was sent" in line for line in logs.output))
+        self.assertIsNotNone(c._send_hold)                        # it goes on out of sight
+        self.assertEqual(c._jobs[action.id], ui._STAGE_HOLD)
+        self.assertTrue(c._send_hold_timer.isActive())
+        self.assertFalse(any("undone" in line for line in logs.output))
         self.assertFalse(any("Dentist" in line for line in logs.output))   # ids only, never titles
-        newest = c.window.reading.activity.entries()[0]
-        self.assertEqual(newest[2], "Undone: Add Dentist")
-        self.assertIn("window minimized, nothing was created", newest[3])
+        c._send_hold = None
+        c._jobs.pop(action.id, None)
+        c._send_hold_timer.stop()
 
-    def test_off_approvals_the_header_shows_the_countdown_and_its_undo(self) -> None:
-        """The card's Undo is on Approvals; on any other screen the header shows the countdown with an
-        Undo that works, so the Undo is never out of sight (minimizing still stops it)."""
+    def test_off_approvals_the_header_shows_sent_and_its_undo(self) -> None:
+        """The card's Undo is on Approvals; on any other screen the header shows "SENT" with an Undo that
+        works (never a number), so the Undo is never out of sight."""
         c = self.prompt()
         c.enter_reading()
         c.window.show()
         settle()
         reading = c.window.reading
         reading.set_tab(ui.SCREEN_APPROVALS)
-        action = parse_action_line("Calendar: Dentist | 2026-10-09 15:00-16:00")
+        action = parse_action_line("Email: acct=work | to=ana@example.edu | cc= | subject=Dentist moved | due= | link= | "
+                                   "body=Hi Ana")
         now = time.monotonic()
-        c._countdown = ui._Countdown(action, deadline=now + 30, started=now)
-        c._jobs[action.id] = ui._STAGE_COUNTDOWN
-        c._countdown_timer.start()
-        reading.set_countdown("ADDING", now + 30)
+        c._send_hold = ui._SendHold(action, deadline=now + 30, started=now)
+        c._jobs[action.id] = ui._STAGE_HOLD
+        c._send_hold_timer.start()
+        reading.set_hold("Sent")
         header = reading.header
-        self.assertEqual(header.countdown_text(), "")             # on Approvals the card has it
+        self.assertEqual(header.hold_text(), "")                  # on Approvals the card has it
         for screen in (ui.SCREEN_HOME, ui.SCREEN_LIVE, ui.SCREEN_BRIEFING):
             reading.set_tab(screen)
             settle()
-            self.assertIsNotNone(c._countdown, screen)            # leaving the card never stops it
-            self.assertRegex(header.countdown_text(), r"^ADDING IN (29|30) S$")
+            self.assertIsNotNone(c._send_hold, screen)            # leaving the card never stops it
+            self.assertEqual(header.hold_text(), "SENT")
             self.assertTrue(header.undo_button.isVisible())
-        self.assertIn("Undo is available", header.countdown.accessibleName())
-        c._countdown.started -= 5                                 # past the double-click guard
+        self.assertIn("Undo is available", header.hold.accessibleName())
+        c._send_hold.started -= 5                                 # past the double-click guard
         with self.assertLogs("briefing_reader.ui", level="INFO") as logs:
             header.undo_button.click()
-        self.assertIsNone(c._countdown)
+        self.assertIsNone(c._send_hold)
         self.assertNotIn(action.id, c._jobs)
         self.assertTrue(any("undone (undone); nothing was sent" in line for line in logs.output))
-        self.assertEqual(reading.activity.entries()[0][2], "Undone: Add Dentist")
-        self.assertEqual(header.countdown_text(), "")              # it went with the countdown
+        self.assertEqual(reading.activity.entries()[0][2], "Undone: Dentist moved")
+        self.assertEqual(header.hold_text(), "")                   # it went with the hold
 
 
 if __name__ == "__main__":

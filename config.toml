@@ -86,10 +86,11 @@ heading = "Proposed actions"
 # (*.instructure.com) hosts. An exact name, or "*.example.edu" for every
 # subdomain. https only.
 link_hosts = []
-# Seconds between a click on Approve / Add block / Accept / Decline / Maybe /
-# Move / Cancel event / Send and the call to Google (3 to 60). Undo works until
-# then and sends nothing.
-undo_seconds = 10
+# Seconds a Send or Cancel event is held before it goes to Google (3 to 30).
+# The card shows "Sent" / "Cancelled" with Undo at once, with no number; Undo
+# during the hold sends nothing. Approve, Add block, Accept / Decline / Maybe
+# and Move act at once; their Undo reverses the change for 10 minutes.
+undo_seconds = 5
 # Email recipients in these domains do not get the red NEW RECIPIENT badge,
 # e.g. ["example.edu"] (its subdomains count too), except an Ask recipient you
 # did not type yourself. Any other address must be one you emailed through
@@ -167,9 +168,9 @@ clock = "12h"
 [ask]
 # Ask Jarvis: type a request ("move my project sync to Friday and tell Ana")
 # and Jarvis lines up cards under NEEDS YOUR OK; nothing happens until you
-# click one and its undo countdown runs out. The planner is your own Claude
-# Code, signed in with your claude.ai plan (claude auth login --claudeai);
-# Jarvis never uses an API key and refuses to run on any other sign-in. Off
+# click one (a Send or Cancel event also waits out its short Undo hold). The
+# planner is your own Claude Code, signed in with your claude.ai plan (claude
+# auth login --claudeai); Jarvis never uses an API key and refuses to run on any other sign-in. Off
 # until you set true; check with: py -3.13 -m briefing_reader --ask-check
 # In the app the bar sits on the reading screen; py -3.13 -m briefing_reader
 # --ask opens it without playing the briefing.

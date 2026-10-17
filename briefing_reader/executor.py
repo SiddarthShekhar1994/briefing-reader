@@ -9,12 +9,17 @@
     GmailBackend(senders, ...)     Gmail (gmail.send), one gmail.GmailSender per alias: a Reply or
                                    an Email from the line's ``acct=``, after the recipient check
     run_action(executor, action)   one job of the action worker: with ``writes_running`` (the
-                                   undo countdown ran out) "running" is saved before the call and
-                                   the result after it; a Reply or Email is sent only that way.
-                                   ``live`` (an approved card's LIVE view task): its last checks,
-                                   sign-in, the exact payload and the call, as they happen
+                                   click on a calendar card, or the end of a Send's / Cancel's
+                                   hidden hold) "running" is saved before the call and the result
+                                   after it; a Reply or Email is sent only that way. ``live`` (an
+                                   approved card's LIVE view task): its last checks, sign-in, the
+                                   exact payload and the call, as they happen
+    run_undo(executor, action, r)  one Undo of the action worker (only the owner's click on that
+                                   card's Undo): reverse exactly Jarvis's own change (UndoRecord,
+                                   from the change's ExecResult.undo) unless the event is gone or
+                                   changed since (UndoRefused: "Changed since - left as it is.")
     preview(action)                Executor: what execute would send or change (live.Payload; no
-                                   network, never a sign-in), for the LIVE view during the countdown
+                                   network, never a sign-in), for the LIVE view
     mail_status(action)            Executor: what a Reply / Email card shows (From, recipients,
                                    why it can't send yet) and what its Send click does
     pending_confirmation(alias)    Executor: a new binding you have not confirmed yet ("Signed in
@@ -37,7 +42,7 @@
 ``readiness`` answers without the network or a sign-in why a proposal cannot be
 carried out ("" when it can). ``prepare`` signs the account in when needed (a
 browser sign-in, only ever after a click; never for email: the card's Send
-signs in first, so its From line shows the account before any countdown);
+signs in first, so its From line shows the account before its Send);
 ``execute`` makes the one call and returns an ExecResult or raises ExecError,
 whose ``outcome`` says whether the change certainly did not happen ("failed")
 or may have happened ("unknown": never retried by itself). ``peek`` reads the
@@ -54,7 +59,7 @@ ids, kinds, account aliases ("work", "personal", else "other"), statuses and
 HTTP status codes. The LIVE view (``live=``) only shows what happens: with or
 without it every status, store write, exception and log line is the same. A
 calendar change shows the exact request gcal sends (its ``on_request`` hook,
-only on gcal.GoogleCalendar), checked against what the countdown showed
+only on gcal.GoogleCalendar), checked against what the card showed
 (``request_differs``); when Google already had the change nothing was sent and
 the steps say so (NOTHING SENT, ALREADY ...).
 """
@@ -103,6 +108,7 @@ from .gcal import (
     CalendarError,
     CalendarNotSignedIn,
     CalendarUnknownOutcome,
+    EventChanged,
     EventDetails,
     EventGone,
     GoogleCalendar,
@@ -177,9 +183,15 @@ NOT_SAVED_MESSAGE = "Could not save the decision before sending, so nothing was 
 CLOSING_MESSAGE = "Jarvis was closing when the sign-in finished, so nothing was sent - click again"
 NOTHING_TO_DO = "There is nothing for Jarvis to carry out on this card"
 MAIL_SETUP_NOTE = "Sending email is not set up yet - see README step 8b"
-# A Reply or Email goes out only through run_action(writes_running=True): after the undo
-# countdown, with "running" saved first.
-COUNTDOWN_ONLY_MESSAGE = "Email is only sent when the Send countdown runs out; nothing was sent"
+# A Reply or Email goes out only through run_action(writes_running=True): at the end of its Send's
+# hidden hold, with "running" saved first.
+HOLD_ONLY_MESSAGE = "Email is only sent through its card's Send; nothing was sent"
+# An Undo (run_undo): the event is gone or changed since Jarvis's change, so nothing is changed.
+UNDO_CHANGED_TEXT = "Changed since - left as it is."
+UNDO_NOT_SAVED_MESSAGE = "Could not save before undoing, so nothing was changed"
+NO_UNDO_MESSAGE = "There is nothing Jarvis can undo on this card"
+UNDONE = "undone"                 # RunOutcome.status of an Undo that reversed the change
+UNDO_REFUSED = "refused"          # ... of an Undo that found the event gone or changed (nothing changed)
 NEW_RECIPIENTS_MESSAGE = "Tick the new recipients on the card first; nothing was sent"
 NO_EVENT_MESSAGE = "There is no event to check on this card"
 UNCONFIRMED_FROM = "account not confirmed yet"
@@ -272,12 +284,37 @@ def apply_edit(action: ProposedAction, edit: ActionEdit) -> ProposedAction:
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class UndoRecord:
+    """What a card's Undo reverses: exactly Jarvis's own change of one event (memory only, for 10
+    minutes; logged by action id, kind and status only). ``stamp`` is the event's etag (else its
+    updated time) as the change left it: an Undo first reads the event again and changes nothing
+    when it is gone or its stamp differs. ``send_updates`` is the change's own guest-notification
+    policy ("none" for an added event: its insert told nobody)."""
+
+    kind: str                       # CALENDAR / TODO (delete the event), RSVP (answer back), MOVE (time back)
+    alias: str
+    event_id: str
+    stamp: str
+    send_updates: str = "none"
+    calendar_id: str = ""           # "" = the calendar's own (an added event)
+    response: str = ""              # RSVP: your answer before (needsAction / accepted / declined / tentative)
+    comment: str = ""               # RSVP: your note before
+    start: datetime | None = None   # MOVE: the event's aware start and end before
+    end: datetime | None = None
+    time_zone: str = ""             # MOVE: the time zone its start was kept in
+    uncertain: bool = False         # an earlier Undo may or may not have happened (Retry checks first)
+
+
+@dataclass(frozen=True)
 class ExecResult:
     status: str             # STATUS_CREATED / STATUS_EXISTS / STATUS_SENT
     link: str = ""          # the event's page (htmlLink), "" when there is none (a cancelled event)
     result_text: str = ""   # "Accepted", "Moved", "Already cancelled" ... ("" = the card's default)
     # Gmail's id of the sent message / the event's id (the LIVE view shows it); not part of equality.
     ref: str = field(default="", compare=False)
+    # What the card's Undo reverses (a calendar change Jarvis made; None when nothing changed or the
+    # change can't be checked again); not part of equality.
+    undo: UndoRecord | None = field(default=None, compare=False)
 
 
 class ExecError(Exception):
@@ -293,6 +330,14 @@ class ExecError(Exception):
         self.outcome = outcome
         self.problem = problem
         self.status = status
+
+
+class UndoRefused(ExecError):
+    """An Undo found the event gone or changed since Jarvis's change: nothing was changed (the card says
+    UNDO_CHANGED_TEXT)."""
+
+    def __init__(self, message: str = UNDO_CHANGED_TEXT) -> None:
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -332,7 +377,7 @@ class MailStatus:
     from_text: str              # "From: work (ana@example.edu)" / "From: work (account not confirmed yet)"
     problem: str = ""           # google_auth PROBLEM_* why it can't send now ("" = it can)
     note: str = ""              # the card's amber note for that problem ("" when there is none)
-    sign_in: bool = False       # a Send click opens the Google sign-in first (no countdown)
+    sign_in: bool = False       # a Send click opens the Google sign-in first (nothing is sent)
     hand_off: bool = False      # Jarvis won't send from here: Copy / Open, and Done instead of Send
     review: RecipientReview | None = None
     confirm: bool = False       # a Send click asks first whether the bound Google account is the right one
@@ -350,7 +395,7 @@ class MailStatus:
 
     @property
     def ready(self) -> bool:
-        """A Send click may start the countdown (still subject to a long body's review)."""
+        """A Send click may send (still subject to a long body's review)."""
         return not self.problem and not self.hand_off and self.review is not None and self.review.ready
 
 
@@ -471,7 +516,8 @@ class CalendarBackend:
                 created = (calendar.create_event(event, **hook) if interactive
                            else calendar.create_event(event, interactive=False, **hook))
                 result = ExecResult(STATUS_EXISTS if created.existed else STATUS_CREATED, created.link,
-                                    ref=_text(getattr(created, "event_id", "")))
+                                    ref=_text(getattr(created, "event_id", "")),
+                                    undo=_created_undo(action, calendar, created))
                 _calendar_done(call, payload, action, result, already=bool(created.existed), requested=bool(sent))
                 return result
             send_updates = _NOTIFY.get(field("notify", "all"), "all")
@@ -491,9 +537,46 @@ class CalendarBackend:
         except CalendarError as exc:
             raise _exec_error(exc) from None
         result = ExecResult(STATUS_SENT, change.link, sent_text(action, already=change.already),
-                            ref=_text(getattr(change, "event_id", "")))
+                            ref=_text(getattr(change, "event_id", "")),
+                            undo=_change_undo(action, change, send_updates, calendar_id))
         _calendar_done(call, payload, action, result, already=bool(change.already), requested=bool(sent))
         return result
+
+    def undo(self, record: UndoRecord) -> ExecResult:
+        """Reverse exactly Jarvis's own change (``record``), never signing in: delete the added event,
+        put the answer back or move the event back, with the change's own ``send_updates``. UndoRefused
+        when the event is gone or changed since (nothing changed); ExecError (with its outcome) when
+        Google refused or did not answer."""
+        calendar = self._calendars.get(record.alias)
+        if calendar is None or not _call_bool(calendar, "is_configured"):
+            raise ExecError(CALENDAR_SETUP_NOTE, problem=PROBLEM_SETUP)
+        if not _call_bool(calendar, "is_signed_in"):
+            raise ExecError(_not_signed_in_text(record.alias), problem=PROBLEM_SIGNED_OUT)
+        problem, message = _change_problem(calendar)
+        if problem == PROBLEM_CONFIRM:
+            raise ExecError(CONFIRM_FIRST_MESSAGE.format(alias=record.alias), problem=PROBLEM_CONFIRM)
+        if problem:
+            raise ExecError(message or UNKNOWN_ACCOUNT_MESSAGE.format(alias=record.alias), problem=problem)
+        calendar_id = record.calendar_id or None
+        try:
+            if record.kind in (CALENDAR, TODO):
+                change = calendar.undo_create(record.event_id, stamp=record.stamp, send_updates=record.send_updates,
+                                              calendar_id=calendar_id, uncertain=record.uncertain)
+            elif record.kind == RSVP:
+                change = calendar.undo_respond(record.event_id, record.response, comment=record.comment,
+                                               stamp=record.stamp, send_updates=record.send_updates,
+                                               calendar_id=calendar_id, uncertain=record.uncertain)
+            elif record.kind == MOVE and record.start is not None and record.end is not None:
+                change = calendar.undo_move(record.event_id, record.start, record.end, time_zone=record.time_zone,
+                                            stamp=record.stamp, send_updates=record.send_updates,
+                                            calendar_id=calendar_id, uncertain=record.uncertain)
+            else:
+                raise ExecError(NO_UNDO_MESSAGE)
+        except EventChanged:
+            raise UndoRefused() from None
+        except CalendarError as exc:
+            raise _exec_error(exc) from None
+        return ExecResult(UNDONE, _text(getattr(change, "link", "")), ref=record.event_id)
 
     def preview(self, action: ProposedAction) -> Payload:
         """What execute() sends or changes for ``action``, in words (pure: no network, never a
@@ -574,7 +657,7 @@ class GmailBackend:
     Email from the line's ``acct=``.
 
     Nothing here opens the browser except ``sign_in`` (a click). A message goes out only from
-    ``execute(..., interactive=False)`` - run_action's "running" path after the undo countdown -
+    ``execute(..., interactive=False)`` - run_action's "running" path at the end of Send's hidden hold -
     and only when the saved sign-in is the bound Google account and you confirmed that binding,
     the card's text is sendable (actions.mail_problem), no recipient is the sending account itself
     (checked on the card's recipients, on the message and once more right before the send) and
@@ -645,7 +728,7 @@ class GmailBackend:
 
     def prepare(self, action: ProposedAction, *, on_stage: OnStage = _no_stage) -> None:
         """Check that the message may go out now. Never opens the browser: a card's Send signs in
-        first, so its From line shows the account before any countdown."""
+        first, so its From line shows the account before its Send."""
         self._message(action)
 
     def execute(self, action: ProposedAction, *, on_stage: OnStage = _no_stage,
@@ -654,7 +737,7 @@ class GmailBackend:
         ``live``: the LIVE view's payload (the message exactly as built, right before the send)
         and call steps."""
         if interactive:
-            raise ExecError(COUNTDOWN_ONLY_MESSAGE)
+            raise ExecError(HOLD_ONLY_MESSAGE)
         mail = self._message(action)
         sender = self._senders[action.account]
         # Once more right before the send, against the message itself and the account as it is
@@ -926,9 +1009,19 @@ class Executor:
         extra = {"live": live} if live is not None else {}
         return backend.execute(action, on_stage=on_stage, interactive=interactive, **extra)
 
+    def undo(self, action: ProposedAction, record: UndoRecord) -> ExecResult:
+        """Reverse Jarvis's own change of ``action`` (the card's Undo; never signs in). See
+        CalendarBackend.undo."""
+        backend = self._backend(action)
+        undo = getattr(backend, "undo", None)
+        if not callable(undo):
+            raise ExecError(NO_UNDO_MESSAGE)
+        logger.info("Undoing action %s (%s, %s)", action.id, action.kind, logged_alias(record.alias))
+        return undo(record)
+
     def preview(self, action: ProposedAction) -> Payload | None:
-        """What execute() would send or change for ``action`` (the LIVE view's payload during the
-        undo countdown): no network, never a sign-in. None when there is no backend for it, the
+        """What execute() would send or change for ``action`` (the LIVE view's payload once it is
+        approved): no network, never a sign-in. None when there is no backend for it, the
         backend can't say (ExecError) or has no preview."""
         if not action.actionable:
             return None
@@ -1020,8 +1113,8 @@ class Executor:
 
     def needs_confirmation(self, alias: str) -> bool:
         """``alias`` has no binding you confirmed, so its next sign-in leaves one to confirm before
-        anything is changed (a Calendar event's or Todo block's Approve signs in before the
-        countdown then). False for objects that do not say (test doubles)."""
+        anything is changed (a Calendar event's or Todo block's Approve signs in and asks before
+        anything is added then). False for objects that do not say (test doubles)."""
         for handle in self._account_handles(alias):
             if callable(getattr(handle, "needs_confirmation", None)) and _call_bool(handle, "needs_confirmation"):
                 return True
@@ -1059,9 +1152,10 @@ def run_action(executor: Executor, action: ProposedAction, *, store: ActionStore
                proceed: Callable[[], bool] | None = None, live: LiveTask | None = None) -> RunOutcome:
     """Carry out one approved proposal, exactly once (never retried here or anywhere else).
 
-    ``writes_running`` (any kind whose undo countdown ran out: a Calendar event, a Todo's
-    block, an RSVP, Move, Cancel, Reply or Email): sign the account in first when needed (never
-    for email: its card signs in before the countdown), save "running" (with kind and account)
+    ``writes_running`` (any kind Jarvis carries out: a Calendar event, a Todo's block, an RSVP or
+    Move right after the click; a Cancel, Reply or Email at the end of its hidden hold): sign the
+    account in first when needed (never for email: its card signs in before Send), save "running"
+    (with kind and account)
     to ``store`` right before the call - nothing is sent when that could not be saved -, make
     the one call without any further sign-in, and save the result over "running": "created" /
     "exists" / "sent", "failed" (certainly not done) or "unknown" (it may have happened: the
@@ -1072,8 +1166,8 @@ def run_action(executor: Executor, action: ProposedAction, *, store: ActionStore
     sign-in, before "running" is saved: False means nothing is sent (failed, CLOSING_MESSAGE),
     so a browser sign-in that finishes after Quit starts no call.
 
-    Without ``writes_running`` (a Calendar event or a Todo's block approved the older way, with
-    no countdown) nothing is saved here: the caller saves the result (created / exists /
+    Without ``writes_running`` (a Calendar event or a Todo's block approved the older way)
+    nothing is saved here: the caller saves the result (created / exists /
     failed). A Reply or Email is never sent that way (failed: nothing was sent). Never raises
     for an ExecError or a bug in a backend (a bug is logged by type only: its message could
     carry a token).
@@ -1092,7 +1186,7 @@ def run_action(executor: Executor, action: ProposedAction, *, store: ActionStore
     extra = {"live": live} if live is not None else {}
     try:
         if action.kind in MAIL_KINDS and not writes_running:
-            raise ExecError(COUNTDOWN_ONLY_MESSAGE)
+            raise ExecError(HOLD_ONLY_MESSAGE)
         if writes_running:
             if store is None:
                 raise ExecError(NOT_SAVED_MESSAGE)
@@ -1135,6 +1229,79 @@ def run_action(executor: Executor, action: ProposedAction, *, store: ActionStore
     return RunOutcome(status, result, error)
 
 
+def run_undo(executor: Executor, action: ProposedAction, record: UndoRecord, *,
+             store: ActionStore) -> RunOutcome:
+    """One Undo of the action worker: only ever the owner's click on that card's Undo (never voice,
+    never by itself). "running" is saved first (a crash mid-call then shows UNKNOWN at the next
+    start, never a silent "added"); then the reversal (Executor.undo). UNDONE: the change was
+    reversed and the decision forgotten (the card waits again). UNDO_REFUSED: the event is gone or
+    changed since, nothing was changed and the card keeps its result. FAILED / UNKNOWN: Google
+    refused or did not answer; the card keeps its result and offers Retry (the reversal again, on
+    a click). Logged by action id, kind, alias and status only. Never raises."""
+    saved = store.get(action.id) or {}
+    result: ExecResult | None = None
+    error: ExecError | None = None
+    running = False
+    try:
+        if not store.set(action.id, STATUS_RUNNING, kind=action.kind, account=action.account):
+            raise ExecError(UNDO_NOT_SAVED_MESSAGE)
+        running = True
+        result = executor.undo(action, record)
+    except UndoRefused as exc:
+        error = exc
+    except ExecError as exc:
+        error = exc
+    except Exception as exc:  # noqa: BLE001 - a bug must not end the worker
+        logger.error("Undoing action %s failed unexpectedly (%s)", action.id, type(exc).__name__)
+        logger.debug("Where:\n%s", "".join(traceback.format_tb(exc.__traceback__)))
+        error = ExecError(f"unexpected error ({type(exc).__name__})",
+                          outcome=OUTCOME_UNKNOWN if running else OUTCOME_FAILED)
+    if error is None:
+        store.forget(action.id, (STATUS_RUNNING,))
+        status = UNDONE
+    else:
+        if isinstance(error, UndoRefused):
+            status = UNDO_REFUSED
+        else:
+            status = STATUS_UNKNOWN if running and error.outcome == OUTCOME_UNKNOWN else STATUS_FAILED
+        if saved.get("status"):   # the change stands: the card keeps its result
+            store.set(action.id, saved["status"], link=saved.get("link", ""), message=saved.get("message", ""),
+                      kind=action.kind, account=action.account)
+        else:
+            store.forget(action.id, (STATUS_RUNNING,))
+    logger.info("Undo of action %s (%s, %s): %s", action.id, action.kind, logged_alias(record.alias), status)
+    return RunOutcome(status, result, error)
+
+
+def _created_undo(action: ProposedAction, calendar: Any, created: Any) -> UndoRecord | None:
+    """The Undo of an event Jarvis just added (None when nothing was added or its stamp is unknown)."""
+    event_id, stamp = _text(getattr(created, "event_id", "")), _text(getattr(created, "stamp", ""))
+    if getattr(created, "existed", True) or not event_id or not stamp:
+        return None
+    return UndoRecord(action.kind, account_of(action), event_id, stamp, send_updates="none",
+                      calendar_id=_text(getattr(calendar, "calendar_id", "")))
+
+
+def _change_undo(action: ProposedAction, change: Any, send_updates: str, calendar_id: str) -> UndoRecord | None:
+    """The Undo of an answer or a move Jarvis just made: what Google held right before it (None when
+    nothing changed, for a Cancel, or when the stamp or the earlier state is unknown)."""
+    before = getattr(change, "before", None)
+    stamp = _text(getattr(change, "stamp", ""))
+    if action.kind not in (RSVP, MOVE) or getattr(change, "already", True) or before is None or not stamp:
+        return None
+    event_id = _text(getattr(change, "event_id", "")) or action.field("event")
+    if action.kind == RSVP:
+        response = _text(getattr(before, "self_response", "")) or "needsAction"
+        return UndoRecord(RSVP, account_of(action), event_id, stamp, send_updates=send_updates,
+                          calendar_id=calendar_id, response=response,
+                          comment=_text(getattr(before, "self_comment", "")))
+    start, end = getattr(before, "start", None), getattr(before, "end", None)
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        return None
+    return UndoRecord(MOVE, account_of(action), event_id, stamp, send_updates=send_updates, calendar_id=calendar_id,
+                      start=start, end=end, time_zone=_text(getattr(before, "time_zone", "")))
+
+
 # --------------------------------------------------------------------------
 # The LIVE view's steps of an approved card (on screen only; every helper is quiet)
 # --------------------------------------------------------------------------
@@ -1151,7 +1318,7 @@ _CALENDAR_CALLS = {
 _RSVP_DONE = {"yes": "ACCEPTED", "no": "DECLINED", "maybe": "ANSWERED MAYBE"}
 # ExecErrors that are one of Jarvis's own guards refusing (BLOCKED), not a failure.
 _GUARD_PROBLEMS = frozenset({PROBLEM_CONFIRM, PROBLEM_IDENTITY})
-_GUARD_MESSAGES = (COUNTDOWN_ONLY_MESSAGE, NEW_RECIPIENTS_MESSAGE, CLOSING_MESSAGE)
+_GUARD_MESSAGES = (HOLD_ONLY_MESSAGE, NEW_RECIPIENTS_MESSAGE, CLOSING_MESSAGE)
 
 
 def _text(value: Any) -> str:
@@ -1192,14 +1359,14 @@ def _payload_step(task: LiveTask, title: str) -> LiveStep:
 @quiet(NO_STEP)
 def _show_payload(task: LiveTask, payload: Payload | None) -> LiveStep:
     """Right before the call: the payload step shows exactly what goes out (a difference from
-    what the countdown showed is named and marks it CHECK)."""
+    what the card showed is named and marks it CHECK)."""
     if not task.enabled or payload is None:
         return NO_STEP
     step = _payload_step(task, payload.title)
     changed = step.show(payload)
     step.update(status_text="SENDING")
     if changed:
-        step.note("Not what the countdown showed: " + ", ".join(changed) + " changed")
+        step.note("Not what the card showed: " + ", ".join(changed) + " changed")
         step.update(status_text="CHANGED SINCE")
     return step
 
@@ -1240,7 +1407,7 @@ def _payload_done(payload: LiveStep, word: str) -> None:
     view = payload.view()
     if view is not None and view.status_text == "CHANGED SINCE":
         payload.done(STATUS_WARN, status_text="CHECK",
-                     summary="what went out is not what the countdown showed (see the note)")
+                     summary="what went out is not what the card showed (see the note)")
     else:
         payload.done(STATUS_OK, status_text=word)
 
@@ -1338,7 +1505,7 @@ def _show_request(payload: LiveStep, call: LiveStep, action: ProposedAction, met
     differs = request_differs(action, method, params)
     if differs:
         verb = "differs" if len(differs) == 1 else "differ"
-        payload.note(f"Not what the countdown showed: {', '.join(differs)} {verb} in the request to Google")
+        payload.note(f"Not what the card showed: {', '.join(differs)} {verb} in the request to Google")
         payload.update(status_text="CHANGED SINCE")
 
 
@@ -1347,7 +1514,7 @@ def _wall_text(moment: datetime | None) -> str:
 
 
 def request_differs(action: ProposedAction, method: str, params: Mapping[str, Any]) -> list[str]:
-    """The labels of what the countdown showed (preview()) that the request to Google does not carry
+    """The labels of what the card showed (preview()) that the request to Google does not carry
     as shown: the event's title, time, place, repeat, the event id, the answer, the new time, who
     gets an email, the calendar. [] when the request is what the card said."""
     differs: list[str] = []
@@ -1368,7 +1535,7 @@ def request_differs(action: ProposedAction, method: str, params: Mapping[str, An
             differs.append("Where")
         if bool(body.get("recurrence")) != bool(event.rrule.strip()):
             differs.append("Repeats")
-        try:   # the description (notes and the card's own footer) as the countdown showed it
+        try:   # the description (notes and the card's own footer) as the card showed it
             shown = str(build_event_body(event, "", footer=event_footer(action)).get("description", ""))
         except CalendarError:
             shown = ""

@@ -5,7 +5,7 @@ Tooltips never read page text as HTML (Qt guesses the format of a tooltip, so
 line and the agenda, deadline and section rows. Long email addresses wrap
 inside the card, a long alias is cut with an ellipsis, a long draft's tooltip
 is capped and the BLOCK ADDED link can be named. The RSVP / Move / Cancel card
-states (countdown with Undo, sent, unknown with Retry, the reserved check line,
+states (the result with Undo beside it, sent, unknown with Retry, the reserved check line,
 Edit / Sign in / Copy links) never move a card's buttons, and the Edit dialog
 returns exactly what was typed and reads nothing as HTML. Qt runs offscreen in
 this process with the bundled fonts and shows nothing; every text is invented.
@@ -121,7 +121,7 @@ class RowTooltipTests(unittest.TestCase):
         row.close()
 
 
-class CountdownCardTests(unittest.TestCase):
+class EventCardTests(unittest.TestCase):
     """The RSVP / Move / Cancel card: nothing above the buttons moves when its state changes."""
 
     def make(self, **options):
@@ -147,13 +147,19 @@ class CountdownCardTests(unittest.TestCase):
         self.assertEqual(card.height(), height)   # the check line was reserved from the start
         self.assertEqual(card.deny_button.mapTo(card, card.deny_button.rect().topLeft()).x(), deny_x)
         self.assertEqual(card.approve_text(), "Retry")
-        card.set_status(hud.CARD_COUNTDOWN, "Sending in 9 s")
+        accept_x = card.approve_button.mapTo(card, card.approve_button.rect().topLeft()).x()
+        # Accepted at once: the confirmed state with the time and Undo beside it (no countdown, no number).
+        card.set_status(hud.CARD_SENT, "Accepted \u00b7 2:41 PM")
+        card.set_undo("Undo")
         QApplication.processEvents()
         self.assertTrue(card.undo_button.isVisible())
         self.assertFalse(card.deny_button.isVisible())
-        self.assertEqual(card.result_text(), "SENDING IN 9 S")
-        self.assertEqual(card.result_label.full_text(), "SENDING IN 9\u00a0S")   # "S" never wraps alone
+        self.assertEqual((card.result_text(), card.undo_text()), ("ACCEPTED \u00b7 2:41 PM", "Undo"))
         self.assertEqual(card.height(), height)
+        undo = card.undo_button.mapTo(card, card.undo_button.rect().topRight()).x()
+        self.assertLess(undo, accept_x)   # left of where Accept was: a second click there never undoes
+        card.set_undo("Retry")
+        self.assertEqual((card.undo_button.text(), card.undo_text()), ("Retry", "Retry"))
         card.set_status(hud.CARD_UNKNOWN, "check the calendar before retrying")
         QApplication.processEvents()
         self.assertFalse(card.undo_button.isVisible())
@@ -174,7 +180,8 @@ class CountdownCardTests(unittest.TestCase):
         card.edit_button.click()
         card.set_sign_in_visible(True)
         card.sign_in_button.click()
-        card.set_status(hud.CARD_COUNTDOWN, "Sending in 3 s")
+        card.set_status(hud.CARD_SENT, "Sent")
+        card.set_undo("Undo")
         card.undo_button.click()
         self.assertEqual(got, [("edit", "c1"), ("sign in", "c1"), ("undo", "c1")])
         card.set_edit_enabled(False)
@@ -224,7 +231,7 @@ class CountdownCardTests(unittest.TestCase):
                 if button is not card.edit_button:
                     button.click()
         self.assertEqual(got, [("sign in", "c1"), ("open", "c1")])
-        card.set_edit_enabled(False)   # another card's countdown: no dialog, no sign-in beside it
+        card.set_edit_enabled(False)   # another card's hold: no dialog, no sign-in beside it
         self.assertFalse(card.edit_button.isEnabled() or card.sign_in_button.isEnabled())
         self.assertTrue(card.event_button.isEnabled())
         plain = self.make()            # built without "Open event": that mode shows Edit
@@ -265,6 +272,25 @@ class CountdownCardTests(unittest.TestCase):
         self.assertGreaterEqual(card.height(), height)   # it never gets shorter again
         card.close()
 
+    def test_undo_shows_only_beside_a_confirmed_result_and_waits_while_locked(self) -> None:
+        card = self.make()
+        card.set_undo("Undo")                     # waiting for a decision: no Undo
+        self.assertEqual(card.undo_text(), "")
+        self.assertFalse(card.undo_button.isVisible())
+        card.set_status(hud.CARD_ADDED, "Added \u00b7 2:41 PM")
+        card.set_undo("Undo")
+        QApplication.processEvents()
+        self.assertTrue(card.undo_button.isVisible())
+        card.set_locked(True, "Finishing the previous approval...")
+        self.assertFalse(card.undo_button.isEnabled())   # another card's approval runs
+        card.set_locked(False)
+        self.assertTrue(card.undo_button.isEnabled())
+        card.set_status(hud.CARD_PENDING)                # undone: the buttons are back, the Undo is gone
+        self.assertEqual(card.undo_text(), "")
+        self.assertFalse(card.undo_button.isVisible())
+        self.assertFalse(hasattr(card, "countdown_label"))
+        card.close()
+
     def test_undo_keeps_the_keyboard_focus_on_its_card(self) -> None:
         host = QWidget()
         first = hud.ActionCard("u1", "rsvp \u00b7 work", "Speaker series", "Answer: yes", approve_text="Accept",
@@ -274,7 +300,8 @@ class CountdownCardTests(unittest.TestCase):
         second.move(0, 400)
         shown(host, 300)
         host.activateWindow()
-        first.set_status(hud.CARD_COUNTDOWN, "Sending in 9 s")
+        first.set_status(hud.CARD_SENT, "Sent")
+        first.set_undo("Undo")
         QApplication.processEvents()
         first.undo_button.setFocus(Qt.FocusReason.TabFocusReason)
         QApplication.processEvents()
@@ -472,10 +499,12 @@ class MailCardTests(unittest.TestCase):
         if QApplication.focusWidget() is not card.approve_button:   # offscreen focus may be unavailable
             card.close()
             self.skipTest("no keyboard focus offscreen")
-        card.set_status(hud.CARD_COUNTDOWN, "Sending from work in 9 s")
+        card.set_status(hud.CARD_SENT, "Sent")       # Sent at once, with Undo beside it
+        card.set_undo("Undo")
         self.assertIs(QApplication.focusWidget(), card.undo_button)
-        card.copy_button.setFocus(Qt.FocusReason.TabFocusReason)   # Tab on during the countdown ...
-        card.set_status(hud.CARD_COUNTDOWN, "Sending from work in 8 s")   # ... is not pulled back each second
+        card.copy_button.setFocus(Qt.FocusReason.TabFocusReason)   # Tab on during the hold ...
+        card.set_status(hud.CARD_SENT, "Sent")
+        card.set_undo("Undo")                                      # ... is never pulled back
         self.assertIs(QApplication.focusWidget(), card.copy_button)
         card.undo_button.setFocus(Qt.FocusReason.TabFocusReason)
         card.set_status(hud.CARD_PENDING)   # Undo: back to the right-hand button

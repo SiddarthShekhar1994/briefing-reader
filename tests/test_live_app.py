@@ -1,7 +1,7 @@
 """Tests for the LIVE view's stream in the app (AppController.live), without the LIVE widgets.
 
-An approved card's task from the click through the undo countdown to Google's answer (the exact
-payload during the countdown, the call and its result), Undo, a sending account that changed,
+An approved card's task from the click (and a Send's hidden hold: SENDING, never a number) to Google's
+answer (the exact payload, the call and its result), Undo during the hold, a sending account that changed,
 Jarvis closing, the briefing fetch's compact task, the rolling "Background reads" task, and
 [live] enabled / background = false. Qt runs offscreen; fakes only: nothing reaches Google,
 Notion or claude.exe, and every name, address and id is invented.
@@ -75,11 +75,17 @@ class LiveAppCase(unittest.TestCase):
         card = self.c.window.reading.action_card(action.id)
         card.approve_button.click()
         settle()
-        self.assertIsNotNone(self.c._countdown, self.c._hints.get(action.id))
+        if action.held:   # a Send / Cancel: Sent at once, the call after a hidden hold
+            self.assertIsNotNone(self.c._send_hold, self.c._hints.get(action.id))
+        else:             # a calendar change: on its way at once (no countdown)
+            self.assertTrue(action.id in self.c._jobs or self.c._store.is_decided(action.id),
+                            self.c._hints.get(action.id))
 
     def run_out(self) -> None:
-        self.c._countdown.deadline = time.monotonic() - 0.001
-        self.c._on_countdown_tick()
+        """A Send's / Cancel's hidden hold ends (a calendar change has none)."""
+        if self.c._send_hold is not None:
+            self.c._send_hold.deadline = time.monotonic() - 0.001
+            self.c._on_send_hold_tick()
 
     def wait_result(self, action) -> None:
         self.assertTrue(wait_for(lambda: action.id not in self.c._jobs and action.id not in self.c._running, 5))
@@ -103,12 +109,12 @@ class ActionTaskTests(LiveAppCase):
         self.approve(mail)
         task = self.task()
         self.assertEqual(task.title, "Email work: Jarvis test sync moved")
-        self.assertEqual(kinds(task), [live.ACTION_APPROVED, live.ACTION_PAYLOAD, live.ACTION_COUNTDOWN])
+        self.assertEqual(kinds(task), [live.ACTION_APPROVED, live.ACTION_PAYLOAD, live.ACTION_HOLD])
         approved = step_of(task, live.ACTION_APPROVED)
         self.assertEqual((fields(approved)["Card"], fields(approved)["Account"]), ("BRIEFING EMAIL", "work"))
         payload = step_of(task, live.ACTION_PAYLOAD)
         self.assertEqual((payload.status, payload.status_text, payload.title),
-                         (live.STATUS_RUNNING, "PREVIEW", "Will send exactly this"))
+                         (live.STATUS_RUNNING, "SENDING", "Will send exactly this"))
         shown = fields(payload)
         self.assertEqual((shown["From"], shown["To"], shown["Cc"], shown["Subject"]),
                          ("me@example.edu", TRUSTED, "none", "Jarvis test sync moved"))
@@ -116,36 +122,36 @@ class ActionTaskTests(LiveAppCase):
         self.assertEqual((body.label, body.text, body.start_open),
                          ("Message", "Hi Sam,\nMoved to Friday at 2 PM.\nThanks\n", True))
         self.assertTrue(payload.open_hint)
-        countdown = step_of(task, live.ACTION_COUNTDOWN)
-        self.assertEqual((countdown.deadline, countdown.status_text), (self.c._countdown.deadline, "SENDING"))
-        self.assertEqual(live.status_word(countdown, time.monotonic()), "SENDING IN 3 S")
+        hold = step_of(task, live.ACTION_HOLD)
+        self.assertEqual((hold.deadline, hold.status_text), (self.c._send_hold.deadline, "SENDING"))
+        self.assertEqual(live.status_word(hold, time.monotonic()), "SENDING")   # the truth, never a number
         self.assertEqual(self.app.senders["work"].sent, [])
         self.run_out()
         self.wait_result(mail)
         task = self.task()
         self.assertEqual((task.status, task.summary), (live.STATUS_OK, "Sent"))
-        self.assertEqual(kinds(task), [live.ACTION_APPROVED, live.ACTION_PAYLOAD, live.ACTION_COUNTDOWN,
+        self.assertEqual(kinds(task), [live.ACTION_APPROVED, live.ACTION_PAYLOAD, live.ACTION_HOLD,
                                        live.ACTION_CHECKS, live.ACTION_CALL])
         call = step_of(task, live.ACTION_CALL)
         self.assertEqual((call.status, call.status_text, fields(call)["Gmail message id"]),
                          (live.STATUS_OK, "SENT", "m1"))
         payload = step_of(task, live.ACTION_PAYLOAD)
         self.assertEqual((payload.status, payload.status_text), (live.STATUS_OK, "SENT EXACTLY THIS"))
-        self.assertEqual(step_of(task, live.ACTION_COUNTDOWN).summary, "ran out - sending now")
+        self.assertEqual(step_of(task, live.ACTION_HOLD).summary, "sending now")
         self.assertEqual(len(self.app.senders["work"].sent), 1)
         self.assertEqual(self.c.live.running(), 0)
 
     def test_undo_sends_nothing(self) -> None:
         mail = self.add_mail()
         self.approve(mail)
-        self.c._countdown.started -= 5
+        self.c._send_hold.started -= 5
         self.c.undo_action(mail.id)
         settle()
         task = self.task()
         self.assertEqual((task.status, task.status_text, task.summary),
                          (live.STATUS_CANCELLED, "UNDONE", "Undone - nothing was sent"))
-        countdown = step_of(task, live.ACTION_COUNTDOWN)
-        self.assertEqual((countdown.status, countdown.status_text, countdown.summary),
+        hold = step_of(task, live.ACTION_HOLD)
+        self.assertEqual((hold.status, hold.status_text, hold.summary),
                          (live.STATUS_CANCELLED, "UNDONE", "nothing was sent"))
         self.assertEqual(step_of(task, live.ACTION_PAYLOAD).status, live.STATUS_CANCELLED)
         self.assertEqual(self.app.senders["work"].sent, [])
@@ -158,8 +164,8 @@ class ActionTaskTests(LiveAppCase):
         settle()
         task = self.task()
         self.assertEqual(task.status, live.STATUS_BLOCKED)
-        self.assertEqual(step_of(task, live.ACTION_COUNTDOWN).summary,
-                         "the sending account changed during the countdown - nothing was sent")
+        self.assertEqual(step_of(task, live.ACTION_HOLD).summary,
+                         "the sending account changed before it went - nothing was sent")
         self.assertEqual(self.app.senders["work"].sent, [])
 
     def test_a_calendar_event_and_a_retry(self) -> None:
@@ -174,7 +180,7 @@ class ActionTaskTests(LiveAppCase):
         payload = step_of(task, live.ACTION_PAYLOAD)
         self.assertEqual(payload.title, "Will add exactly this")
         self.assertEqual(fields(payload)["Title"], "Club general meeting")
-        self.assertEqual(step_of(task, live.ACTION_COUNTDOWN).status_text, "ADDING")
+        self.assertNotIn(live.ACTION_HOLD, kinds(task))   # a calendar change goes at once: no hold
         self.run_out()
         self.wait_result(calendar)
         task = self.task()
@@ -207,9 +213,9 @@ class ActionTaskTests(LiveAppCase):
         call = step_of(self.task(), live.ACTION_CALL)
         self.assertEqual((call.status, call.status_text), (live.STATUS_OK, "MOVED"))
 
-    def test_shutdown_during_a_countdown(self) -> None:
-        calendar = next(action for action in self.c._actions if action.kind == "calendar")
-        self.approve(calendar)
+    def test_shutdown_during_a_hold_sends_it(self) -> None:
+        mail = self.add_mail()
+        self.approve(mail)
         closed: list[tuple] = []
         real_close = self.c.live.close
 
@@ -222,8 +228,9 @@ class ActionTaskTests(LiveAppCase):
             self.c.shutdown()
         (snapshot,) = closed
         (task,) = [view for view in snapshot if view.kind == live.TASK_ACTION]
-        self.assertEqual((task.status, task.summary), (live.STATUS_CANCELLED, "Jarvis closed - nothing was sent"))
-        self.assertEqual(step_of(task, live.ACTION_COUNTDOWN).status, live.STATUS_CANCELLED)
+        hold = step_of(task, live.ACTION_HOLD)
+        self.assertEqual((hold.status, hold.summary), (live.STATUS_OK, "Jarvis is closing - sending it now"))
+        self.assertEqual(len(self.app.senders["work"].sent), 1)   # the owner already saw Sent
         self.assertEqual(self.c.live.snapshot(), ())     # closed: nothing is kept
         self.assertFalse(self.c.live.enabled)
 
@@ -263,7 +270,7 @@ class PictureTests(LiveAppCase):
                          ("me@example.edu", TRUSTED, "", "Jarvis test sync moved", ""))
         self.assertEqual(picture.mail.body, "Hi Sam,\nMoved to Friday at 2 PM.\nThanks\n")
         self.assertEqual(picture.mail.reply_line, "New email (a new thread)")
-        self.assertEqual(stamp_of(payload), ("WILL BE SENT", pictures.TONE_WILL))
+        self.assertEqual(stamp_of(payload), ("SENDING NOW", pictures.TONE_DOING))   # its hidden hold
         self.assertTrue(payload.open_hint)
         self.run_out()
         self.wait_result(mail)
@@ -275,7 +282,7 @@ class PictureTests(LiveAppCase):
     def test_undo_stamps_the_email_undone(self) -> None:
         mail = self.add_mail()
         self.approve(mail)
-        self.c._countdown.started -= 5
+        self.c._send_hold.started -= 5
         self.c.undo_action(mail.id)
         settle()
         payload = step_of(self.task(), live.ACTION_PAYLOAD)
@@ -303,7 +310,6 @@ class PictureTests(LiveAppCase):
         self.assertEqual(picture.day.others_note,
                          "Only this event is drawn: Jarvis has not read the rest of Mon Oct 5 or Fri Oct 9")
         self.assertEqual(picture.day.account, "work")
-        self.assertEqual(stamp_of(payload), ("WILL MOVE", pictures.TONE_WILL))
         self.run_out()
         self.wait_result(move)
         payload = step_of(self.task(), live.ACTION_PAYLOAD)
@@ -333,7 +339,8 @@ class PictureTests(LiveAppCase):
                                           (pictures.ROLE_AFTER, 1, 16 * 60, 17 * 60, "Study group")])
         self.assertTrue(picture.day.others_shown)
         self.assertEqual(picture.day.others_note, "Other events as Jarvis read them at 1:52 PM (today's agenda)")
-        self.assertEqual(stamp_of(payload), ("WILL MOVE", pictures.TONE_WILL))
+        self.wait_result(move)
+        self.assertEqual(stamp_of(step_of(self.task(), live.ACTION_PAYLOAD)), ("MOVED", pictures.TONE_DONE))
         # Drawing it listed nothing more from Google (only the card's own event check read it).
         self.assertEqual([call for call in personal.calls[len(calls):] if call[0] in ("list", "briefs")], [])
 
@@ -342,8 +349,8 @@ class PictureTests(LiveAppCase):
         self.approve(cancel)
         payload = step_of(self.task(), live.ACTION_PAYLOAD)
         self.assertEqual(roles(payload.picture), [(pictures.ROLE_CANCEL, 0, 14 * 60, 15 * 60, "Jarvis test sync")])
-        self.assertEqual(stamp_of(payload), ("WILL BE CANCELLED", pictures.TONE_WILL))
-        self.c._countdown.started -= 5
+        self.assertEqual(stamp_of(payload), ("CHANGING NOW", pictures.TONE_DOING))   # its hidden hold
+        self.c._send_hold.started -= 5
         self.c.undo_action(cancel.id)
         settle()
         self.assertEqual(stamp_of(step_of(self.task(), live.ACTION_PAYLOAD)),
@@ -367,7 +374,6 @@ class PictureTests(LiveAppCase):
                                           (pictures.ROLE_NEW, 0, 17 * 60, 18 * 60, "Club general meeting")])
         self.assertTrue(picture.day.others_shown)
         self.assertEqual(picture.day.others_note, "Other events as Jarvis read them at 1:52 PM (today's agenda)")
-        self.assertEqual(stamp_of(payload), ("WILL BE ADDED", pictures.TONE_WILL))
         self.run_out()
         self.wait_result(calendar)
         self.assertEqual(stamp_of(step_of(self.task(), live.ACTION_PAYLOAD)), ("ADDED", pictures.TONE_DONE))

@@ -198,7 +198,6 @@ RADIUS_BADGE = 4
 RADIUS_FRAME = 6
 RADIUS_DIALOG = 14
 RADIUS_CHECKBOX = 4
-RADIUS_COUNTDOWN = 8
 BRACKET_WIDTH = 1.5
 
 # --------------------------------------------------------------------------
@@ -491,7 +490,6 @@ TILE_ERROR = "error"
 TILE_INFO = "info"
 TILE_NEEDS_FOCUS = "needs_focus"          # round 2: the focal needs-you card (all four brackets)
 TILE_NEEDS_SELECTED = "needs_selected"    # the queue's selected tile (all four brackets, stronger border)
-TILE_COUNTING = "counting"                # a card whose undo countdown runs
 TILE_STEEL = "steel"                      # denied: nothing was sent
 
 BRACKETS_DIAGONAL = "diagonal"     # top-left + bottom-right
@@ -522,13 +520,11 @@ TILE_STYLES: dict[str, TileStyle] = {
                           ALERT_TX, INK_1),
     TILE_INFO: TileStyle(TILE, LINE_FAINT, None, BRACKETS_NONE, 0, RADIUS_TILE, None, INK_4, INK_2),
     # Round 2 (Approvals): the card in focus (the screen's focal card; the queue's selected tile with a
-    # stronger border: all four brackets), a card counting down and a denied card (steel).
+    # stronger border: all four brackets) and a denied card (steel).
     TILE_NEEDS_FOCUS: TileStyle(TILE_AMBER, alpha(AMBER, 0.50), AMBER, BRACKETS_ALL, 12, RADIUS_TILE_AMBER,
                                 SCAN_AMBER, AMBER, AMBER_TX),
     TILE_NEEDS_SELECTED: TileStyle(TILE_AMBER, alpha(AMBER, 0.80), AMBER, BRACKETS_ALL, 12, RADIUS_TILE_AMBER,
                                    SCAN_AMBER, AMBER, AMBER_TX),
-    TILE_COUNTING: TileStyle(TILE_AMBER, alpha(AMBER, 0.72), AMBER, BRACKETS_ALL, 12, RADIUS_TILE_AMBER,
-                             SCAN_AMBER, AMBER, AMBER_TX),
     TILE_STEEL: TileStyle(TILE, alpha(STEEL, 0.45), None, BRACKETS_NONE, 0, RADIUS_TILE_AMBER, None, INK_4, INK_3),
 }
 
@@ -1405,7 +1401,7 @@ class ActionChip(QAbstractButton):
 # --------------------------------------------------------------------------
 
 STAMP_OK = "ok"          # an ok disc with a check (sent, added, moved, accepted, cancelled, done)
-STAMP_STEEL = "steel"    # a steel ring (denied, undone: nothing was sent)
+STAMP_STEEL = "steel"    # a steel ring (denied, undone: nothing was sent or changed)
 STAMP_ALERT = "alert"    # the warning glyph (failed)
 STAMP_AMBER = "amber"    # an amber dot (unknown: check before retrying)
 STAMP_HOLO = "holo"      # a cyan dot (working, waiting for the sign-in)

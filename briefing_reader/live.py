@@ -120,7 +120,7 @@ ASK_VALIDATE = "ask.validate"
 ASK_CARDS = "ask.cards"
 ACTION_APPROVED = "action.approved"
 ACTION_PAYLOAD = "action.payload"
-ACTION_COUNTDOWN = "action.countdown"
+ACTION_HOLD = "action.hold"            # a Send's / Cancel's hidden hold (SENDING, never a number)
 ACTION_SIGNIN = "action.signin"
 ACTION_CHECKS = "action.checks"
 ACTION_CALL = "action.call"
@@ -146,7 +146,7 @@ CALENDAR_DAY = "calendar.day"             # Jarvis's own read of today's events 
 OFFER_MADE = "offer.made"                 # an offer posted (or not, and why; spoken, held or text only)
 MAIL_SCAN = "mail.scan"                   # Jarvis's own header scan of one account (or one thread again), counts
 STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, PLANNER_RUN, ASK_VALIDATE,
-              ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_COUNTDOWN, ACTION_SIGNIN, ACTION_CHECKS,
+              ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_HOLD, ACTION_SIGNIN, ACTION_CHECKS,
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
               WEB_FETCH, WEB_SOURCE, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE, MEMORY_SAVE, MODE_REQUEST,
               PLAN_FREE, PLAN_VALIDATE, PREP_MEETING, PREP_PEOPLE, PREP_VALIDATE, CALENDAR_DAY, OFFER_MADE,
@@ -312,7 +312,7 @@ class StepView:
     started: float                          # monotonic
     ended: float | None
     at: datetime                            # wall clock of the start
-    deadline: float | None                  # a countdown's monotonic deadline
+    deadline: float | None                  # a hold's monotonic end (never shown as a number)
     fields: tuple[Field, ...]
     items: tuple[Item, ...]
     items_more: int
@@ -500,17 +500,9 @@ def elapsed_text(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def countdown_seconds(deadline: float, now: float) -> int:
-    """Whole seconds left of a countdown (as the card shows them: math.ceil, never below 0)."""
-    return max(0, math.ceil(deadline - now))
-
-
 def status_word(view: StepView | TaskView, now: float | None = None) -> str:
-    """What the status pill says: the view's status_text, else the status's default word; a
-    RUNNING countdown step with ``now``: "SENDING IN 7 S" (its status_text names the verb)."""
-    deadline = getattr(view, "deadline", None)
-    if view.status == STATUS_RUNNING and deadline is not None and now is not None:
-        return f"{view.status_text or 'RUNNING'} IN {countdown_seconds(deadline, now)} S"
+    """What the status pill says: the view's status_text, else the status's default word. A running
+    hold says only its word ("SENDING"): no number, ever (``now`` is accepted and ignored)."""
     return view.status_text or STATUS_WORDS.get(view.status, "")
 
 
