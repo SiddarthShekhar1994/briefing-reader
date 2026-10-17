@@ -29,6 +29,9 @@ Motion
     ``qt_easing(curve) -> QEasingCurve``. Reduced motion: ``reduced_motion()``,
     ``set_reduced_motion(value | None)`` (None follows Windows' "Show animations"),
     ``refresh_reduced_motion()`` (call on WM_SETTINGCHANGE), ``motion_settings().changed(bool)``.
+    The owner's ``[ui] motion``: ``set_motion_level(level)`` (``MOTION_LIVELY`` default, ``MOTION_CALM``,
+    ``MOTION_OFF``; anything else is lively), ``configured_motion()``, ``motion_level()`` (``MOTION_OFF``
+    while reduced motion is on), ``motion_ms(ms)`` (a transition's length at that level: calm x1.5, off 0).
 Ground
     ``paint_ground(painter, rect)`` (void, the 30 px triangle grid, the vignette) and
     ``GroundCache`` (``pixmap(size, dpr)``, ``paint_slice(painter, target, source)``).
@@ -172,6 +175,7 @@ GUTTER_SIDE = 24
 GUTTER_TOP = 20
 GUTTER_BOTTOM = 24
 DOCK_WIDTH = 64
+DOCK_WIDTH_LABELLED = 200      # the Dock with each screen's name (the motion prototype); 64 folds to glyphs
 DOCK_BUTTON = 44
 DOCK_GAP = 6
 HEADER_HEIGHT = 52
@@ -237,6 +241,9 @@ ROLES: dict[str, TypeRole] = {
     "input": TypeRole(_D, 16, 20, 400, 0.02),
     "tooltip": TypeRole(_D, 12, 16, 500, 0.04),
     "shortcut": TypeRole(_M, 11, 14, 500, 0.12, caps=True),      # the shortcut after a Dock label
+    "dock_label": TypeRole(_B, 14, 18, 500, 0.0),                 # a screen's name in the labelled Dock
+    "find_item": TypeRole(_B, 14, 18, 400, 0.0),                  # a row of the Find list
+    "kbd": TypeRole(_M, 10, 12, 500, 0.08, caps=True),            # a key hint chip (CTRL K)
 }
 _FONT_MAKERS: dict[str, Callable[[int, int, float], QFont]] = {
     _D: hud.display_font, _B: hud.body_font, _M: hud.mono_font,
@@ -286,6 +293,16 @@ ORB_STATE_MS = 800
 POP_MS = 400
 PING_MS = 1700
 REDUCED_FADE_MS = 150
+DOCK_RAIL_MS = 400             # the motion prototype: the Dock's glowing rail slides to the current screen
+WIPE_MS = 550                  # a screen change: the scan-line wipe over the stage
+ASSEMBLE_MS = 450              # ... each main panel's fade + rise + top-to-bottom reveal
+ASSEMBLE_STAGGER_MS = 70
+ASSEMBLE_RISE = 14.0
+CALM_FADE_MS = 600             # calm: the panels only fade in
+CALM_STAGGER_MS = 90
+STARTUP_SCAN_MS = 1600         # the start-up's one scan line
+STARTUP_TYPE_DELAY_MS = 250    # J.A.R.V.I.S. types in after this
+STARTUP_TYPE_MS = 1100
 
 Curve = tuple[float, float, float, float]
 EASE_STD: Curve = (0.2, 0.8, 0.2, 1.0)
@@ -372,6 +389,38 @@ def _windows_animations_off() -> bool:
     except Exception as exc:  # noqa: BLE001 - an unknown answer keeps the motion
         logger.debug("Could not read the animation setting: %s", exc)
         return False
+
+
+MOTION_LIVELY = "lively"
+MOTION_CALM = "calm"
+MOTION_OFF = "off"
+MOTION_LEVELS = (MOTION_LIVELY, MOTION_CALM, MOTION_OFF)
+_motion_level = MOTION_LIVELY
+
+
+def set_motion_level(level: str | None) -> None:
+    """The owner's ``[ui] motion`` ("lively", "calm", "off"; anything else is lively)."""
+    global _motion_level
+    text = str(level or "").strip().casefold()
+    _motion_level = text if text in MOTION_LEVELS else MOTION_LIVELY
+
+
+def configured_motion() -> str:
+    return _motion_level
+
+
+def motion_level() -> str:
+    """The motion now: the owner's setting, but "off" while reduced motion is on (Windows' "Show animations in
+    Windows" off, or forced)."""
+    return MOTION_OFF if reduced_motion() else _motion_level
+
+
+def motion_ms(ms: int) -> int:
+    """A transition's length at the current motion level (calm 1.5 x, off 0)."""
+    level = motion_level()
+    if level == MOTION_OFF:
+        return 0
+    return round(ms * 1.5) if level == MOTION_CALM else int(ms)
 
 
 def reduced_motion() -> bool:
@@ -801,6 +850,11 @@ ICONS: dict[str, tuple[str, ...]] = {
     "plus": ("M12 5v14M5 12h14",),
     "more": ("M4.6 12a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0-2.8 0z", "M10.6 12a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0-2.8 0z",
              "M16.6 12a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0-2.8 0z"),
+    # The motion prototype (the Find list and the labelled Dock).
+    "search": ("M11 5a6 6 0 1 0 0 12a6 6 0 1 0 0-12z", "M20 20l-4.5-4.5"),
+    "home": ("M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z",),
+    "plan": ("M4 5h16v15H4z", "M4 10h16", "M8 3v4M16 3v4", "M8 14h4"),
+    "prep": ("M6 4h12v16H6z", "M9 8h6M9 12h6M9 16h3"),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",

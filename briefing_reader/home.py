@@ -30,9 +30,12 @@ Public API
     OK (``set_service(name, status, tooltip)``: dot + mono name, the service chip's text as tooltip and
     accessible name; until round 2's error tiles), a Send's or Cancel's hidden hold away from its card
     (``set_hold(word)``: the confirmed "SENT" with an **Undo** link, ``undoClicked``; never a number),
-    then the clock button (opens the
+    the "Find or ask anything" pill (``find_button``, a find_view.FindButton: ``findClicked``; Ctrl+K;
+    folded to a round search button when the header is too narrow), then the clock button (opens the
     Day view: ``clockClicked``), a divider, mute (``muteClicked``; ``set_mute_visible``,
     ``set_muted``), minimize (``minimizeClicked``) and close = Done (``closeClicked``).
+    ``type_wordmark()`` types J.A.R.V.I.S. in (the start-up: 1.1 s after 250 ms, letter by letter; the
+    accessible name stays "Jarvis"), ``wordmark_typing()``.
 
 ``HomeStage``
     The stage: the hero orb (``hero``, an ``orb.OrbWidget`` sized to fit, 200-320 px) centred, four
@@ -70,6 +73,7 @@ from PySide6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    QVariantAnimation,
     Signal,
 )
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPen
@@ -82,7 +86,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import holo, offer_view
+from . import find_view, holo, offer_view
 from . import orb as orb_mod
 
 # --------------------------------------------------------------------------
@@ -879,6 +883,7 @@ class HoloHeader(QWidget):
     """The main window's 52 px title bar; see the module docstring."""
 
     clockClicked = Signal()
+    findClicked = Signal()               # the "Find or ask anything" pill (Ctrl+K does the same)
     undoClicked = Signal()               # the hold's Undo (while ``set_hold`` shows one)
     muteClicked = Signal()
     minimizeClicked = Signal()
@@ -890,10 +895,19 @@ class HoloHeader(QWidget):
         self._now: Callable[[], datetime] = datetime.now
         self._hour24 = False
         self._drag: QPoint | None = None
-        self.wordmark = QLabel(holo.role_text("wordmark", "J.A.R.V.I.S."))
+        self._wordmark_text = holo.role_text("wordmark", "J.A.R.V.I.S.")
+        self.wordmark = QLabel(self._wordmark_text)
         self.wordmark.setFont(holo.font("wordmark"))
         holo_label_color(self.wordmark, holo.INK_1)
         self.wordmark.setAccessibleName("Jarvis")
+        self._typing = QVariantAnimation(self)
+        self._typing.setStartValue(0.0)
+        self._typing.setEndValue(float(holo.STARTUP_TYPE_DELAY_MS + holo.STARTUP_TYPE_MS))
+        self._typing.setDuration(holo.STARTUP_TYPE_DELAY_MS + holo.STARTUP_TYPE_MS)
+        self._typing.valueChanged.connect(self._on_typing)
+        self._typing.finished.connect(self._end_typing)
+        self.find_button = find_view.FindButton()
+        self.find_button.clicked.connect(self.findClicked)
         self.readout = _StateReadout()
         self._services: dict[str, _ServiceNote] = {}
         self._service_row = QHBoxLayout()
@@ -927,6 +941,8 @@ class HoloHeader(QWidget):
         row.addSpacing(12)
         row.addWidget(self.hold, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.undo_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addSpacing(12)
+        row.addWidget(self.find_button, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addSpacing(8)
         row.addWidget(self.clock, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self._divider, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -941,6 +957,36 @@ class HoloHeader(QWidget):
 
     def set_state_word(self, word: str, tone: str = TONE_HOLO) -> None:
         self.readout.set_word(word, tone)
+        self._fit_notes()
+
+    # ---- the start-up: J.A.R.V.I.S. types in ---------------------------------------------------
+
+    def type_wordmark(self) -> None:
+        """The wordmark types in, letter by letter (motion "lively" only; never changes the layout)."""
+        if holo.motion_level() != holo.MOTION_LIVELY:
+            return
+        self.wordmark.setMinimumWidth(self.wordmark.sizeHint().width())
+        self._typing.stop()
+        self.wordmark.setText("")
+        self._typing.start()
+
+    def wordmark_typing(self) -> bool:
+        return self._typing.state() == QVariantAnimation.State.Running
+
+    def wordmark_shown(self) -> str:
+        return self.wordmark.text()
+
+    def _on_typing(self, value: Any) -> None:
+        share = (float(value) - holo.STARTUP_TYPE_DELAY_MS) / holo.STARTUP_TYPE_MS
+        count = max(0, min(len(self._wordmark_text), math.floor(share * len(self._wordmark_text) + 1e-6)))
+        text = self._wordmark_text[:count]
+        if text != self.wordmark.text():
+            self.wordmark.setText(text)
+
+    def _end_typing(self) -> None:
+        self._typing.stop()
+        self.wordmark.setText(self._wordmark_text)
+        self.wordmark.setMinimumWidth(0)
 
     def state_word(self) -> str:
         return self.readout.word()
@@ -973,14 +1019,18 @@ class HoloHeader(QWidget):
         self._fit_notes()
 
     def _fit_notes(self) -> None:
-        """Too narrow for every note's name (the smallest window, a hold showing): their dots only."""
+        """Too narrow for everything (the smallest window, a hold showing): first the Find pill folds to its
+        round search button, then the notes show their dots only (their names stay as long as they fit)."""
         notes = [note for note in self._services.values() if not note.isHidden()]
         layout = self.layout()
-        for compact in (False, True):
+        for compact_notes, compact_find in ((False, False), (False, True), (True, True)):
+            if compact_notes and not notes:
+                return
             for note in notes:
-                note.set_compact(compact)
+                note.set_compact(compact_notes)
+            self.find_button.set_compact(compact_find)
             layout.invalidate()
-            if not notes or layout.minimumSize().width() <= self.width():
+            if layout.minimumSize().width() <= self.width():
                 return
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -1045,6 +1095,8 @@ class HoloHeader(QWidget):
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().hideEvent(event)
         self._timer.stop()
+        if self.wordmark_typing():
+            self._end_typing()
 
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         if event.button() == Qt.MouseButton.LeftButton:

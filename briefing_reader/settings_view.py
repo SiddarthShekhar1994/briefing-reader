@@ -39,7 +39,7 @@ GROUPS: tuple[tuple[str, str], ...] = (("voice", "Voice"), ("times", "Briefing t
                                        ("accounts", "Accounts"), ("quiet", "Quiet hours"),
                                        ("live", "LIVE and privacy"))
 GROUP_TABLES: dict[str, tuple[str, ...]] = {
-    "voice": ("voice", "assistant"), "times": ("schedule", "polling", "display"),
+    "voice": ("voice", "assistant"), "times": ("schedule", "polling", "display", "ui"),
     "ask": ("ask", "research", "hotkey", "actions"), "accounts": ("accounts",), "quiet": ("productivity",),
     "live": ("live", "productivity"),
 }
@@ -59,6 +59,18 @@ OPEN_DATA_TEXT = "Open the data folder"
 NOT_CHECKED = "Not checked yet"
 LIST_WIDTH = 220
 _LIVE_OPENS = {"tab": "On the Live screen", "window": "In its own window", "off": "Only when you open it"}
+_MOTION_WORDS = {holo.MOTION_LIVELY: "Lively - screens sweep and assemble, the orb assembles at start-up",
+                 holo.MOTION_CALM: "Calm - slower, gentle fades only",
+                 holo.MOTION_OFF: "Off - no entrance or transition effects"}
+MOTION_WINDOWS_OFF = "Off - Windows' animations are turned off"
+
+
+def motion_words(config: Any) -> str:
+    """``[ui] motion`` in words; "off" whenever Windows' "Show animations in Windows" is off."""
+    level = str(getattr(getattr(config, "ui", None), "motion", holo.MOTION_LIVELY) or holo.MOTION_LIVELY)
+    if holo.reduced_motion() and level != holo.MOTION_OFF:
+        return MOTION_WINDOWS_OFF
+    return _MOTION_WORDS.get(level, _MOTION_WORDS[holo.MOTION_LIVELY])
 
 
 def _yes(value: Any) -> str:
@@ -141,7 +153,8 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
                  f"checking {_every(getattr(polling, 'interval_seconds', 60))}"),
                 ("When a briefing arrives", 'Asks "Hear it now?" first' if getattr(assistant, "scheduled_prompt",
                                                                                  False) else "Says it is ready"),
-                ("Clock on screen", "24-hour (13:05)" if hour24 else "12-hour (1:05 PM)")]
+                ("Clock on screen", "24-hour (13:05)" if hour24 else "12-hour (1:05 PM)"),
+                ("Screen motion", motion_words(config))]
     if group == "ask":
         ask = getattr(config, "ask", None)
         research = getattr(config, "research", None)

@@ -483,7 +483,8 @@ class HomeWindowTests(unittest.TestCase):
         self.assertIs(reading.stage.side_tile(), tile)
         self.assertEqual(reading.home_chip(), "")                               # one focal point: no chip
         kicker, title, meta = tile.texts()
-        self.assertEqual((kicker, title), ("PLAN MY DAY", ["Blocks around your meetings"]))
+        # The labelled Dock (the motion prototype) leaves the tile 220-290 px: its title may take two lines.
+        self.assertEqual((kicker, " ".join(title)), ("PLAN MY DAY", "Blocks around your meetings"))
         self.assertEqual(" ".join(meta), "Nothing goes on your calendar until you approve each block.")
         self.assertEqual((tile.commit_button.text(), tile.not_now_button.text()), ("Plan my day", "Not now"))
         self.assertEqual((tile.commit_button.variant(), tile.not_now_button.variant()),
@@ -491,7 +492,8 @@ class HomeWindowTests(unittest.TestCase):
         self.assertEqual(reading.captions.shown_text(), "Shall I plan your day, sir?")
         hero = reading.hero.geometry()
         self.assertGreaterEqual(tile.x(), hero.center().x() + reading.hero.orb_size() / 2)   # right of the orb
-        self.assertGreaterEqual(tile.y() + 12, hero.center().y())                          # its lower half
+        # Its lower half (beside the labelled Dock its two-line title may lift it a few px to stay on the stage).
+        self.assertGreaterEqual(tile.y() + 16, hero.center().y())
         self.assertLessEqual(tile.geometry().right(), reading.stage.width())
         tile.commit_button.click()
         settle()

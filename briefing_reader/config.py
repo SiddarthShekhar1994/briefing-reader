@@ -12,9 +12,9 @@ Settings come from three places:
   no extra confirmation), account (``[accounts.<alias>]``: which service acts for
   "work" / "personal" and what it may do), schedule, hotkey,
   agenda, display, Ask Jarvis (``[ask]``, off by default), assistant (``[assistant]``: how
-  Jarvis speaks on his own) and LIVE view (``[live]``: the tab that shows every step Jarvis
-  takes, on screen only) options. Which Google account an alias is never goes
-  here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader.
+  Jarvis speaks on his own), LIVE view (``[live]``: the tab that shows every step Jarvis
+  takes, on screen only) and screen (``[ui]``: how much the hologram moves) options. Which
+  Google account an alias is never goes here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader.
 
 A bad setting never stops the app: invalid values are logged as warnings and
 replaced by their defaults. The Notion token is never logged. As soon as it is
@@ -74,6 +74,10 @@ DEFAULT_DEADLINE_KEYWORDS = ("due", "deadline", "exam", "midterm", "final", "qui
                              "submission", "assignment", "lab report", "application")
 CLOCK_12H = "12h"
 CLOCK_24H = "24h"
+MOTION_LIVELY = "lively"       # [ui] motion: screen changes wipe and assemble, the start-up plays
+MOTION_CALM = "calm"           # slower, fewer effects (fades only)
+MOTION_OFF = "off"             # no entrance or transition effects
+MOTION_CHOICES = (MOTION_LIVELY, MOTION_CALM, MOTION_OFF)
 # What an account may do (google_auth.FEATURE_SCOPES has the scopes of each): "calendar" answers
 # invitations and moves or cancels events; "gmail_send" sends the replies and emails you approve;
 # "gmail_read" lets Ask Jarvis read the Gmail threads your request is about (read only; never used
@@ -89,7 +93,7 @@ UNDO_SECONDS_RANGE = (3, 30)
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
-                 "productivity")
+                 "productivity", "ui")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -237,6 +241,15 @@ class DisplayConfig:
     @property
     def hour24(self) -> bool:
         return self.clock == CLOCK_24H
+
+
+@dataclass(frozen=True)
+class UiConfig:
+    """``[ui]``: how the hologram moves. ``motion`` is "lively" (screen changes wipe and assemble, the
+    start-up plays), "calm" (slower, fewer effects) or "off" (no entrance or transition effects; Windows'
+    "Show animations in Windows" off counts as off too). true / false are read as "lively" / "off"."""
+
+    motion: str = MOTION_LIVELY
 
 
 # Ask Jarvis ([ask]): the planner is your own signed-in Claude Code CLI on your claude.ai plan.
@@ -414,6 +427,7 @@ class Config:
     live: LiveConfig = field(default_factory=LiveConfig)
     research: ResearchConfig = field(default_factory=ResearchConfig)
     productivity: ProductivityConfig = field(default_factory=ProductivityConfig)
+    ui: UiConfig = field(default_factory=UiConfig)
 
     @property
     def notion_url(self) -> str:
@@ -537,6 +551,7 @@ def load_config(project_root: Path | None = None, *,
         live=_parse_live(doc),
         research=_parse_research(doc, environ),
         productivity=_parse_productivity(doc, environ),
+        ui=_parse_ui(doc),
     )
 
 
@@ -972,6 +987,16 @@ def _parse_display(doc: Mapping[str, Any]) -> DisplayConfig:
     d = DisplayConfig()
     r = _TableReader(doc, "display", _field_names(DisplayConfig))
     return DisplayConfig(clock=r.choice("clock", d.clock, (CLOCK_12H, CLOCK_24H)))
+
+
+def _parse_ui(doc: Mapping[str, Any]) -> UiConfig:
+    """``[ui]``: ``motion`` (any case; true -> "lively", false -> "off"); anything else is the default."""
+    d = UiConfig()
+    r = _TableReader(doc, "ui", _field_names(UiConfig))
+    raw = r._get("motion")
+    if isinstance(raw, bool):
+        return UiConfig(motion=MOTION_LIVELY if raw else MOTION_OFF)
+    return UiConfig(motion=r.choice("motion", d.motion, MOTION_CHOICES))
 
 
 ASK_ENABLED_ENV = "JARVIS_ASK_ENABLED"

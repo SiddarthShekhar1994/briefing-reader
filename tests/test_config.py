@@ -372,6 +372,7 @@ class ConfigFileTests(ProjectTestCase):
             "live": {f.name for f in dataclasses.fields(LiveConfig)},
             "research": {f.name for f in dataclasses.fields(ResearchConfig)},
             "productivity": {f.name for f in dataclasses.fields(ProductivityConfig)},
+            "ui": {f.name for f in dataclasses.fields(config.UiConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():
@@ -859,6 +860,44 @@ class ScheduleHotkeyAgendaConfigTests(ProjectTestCase):
         self.write_config('display = "24h"\n')
         cfg = self.load_warning("[display]")
         self.assertEqual(cfg.display, DisplayConfig())
+
+
+class UiConfigTests(ProjectTestCase):
+    """``[ui] motion`` (the motion prototype): lively (default), calm or off; anything else is the default."""
+
+    def test_motion_values(self) -> None:
+        for raw, expected in (('"lively"', "lively"), ('"calm"', "calm"), ('"off"', "off"), ('" Calm "', "calm"),
+                              ('"OFF"', "off"), ("true", "lively"), ("false", "off")):
+            with self.subTest(raw=raw):
+                self.write_config(f"[ui]\nmotion = {raw}\n")
+                self.assertEqual(self.load_quietly().ui, config.UiConfig(motion=expected))
+
+    def test_missing_ui_table_is_lively(self) -> None:
+        self.write_config('[display]\nclock = "24h"\n')
+        self.assertEqual(self.load_quietly().ui.motion, "lively")
+        self.write_config("[ui]\n")
+        self.assertEqual(self.load_quietly().ui.motion, "lively")
+        self.assertEqual(config.UiConfig(), config.UiConfig(motion="lively"))
+
+    def test_bad_motion_falls_back_to_lively(self) -> None:
+        for value in ('"fast"', '""', "3", '["calm"]', '"full"'):
+            with self.subTest(value=value):
+                self.write_config(f"[ui]\nmotion = {value}\n")
+                cfg = self.load_warning("ui.motion")
+                self.assertEqual(cfg.ui, config.UiConfig())
+
+    def test_unknown_ui_keys_and_wrong_table_are_reported(self) -> None:
+        self.write_config('[ui]\nmotion = "calm"\nspeed = 2\n')
+        cfg = self.load_warning("ui.speed")
+        self.assertEqual(cfg.ui.motion, "calm")
+        self.write_config('ui = "calm"\n')
+        self.assertEqual(self.load_warning("[ui]").ui, config.UiConfig())
+
+    def test_the_shipped_file_explains_motion(self) -> None:
+        raw = (config.PROJECT_ROOT / "config.toml").read_text(encoding="ascii")
+        section = raw.split("[ui]", 1)[1].split("\n[", 1)[0]
+        for word in ('"lively"', '"calm"', '"off"', "Show animations in Windows", 'motion = "lively"'):
+            self.assertIn(word, section)
 
 
 class AskConfigTests(ProjectTestCase):

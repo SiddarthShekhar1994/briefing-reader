@@ -165,6 +165,17 @@ deadline_keywords = ["due", "deadline", "exam", "midterm", "final", "quiz", "sub
 # the cards, DEADLINES and the spoken briefing always use 12-hour times.
 clock = "12h"
 
+[ui]
+# How much the screen moves. "lively" (the default): changing screens sweeps a
+# scan line over the stage while the new screen's panels assemble, and when
+# Jarvis first opens (or comes back after more than 30 minutes hidden) the orb's
+# rings assemble from the centre out and the J.A.R.V.I.S. name types in.
+# "calm": slower and fewer effects (gentle fades only). "off": no entrance or
+# transition effects. With "Show animations in Windows" turned off (Settings >
+# Accessibility > Visual effects) Jarvis treats this as "off" whatever it says.
+# None of it ever delays Jarvis's greeting or what you click or type.
+motion = "lively"
+
 [ask]
 # Ask Jarvis: type a request ("move my project sync to Friday and tell Ana")
 # and Jarvis lines up cards under NEEDS YOUR OK; nothing happens until you

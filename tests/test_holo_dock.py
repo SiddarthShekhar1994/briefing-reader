@@ -86,7 +86,7 @@ class DockTests(unittest.TestCase):
         self.assertTrue(self.dock.is_sliding())
         middle = self.dock.highlight_rect()
         self.assertTrue(self.dock.slot_rect(dock.HOME).y() <= middle.y() <= self.dock.slot_rect(dock.APPROVALS).y())
-        wait(300)
+        wait(520)                                   # the motion prototype's rail: 400 ms
         self.assertFalse(self.dock.is_sliding())
         self.assertEqual(self.dock.highlight_rect(), self.dock.slot_rect(dock.APPROVALS))
         self.assertIn("Current screen", self.dock.button(dock.APPROVALS).accessibleDescription())

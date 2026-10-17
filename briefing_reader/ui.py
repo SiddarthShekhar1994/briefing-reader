@@ -122,8 +122,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import (approvals_view, brief_view, briefing_view, followups_view, live_view, memory_view, offer_view,
-               plan_view, settings_view, states_view, transcript_view)
+from . import (alive, approvals_view, brief_view, briefing_view, find_view, followups_view, live_view, memory_view,
+               offer_view, plan_view, settings_view, states_view, transcript_view)
 from . import dock as dock_mod
 from . import holo, home, hud
 from . import live as _live
@@ -986,6 +986,12 @@ SCREEN_FOLLOWUPS = 5
 SCREEN_SETTINGS = 6
 SCREENS = (SCREEN_HOME, SCREEN_BRIEFING, SCREEN_LIVE, SCREEN_MEMORY, SCREEN_APPROVALS, SCREEN_FOLLOWUPS,
            SCREEN_SETTINGS)
+# The motion prototype: the Dock shows each screen's name from this reading-view width (a window of about
+# 1,036 px: the main column keeps the 824 px of the smallest window), and folds to glyphs below it.
+DOCK_LABELS_FROM = holo.DOCK_WIDTH_LABELLED + 824
+FIND_ACTION_HINT = "ACTION"
+FIND_ASK_HINT = "ENTER"
+_FIND_ICONS = {dock_mod.HOME: "home", **dock_mod.GLYPHS}
 _SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING, SCREEN_LIVE: dock_mod.LIVE,
                  SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
                  SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS}
@@ -1060,6 +1066,17 @@ class ReadingView(QWidget):
     for the bundle) and Settings (``settings_page``, a settings_view.SettingsStage: the groups, read only). The
     agenda panel lives in the Day view's drawer (TODAY / DEADLINES; its Connect link emits ``connectCalendar``).
     ``tabChanged(index)`` when the current screen changes (the Dock, Ctrl+1..6, Ctrl+,, ``set_tab``).
+
+    Alive (the approved motion prototype; ``[ui] motion`` through holo.motion_level): the Dock is labelled
+    (each screen's glyph and name, 200 px) from ``DOCK_LABELS_FROM`` px wide and folds to glyphs below;
+    Ctrl+K or the header's "Find or ask anything" open ``find_overlay`` (a find_view.FindOverlay;
+    ``open_find()``, ``find_items(query)``): the screens with what waits on them, an open offer's link
+    while the productivity bundle is on (``set_find_actions``) and "Ask Jarvis: <text>" - a pick does exactly
+    what the Dock button, the link (``homeLink``) or Enter in the command bar does. Each screen change plays
+    ``transition`` (an alive.ScreenTransition: the scan-line wipe and the panels assembling; it never blocks
+    a click or the focus), and ``arm_startup()`` (the app started) makes the first showing - and one after
+    more than 30 minutes hidden (``startup``, an alive.StartupPresence; ``sync_presence()``) - play the
+    start-up: the hero orb assembles, J.A.R.V.I.S. types in, ``scan_sweep`` crosses the window.
 
     The states (round 2, part 3b, HOLOGRAM_SPEC 16.7): ``set_waiting(waiting, run, readout)`` (the orb waits,
     "Checking for your AM briefing, sir." and when Jarvis checks), ``set_offline_voice(offline, retry)``
@@ -1146,6 +1163,11 @@ class ReadingView(QWidget):
         ask.setContext(Qt.ShortcutContext.WindowShortcut)
         ask.activated.connect(self.focus_command_bar)
         self._shortcuts.append(ask)
+        find = QShortcut(QKeySequence(find_view.FIND_SHORTCUT), self)     # the Find list (the motion prototype)
+        find.setContext(Qt.ShortcutContext.WindowShortcut)
+        find.setAutoRepeat(False)
+        find.activated.connect(self.open_find)
+        self._shortcuts.append(find)
         self._build_layout()
         self._show_screen(SCREEN_HOME)
 
@@ -1319,14 +1341,16 @@ class ReadingView(QWidget):
         self._memory_unread = False
         self._live_activity = ""
         self._live_state = hud.LIVE_IDLE
-        self.dock = dock_mod.Dock()
+        self.dock = dock_mod.Dock(labelled=READING_SIZE.width() >= DOCK_LABELS_FROM)
         self.dock.set_slot_visible(dock_mod.MEMORY, False)       # the productivity bundle shows them
         self.dock.set_slot_visible(dock_mod.FOLLOWUPS, False)
         self.dock.slotActivated.connect(self._on_dock_slot)
         self.header = home.HoloHeader()
         self._close_tip = self.header.close_button.toolTip()
         self.header.clockClicked.connect(self.open_day_view)
+        self.header.findClicked.connect(self.open_find)
         self.header.undoClicked.connect(self.holdUndo)
+        self._find_actions = False   # an open offer's link in the Find list (the productivity bundle)
         self._hold_word = ""   # "Sent" / "Cancelled" while a Send's hidden hold runs
         self.stage = home.HomeStage()
         self.hero = self.stage.hero
@@ -1461,6 +1485,13 @@ class ReadingView(QWidget):
         self.day_drawer = home.Drawer(DAY_VIEW_TITLE, self._main)
         self._place_agenda(self.day_drawer.body_layout, hud.AGENDA_DAY)
         self._apply_tier(READING_SIZE.width())
+        # Alive (the motion prototype): the screen change over the screens' area, the start-up's scan line and
+        # the Find list over everything. All of them ignore the mouse except the open Find list.
+        self.transition = alive.ScreenTransition(self._screens)
+        self.scan_sweep = alive.ScanSweep(self)
+        self.startup = alive.StartupPresence(self._play_startup)
+        self.find_overlay = find_view.FindOverlay(self)
+        self.find_overlay.picked.connect(self._on_find_pick)
 
     # ---- screens and the Dock (HOLOGRAM_SPEC 11.1) ----------------------------------------------------
 
@@ -1475,9 +1506,12 @@ class ReadingView(QWidget):
             return
         self.transcript_drawer.close_drawer()
         self.day_drawer.close_drawer()
+        self.find_overlay.close_list()
         self._screen = index
         self._sync_brief_cards()                # a brief's lent reply cards go back before another screen shows
-        self._screens.setCurrentWidget(self._screens.widget(index))
+        page = self._screens.widget(index)
+        self._screens.setCurrentWidget(page)
+        self.transition.play(page)              # the wipe and the panels assembling (never blocks a click)
         if index == SCREEN_MEMORY:
             self._set_memory_unread(False)
         elif index == SCREEN_APPROVALS:
@@ -1485,6 +1519,94 @@ class ReadingView(QWidget):
         self._sync_header_hold()
         self.sections_popover.hide()
         self.tabChanged.emit(index)
+
+    # ---- the Find list (Ctrl+K; the motion prototype) ---------------------------------------------------
+
+    def open_find(self) -> None:
+        """Ctrl+K or the header's pill: the Find list over the screen; Esc closes it and focus goes back."""
+        self.sections_popover.hide()
+        self.find_overlay.open_list(self.find_items)
+
+    def set_find_actions(self, available: bool) -> None:
+        """An open offer's link may show in the Find list (only while the productivity bundle is on)."""
+        self._find_actions = bool(available)
+
+    def find_items(self, query: str = "") -> list[find_view.FindItem]:
+        """What the Find list offers for ``query``: every screen the Dock shows (its shortcut, what waits on it
+        in words), the links that exist right now (an open offer's Plan my day / Prepare brief, with the bundle)
+        and, for text that matches nothing, "Ask Jarvis: <text>" while the command bar is on and idle."""
+        items = []
+        for key in self.dock.visible_slots():
+            words = self.dock.signal_words(key)
+            label = f"{dock_mod.LABELS[key]} - {words}" if words else dock_mod.LABELS[key]
+            items.append(find_view.FindItem(find_view.KIND_SCREEN, key, label, dock_mod.SHORTCUTS[key].upper(),
+                                            _FIND_ICONS.get(key, "")))
+        if self._find_actions:
+            for offer in self._offer_infos:
+                if any(item.key == offer.link_id for item in items):
+                    continue
+                if offer.kind == "prep":
+                    label = f"Prepare a brief for {offer.title}" if offer.title else "Prepare a brief"
+                    items.append(find_view.FindItem(find_view.KIND_ACTION, offer.link_id, label, FIND_ACTION_HINT,
+                                                    "prep"))
+                else:
+                    items.append(find_view.FindItem(find_view.KIND_ACTION, offer.link_id, PLAN_OFFER_LINK,
+                                                    FIND_ACTION_HINT, "plan"))
+        text = " ".join(query.split())
+        found = find_view.filter_items(items, text)
+        if found or not text:
+            return found
+        if self.ask_available() and not self.command_bar.is_running():
+            return [find_view.FindItem(find_view.KIND_ASK, text, f"{find_view.ASK_PREFIX}{text}", FIND_ASK_HINT,
+                                       "ask")]
+        return [find_view.FindItem(find_view.KIND_NONE, "", find_view.NOTHING_TEXT)]
+
+    def _on_find_pick(self, item: find_view.FindItem) -> None:
+        """A pick does exactly what its counterpart does, nothing more: a screen = its Dock button; an offer's
+        action = its link (``homeLink``: the tile's commit, the Transcript link); "Ask Jarvis: <text>" = the
+        text in the command bar and Enter there. Nothing is approved, sent or changed here."""
+        if item.kind == find_view.KIND_SCREEN:
+            self.dock.activate(item.key)
+        elif item.kind == find_view.KIND_ACTION:
+            if self._find_actions and any(offer.link_id == item.key for offer in self._offer_infos):
+                self.homeLink.emit(item.key)
+        elif item.kind == find_view.KIND_ASK:
+            if not self.ask_available() or self.command_bar.is_running():
+                return
+            self.set_tab(SCREEN_HOME)
+            self.command_bar.set_text(item.key)
+            self.command_bar.focus_input()
+            self.command_bar.submit()
+            return
+        focus = QApplication.focusWidget()
+        if focus is None or not focus.isVisible() or focus.window() is not self.window():
+            self.header.find_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    # ---- the start-up (the motion prototype) -----------------------------------------------------------
+
+    def arm_startup(self) -> None:
+        """The app started: the first showing of this screen plays the start-up (and so does one after more
+        than 30 minutes hidden or minimised)."""
+        self.startup.arm()
+        self.sync_presence()
+
+    def sync_presence(self) -> None:
+        """Shown, hidden or minimised (the window tells it too): alive.StartupPresence decides."""
+        if not shiboken6.isValid(self):
+            return
+        window = self.window()
+        self.startup.note_shown(self.isVisible() and not (window is not None and window.isMinimized()))
+
+    def _play_startup(self) -> None:
+        """The hero orb's rings assemble from the centre out, J.A.R.V.I.S. types in and one scan line sweeps
+        the window (lively, about 1.8 s; calm: the rings only, slower; off: nothing). Nothing waits for it."""
+        level = holo.motion_level()
+        if level == holo.MOTION_OFF:
+            return
+        self.hero.play_intro(calm=level == holo.MOTION_CALM)
+        if level == holo.MOTION_LIVELY:
+            self.header.type_wordmark()
+            self.scan_sweep.play()
 
     def set_hold(self, word: str = "") -> None:
         """A Send's or Cancel's hidden hold runs ("Sent" / "Cancelled"; "" none): never a number."""
@@ -2551,6 +2673,7 @@ class ReadingView(QWidget):
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
+        self.dock.set_labelled(event.size().width() >= DOCK_LABELS_FROM)
         self._apply_tier(event.size().width())
         self._fit_short(self._screens_height(event.size().height()))
         self._apply_highlight(scroll_to=False)   # line wrapping changed
@@ -2566,11 +2689,13 @@ class ReadingView(QWidget):
         self._apply_highlight(scroll_to=True)    # an item highlighted while hidden comes into view
         self.refresh_quiet()
         self._sync_quiet_timer()
+        self.sync_presence()
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().hideEvent(event)
         self.sections_popover.hide()
         self._sync_quiet_timer()
+        self.startup.note_shown(False)
 
     def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         if event.key() == Qt.Key.Key_Escape and (self.transcript_drawer.is_open() or self.day_drawer.is_open()):
@@ -2783,6 +2908,8 @@ class BriefingWindow(hud.HudWindowFrame):
         self.ground = holo.GroundCache()
         self.reading.hero.set_ground(orb_mod.ground_painter(self.ground))
         self.reading.briefing_orb.set_ground(orb_mod.ground_painter(self.ground))
+        self.reading.transition.set_ground(orb_mod.ground_painter(self.ground))
+        self.visibilityChanged.connect(self.reading.sync_presence)   # minimised / restored: the start-up's clock
         holo_header = self.reading.header
         holo_header.muteClicked.connect(self._on_holo_mute)
         holo_header.minimizeClicked.connect(self.showMinimized)
@@ -4458,7 +4585,10 @@ class AppController(QObject):
                                      hour24=bool(config.display.hour24),
                                      pictures=bool(getattr(live_config, "pictures", True)))
         self._volume = volume
+        # [ui] motion (lively / calm / off; Windows' "Show animations" off counts as off), set before the window.
+        holo.set_motion_level(getattr(getattr(config, "ui", None), "motion", holo.MOTION_LIVELY))
         self.window = BriefingWindow(config.prompt.later_short_minutes, config.prompt.later_long_minutes)
+        self.window.reading.arm_startup()   # the app started: its first showing plays the start-up
         self.window.set_hour24(config.display.hour24)
         self.window.set_clock(now_func)
         self.player = self._create_player()
@@ -4491,6 +4621,7 @@ class AppController(QObject):
         self.ask: Any = self._create_ask(ask_factory)   # ask_ui.AskController, or None while [ask] is off
         self._create_memory()                           # the productivity bundle's memory (needs Ask)
         self.productivity: Any = self._create_productivity()   # the bundle's day read and offers (needs Ask)
+        self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
         self.voice: Voice = voice_factory(self) if voice_factory is not None else SilentVoice()

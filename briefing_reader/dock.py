@@ -1,12 +1,16 @@
-"""The Dock (HOLOGRAM_SPEC section 11.1): the 64 px glyph rail on the window's left edge.
+"""The Dock (HOLOGRAM_SPEC section 11.1, labelled as in the approved motion prototype): the window's left edge.
 
 Slots, top to bottom: Home (the live mini orb), a hairline, Briefing, Approvals, Live, Memory,
-Follow-ups, flexible space, Settings. Glyphs only; labels show as a tooltip right of the button
-(after 400 ms of hover, at once on keyboard focus) with the shortcut (``Approvals  CTRL+3``). The
-current slot carries a cyan highlight that slides between slots in 200 ms. Badges: amber counts
-(something waits for the owner: Approvals, Follow-ups) and a cyan dot (new: Briefing, a Memory
-suggestion, Live while Jarvis works or a Send is in its hidden hold; it never blinks). Count badges pop in when a
-count goes from 0 to more; dots ping three times on arrival (neither in reduced motion).
+Follow-ups, flexible space, Settings. Labelled (``set_labelled(True)``, 200 px: the app's window at its
+default size) every slot shows its glyph AND its name, its badge at the right end. Folded (64 px, the
+default, and the app's windows under about 1,000 px) it is glyphs only and the name shows as a tooltip
+right of the button (after 400 ms of hover, at once on keyboard focus) with the shortcut
+(``Approvals  CTRL+3``). The current slot carries a cyan highlight and a glowing 3 px cyan rail at the
+Dock's left edge that slide between slots in 400 ms (``holo.motion_ms``: calm 600 ms, none when motion
+is off). Badges: amber counts (something waits for the owner: Approvals, Follow-ups) and a cyan dot
+(new: Briefing, a Memory suggestion, Live while Jarvis works or a Send is in its hidden hold; it never
+blinks). Count badges pop in when a count goes from 0 to more; dots ping three times on arrival
+(neither in reduced motion).
 
 The Dock is one tab stop (roving focus): Up / Down move between the visible slots, Home / End
 jump, Enter / Space open. Every button's accessible name carries its signal ("Approvals, 2 waiting",
@@ -20,7 +24,8 @@ Constants: slot keys ``HOME``, ``BRIEFING``, ``APPROVALS``, ``LIVE``, ``MEMORY``
 ``SETTINGS`` (``SLOTS`` in order), ``LABELS``, ``SHORTCUTS`` (Ctrl+1 .. Ctrl+6, Ctrl+,), ``GLYPHS``;
 Live activity ``LIVE_IDLE``, ``LIVE_WORKING``, ``LIVE_HOLD``.
 
-``Dock(parent=None)``
+``Dock(parent=None, labelled=False)``
+    ``set_labelled(bool)``, ``is_labelled()``, ``rail_rect()`` (where the rail is painted now).
     Signal ``slotActivated(str)``: a slot was clicked, opened with Enter / Space or its shortcut
     (screen slots become current first; Settings does not). ``set_current(key, animate=True)``,
     ``current()``; ``set_slot_visible(key, bool)`` (Memory / Follow-ups when the bundle is off; a
@@ -29,7 +34,8 @@ Live activity ``LIVE_IDLE``, ``LIVE_WORKING``, ``LIVE_HOLD``.
     ``set_live_activity(LIVE_*)``, ``set_memory_suggestions(n)`` (pending suggestions: "Memory, 1
     suggestion"), ``set_memory_new(bool)`` (a note was saved: "Memory, new"), ``set_followups(n)``;
     ``set_orb_look(base, muted=False, offline=False)`` for the Home slot's mini orb; ``button(key)``,
-    ``mini_orb()``, ``accessible_name(key)``, ``highlight_rect()``, ``tooltip()`` (the shared
+    ``mini_orb()``, ``accessible_name(key)``, ``signal_words(key)`` ("2 waiting", "new", ...; "" none),
+    ``highlight_rect()``, ``tooltip()`` (the shared
     ``DockTooltip``), ``install_shortcuts(widget) -> list[QShortcut]`` (window-wide shortcuts that
     open visible slots; the app decides whether to install them).
 """
@@ -68,6 +74,11 @@ BUTTON = holo.DOCK_BUTTON
 PAD_X = (holo.DOCK_WIDTH - BUTTON) // 2     # 10
 PAD_Y = 16
 GLYPH = 20
+LABELLED_PAD_X = 12
+LABELLED_BUTTON = holo.DOCK_WIDTH_LABELLED - 2 * LABELLED_PAD_X   # 176
+LABEL_X = BUTTON                            # the name starts 12 px right of the glyph (centred at 22)
+RAIL_WIDTH = 3.0
+RAIL_HEIGHT = 32.0
 
 
 def _plural(n: int, one: str, many: str) -> str:
@@ -88,6 +99,7 @@ class DockButton(QAbstractButton):
         self._pop = 1.0
         self._ping = -1.0
         self._keyboard = False
+        self._labelled = False
         self.setFixedSize(BUTTON, BUTTON)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -132,6 +144,19 @@ class DockButton(QAbstractButton):
 
     def has_focus_ring(self) -> bool:
         return self._keyboard and self.hasFocus()
+
+    def set_labelled(self, labelled: bool) -> None:
+        """The glyph and the screen's name (176 x 44), or the glyph alone (44 x 44)."""
+        self._labelled = bool(labelled)
+        self.setFixedSize(LABELLED_BUTTON if self._labelled else BUTTON, BUTTON)
+        self.update()
+
+    def is_labelled(self) -> bool:
+        return self._labelled
+
+    def label_text(self) -> str:
+        """The name painted beside the glyph ("" while folded to the glyph)."""
+        return LABELS[self._key] if self._labelled else ""
 
     def set_count(self, count: int) -> None:
         count = max(0, int(count))
@@ -218,6 +243,10 @@ class DockButton(QAbstractButton):
         rest = holo.mix(holo.INK_4, holo.HOLO, self._current_mix)
         return holo.mix(rest, holo.INK_1, self._hover)
 
+    def label_color(self) -> QColor:
+        """The name: ``ink-3`` at rest, ``ink-1`` when current or under the pointer (the prototype)."""
+        return holo.mix(holo.INK_3, holo.INK_1, max(self._current_mix, self._hover))
+
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
@@ -225,18 +254,47 @@ class DockButton(QAbstractButton):
             rect = QRectF(self.rect())
             if self._hover > 0.0:
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(holo.alpha(holo.INK_1, 0.06 * self._hover))
+                painter.setBrush(holo.alpha(holo.HOLO, 0.06 * self._hover))
                 painter.drawRoundedRect(rect, holo.RADIUS_DOCK_BUTTON, holo.RADIUS_DOCK_BUTTON)
             glyph = GLYPHS.get(self._key)
             if glyph:
                 box = QRectF(0, 0, GLYPH, GLYPH)
-                box.moveCenter(rect.center())
+                box.moveCenter(QPointF(BUTTON / 2, BUTTON / 2))
+                if self._current_mix > 0.0:          # the current glyph glows (the prototype's drop shadow)
+                    glow = holo.alpha(holo.HOLO, 0.28 * self._current_mix)
+                    holo.paint_icon(painter, box, glyph, glow, stroke=4.2)
                 holo.paint_icon(painter, box, glyph, self.glyph_color(), stroke=1.6)
+            if self._labelled:
+                self._paint_label(painter)
             self._paint_badges(painter)
         finally:
             painter.end()
 
+    def _badge_room(self) -> float:
+        if self._count > 0:
+            return holo.count_badge_rect(QPointF(0, 0), self._count).width() + 8
+        return holo.NEW_DOT + 8 if self._dot else 0.0
+
+    def _paint_label(self, painter: QPainter) -> None:
+        font = holo.font("dock_label")
+        painter.setFont(font)
+        painter.setPen(self.label_color())
+        room = QRectF(LABEL_X, 0, self.width() - LABEL_X - LABELLED_PAD_X - self._badge_room(), self.height())
+        text = QFontMetricsF(font).elidedText(LABELS[self._key], Qt.TextElideMode.ElideRight, room.width())
+        painter.drawText(room, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
+
     def _paint_badges(self, painter: QPainter) -> None:
+        if self._labelled:                           # at the right end of the row, centred on it
+            right = self.width() - LABELLED_PAD_X
+            if self._count > 0:
+                top = (self.height() - holo.COUNT_BADGE) / 2
+                holo.paint_count_badge(painter, QPointF(right, top), self._count, scale=self._pop)
+            elif self._dot:
+                center = QPointF(right - holo.NEW_DOT / 2, self.height() / 2)
+                if self._ping >= 0.0:
+                    holo.paint_ping(painter, center, self._ping)
+                holo.paint_new_dot(painter, center)
+            return
         if self._count > 0:
             holo.paint_count_badge(painter, QPointF(BUTTON - 4, 4), self._count, scale=self._pop)
         elif self._dot:
@@ -326,15 +384,20 @@ class DockTooltip(QWidget):
 
 
 class _Hairline(QWidget):
-    """The 24 px `line-strong` hairline under Home (4 px margins: 10 px from its neighbours)."""
+    """The 24 px `line-strong` hairline under Home (4 px margins: 10 px from its neighbours); labelled, it
+    runs under the whole row."""
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self.setFixedSize(BUTTON, 9)
 
+    def set_width(self, width: int) -> None:
+        self.setFixedSize(width, 9)
+
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
-        painter.fillRect(QRectF((BUTTON - 24) / 2, 4, 24, 1), holo.LINE_STRONG)
+        length = 24 if self.width() <= BUTTON else self.width() - 2 * LABELLED_PAD_X
+        painter.fillRect(QRectF((self.width() - length) / 2, 4, length, 1), holo.LINE_STRONG)
         painter.end()
 
 
@@ -344,10 +407,11 @@ class Dock(QWidget):
     slotActivated = Signal(str)
     WIDTH = holo.DOCK_WIDTH
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, labelled: bool = False) -> None:
         super().__init__(parent)
         self.setFixedWidth(self.WIDTH)
         self.setAccessibleName("Jarvis sections")
+        self._labelled = False
         self._current = HOME
         self._previous: str | None = None
         self._slide = 1.0
@@ -362,6 +426,7 @@ class Dock(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(PAD_X, PAD_Y, PAD_X, PAD_Y)
         layout.setSpacing(holo.DOCK_GAP)
+        self._hairline = _Hairline(self)
         for key in SLOTS:
             if key == SETTINGS:
                 layout.addStretch(1)
@@ -370,11 +435,11 @@ class Dock(QWidget):
             self._buttons[key] = button
             layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
             if key == HOME:
-                layout.addWidget(_Hairline(self), 0, Qt.AlignmentFlag.AlignHCenter)
+                layout.addWidget(self._hairline, 0, Qt.AlignmentFlag.AlignHCenter)
         self._slide_anim = QVariantAnimation(self)
         self._slide_anim.setStartValue(0.0)
         self._slide_anim.setEndValue(1.0)
-        self._slide_anim.setDuration(holo.DOCK_SLIDE_MS)
+        self._slide_anim.setDuration(holo.DOCK_RAIL_MS)
         self._slide_anim.setEasingCurve(holo.qt_easing(holo.EASE_STD))
         self._slide_anim.valueChanged.connect(self._on_slide)
         self._hover_timer = QTimer(self)
@@ -386,6 +451,35 @@ class Dock(QWidget):
         self._sync_mix()
         for key in SLOTS:
             self._update_name(key)
+        self.set_labelled(labelled)
+
+    # ---- labelled or folded (the motion prototype) -----------------------------------------
+
+    def set_labelled(self, labelled: bool) -> None:
+        """Each slot's glyph and name, 200 px wide; or folded to the 64 px glyph rail (names as tooltips)."""
+        labelled = bool(labelled)
+        if labelled == self._labelled and self.width() == self._width():
+            return
+        self._labelled = labelled
+        self.setFixedWidth(self._width())
+        pad = LABELLED_PAD_X if labelled else PAD_X
+        layout = self.layout()
+        layout.setContentsMargins(pad, PAD_Y, pad, PAD_Y)
+        for button in self._buttons.values():
+            button.set_labelled(labelled)
+        self._hairline.set_width(LABELLED_BUTTON if labelled else BUTTON)
+        if labelled:
+            self._hover_timer.stop()
+            self._hide_tip()             # the names are on the rail now
+        layout.activate()
+        self.updateGeometry()
+        self.update()
+
+    def is_labelled(self) -> bool:
+        return self._labelled
+
+    def _width(self) -> int:
+        return holo.DOCK_WIDTH_LABELLED if self._labelled else holo.DOCK_WIDTH
 
     # ---- slots and current -------------------------------------------------------------
 
@@ -408,8 +502,10 @@ class Dock(QWidget):
         self._previous = previous
         visible = self._buttons[previous].isVisibleTo(self) and self._buttons[key].isVisibleTo(self)
         self._slide_anim.stop()
-        if animate and visible and self.isVisible() and not holo.reduced_motion():
+        duration = holo.motion_ms(holo.DOCK_RAIL_MS)
+        if animate and visible and self.isVisible() and duration > 0:
             self._slide = 0.0
+            self._slide_anim.setDuration(duration)
             self._slide_anim.start()
         else:
             self._slide = 1.0
@@ -477,6 +573,13 @@ class Dock(QWidget):
         k = self._slide
         return QRectF(target.x(), start.y() + (target.y() - start.y()) * k, target.width(), target.height())
 
+    def rail_rect(self) -> QRectF | None:
+        """The glowing rail at the Dock's left edge, centred on the highlight (None while it is hidden)."""
+        highlight = self.highlight_rect()
+        if highlight is None:
+            return None
+        return QRectF(0.0, highlight.center().y() - RAIL_HEIGHT / 2, RAIL_WIDTH, RAIL_HEIGHT)
+
     # ---- signals -------------------------------------------------------------------------
 
     def set_briefing_new(self, new: bool) -> None:
@@ -525,23 +628,27 @@ class Dock(QWidget):
 
     # ---- accessible names ------------------------------------------------------------------
 
-    def accessible_name(self, key: str) -> str:
-        label = LABELS[key]
+    def signal_words(self, key: str) -> str:
+        """What the slot's badge says in words ("2 waiting", "new", "1 suggestion", "Jarvis is working"; "")."""
         if key == BRIEFING and self._briefing_new:
-            return f"{label}, new"
+            return "new"
         if key == APPROVALS and self._buttons[key].count():
-            return f"{label}, {self._buttons[key].count()} waiting"
+            return f"{self._buttons[key].count()} waiting"
         if key == FOLLOWUPS and self._buttons[key].count():
-            return f"{label}, {self._buttons[key].count()} waiting on you"
+            return f"{self._buttons[key].count()} waiting on you"
         if key == MEMORY and self._memory:
-            return f"{label}, {self._memory} {_plural(self._memory, 'suggestion', 'suggestions')}"
+            return f"{self._memory} {_plural(self._memory, 'suggestion', 'suggestions')}"
         if key == MEMORY and self._memory_new:
-            return f"{label}, new"
+            return "new"
         if key == LIVE and self._live == LIVE_WORKING:
-            return f"{label}, Jarvis is working"
+            return "Jarvis is working"
         if key == LIVE and self._live == LIVE_HOLD:
-            return f"{label}, Jarvis is sending"
-        return label
+            return "Jarvis is sending"
+        return ""
+
+    def accessible_name(self, key: str) -> str:
+        words = self.signal_words(key)
+        return f"{LABELS[key]}, {words}" if words else LABELS[key]
 
     def _update_name(self, key: str) -> None:
         button = self._buttons[key]
@@ -626,6 +733,8 @@ class Dock(QWidget):
 
     def _hover_started(self, button: DockButton) -> None:
         self._hover_target = button
+        if self._labelled:
+            return                        # the name is on the rail: no tooltip
         if self._tip_for is not None and self._tip is not None and self._tip.isVisible():
             self._show_tip(button)        # moving along the rail: no new delay
         else:
@@ -643,6 +752,8 @@ class Dock(QWidget):
             self._show_tip(self._hover_target)
 
     def _show_tip(self, button: DockButton) -> None:
+        if self._labelled:
+            return
         host = self.window()
         if self._tip is None or self._tip.parent() is not host:
             if self._tip is not None:
@@ -672,7 +783,7 @@ class Dock(QWidget):
     # ---- Qt ------------------------------------------------------------------------------------
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(self.WIDTH, 2 * PAD_Y + 8 * BUTTON)
+        return QSize(self._width(), 2 * PAD_Y + 8 * BUTTON)
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().hideEvent(event)
@@ -686,12 +797,25 @@ class Dock(QWidget):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             highlight = self.highlight_rect()
             if highlight is not None:
-                painter.setPen(QPen(holo.LINE_STRONG, 1.0))
-                painter.setBrush(holo.alpha(holo.HOLO, 0.12))
+                painter.setPen(QPen(holo.alpha(holo.HOLO, 0.26), 1.0))
+                painter.setBrush(holo.alpha(holo.HOLO, 0.10))
                 painter.drawRoundedRect(highlight.adjusted(0.5, 0.5, -0.5, -0.5), holo.RADIUS_DOCK_BUTTON,
                                         holo.RADIUS_DOCK_BUTTON)
+            rail = self.rail_rect()
+            if rail is not None:
+                self._paint_rail(painter, rail)
             for button in self._buttons.values():
                 if button.has_focus_ring() and button.isVisible():
                     holo.paint_focus_ring(painter, QRectF(button.geometry()), holo.RADIUS_DOCK_BUTTON)
         finally:
             painter.end()
+
+    @staticmethod
+    def _paint_rail(painter: QPainter, rail: QRectF) -> None:
+        """The 3 x 32 cyan rail and its glow (the prototype's 12 px shadow as three soft layers)."""
+        painter.setPen(Qt.PenStyle.NoPen)
+        for spread, a in ((7.0, 0.07), (4.0, 0.12), (2.0, 0.22)):
+            painter.setBrush(holo.alpha(holo.HOLO, a))
+            painter.drawRoundedRect(rail.adjusted(0.0, -spread, spread, spread), 2.0 + spread / 2, 2.0 + spread / 2)
+        painter.setBrush(QColor(holo.HOLO))
+        painter.drawRoundedRect(rail, 1.5, 1.5)

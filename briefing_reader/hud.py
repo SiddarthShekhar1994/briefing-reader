@@ -7788,6 +7788,11 @@ class CommandBar(QWidget):
         self.input.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
     def _on_return(self) -> None:
+        self.submit()
+
+    def submit(self) -> None:
+        """What Enter in the field does (the Find list's "Ask Jarvis: ..." too): ``submitted(text)``, unless the
+        field is empty or a request runs."""
         text = self.text()
         if self._running or not text:
             return

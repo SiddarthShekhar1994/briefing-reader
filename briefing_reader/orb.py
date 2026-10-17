@@ -45,6 +45,11 @@ OrbWidget(px=HERO)
     square (the halo overflows the orb's box). ``set_ground(fn)`` paints the window ground under the
     orb (``fn(painter, widget)``) and makes the widget opaque, so a frame never repaints the parent.
     ``set_phase(seconds | None)`` freezes the motion (screenshots); ``settle()`` ends transitions.
+    ``play_intro(calm=False, start=None)``: the start-up (the motion prototype): the layers assemble from
+    the centre out - core, crown, R6 .. R1, then the frame, track and halo - each scaling up from 55 %,
+    turning in from -80 deg and fading in, staggered (``INTRO_STAGGER_S``, ``INTRO_LAYER_S``: about 1.2 s
+    in all; calm: no turn, slower, about 1.6 s) at 30 fps; ``start`` is the orb time it began (stills).
+    ``intro_running()``; ``settle()`` (and so ``set_phase``) ends it; never under reduced motion.
     ``set_dim(level)`` draws the whole orb at ``level`` of its strength (quiet hours: 0.7), ``dim()``.
     ``is_animating()``, ``frame_interval()``, ``detail()`` (``"full"`` / ``"compact"``),
     ``sample(now=None) -> OrbFrame`` (the computed values, for tests), ``paint_times()``.
@@ -118,6 +123,12 @@ FRAME_IDLE_MS = 100            # 10 fps: idle, needs you, offline voice (round 1
 FRAME_SLOW_MS = 100            # 10 fps: muted, waiting
 FRAME_DEEP_MS = 200            # 5 fps: deep idle
 FRAME_MINI_MS = 66             # 15 fps: the mini orb while listening, thinking or speaking
+INTRO_LAYERS = 9               # the start-up: core, crown, R6 .. R1, frame + track + halo (centre out)
+INTRO_STAGGER_S = 0.075        # ... each layer starts this much after the one inside it
+INTRO_LAYER_S = 0.6            # ... and takes this long (scale .55 -> 1, turn -80 deg -> 0, fade in)
+INTRO_TURN = -80.0
+INTRO_CALM_STAGGER_S = 0.1     # calm: no turn, slower
+INTRO_CALM_LAYER_S = 0.8
 DEEP_IDLE_S = 120.0            # no look change and no input this long: deep idle
 DEEP_PACE = 0.5                # deep idle runs every motion at half speed ...
 DEEP_EASE_S = 1.5              # ... eased in over this long
@@ -133,6 +144,7 @@ BREATH_STEPS = 5               # cached backdrops per look: the halo breath (.7 
 _STD = holo.bezier(holo.EASE_STD)
 _EASE = holo.bezier(holo.CSS_EASE)
 _IN_OUT = holo.bezier(holo.CSS_EASE_IN_OUT)
+_OUT = holo.bezier(holo.EASE_OUT)
 _RIPPLE_EASE = holo.bezier((0.4, 0.0, 0.2, 1.0))
 
 
@@ -1211,6 +1223,7 @@ class OrbWidget(_OrbBase):
         self._ink = _Fade(targets.ink)
         self._halo_look = _Fade((targets.halo_color, targets.halo_a, targets.halo_b))
         self._core_look = _Fade(targets.core)
+        self._intro: tuple[float, bool] | None = None   # the start-up: (orb time it began, calm)
         self.set_orb_size(px)
 
     # ---- API --------------------------------------------------------------------
@@ -1288,6 +1301,7 @@ class OrbWidget(_OrbBase):
         return self._env
 
     def settle(self) -> None:
+        self._intro = None
         for tween in self._tw.values():
             tween.settle()
         self._ink.settle()
@@ -1367,9 +1381,72 @@ class OrbWidget(_OrbBase):
     def frame_interval(self) -> int | None:
         ms = frame_interval_ms(self._base, self._muted, frame_clock().deep())
         now = self._now()
-        if any(not tween.done(now) for tween in self._tw.values()) or not self._ink.done(now):
+        if (any(not tween.done(now) for tween in self._tw.values()) or not self._ink.done(now)
+                or self.intro_running(now)):
             ms = min(ms, FRAME_ACTIVE_MS)      # transitions run smoothly, then the rate drops
         return ms
+
+    # ---- the start-up (the motion prototype) ---------------------------------------------------
+
+    @staticmethod
+    def _intro_timing(calm: bool) -> tuple[float, float, float]:
+        """(stagger, layer length, turn) of the start-up."""
+        if calm:
+            return INTRO_CALM_STAGGER_S, INTRO_CALM_LAYER_S, 0.0
+        return INTRO_STAGGER_S, INTRO_LAYER_S, INTRO_TURN
+
+    @classmethod
+    def intro_seconds(cls, calm: bool = False) -> float:
+        stagger, layer, _turn = cls._intro_timing(calm)
+        return stagger * (INTRO_LAYERS - 1) + layer
+
+    def play_intro(self, *, calm: bool = False, start: float | None = None) -> None:
+        """The rings assemble from the centre out (see the module docstring); nothing under reduced motion."""
+        if holo.reduced_motion():
+            return
+        self._intro = (self._now() if start is None else float(start), bool(calm))
+        self._sync()
+        self.update()
+
+    def intro_running(self, now: float | None = None) -> bool:
+        if self._intro is None:
+            return False
+        now = self._now() if now is None else now
+        start, calm = self._intro
+        return now - start < self.intro_seconds(calm)
+
+    def _apply_intro(self, f: OrbFrame, now: float) -> None:
+        """Scale, turn and fade each layer by its start-up progress (core first, the halo last)."""
+        if self._intro is None:
+            return
+        start, calm = self._intro
+        elapsed = now - start
+        if holo.reduced_motion() or (elapsed >= self.intro_seconds(calm) and self._frozen is None):
+            self._intro = None
+            return
+        stagger, length, turn = self._intro_timing(calm)
+
+        def progress(layer: int) -> float:
+            return _OUT(max(0.0, min(1.0, (elapsed - layer * stagger) / length)))
+
+        core = progress(0)
+        f.core_op *= core
+        f.core_scale *= 0.55 + 0.45 * core
+        f.glow *= core
+        f.crown_op *= progress(1)
+        scales, opacities, angles = list(f.scales), list(f.opacities), list(f.angles)
+        for i in range(6):                     # R6 (index 5) is the innermost ring, R1 (index 0) the outermost
+            k = progress(7 - i)
+            scales[i] *= 0.55 + 0.45 * k
+            opacities[i] *= k
+            angles[i] += turn * (1.0 - k)
+        f.scales, f.opacities, f.angles = tuple(scales), tuple(opacities), tuple(angles)
+        f.amp_op *= progress(7)
+        outer = progress(INTRO_LAYERS - 1)
+        f.frame *= outer
+        f.halo *= outer
+        f.halo_steady = False                  # painted directly (no cached backdrop or ring layer) meanwhile
+        f.frame_steady = False
 
     # ---- frame values ----------------------------------------------------------------------
 
@@ -1479,7 +1556,7 @@ class OrbWidget(_OrbBase):
         halo_mix = self._halo_look.mix(now)
         halos = ((self._halo_look.cur, 1.0),) if halo_mix >= 1.0 else (
             (self._halo_look.prev, 1.0 - halo_mix), (self._halo_look.cur, halo_mix))
-        return OrbFrame(
+        frame = OrbFrame(
             t=now, halo_level=halo_level, halo_breath=halo_breath,
             halo_steady=halo_mix >= 1.0 and tw["halo"].done(now) and tw["lit"].done(now),
             frame_steady=tw["frame"].done(now) and ink_mix >= 1.0, angles=tuple(self._angles),
@@ -1493,6 +1570,8 @@ class OrbWidget(_OrbBase):
             alert=alert, arc=arc, dot=dot, slash=tw["slash"].value(now), core_looks=looks, halos=halos,
             dashed=new.dashed, compact=self._compact(), fine=not (self._compact() or self._degraded),
         )
+        self._apply_intro(frame, now)
+        return frame
 
     # ---- painting ------------------------------------------------------------------------------
 

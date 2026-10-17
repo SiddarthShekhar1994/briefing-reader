@@ -942,13 +942,34 @@ greeting was more than 2 minutes ago. Without sound (muted, `[assistant]
 speak = false`, no voice available) the same words are shown in the JARVIS
 tab; `[assistant] greet = false` turns the greeting off.
 
-**The Dock and the screens.** A narrow rail of glyphs on the window's left
-edge, the Dock, opens the screens (hover a glyph, or Tab to it, for its name
-and shortcut; Up / Down move along it). The keyboard: **Ctrl+1** .. **Ctrl+6**
-and **Ctrl+,** open the screens below, **Ctrl+Space** opens Home with the
-command bar ready (while Ask Jarvis is on), **Ctrl+M** mutes Jarvis's own
-voice, **Space** plays or pauses the briefing and **Esc** closes a drawer or a
-list.
+**The Dock and the screens.** The Dock on the window's left edge opens the
+screens: each one with its glyph and its name (Home, Briefing, Approvals, Live,
+Memory, Follow-ups, and Settings at the bottom), its count or its cyan NEW dot,
+and a glowing cyan rail that slides to the screen you are on. In a narrow window
+(under about 1,000 px wide) it folds to glyphs only: hover a glyph, or Tab to
+it, for its name and shortcut. Up / Down move along it. The keyboard:
+**Ctrl+1** .. **Ctrl+6** and **Ctrl+,** open the screens below, **Ctrl+Space**
+opens Home with the command bar ready (while Ask Jarvis is on), **Ctrl+M**
+mutes Jarvis's own voice, **Space** plays or pauses the briefing and **Esc**
+closes a drawer or a list.
+
+**Find or ask anything (Ctrl+K).** The pill in the header (or **Ctrl+K**) opens
+a short list over the screen: every screen with its shortcut and what waits on
+it ("Approvals - 2 waiting"), and, with the productivity bundle on, the offers
+open right now (Plan my day, Prepare a brief for a meeting). Type to filter it;
+Up / Down choose, Enter opens, Esc closes it and puts you back where you were.
+Picking a screen is the same as its Dock button; picking an offer is the same
+as clicking its link. Text that matches nothing becomes **Ask Jarvis: ...**,
+which puts it in the command bar and asks it, exactly as pressing Enter there
+would (while Ask Jarvis is on). Nothing in the list approves, sends or changes
+anything by itself.
+
+**Motion.** Changing screens sweeps a scan line over the stage while the new
+screen's panels assemble, and when Jarvis first opens (or comes back after
+more than 30 minutes hidden) the orb's rings assemble from the centre out and
+the J.A.R.V.I.S. name types in. None of it waits: you can click and type at
+once. `[ui] motion = "calm"` makes it slower and gentler, `"off"` turns these
+effects off, and so does turning off "Show animations in Windows".
 
 - **Home** (**Ctrl+1**; the Dock's glyph is Jarvis's small orb) is Jarvis
   himself: the large orb in the middle shows what he is doing, the same word
@@ -3323,6 +3344,7 @@ log. Changes apply the next time the app starts.
 | `[assistant] speak_results` | `true` | Speak what happened after an approved card was carried out ("Done, sir - ..."). |
 | `[assistant] scheduled_prompt` | `false` | `true`: the scheduled runs and the catch-up show the classic "Hear it now?" prompt (with Later and Read now) instead of announcing the briefing. |
 | `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
+| `[ui] motion` | `"lively"` | How much the screen moves: `"lively"` (a scan line sweeps the stage and the new screen's panels assemble when you change screens; the orb's rings assemble and the J.A.R.V.I.S. name types in when Jarvis first opens or comes back after more than 30 minutes hidden), `"calm"` (slower, gentle fades only) or `"off"` (no entrance or transition effects). "Show animations in Windows" turned off counts as `"off"`. Nothing waits for these effects: clicks and typing work at once. The Settings screen shows it. |
 | `[live] enabled` | `true` | The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)): every step Jarvis takes for an Ask or a card you approved, on screen only. `false`: no LIVE tab, nothing recorded. |
 | `[live] auto_open` | `"tab"` | When Jarvis starts on an Ask or an approved card: `"tab"` brings up the LIVE tab (not for a request typed on Home, not for a card approved on Approvals, not while the briefing plays, not when the window is hidden or minimized), `"window"` shows the LIVE pop-out window without taking the focus, `"off"` never switches. `true` / `false` mean `"tab"` / `"off"`. |
 | `[live] background` | `true` | Also show the reads Jarvis does on his own (agenda, event checks, sign-ins, Claude Code checks) in one compact LIVE row. The productivity bundle's own reads and offers have a row of their own that is always shown. |
