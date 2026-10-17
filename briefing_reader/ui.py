@@ -122,7 +122,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import approvals_view, briefing_view, followups_view, live_view, memory_view, settings_view
+from . import (approvals_view, brief_view, briefing_view, followups_view, live_view, memory_view, offer_view,
+               plan_view, settings_view, transcript_view)
 from . import dock as dock_mod
 from . import holo, home, hud
 from . import live as _live
@@ -1021,6 +1022,8 @@ def _briefing_notice(status: str) -> str:
 HOME_BRIEFING_CHIP = "Briefing ready"
 HOME_PLAN_CHIP = "Plan ready"        # cyan: the plan just made is in the Transcript (its blocks on Approvals)
 HOME_BRIEF_CHIP = "Brief ready"      # cyan: the meeting brief just made is in the Transcript
+MOMENT_PLAN = "plan"                 # Home's plan moment (plan_view.PlanStage, HOLOGRAM_SPEC 16.4)
+MOMENT_BRIEF = "brief"               # Home's brief moment (brief_view.BriefStage, HOLOGRAM_SPEC 16.5)
 DAY_VIEW_TITLE = "Day view"
 TRANSCRIPT_TITLE = "Transcript"
 # What the hero orb shows for the old activity states (spec 12.6).
@@ -1044,7 +1047,11 @@ class ReadingView(QWidget):
     (home.HoloHeader: wordmark, state word, the clock that opens the Day view, mute, minimize, close)
     sits over them. Screens (``set_tab(index)``, ``current_tab()``, ``tabChanged``; Ctrl+1..6, Ctrl+,):
     Home (SCREEN_HOME = hud.TAB_JARVIS: ``stage`` with the ``hero`` orb, ``echo``, ``captions``, one
-    quiet chip, the command bar, the Transcript drawer holding ``conversation``), Briefing (STATUS and
+    quiet chip, the command bar, the Transcript drawer holding ``conversation`` (round 2, part 3a: a
+    transcript_view.TranscriptLog), an open offer as ONE amber tile beside the orb (``offer_tile``,
+    ``set_offers``: its commit is the offer's own link, ``homeLink``; Not now, ``offerNotNow``) and the plan or
+    the brief in place of the orb (``show_plan`` / ``show_brief``: ``plan_stage``, ``brief_stage``; the brief's
+    reply cards are NEEDS YOUR OK's own, lent while it shows)), Briefing (STATUS and
     the orb row, the controls and the panel with the transcript, as before), Approvals (NEEDS YOUR OK),
     Live (round 2, HOLOGRAM_SPEC 16.3: ``live_stage``, a live_view.LiveStage - the strip with ``live_status``
     (a live_view.LiveReadout), Pop out and Clear, the timeline ``live_log`` with ACTIVITY under it and the
@@ -1100,6 +1107,8 @@ class ReadingView(QWidget):
     liveLink = Signal(str)       # a result link or an internal link id in the LIVE log
     openConfig = Signal()        # Settings: Open config.toml
     openDataFolder = Signal()    # Settings: Open the data folder
+    homeLink = Signal(str)       # an offer tile's commit, a moment's See every step: the Transcript's own link
+    offerNotNow = Signal(int)    # an offer tile's Not now (Home only): the offer id
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1222,7 +1231,7 @@ class ReadingView(QWidget):
         self._command_holder.setVisible(False)
         # The conversation: Home's Transcript drawer. The panel's strip caption names the LIVE and
         # MEMORY pages (where the step chips and SECTIONS are hidden).
-        self.conversation = hud.ConversationLog()
+        self.conversation = transcript_view.TranscriptLog()
         self.strip_caption = _label(_caps(hud.mono_font(11, 400, 0.12)), hud.TEXT_DIM, name="stripCaption")
         self.strip_caption.setText(STRIP_CAPTION)
         self._make_live_page()
@@ -1301,8 +1310,11 @@ class ReadingView(QWidget):
         self._paused = False
         self._waiting = False
         self._new_briefing = False
-        self._offer: tuple[str, int, str] = ("", 0, "")     # an open offer's (link text, entry id, question)
-        self._answer: tuple[str, int] = ("", 0)             # the answer just given: (chip text, entry id)
+        self._offer_infos: tuple[offer_view.OfferInfo, ...] = ()   # the open offers, oldest first
+        self._not_now: set[int] = set()                     # offers put away on Home with Not now
+        self._answer: tuple[str, int, str] = ("", 0, "")    # the answer just given: (chip text, entry id, moment)
+        self._moment = ""                                   # Home's moment: "", MOMENT_PLAN or MOMENT_BRIEF
+        self._moment_sync = False
         self._memory_unread = False
         self._live_activity = ""
         self._live_state = hud.LIVE_IDLE
@@ -1328,12 +1340,27 @@ class ReadingView(QWidget):
         self.briefing_chip.clicked.connect(lambda: self.set_tab(SCREEN_BRIEFING))
         self.approvals_chip = holo.ActionChip(needs_ok_chip(1), holo.CHIP_AMBER)
         self.approvals_chip.clicked.connect(lambda: self.set_tab(SCREEN_APPROVALS))
-        # An open offer (amber: a decision waits) and the answer just given (cyan): each opens the
-        # Transcript at its entry; the offer itself runs only from its link there (the owner's click).
-        self.offer_chip = holo.ActionChip("", holo.CHIP_AMBER)
-        self.offer_chip.clicked.connect(lambda: self.open_transcript(self._offer[1]))
+        # An open offer is ONE amber tile bottom-right of the orb (round 2, part 3a): its commit hands the
+        # offer's own link to the app (homeLink), exactly what a click on its Transcript link does; Not now
+        # puts it away on Home only. The answer just given (cyan chip) opens its moment or the Transcript.
+        self.offer_tile = offer_view.OfferTile()
+        self.offer_tile.commitClicked.connect(self.homeLink)
+        self.offer_tile.notNowClicked.connect(self._on_offer_not_now)
+        self.stage.set_side_tile(self.offer_tile)
         self.answer_chip = holo.ActionChip("", holo.CHIP_CYAN)
-        self.answer_chip.clicked.connect(lambda: self.open_transcript(self._answer[1]))
+        self.answer_chip.clicked.connect(self._on_answer_chip)
+        # Home's moments (round 2, part 3a): the day plan (Add block goes through each block's own approval
+        # card) and the meeting brief (its reply cards are the approval cards themselves, lent while it shows).
+        self.plan_stage = plan_view.PlanStage()
+        self.plan_stage.addBlock.connect(self._on_plan_add)
+        self.plan_stage.undoBlock.connect(self.undoAction)
+        self.plan_stage.openLink.connect(self.openLink)
+        self.plan_stage.linkClicked.connect(self.homeLink)
+        self.plan_stage.closeRequested.connect(self.close_moment)
+        self.brief_stage = brief_view.BriefStage()
+        self.brief_stage.linkClicked.connect(self.homeLink)
+        self.brief_stage.closeRequested.connect(self.close_moment)
+        self.approvals.changed.connect(self._schedule_moment_sync)
         for chip in self._home_chips():
             chip.hide()
         self.settings_page = settings_view.SettingsStage()
@@ -1344,14 +1371,19 @@ class ReadingView(QWidget):
         self.conversation.set_sub_filter(home.quiet_sub)   # the Transcript is on Home: no readouts there
 
     def _build_home(self) -> QWidget:
-        """Home: the stage, the YOU echo, the caption band, one quiet chip and the command bar."""
+        """Home: the stage, the YOU echo, the caption band and one quiet chip - or a moment in their place (the
+        plan, the brief) - then the command bar."""
         page = QWidget()
         column = QVBoxLayout(page)
         column.setContentsMargins(holo.GUTTER_SIDE, 0, holo.GUTTER_SIDE, 12)
         column.setSpacing(6)
-        column.addWidget(self.stage, 1)
-        column.addWidget(self.echo, 0, Qt.AlignmentFlag.AlignHCenter)
-        column.addWidget(self.captions)
+        self._home_rest = QWidget()
+        rest = QVBoxLayout(self._home_rest)
+        rest.setContentsMargins(0, 0, 0, 0)
+        rest.setSpacing(6)
+        rest.addWidget(self.stage, 1)
+        rest.addWidget(self.echo, 0, Qt.AlignmentFlag.AlignHCenter)
+        rest.addWidget(self.captions)
         self._chip_row = QWidget()
         chips = QHBoxLayout(self._chip_row)
         chips.setContentsMargins(0, 0, 0, 0)
@@ -1360,7 +1392,11 @@ class ReadingView(QWidget):
             chips.addWidget(chip)
         chips.addStretch(1)
         self._chip_row.setFixedHeight(holo.ActionChip.HEIGHT + 2 * holo.ActionChip.MARGIN)
-        column.addWidget(self._chip_row)
+        rest.addWidget(self._chip_row)
+        self._home_pages = _PageSwitch()
+        for widget in (self._home_rest, self.plan_stage, self.brief_stage):
+            self._home_pages.addWidget(widget)
+        column.addWidget(self._home_pages, 1)
         column.addWidget(self._command_holder)
         return page
 
@@ -1415,7 +1451,10 @@ class ReadingView(QWidget):
     # ---- screens and the Dock (HOLOGRAM_SPEC 11.1) ----------------------------------------------------
 
     def _on_dock_slot(self, key: str) -> None:
-        self.set_tab(_SLOT_SCREENS.get(key, SCREEN_HOME))
+        screen = _SLOT_SCREENS.get(key, SCREEN_HOME)
+        if screen == SCREEN_HOME and self._screen == SCREEN_HOME:
+            self.close_moment()                 # Home on Home: back to the orb
+        self.set_tab(screen)
 
     def _show_screen(self, index: int) -> None:
         if index == self._screen:
@@ -1423,6 +1462,7 @@ class ReadingView(QWidget):
         self.transcript_drawer.close_drawer()
         self.day_drawer.close_drawer()
         self._screen = index
+        self._sync_brief_cards()                # a brief's lent reply cards go back before another screen shows
         if index in _PANEL_SCREENS:
             self._place_panel(index)
         self._screens.setCurrentWidget(self._screens.widget(index))
@@ -1491,7 +1531,7 @@ class ReadingView(QWidget):
             self.conversation.follow_from(entry_id)
         self.conversation.scroll_to_newest()
         if self._answer[0]:
-            self._answer = ("", 0)              # seen: the answer's chip goes
+            self._answer = ("", 0, "")          # seen: the answer's chip goes
             self._sync_chip()
 
     def open_day_view(self) -> None:
@@ -1523,6 +1563,7 @@ class ReadingView(QWidget):
         self.dock.set_orb_look(base, muted=muted, offline=offline)
         # Briefing's compact orb: as the hero, but never amber (nothing there waits on a decision).
         self.briefing_orb.set_look(orb_mod.IDLE if base == orb_mod.NEEDS else base, muted=muted, offline=offline)
+        self.plan_stage.orb.set_look(base, muted=muted, offline=offline)
         word = orb_mod.state_word(base, muted, offline)
         if self._paused and base == orb_mod.IDLE and not muted:
             word = PAUSED_WORD
@@ -1560,28 +1601,138 @@ class ReadingView(QWidget):
             self._waiting = bool(waiting)
             self._sync_look()
 
-    def set_offers_waiting(self, count: int, *, link: str = "", entry: int = 0, question: str = "") -> None:
-        """Offers on screen that wait for the owner's answer (they count as needs you). The newest one's
-        link text and entry make Home's amber chip (it opens the Transcript there) and its spoken
-        question stays as the caption's resting line until it is answered or expires (spec 14.5)."""
-        count = max(0, int(count))
-        self._offer = (link, int(entry), question) if count else ("", 0, "")
-        self.captions.set_question(self._offer[2])
-        if count != self._offers:
-            self._offers = count
+    def set_offers(self, offers: Sequence[offer_view.OfferInfo]) -> None:
+        """The open offers, oldest first (the productivity bundle). Those not put away with Not now count as
+        needs you; the newest of them is Home's ONE amber tile (bottom-right of the orb) and its spoken
+        question the caption's resting line until it is answered or expires (spec 14.5, 16.4, 16.5). The
+        tile never acts by itself: its commit hands the offer's link to the app (``homeLink``)."""
+        self._offer_infos = tuple(offers)
+        self._not_now &= {offer.offer_id for offer in self._offer_infos}
+        waiting = offer_view.newest_waiting(self._offer_infos, self._not_now)
+        newest = waiting[-1] if waiting else None
+        self.offer_tile.set_offer(newest)
+        self.stage.place_side_tile()
+        self.captions.set_question(newest.question if newest is not None else "")
+        if len(waiting) != self._offers:
+            self._offers = len(waiting)
             self._sync_look()
         self._sync_chip()
 
-    def set_answer_chip(self, text: str, entry: int) -> None:
-        """The answer just given lives in the Transcript (a plan, a brief): Home's cyan chip opens it
-        there until the drawer is opened or the next request is made (none while the drawer is open:
-        the answer is in view)."""
+    def _on_offer_not_now(self, offer_id: int) -> None:
+        """Not now: the offer leaves Home (its tile, the question, the needs you); the Transcript keeps its
+        link until it expires. Nothing is read, run or saved."""
+        had_focus = _holds_focus(self.offer_tile)
+        self._not_now.add(int(offer_id))
+        self.set_offers(self._offer_infos)
+        if had_focus:
+            self.stage.transcript_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.offerNotNow.emit(int(offer_id))
+
+    def set_answer_chip(self, text: str, entry: int, moment: str = "") -> None:
+        """The answer just given (a plan, a brief): Home's cyan chip opens its ``moment`` again (the plan,
+        the brief), else the Transcript at its entry, until it is opened or the next request is made (none
+        while the drawer is open: the answer is in view)."""
         shown = bool(text and entry) and not self.transcript_drawer.is_open()
-        self._answer = (text, int(entry)) if shown else ("", 0)
+        self._answer = (text, int(entry), moment) if shown else ("", 0, "")
         self._sync_chip()
 
+    def _on_answer_chip(self) -> None:
+        _text, entry, moment = self._answer
+        if moment and self.show_moment(moment):
+            self._answer = ("", 0, "")
+            self._sync_chip()
+            return
+        self.open_transcript(entry)
+
     def offer_question(self) -> str:
-        return self._offer[2]
+        info = self.offer_tile.info()
+        return info.question if info is not None and not self.offer_tile.isHidden() else ""
+
+    # ---- Home's moments: the plan and the brief (round 2, part 3a) ----------------------------
+
+    def show_plan(self, info: plan_view.PlanInfo, *, hour24: bool = False) -> None:
+        """The day plan as Home's focal point (HOLOGRAM_SPEC 16.4 moment 2), with each block's card state."""
+        self.plan_stage.set_plan(info, hour24=hour24)
+        self.plan_stage.sync_cards(self.approvals.card)
+        self._set_moment(MOMENT_PLAN)
+
+    def show_brief(self, info: brief_view.BriefInfo) -> None:
+        """The meeting brief as Home's focal point (HOLOGRAM_SPEC 16.5 moment 2); its reply cards follow."""
+        for card in self.brief_stage.held():
+            self.brief_stage.release(card)
+            self.approvals.take_back(card)
+        self.brief_stage.set_brief(info)
+        self._set_moment(MOMENT_BRIEF)
+
+    def show_moment(self, moment: str) -> bool:
+        """Home with the plan or the brief shown last (the cyan chip); False when there is none."""
+        stage = {MOMENT_PLAN: self.plan_stage, MOMENT_BRIEF: self.brief_stage}.get(moment)
+        if stage is None or stage.info() is None:
+            return False
+        self.set_tab(SCREEN_HOME)
+        self._set_moment(moment)
+        return True
+
+    def close_moment(self) -> None:
+        """Back to the orb (the close button, Esc, Home on Home, the next request); the plan and the brief
+        stay in the Transcript, and the chip may open them again."""
+        if not self._moment:
+            return
+        current = self._home_pages.currentWidget()
+        had_focus = current is not None and _holds_focus(current)
+        self._set_moment("")
+        if had_focus:
+            self.stage.transcript_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def moment(self) -> str:
+        return self._moment
+
+    def _set_moment(self, moment: str) -> None:
+        self._moment = moment
+        page = {MOMENT_PLAN: self.plan_stage, MOMENT_BRIEF: self.brief_stage}.get(moment, self._home_rest)
+        self._home_pages.setCurrentWidget(page)
+        self._sync_brief_cards()
+
+    def _schedule_moment_sync(self) -> None:
+        if not self._moment_sync:
+            self._moment_sync = True
+            QTimer.singleShot(0, self._moment_sync_now)
+
+    def _moment_sync_now(self) -> None:
+        self._moment_sync = False
+        if not shiboken6.isValid(self):
+            return
+        if self.plan_stage.info() is not None:
+            self.plan_stage.sync_cards(self.approvals.card)
+        self._sync_brief_cards()
+
+    def _sync_brief_cards(self) -> None:
+        """The brief's reply cards are NEEDS YOUR OK's own cards: lent while the brief shows on Home, back in
+        their place otherwise (so Send, the tick, the countdown and Undo are the same everywhere)."""
+        wanted = self._moment == MOMENT_BRIEF and self._screen == SCREEN_HOME
+        ids = self.brief_stage.card_ids() if wanted else ()
+        for card in self.brief_stage.held():
+            if card.action_id not in ids or self.approvals.card(card.action_id) is not card:
+                self.brief_stage.release(card)
+                self.approvals.take_back(card)
+        held = self.brief_stage.held()
+        for action_id in ids:
+            card = self.approvals.card(action_id)
+            if card is not None and card not in held:
+                self.approvals.lend(action_id)
+                self.brief_stage.hold(card)
+
+    def _on_plan_add(self, action_id: str) -> None:
+        """A block's Add block: the click of that block's own approval card (its guards, the undo countdown
+        and Undo, exactly as on Approvals). A locked card only says so (as a click on its dimmed button)."""
+        card = self.approvals.card(action_id)
+        if card is None:
+            return
+        if card.is_locked():
+            self.lockedClicked.emit(action_id)
+        elif card.approve_button.isEnabled():
+            card.approve_button.click()
+        self._moment_sync_now()
 
     def _on_typing(self, typing: bool) -> None:
         self._typing = bool(typing)
@@ -1611,7 +1762,8 @@ class ReadingView(QWidget):
         """The owner's request just made, as the YOU echo under the orb (until the band rests again);
         the last answer's chip goes."""
         self.echo.set_text(text)
-        self._answer = ("", 0)
+        self._answer = ("", 0, "")
+        self.close_moment()                     # a new request: the orb and its captions again
         self._sync_echo()
         self._sync_chip()
 
@@ -1625,26 +1777,23 @@ class ReadingView(QWidget):
         self.echo.setVisible(bool(self.echo.text()))
 
     def _home_chips(self) -> tuple[holo.ActionChip, ...]:
-        return (self.offer_chip, self.answer_chip, self.briefing_chip, self.approvals_chip)
+        return (self.answer_chip, self.briefing_chip, self.approvals_chip)
 
     def _sync_chip(self) -> None:
-        """At most one quiet chip at rest, in this order: an open offer (amber, its link's words: the
-        only place it shows besides the Transcript, and it expires), the answer just given (cyan: Plan
-        ready / Brief ready), Briefing ready (cyan) before N need your OK (amber); the Dock carries
-        the last two as well."""
+        """At most one quiet chip at rest and none while an offer's amber tile waits (one focal point): the
+        answer just given (cyan: Plan ready / Brief ready), Briefing ready (cyan) before N need your OK
+        (amber); the Dock carries the last two as well."""
         resting = self.captions.state() == home.RESTING
-        link, _entry, _question = self._offer
-        offer = resting and self._offers > 0 and bool(link)
+        offer = self._offers > 0
         answer = resting and not offer and bool(self._answer[0])
         briefing = resting and not (offer or answer) and self._new_briefing
         approvals = resting and not (offer or answer or briefing) and self._pending > 0
-        for chip, shown, text in ((self.offer_chip, offer, link), (self.answer_chip, answer, self._answer[0]),
+        for chip, shown, text in ((self.answer_chip, answer, self._answer[0]),
                                   (self.approvals_chip, approvals, needs_ok_chip(self._pending))):
             if shown and chip.text() != text:
                 chip.setText(text)
                 chip.updateGeometry()
         was_shown = not self.briefing_chip.isHidden()
-        self.offer_chip.setVisible(offer)
         self.answer_chip.setVisible(answer)
         self.briefing_chip.setVisible(briefing)
         self.approvals_chip.setVisible(approvals)
@@ -2298,6 +2447,12 @@ class ReadingView(QWidget):
         # actionTriggered fires for wheel, drag, clicks and keys, never for setValue().
         self._user_scrolled_at = time.monotonic()
         self._scroll_animation.stop()
+
+
+def _holds_focus(widget: QWidget) -> bool:
+    """The keyboard focus is on ``widget`` or inside it."""
+    focus = QApplication.focusWidget()
+    return focus is not None and (focus is widget or widget.isAncestorOf(focus))
 
 
 def _retain_size(widget: QWidget) -> None:
@@ -4322,6 +4477,8 @@ class AppController(QObject):
         reading.connectCalendar.connect(self.connect_calendar)
         reading.tabChanged.connect(self._on_tab_changed)
         reading.conversation.linkClicked.connect(self._on_conversation_link)
+        reading.homeLink.connect(self._on_conversation_link)      # Home's offer tile and moments: the same links
+        reading.offerNotNow.connect(self._on_offer_not_now)
         reading.openConfig.connect(self._open_config)
         reading.openDataFolder.connect(self._open_data_folder)
         self.window.header.muteToggled.connect(self._on_mute_toggled)
@@ -7335,7 +7492,13 @@ class AppController(QObject):
                              link=link)
         self._plan_gives_way()
         if valid:
-            self.window.reading.set_answer_chip(HOME_PLAN_CHIP, entry)   # the list is in the Transcript
+            # Home's plan moment (HOLOGRAM_SPEC 16.4): the timeline with each block's Add block; the list
+            # is in the Transcript too, and the cyan chip opens the plan again.
+            starts = [card.start for card in valid if card.start is not None]
+            caption = plan_result_speech(len(valid), min(starts) if starts else None, label, address)
+            reading = self.window.reading
+            reading.show_plan(self._plan_info(outcome, valid, caption, link[1]), hour24=hour24)
+            reading.set_answer_chip(HOME_PLAN_CHIP, entry, MOMENT_PLAN)
         if not assistant.speak_replies:
             return
         if valid:
@@ -7346,6 +7509,55 @@ class AppController(QObject):
         else:
             spoken = plan_result_speech(0, None, label, address)
         self._say(KIND_REPLY, spoken)   # built here from counts and times: never a title or the planner's say
+
+    def _plan_info(self, outcome: Any, valid: Sequence[ProposedAction], caption: str,
+                   steps_link: str) -> plan_view.PlanInfo:
+        """What Home's plan moment shows (memory only): the blocks (their cards' ids, times, titles and the
+        to-dos they serve), the day's events as last read for TODAY, the day's DUE items, now (on today's
+        plan), the spoken sentence as the caption and See every step's link. Never a technical readout."""
+        hour24 = self.config.display.hour24
+        window = getattr(outcome, "window", None)
+        now_wall = self._plan_now_wall()
+        day = getattr(window, "day", None) or now_wall.date()
+        zone = getattr(window, "zone", "") or self._plan_zone()
+
+        def wall(moment: datetime) -> datetime:
+            if moment.utcoffset() is None:
+                return moment
+            return wall_in_zone(moment, zone) if zone else moment.astimezone().replace(tzinfo=None)
+
+        titles = {action.id: action.title for action in self._actions}
+        blocks = []
+        for card in valid:
+            if card.start is None or card.end is None:
+                continue
+            start, end = card.start.replace(tzinfo=None), card.end.replace(tzinfo=None)
+            served = titles.get(card.serves, "") if card.serves else ""
+            blocks.append(plan_view.PlanBlock(card.id, start, end, hours_text(start, end, hour24), card.title,
+                                              f"For: {served}" if served else ""))
+        events = []
+        for event in self._agenda_events or ():
+            if event.all_day or event.start is None or event.end is None:
+                continue
+            start, end = wall(event.start), wall(event.end)
+            if start.date() == day:
+                events.append(plan_view.PlanEvent(start, end, hours_text(start, end, hour24),
+                                                  event.title or "(No title)"))
+        due = []
+        for item in self._merged_deadlines:
+            item_day = wall(item.due).date() if isinstance(item.due, datetime) else item.due
+            if item_day != day:
+                continue
+            text, _urgency = due_label(item.due, self._now())
+            if day == now_wall.date():
+                word = "DUE TONIGHT" if text.startswith("TONIGHT") else "DUE TODAY"
+            else:
+                word = "DUE TOMORROW" if day == now_wall.date() + timedelta(days=1) else f"DUE {day:%a}".upper()
+            due.append((word, item.title))
+        name = "TODAY" if day == now_wall.date() else "TOMORROW" if day == now_wall.date() + timedelta(days=1) \
+            else f"{day:%A}".upper()
+        return plan_view.PlanInfo(f"{name} {DOT} {day:%a} {day.day} {day:%b}".upper(), tuple(blocks), tuple(events),
+                                  tuple(due), now_wall if day == now_wall.date() else None, caption, steps_link)
 
     def _plan_gives_way(self) -> None:
         """LIVE became current only through this plan or brief run's own auto-open and the owner has not
@@ -7431,12 +7643,41 @@ class AppController(QObject):
         task_id = self._ask_task_id
         link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
         entry = self._jarvis(text, tone=hud.TONE_DONE, sub=f" {DOT} ".join(sub), link=link)
-        self._brief_nudge_entries(brief)
-        self._plan_gives_way()
         reading = self.window.reading
-        reading.set_answer_chip(HOME_BRIEF_CHIP, entry)   # the brief is in the Transcript
+        # Home's brief moment (HOLOGRAM_SPEC 16.5): the brief panel with its reply cards under it; the brief
+        # is in the Transcript too, and the cyan chip opens it again.
+        nudges = self._brief_nudge_entries(brief)
+        reading.show_brief(self._brief_info(brief, outcome, link[1], nudges))
+        self._plan_gives_way()
+        reading.set_answer_chip(HOME_BRIEF_CHIP, entry, MOMENT_BRIEF)
         in_jarvis = reading.current_tab() == hud.TAB_JARVIS or self.window.isMinimized()
         self._prep_say(prep_result_speech(brief.start, address, in_jarvis_tab=in_jarvis, day=brief.day))
+
+    def _brief_info(self, brief: Any, outcome: Any, steps_link: str,
+                    nudges: Sequence[tuple[str, str]] = ()) -> brief_view.BriefInfo:
+        """What Home's brief moment shows (memory only: never logged or spoken): the brief's own parts, the
+        follow-up nudges with their Draft a nudge links (the Transcript's own), the valid reply cards' ids
+        (they show under it) and See every step's link."""
+        from .ask.prep import WAITING_WORDS
+
+        threads = []
+        for who, label, summary, waiting in brief.threads:
+            text = f"{who} - {label}" if who else label
+            if summary:
+                text += f": {summary.rstrip('.')}."
+                tail = WAITING_WORDS.get(waiting, "")
+                if tail:
+                    text += f" {tail}"
+            threads.append(text)
+        notes = [brief.note] if brief.note else []
+        if not outcome.note_kind:
+            notes += [part for part in (outcome.message or "").split("; ") if part]
+        note = " ".join((part[:1].upper() + part[1:]).rstrip(".") + "." for part in notes)
+        cards = tuple(card.id for card in outcome.cards if not card.error)
+        return brief_view.BriefInfo(brief.title or "(No title)", brief.when(self.config.display.hour24), brief.alias,
+                                    brief_view.people_of(brief.who, brief.threads, brief.missing), tuple(threads),
+                                    tuple(brief.open), tuple(brief.points), tuple(brief.notes), note, cards,
+                                    steps_link, tuple(nudges))
 
     def _prep_say(self, spoken: str) -> None:
         """Say a brief's sentence ([assistant] speak_replies; built here from its time only)."""
@@ -7551,6 +7792,7 @@ class AppController(QObject):
         the bundle is on and Ask exists; None otherwise (nothing is read, offered or timed). An offer
         never acts: its link starts the plan or the brief, as a click-started run."""
         self._offer_running = 0            # the offer whose click started the running plan or brief
+        self._offers_not_now: set[int] = set()     # offers put away on Home with Not now (memory only)
         self._offer_entries: dict[int, int] = {}   # offer id -> its JARVIS entry (memory only)
         # Follow-ups (memory only): link counters -> (ThreadTarget, subject, row id), the accounts behind
         # the fix lines' links, the draft running now, the open menus and dialog, the counts last shown.
@@ -7602,6 +7844,7 @@ class AppController(QObject):
         controller.offerSpeak.connect(self._on_offer_speak)
         controller.offerRetired.connect(self._on_offer_retired)
         controller.offerChanged.connect(self._on_offer_changed)
+        controller.offerChanged.connect(self._sync_offers_waiting)
         controller.offerUnsaid.connect(self._on_offer_unsaid)
         controller.dayChanged.connect(self._update_done_tooltip)
         controller.ticked.connect(self._on_prod_ticked)
@@ -7733,26 +7976,54 @@ class AppController(QObject):
                 logger.debug("No taskbar flash (%s)", type(exc).__name__)
 
     def _sync_offers_waiting(self, *_args: Any) -> None:
-        """Offers that wait for the owner's answer count as Home's needs you; the newest one gives Home
-        its amber chip (its link's words) and its question as the resting line."""
+        """Offers that wait for the owner's answer count as Home's needs you; the newest one is Home's ONE
+        amber tile (its commit is the offer's own link) and its question the resting line."""
         controller = getattr(self, "productivity", None)
         try:
             offers = tuple(controller.open_offers()) if controller is not None else ()
         except Exception:  # noqa: BLE001 - unknown: none
             offers = ()
-        if not offers:
-            self.window.reading.set_offers_waiting(0)
-            return
-        offer = offers[-1]
-        link = PREP_OFFER_LINK if getattr(offer, "kind", "") == "prep" else PLAN_OFFER_LINK
-        entry = self._offer_entries.get(getattr(offer, "id", ""), 0) or getattr(offer, "entry_id", 0) or 0
-        self.window.reading.set_offers_waiting(len(offers), link=link, entry=entry,
-                                               question=str(getattr(offer, "speech", "") or ""))
+        self.window.reading.set_offers([self._offer_info(offer) for offer in offers])
+
+    def _offer_info(self, offer: Any) -> offer_view.OfferInfo:
+        """Home's tile for one offer (memory only): the plan offer's fixed words, or the meeting's time,
+        minutes left, title, account and guest count (what its Transcript entry says; nothing is read)."""
+        offer_id = int(getattr(offer, "id", 0))
+        entry = self._offer_entries.get(offer_id, 0) or int(getattr(offer, "entry_id", 0) or 0)
+        question = str(getattr(offer, "speech", "") or "")
+        link_id = f"{OFFER_LINK}{offer_id}"
+        start = getattr(offer, "start", None)
+        if getattr(offer, "kind", "") != "prep" or start is None:
+            return offer_view.OfferInfo(offer_id, "plan", link_id, offer_view.PLAN_KICKER, offer_view.PLAN_TITLE,
+                                        PLAN_OFFER_LINK, (offer_view.PLAN_META,), question, entry)
+        try:
+            minutes = math.ceil((start - self._now()).total_seconds() / 60)
+        except TypeError:   # one of them without a zone: the minutes as posted
+            minutes = int(getattr(offer, "lead_minutes", 0) or 0)
+        when = format_time(self._offer_wall(start), hour24=self.config.display.hour24)
+        kicker = f"{when} {DOT} IN {minutes} MIN" if minutes > 0 else f"{when} {DOT} NOW"
+        guests = max(0, int(getattr(offer, "guests", 0) or 0))
+        alias = str(getattr(offer, "alias", "") or "")
+        who = f"{guests} guest{'' if guests == 1 else 's'}"
+        meta = (f"{alias.capitalize()} {DOT} {who}" if alias else who, offer_view.PREP_META)
+        title = getattr(offer, "event_title", "") or "(No title)"
+        return offer_view.OfferInfo(offer_id, "prep", link_id, kicker, title, PREP_OFFER_LINK, meta, question, entry)
+
+    def _on_offer_not_now(self, offer_id: int) -> None:
+        """An offer tile's Not now (Home only): its sentence is not said any more (text only, never
+        retried); its Transcript link stays until it expires. Nothing is read or run."""
+        self._offers_not_now.add(int(offer_id))
+        while len(self._offers_not_now) > 64:   # memory only
+            self._offers_not_now.pop()
+        self._voice_call("cancel_key", f"{OFFER_LINK}{offer_id}")
+        logger.info("Offer %d: not now (put away on Home)", int(offer_id))
 
     def _on_offer_speak(self, offer: Any) -> None:
         """The offer's one sentence (times and counts only; KIND_NOTICE, key offer:<id>). It counts as
-        spoken only when the voice starts it (_on_voice_speaking, R26)."""
-        if not self._say(KIND_NOTICE, offer.speech, key=f"{OFFER_LINK}{offer.id}"):
+        spoken only when the voice starts it (_on_voice_speaking, R26). One put away with Not now is not
+        said (text only)."""
+        if offer.id in getattr(self, "_offers_not_now", ()) or not self._say(KIND_NOTICE, offer.speech,
+                                                                              key=f"{OFFER_LINK}{offer.id}"):
             self._prod_call("speech_failed", offer.id)
 
     def _on_offer_retired(self, offer: Any, how: str) -> None:
@@ -7865,6 +8136,7 @@ class AppController(QObject):
     def _on_prod_ticked(self) -> None:
         self._update_done_tooltip()
         self._show_prod_hint()
+        self._sync_offers_waiting()      # a prep tile's minutes left
 
     def _show_prod_hint(self) -> None:
         """Once (assistant.json prod_hint_shown): offers and follow-ups work while Jarvis is open or
@@ -8225,18 +8497,23 @@ class AppController(QObject):
             self._nudge_links.pop(next(iter(self._nudge_links)))
         return f"{prefix}{self._nudge_seq}"
 
-    def _brief_nudge_entries(self, brief: Any) -> None:
+    def _brief_nudge_entries(self, brief: Any) -> list[tuple[str, str]]:
         """Under a brief: 'Ana Lima owes you an answer in "Budget numbers" (Oct 8).' with Draft a nudge
-        (R32), when the follow-up list is on; the link maps to the thread in memory only."""
+        (R32), when the follow-up list is on; the link maps to the thread in memory only. Returns (text,
+        link id) of each, for the brief on Home."""
         if not getattr(brief, "nudges", ()) or not self._followups_section_on():
-            return
+            return []
         controller = self.productivity
+        made = []
         for who, subject, when, target in brief.nudges:
             listed = controller.row_of(target.alias, target.thread_id) if controller is not None else None
             link = self._nudge_link_id(NUDGE_LINK, target, subject, "")
             if listed is not None:   # a listed row: its own row id, so a guard stop re-fetches it (R47)
                 self._nudge_links[self._nudge_seq] = (target, subject, listed.row_id)
-            self._jarvis(owes_answer_text(who, subject, when), tone=hud.TONE_IDLE, link=(NUDGE_DRAFT_LINK, link))
+            text = owes_answer_text(who, subject, when)
+            self._jarvis(text, tone=hud.TONE_IDLE, link=(NUDGE_DRAFT_LINK, link))
+            made.append((text, link))
+        return made
 
     def _on_nudge_outcome(self, outcome: Any) -> None:
         """A finished draft: no run (the guard re-fetches the row at once, R47; gone; unreadable), or its
@@ -9147,6 +9424,9 @@ class AppController(QObject):
             return False   # the briefing plays on BRIEFING: the tab stays, LIVE gets its working dot
         if kind == _live.TASK_ACTION and self.window.reading.current_tab() == SCREEN_APPROVALS:
             return False   # the owner decides cards there (countdown, Undo, the next card): Live gets its dot
+        if kind == _live.TASK_ACTION and self.window.reading.current_tab() == SCREEN_HOME \
+                and self.window.reading.moment():
+            return False   # ... and on Home's plan or brief (a block's Add block, the reply's Send): the same
         self.window.reading.set_tab(hud.TAB_LIVE)
         return True
 

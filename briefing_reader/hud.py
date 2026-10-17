@@ -6082,6 +6082,11 @@ class ActionCard(QWidget):
     def set_countdown(self, deadline: float | None, seconds: float) -> None:
         """The running undo countdown's monotonic deadline and length: the strip's drain bar."""
         self._result.set_deadline(deadline, seconds)
+        self.changed.emit()
+
+    def countdown(self) -> tuple[float | None, float]:
+        """(the running countdown's monotonic deadline or None, its length in seconds)."""
+        return self._result._deadline, self._result._seconds
 
     def set_focal(self, focal: bool) -> None:
         """The Approvals screen's focal card (the one it opened on, or picked in the queue): all four
@@ -6368,6 +6373,7 @@ class ActionList(QScrollArea):
         self._layout.addStretch(1)
         self._cards: list[ActionCard] = []
         self._items: list[QWidget] = []   # the cards and group headers, in order
+        self._lent: list[ActionCard] = []   # cards shown elsewhere for now (a brief's reply card on Home)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
     def set_empty_text(self, text: str) -> None:
@@ -6423,9 +6429,39 @@ class ActionList(QScrollArea):
         card = self.card(action_id)
         if card is None:
             return False
-        self.ensureWidgetVisible(card, 0, 8)
+        if card not in self._lent:
+            self.ensureWidgetVisible(card, 0, 8)
         card.flash()
         return True
+
+    def lend(self, action_id: str) -> ActionCard | None:
+        """Hand ``action_id``'s card to another view for now (the same card: its buttons, ticks, countdown
+        and Undo work as here; ``cards()`` and ``card()`` keep it); None when there is no such card.
+        ``take_back(card)`` puts it back in its place."""
+        card = self.card(action_id)
+        if card is None or card in self._lent:
+            return card
+        self._layout.removeWidget(card)
+        self._lent.append(card)
+        self.updateGeometry()
+        return card
+
+    def take_back(self, card: ActionCard) -> None:
+        """A lent card back in its place in the column."""
+        if card not in self._lent:
+            return
+        self._lent.remove(card)
+        if not shiboken6.isValid(card) or card not in self._items:
+            return
+        index = self._items.index(card)
+        position = sum(1 for item in self._items[:index] if item not in self._lent)
+        card.setParent(self.widget())
+        self._layout.insertWidget(position, card)
+        card.show()
+        self.updateGeometry()
+
+    def lent(self) -> list[ActionCard]:
+        return [card for card in self._lent if shiboken6.isValid(card)]
 
     def clear(self) -> None:
         for item in self._items:
@@ -6433,6 +6469,7 @@ class ActionList(QScrollArea):
             item.deleteLater()
         self._items = []
         self._cards = []
+        self._lent = []
         self.empty_label.setVisible(True)
         self.updateGeometry()
         self.changed.emit()
@@ -8904,8 +8941,8 @@ class ConversationLog(QScrollArea):
     def add(self, role: str, text: str, *, when: datetime | str | None = None, tone: str = TONE_DONE,
             sub: str = "", link_text: str = "", link_id: str = "") -> int:
         stamp = when if isinstance(when, str) else format_time(when or datetime.now(), hour24=self._hour24)
-        entry = _ConversationEntry(self._next_id, role, stamp, text, tone, sub, link_text, link_id,
-                                   sub_filter=self._sub_filter)
+        entry = self._make_entry(self._next_id, role, stamp, text, tone, sub, link_text, link_id,
+                                 sub_filter=self._sub_filter)
         self._next_id += 1
         entry.linkClicked.connect(self.linkClicked)
         self._layout.insertWidget(self._layout.count() - 1, entry)   # before the stretch
@@ -8919,6 +8956,10 @@ class ConversationLog(QScrollArea):
         self._anchor = 0
         self._follow_newest()
         return entry.entry_id
+
+    def _make_entry(self, *args: Any, **kwargs: Any) -> _ConversationEntry:
+        """One entry's widget (the hologram's Transcript draws its own: transcript_view.TranscriptEntry)."""
+        return _ConversationEntry(*args, **kwargs)
 
     def follow_from(self, entry_id: int) -> None:
         """Follow the entries from ``entry_id`` (a group posted together) as one: while they do not

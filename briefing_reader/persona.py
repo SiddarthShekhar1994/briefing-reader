@@ -952,8 +952,8 @@ PREP_CHOOSE_TEXT = "Which meeting shall I prepare, {sir}? Nothing is read until 
 PREP_CHOOSE_ONE_TEXT = "Is this the meeting you mean, {sir}? Nothing is read until you click."
 PREP_CHOOSE_SPEECH = "Which meeting, {sir}? The choices are on screen."
 PREP_CHOOSE_ONE_SPEECH = "Is this the meeting you mean, {sir}? It's on screen."
-PREP_READY_STATUS = "Your brief is in the JARVIS tab."
-PREP_NO_RUN_STATUS = "Your brief is in the JARVIS tab (no planner run)."
+PREP_READY_STATUS = "Your brief is ready."          # Home shows it (round 2, part 3a); no readout
+PREP_NO_RUN_STATUS = "Your brief is ready."         # the run counts live in LIVE
 PREP_THIS_ONE = "Prep this one"
 # A no-run reason in a few words (ACTIVITY's row, the LIVE task's end): never the raw reason word.
 _PREP_NO_RUN_WORDS = {"no_match": "no such meeting", "gone": "the meeting is gone", "ended": "the meeting has ended",

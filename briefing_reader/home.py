@@ -37,7 +37,8 @@ Public API
 ``HomeStage``
     The stage: the hero orb (``hero``, an ``orb.OrbWidget`` sized to fit, 200-320 px) centred, four
     18 px corner brackets, a faint hairline through the orb, and the Transcript button bottom-left
-    (``transcript_button``).
+    (``transcript_button``). Round 2, part 3a: ``set_side_tile(tile)`` puts the one amber tile (an offer,
+    offer_view.OfferTile) bottom-right of the orb, tethered to it; the orb gives it room while it shows.
 
 ``EchoPill``
     ``YOU`` + the owner's request in mono 13, under the orb while it is handled.
@@ -60,6 +61,7 @@ from typing import Any, Callable
 
 import shiboken6
 from PySide6.QtCore import (
+    QEvent,
     QPoint,
     QPointF,
     QPropertyAnimation,
@@ -80,7 +82,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import holo
+from . import holo, offer_view
 from . import orb as orb_mod
 
 # --------------------------------------------------------------------------
@@ -1100,6 +1102,7 @@ def holo_label_color(label: QLabel, color: str | QColor) -> None:
 
 STAGE_BRACKET = 18
 ORB_MIN = 200
+SIDE_GAP = 40              # between the orb and its side tile (spec 16.0)
 
 
 class HomeStage(QWidget):
@@ -1112,6 +1115,87 @@ class HomeStage(QWidget):
         self.transcript_button = holo.HoloButton("Transcript", holo.ICON, icon="transcript", diameter=34,
                                                  parent=self)
         self._unread = False
+        self._side: QWidget | None = None
+
+    def set_side_tile(self, tile: QWidget | None) -> None:
+        """The one amber tile bottom-right of the orb (an offer: offer_view.OfferTile), tethered to it; the
+        hero gives it room (220 px at least) while it shows. None: no tile."""
+        if self._side is not None and self._side is not tile and shiboken6.isValid(self._side):
+            self._side.removeEventFilter(self)
+        self._side = tile
+        if tile is not None:
+            tile.setParent(self)
+            tile.installEventFilter(self)
+        self._relayout()
+
+    def side_tile(self) -> QWidget | None:
+        return self._side
+
+    def _side_shown(self) -> bool:
+        side = self._side
+        return side is not None and shiboken6.isValid(side) and not side.isHidden()
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:  # noqa: N802 - Qt override
+        if watched is self._side and event.type() in (QEvent.Type.Show, QEvent.Type.Hide):
+            QTimer.singleShot(0, self._relayout_if_valid)
+        return super().eventFilter(watched, event)
+
+    def place_side_tile(self) -> None:
+        """The side tile changed what it shows (its height): place it again."""
+        self._relayout()
+
+    def _relayout_if_valid(self) -> None:
+        if shiboken6.isValid(self):
+            self._relayout()
+
+    def _relayout(self) -> None:
+        px = self.orb_px()
+        if px != self.hero.orb_size():
+            self.hero.set_orb_size(px)
+        self._place_hero()
+        self.update()
+
+    def _place_side(self) -> None:
+        """The side tile: its top on the orb's centre line, 40 px right of the orb (220-290 wide); on a
+        narrow stage it keeps inside the stage."""
+        if not self._side_shown():
+            return
+        tile = self._side
+        assert tile is not None
+        center = QRectF(self.hero.geometry()).center()
+        radius = self.hero.orb_size() / 2
+        room = self.width() - (center.x() + radius + SIDE_GAP) - 4
+        width = offer_view.tile_width(room)
+        height = tile.heightForWidth(width) if tile.hasHeightForWidth() else tile.sizeHint().height()
+        x = min(center.x() + radius + SIDE_GAP, self.width() - 4 - width)
+        y = max(4.0, min(center.y() - 12, self.height() - 4 - height))
+        geometry = QRect(round(x), round(y), width, height)
+        if tile.geometry() != geometry:
+            tile.setGeometry(geometry)
+        tile.raise_()
+
+    def _paint_tether(self, painter: QPainter) -> None:
+        """The amber tether from the side tile's kicker to the orb's rim, with its 5 px dot (spec 5, 13)."""
+        assert self._side is not None
+        tile = QRectF(self._side.geometry())
+        center = QRectF(self.hero.geometry()).center()
+        start = QPointF(tile.left(), tile.top() + holo.TILE_PAD[0] + holo.line_height("label") / 2)
+        dx, dy = center.x() - start.x(), center.y() - start.y()
+        distance = math.hypot(dx, dy)
+        radius = self.hero.orb_size() / 2 + 4
+        if distance <= radius:
+            return
+        end = QPointF(center.x() - dx / distance * radius, center.y() - dy / distance * radius)
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(QPen(holo.alpha(holo.AMBER, 0.45), 1.0))
+            painter.drawLine(start, end)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(holo.AMBER))
+            painter.drawEllipse(end, holo.TETHER_DOT / 2, holo.TETHER_DOT / 2)
+        finally:
+            painter.restore()
 
     def set_unread(self, unread: bool) -> None:
         """A cyan dot on the Transcript button: something new was added while the drawer was closed."""
@@ -1128,6 +1212,8 @@ class HomeStage(QWidget):
         size = size or self.size()
         room = min(size.width() - 2 * STAGE_BRACKET, size.height() - 8)
         px = min(orb_mod.HERO, room)
+        if self._side_shown():      # room for the side tile on both sides, so the orb stays centred
+            px = min(px, size.width() - 2 * (STAGE_BRACKET + offer_view.TILE_MIN + SIDE_GAP))
         while px > ORB_MIN and orb_mod.widget_side(px) > room:
             px -= 2
         return max(ORB_MIN, px)
@@ -1144,13 +1230,11 @@ class HomeStage(QWidget):
         y = snap((self.height() - side) / 2, origin.y())
         if (x, y) != (self.hero.x(), self.hero.y()):
             self.hero.move(x, y)
+        self._place_side()
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
-        px = self.orb_px(event.size())
-        if px != self.hero.orb_size():
-            self.hero.set_orb_size(px)
-        self._place_hero()
+        self._relayout()
         QTimer.singleShot(0, self._place_hero_if_valid)      # the stage's own position settles after this
         button = self.transcript_button
         button.resize(button.sizeHint())
@@ -1193,6 +1277,8 @@ class HomeStage(QWidget):
             hairline.setColorAt(0.84, line)
             hairline.setColorAt(1.0, holo.alpha(holo.HOLO, 0.0))
             painter.fillRect(QRectF(rect.left() + 28, cy, rect.width() - 56, 1), hairline)
+            if self._side_shown():
+                self._paint_tether(painter)
             if self._unread:
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                 b = QRectF(self.transcript_button.geometry())

@@ -8,6 +8,7 @@ Qt runs offscreen in this process with the bundled fonts and shows nothing; ever
 
 from __future__ import annotations
 
+import dataclasses
 import time
 import unittest
 from datetime import datetime
@@ -18,13 +19,17 @@ from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import dock, holo, home, hud, orb, ui
+from briefing_reader import dock, holo, home, hud, offer_view, orb, ui
 from tests.ui_fakes import AppHarness, fonts, settle
 
 _app: QApplication | None = None
 SPEC_ANSWER = ("Three things tomorrow, sir. Your AI-Trader check-in at 10, the Project Development check-in at "
                "12:30 on Google Meet, and your LING essay draft is due by evening. Shall I block an hour after "
                "lunch for the essay?")
+
+
+PLAN_OFFER = offer_view.OfferInfo(1, "plan", "offer:1", offer_view.PLAN_KICKER, offer_view.PLAN_TITLE, "Plan my day",
+                                   (offer_view.PLAN_META,), "Shall I plan your day, sir?")
 
 
 def setUpModule() -> None:
@@ -278,8 +283,8 @@ class HomeWindowTests(unittest.TestCase):
             (lambda: reading.set_activity_state(hud.ORB_STANDBY, False), orb.IDLE, "STANDBY", home.TONE_HOLO),
             (lambda: reading.set_pending(2, 2), orb.NEEDS, "NEEDS YOU", home.TONE_AMBER),
             (lambda: reading.set_pending(0, 2), orb.IDLE, "STANDBY", home.TONE_HOLO),
-            (lambda: reading.set_offers_waiting(1), orb.NEEDS, "NEEDS YOU", home.TONE_AMBER),
-            (lambda: reading.set_offers_waiting(0), orb.IDLE, "STANDBY", home.TONE_HOLO),
+            (lambda: reading.set_offers([PLAN_OFFER]), orb.NEEDS, "NEEDS YOU", home.TONE_AMBER),
+            (lambda: reading.set_offers([]), orb.IDLE, "STANDBY", home.TONE_HOLO),
             (lambda: reading.set_waiting(True), orb.WAITING, "WAITING FOR THE AM BRIEFING", home.TONE_HOLO),
             (lambda: reading.set_waiting(False), orb.IDLE, "STANDBY", home.TONE_HOLO),
             (lambda: reading.set_briefing_paused(True), orb.IDLE, ui.PAUSED_WORD, home.TONE_STEEL),
@@ -454,26 +459,56 @@ class HomeWindowTests(unittest.TestCase):
         settle()
         self.assertFalse(note.is_compact())
 
-    def test_an_open_offer_has_its_chip_and_its_question(self) -> None:
+    def test_an_open_offer_is_one_amber_tile_with_its_question(self) -> None:
+        """Round 2, part 3a (spec 16.4 / 16.5 moment 1): the offer is ONE amber tile bottom-right of the orb
+        (no chip beside it), its question rests under the orb, its commit only hands the offer's own link to
+        the app and Not now puts it away on Home only."""
         reading = self.reading
         reading.set_greeting("Good evening, sir.")
         reading.set_new_briefing(True, "Your AM briefing is ready to view")
         reading.set_pending(2, 3)
         entry = reading.conversation.add(hud.ROLE_JARVIS, "Shall I plan your day, sir?", link_text="Plan my day",
                                          link_id="offer:1")
-        reading.set_offers_waiting(1, link="Plan my day", entry=entry, question="Shall I plan your day, sir?")
-        self.assertEqual(reading.state_word(), "NEEDS YOU")
-        self.assertEqual(reading.home_chip(), "Plan my day")                    # before NEW and the cards
-        self.assertEqual(reading.offer_chip.tone(), holo.CHIP_AMBER)
-        self.assertEqual(reading.captions.shown_text(), "Shall I plan your day, sir?")
-        reading.offer_chip.click()
+        links: list[str] = []
+        put_away: list[int] = []
+        reading.homeLink.connect(links.append)
+        reading.offerNotNow.connect(put_away.append)
+        reading.set_offers([dataclasses.replace(PLAN_OFFER, entry=entry)])
         settle()
-        self.assertTrue(reading.transcript_drawer.is_open())                     # opened, never run
+        tile = reading.offer_tile
+        self.assertEqual(reading.state_word(), "NEEDS YOU")
+        self.assertTrue(tile.isVisible())
+        self.assertIs(reading.stage.side_tile(), tile)
+        self.assertEqual(reading.home_chip(), "")                               # one focal point: no chip
+        kicker, title, meta = tile.texts()
+        self.assertEqual((kicker, title), ("PLAN MY DAY", ["Blocks around your meetings"]))
+        self.assertEqual(" ".join(meta), "Nothing goes on your calendar until you approve each block.")
+        self.assertEqual((tile.commit_button.text(), tile.not_now_button.text()), ("Plan my day", "Not now"))
+        self.assertEqual((tile.commit_button.variant(), tile.not_now_button.variant()),
+                         (holo.AMBER_COMMIT, holo.AMBER_GHOST))
+        self.assertEqual(reading.captions.shown_text(), "Shall I plan your day, sir?")
+        hero = reading.hero.geometry()
+        self.assertGreaterEqual(tile.x(), hero.center().x() + reading.hero.orb_size() / 2)   # right of the orb
+        self.assertGreaterEqual(tile.y() + 12, hero.center().y())                          # its lower half
+        self.assertLessEqual(tile.geometry().right(), reading.stage.width())
+        tile.commit_button.click()
+        settle()
+        self.assertEqual(links, ["offer:1"])                                    # the offer's own link, once
+        self.assertFalse(reading.transcript_drawer.is_open())
         self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
-        reading.transcript_drawer.close_drawer()
-        reading.set_offers_waiting(0)
-        self.assertEqual(reading.home_chip(), ui.HOME_BRIEFING_CHIP)
+        tile.not_now_button.click()
+        settle()
+        self.assertEqual(put_away, [1])
+        self.assertFalse(tile.isVisible())
+        self.assertEqual(links, ["offer:1"])                                    # Not now runs nothing
         self.assertEqual(reading.captions.shown_text(), "Good evening, sir.")
+        self.assertEqual(reading.home_chip(), ui.HOME_BRIEFING_CHIP)
+        self.assertEqual(reading.conversation.entry(entry).link(), ("Plan my day", "offer:1"))   # kept there
+        reading.set_offers([dataclasses.replace(PLAN_OFFER, entry=entry)])    # a later tick: still put away
+        self.assertFalse(tile.isVisible())
+        reading.set_pending(0, 3)
+        self.assertEqual(reading.state_word(), "STANDBY")
+        reading.set_offers([])
         reading.set_answer_chip(ui.HOME_BRIEF_CHIP, entry)
         self.assertEqual(reading.home_chip(), ui.HOME_BRIEF_CHIP)
         self.assertEqual(reading.answer_chip.tone(), holo.CHIP_CYAN)

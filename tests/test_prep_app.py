@@ -169,19 +169,23 @@ class PrepFlowTests(PrepAppCase):
         self.assertEqual(app.voice.texts()[-1], "Your brief for tomorrow's 2 PM meeting is ready, sir.")
 
     def test_a_brief_typed_on_home_stays_on_home_with_its_chip(self) -> None:
-        """Spec 16.0: Home stays; the brief lives in the Transcript and the cyan "Brief ready" chip
-        opens it at the brief (never by itself)."""
+        """Spec 16.0 / 16.5: Home stays and shows the brief (the drawer stays shut: never opened by itself);
+        the brief is in the Transcript too. Closed, the cyan "Brief ready" chip opens the brief again."""
         self.make(plan_stream(ANSWER))
         self.prep()
         reading = self.reading
         self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
         self.assertFalse(reading.transcript_drawer.is_open())
+        self.assertEqual(reading.moment(), ui.MOMENT_BRIEF)
+        self.assertTrue(self.entries()[-1].entry[2].startswith("Brief: Jarvis test sync"))
+        reading.close_moment()
         reading.captions.clear()
         settle()
         self.assertEqual(reading.home_chip(), ui.HOME_BRIEF_CHIP)
         reading.answer_chip.click()
         settle()
-        self.assertTrue(reading.transcript_drawer.is_open())
+        self.assertEqual(reading.moment(), ui.MOMENT_BRIEF)
+        self.assertFalse(reading.transcript_drawer.is_open())
         self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
         self.assertNotEqual(reading.home_chip(), ui.HOME_BRIEF_CHIP)
 

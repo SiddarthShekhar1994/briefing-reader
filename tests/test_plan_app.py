@@ -432,8 +432,8 @@ class GiveWayTests(PlanAppCase):
         self.assertEqual(self.reading.current_tab(), hud.TAB_JARVIS)
 
     def test_a_plan_from_home_stays_on_home_with_its_chip(self) -> None:
-        """Spec 16.0: typed on Home, Home stays; the plan's list is in the Transcript, which the cyan
-        "Plan ready" chip opens at the plan (the chip then goes)."""
+        """Spec 16.0 / 16.4: typed on Home, Home stays and shows the plan (the timeline); the list is in the
+        Transcript too. Closed, the cyan "Plan ready" chip opens the plan again (the chip then goes)."""
         gate = threading.Event()
         self.make(GatedProcess(plan_run(CHAPTER), gate))
         self.type("plan my day")
@@ -445,10 +445,16 @@ class GiveWayTests(PlanAppCase):
         reading = self.reading
         reading.captions.clear()                       # the spoken answer's caption has rested
         settle()
+        self.assertEqual(reading.moment(), ui.MOMENT_PLAN)
+        self.assertFalse(reading.transcript_drawer.is_open())
+        self.assertTrue(self.last_entry().entry[2].startswith("Here's a plan for today:"))
+        reading.close_moment()
+        settle()
         self.assertEqual(reading.home_chip(), ui.HOME_PLAN_CHIP)
         reading.answer_chip.click()
         settle()
-        self.assertTrue(reading.transcript_drawer.is_open())
+        self.assertEqual(reading.moment(), ui.MOMENT_PLAN)
+        self.assertFalse(reading.transcript_drawer.is_open())
         self.assertNotEqual(reading.home_chip(), ui.HOME_PLAN_CHIP)
 
     def test_not_when_live_was_already_open(self) -> None:
