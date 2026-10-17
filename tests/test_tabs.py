@@ -17,7 +17,7 @@ from PySide6.QtGui import QFontMetricsF
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
-from briefing_reader import briefing_view, config, dock, home, hud, ui
+from briefing_reader import briefing_view, config, dock, home, hud, live_view, ui
 
 _app: QApplication | None = None
 WHEN = datetime(2026, 10, 8, 14, 41)
@@ -698,13 +698,16 @@ class ReadingViewScreenTests(unittest.TestCase):
                     self.assert_inside(reading.dock.button(slot), window)
         self.assertEqual(seen[:len(dock.SLOTS)], [ui._SLOT_SCREENS[slot] for slot in dock.SLOTS][1:] + [
             ui.SCREEN_HOME])
-        # The panel follows the panel screens (round 2: Live and Memory; Briefing has its own stage); the
-        # agenda follows Follow-ups.
-        for screen, holder in ((hud.TAB_LIVE, reading.live_screen), (hud.TAB_MEMORY, reading.memory_screen)):
-            reading.set_tab(screen)
-            settle()
-            self.assertTrue(holder.isAncestorOf(reading.transcript_panel))
-            self.assertTrue(reading.transcript_panel.isVisible())
+        # The panel is on Memory (round 2: Briefing and Live have their own stages); the agenda follows
+        # Follow-ups.
+        reading.set_tab(hud.TAB_MEMORY)
+        settle()
+        self.assertTrue(reading.memory_screen.isAncestorOf(reading.transcript_panel))
+        self.assertTrue(reading.transcript_panel.isVisible())
+        reading.set_tab(hud.TAB_LIVE)
+        settle()
+        self.assertTrue(reading.live_screen.isAncestorOf(reading.live_stage))
+        self.assertFalse(reading.transcript_panel.isVisible())
         reading.set_tab(hud.TAB_BRIEFING)
         settle()
         self.assertTrue(reading.briefing_screen.isAncestorOf(reading.briefing_stage))
@@ -724,77 +727,85 @@ class ReadingViewScreenTests(unittest.TestCase):
         self.assertEqual(reading.agenda_panel.mode(), hud.AGENDA_DAY)
         window.hide()
 
-    def test_the_live_page_its_caption_and_status_tag(self) -> None:
+    def test_the_live_screen_its_strip_and_readout(self) -> None:
+        """Round 2 (HOLOGRAM_SPEC 16.3): the Live screen is its own stage - the strip (the readout, Pop out,
+        Clear), the timeline with ACTIVITY under it and the focal column; no transcript panel."""
         window = self.window(False)
         window.resize(ui.READING_SIZE)
         reading = window.reading
         reading.set_activity_state(hud.ORB_SPEAKING, True)          # the briefing is live
         reading.set_tab(hud.TAB_BRIEFING)
         settle(4)
-        marker = reading.transcript_panel.live
-        self.assertFalse(marker.isVisible())                         # round 2: no panel on Briefing
         self.assertFalse(reading.live_status.isVisible())
         reading.set_tab(hud.TAB_LIVE)
         settle(6)
-        self.assertTrue(reading.live_page.isVisible())
+        stage = reading.live_stage
+        self.assertIs(reading.live_page, stage)
+        self.assertTrue(stage.isVisible())
         self.assertTrue(reading.live_log.isVisible())
-        self.assertTrue(reading.activity_panel.isVisible())       # ACTIVITY's rows are on Live now
+        self.assertTrue(reading.activity_panel.isVisible())       # ACTIVITY's rows stay on Live (spec 11.7)
+        self.assertTrue(stage.timeline.isAncestorOf(reading.activity_panel))
+        self.assertFalse(reading.transcript_panel.isVisible())
         self.assertFalse(reading.conversation.isVisible())
-        self.assertTrue(reading.strip_caption.isVisible())
-        self.assertEqual(reading.strip_caption.text(), ui.LIVE_CAPTION)
-        self.assertFalse(reading.sections_button.isVisible())
-        self.assertFalse(reading.transcript_panel.steps.isVisible())
-        self.assertFalse(marker.isVisible())                         # its slot is the status tag's
+        self.assertTrue(stage.strip.isAncestorOf(reading.live_status))
         self.assertTrue(reading.live_status.isVisible())
         self.assertEqual(reading.live_status.text(), "IDLE")
-        self.assertEqual(reading.live_status.height(), marker.sizeHint().height())
         self.assertEqual(reading.live_summary_text(), "Nothing running")
         self.assertEqual(reading.live_status.toolTip(), hud.plain_tooltip("Nothing running"))   # the summary
-        self.assertEqual(reading.live_pop_button.text(), ui.POP_OUT_TEXT)
+        self.assertEqual(reading.live_pop_button.text(), ui.POP_OUT_TEXT)           # an icon: its name
+        self.assertEqual(reading.live_pop_button.accessibleName(), ui.POP_OUT_TEXT)
+        self.assertEqual(reading.live_clear_button.text(), "Clear")
         self.assertEqual(reading.live_clear_button.toolTip(), ui.CLEAR_TIP)
-        # Pop out and Clear sit in the strip (no toolbar row): the log starts right under the strip.
-        strip = reading.transcript_panel.strip
         for button in (reading.live_pop_button, reading.live_clear_button):
             self.assertTrue(button.isVisible())
-            self.assertTrue(strip.isAncestorOf(button))
-        self.assertEqual(reading.live_log.mapTo(reading, QPoint(0, 0)).y(),
-                         reading.live_page.mapTo(reading, QPoint(0, 0)).y())
+            self.assertTrue(stage.strip.isAncestorOf(button))
+        # The timeline is 300 wide on the left, the focal column beside it, both under the strip.
+        self.assertEqual(reading.live_log.width(), live_view.TIMELINE_WIDTH)
+        log_top = reading.live_log.mapTo(reading, QPoint(0, 0)).y()
+        self.assertGreaterEqual(log_top, stage.strip.mapTo(reading, QPoint(0, stage.strip.height())).y())
+        focal = stage.focal.mapTo(reading, QPoint(0, 0))
+        self.assertGreater(focal.x(), reading.live_log.mapTo(reading, QPoint(reading.live_log.width(), 0)).x())
         self.assertGreaterEqual(reading.live_room(), ui.LIVE_DOCKED_MIN_PX)
         reading.set_live_popped(True)
         settle()
         self.assertTrue(reading.live_away.isVisible())
         self.assertFalse(reading.live_log.isVisible())
         self.assertEqual(reading.live_away_label.text(), ui.LIVE_AWAY_TEXT)
+        self.assertEqual(ui.LIVE_AWAY_TEXT, "LIVE is in its own window, sir.")
+        self.assertEqual(reading.live_back_button.text(), "Bring it back")
         self.assertFalse(reading.live_pop_button.isEnabled())
         seen: list[str] = []
         reading.liveDock.connect(lambda: seen.append("dock"))
         reading.liveShowWindow.connect(lambda: seen.append("show"))
+        reading.livePopOut.connect(lambda: seen.append("pop"))
+        reading.liveClear.connect(lambda: seen.append("clear"))
         reading.live_show_button.click()
         reading.live_back_button.click()
-        self.assertEqual(seen, ["show", "dock"])
+        reading.live_clear_button.click()
+        self.assertEqual(seen, ["show", "dock", "clear"])
         reading.set_live_popped(False)
+        settle()
+        reading.live_pop_button.click()
+        self.assertEqual(seen[-1], "pop")
         reading.set_tab(hud.TAB_BRIEFING)
         settle(4)
-        self.assertFalse(marker.isVisible())                         # back on BRIEFING: its own stage
         self.assertFalse(reading.live_status.isVisible())
         self.assertFalse(reading.live_pop_button.isVisible() or reading.live_clear_button.isVisible())
+        # The 900 px window counting down: the readout whole, the buttons whole and inside the strip.
         window.resize(ui.READING_MIN_SIZE)
         reading.set_tab(hud.TAB_LIVE)
         reading.set_live_state(hud.LIVE_COUNTDOWN, "SENDING", deadline=time.monotonic() + 8)
         settle(6)
-        # A wider tag (counting down) in the 900 px window: the caption gives way before anything is cut.
-        self.assertIn(reading.strip_caption.text(), ("", ui.LIVE_CAPTION_SHORT, ui.LIVE_CAPTION))
-        self.assertLessEqual(reading.strip_caption.sizeHint().width(), reading.strip_caption.width() + 1)
+        self.assertTrue(reading.live_status.text().startswith("SENDING IN "))
         self.assertGreaterEqual(reading.live_status.width(), reading.live_status.sizeHint().width())
         for button in (reading.live_pop_button, reading.live_clear_button):
             self.assertTrue(button.isVisible())
             self.assertGreaterEqual(button.width(), button.sizeHint().width())
-        right = reading.live_clear_button.mapTo(strip, QPoint(reading.live_clear_button.width(), 0)).x()
-        self.assertLessEqual(right, strip.width())
+        right = reading.live_clear_button.mapTo(stage.strip, QPoint(reading.live_clear_button.width(), 0)).x()
+        self.assertLessEqual(right, stage.strip.width())
         reading.set_live_state(hud.LIVE_IDLE)
         settle(6)
-        self.assertIn(reading.strip_caption.text(), (ui.LIVE_CAPTION, ui.LIVE_CAPTION_SHORT))
-        self.assertLessEqual(reading.strip_caption.sizeHint().width(), reading.strip_caption.width() + 1)
+        self.assertEqual(reading.live_status.text(), "IDLE")
         window.hide()
 
     def test_live_unavailable_hides_its_slot(self) -> None:
@@ -909,10 +920,11 @@ class ReadingViewScreenTests(unittest.TestCase):
     def test_the_whole_caption_at_the_default_size(self) -> None:
         window = self.window(False)
         window.resize(ui.READING_SIZE)
-        window.reading.set_tab(hud.TAB_LIVE)
+        window.reading.set_memory_available(True)
+        window.reading.set_tab(hud.TAB_MEMORY)              # round 2: the panel (and its caption) is on Memory
         settle(6)
         caption = window.reading.strip_caption
-        self.assertEqual(caption.text(), ui.LIVE_CAPTION)
+        self.assertEqual(caption.text(), ui.MEMORY_CAPTION)
         self.assertLessEqual(caption.sizeHint().width(), caption.width() + 1)
         window.hide()
 

@@ -122,7 +122,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import approvals_view, briefing_view
+from . import approvals_view, briefing_view, live_view
 from . import dock as dock_mod
 from . import holo, home, hud
 from . import live as _live
@@ -980,12 +980,12 @@ LIVE_CAPTION = f"Live steps {DOT} this session"      # ... and on the LIVE tab
 LIVE_CAPTION_SHORT = "Live steps"
 MEMORY_CAPTION = f"Memory {DOT} kept on this PC"     # ... and on the MEMORY tab
 MEMORY_CAPTION_SHORT = "Memory"
-LIVE_AWAY_TEXT = "LIVE is in its own window."        # the LIVE page while the pop-out shows the steps
-POP_OUT_TEXT = "Pop out"
+LIVE_AWAY_TEXT = live_view.AWAY_TEXT                  # the Live screen while the pop-out shows the steps
+POP_OUT_TEXT = live_view.POP_OUT_LABEL                # the name of the Live strip's Pop out (an icon)
 POP_OUT_TIP = "Show LIVE in its own window - put it on a second screen"
 CLEAR_TEXT = "Clear"
 CLEAR_TIP = "Clear what is shown here (nothing else changes; nothing was saved)"
-DOCK_TEXT = "Dock"
+DOCK_TEXT = live_view.BRING_BACK_TEXT                # "Bring it back" in the pop-out header
 # The strip's caption per tab: (in full, where the whole does not fit).
 _CAPTIONS = {hud.TAB_LIVE: (LIVE_CAPTION, LIVE_CAPTION_SHORT), hud.TAB_MEMORY: (MEMORY_CAPTION, MEMORY_CAPTION_SHORT)}
 DOCK_TIP = "Put LIVE back in the main window"
@@ -1003,7 +1003,7 @@ _SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING,
                  SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
                  SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS}
 _SLOT_SCREENS = {slot: screen for screen, slot in _SCREEN_SLOTS.items()}
-_PANEL_SCREENS = (SCREEN_LIVE, SCREEN_MEMORY)     # the transcript panel moves between them (round 2: not Briefing)
+_PANEL_SCREENS = (SCREEN_MEMORY,)     # the transcript panel's screen (round 2: Live has its own stage)
 _SCREEN_MARGINS = (16, 4, 16, 14)
 _LIST_HEIGHT_MAX = 100_000          # ... whose cards take the screen's whole height
 # Statuses the Briefing screen's transport already says (its quiet line leaves them out).
@@ -1033,8 +1033,8 @@ PAUSED_WORD = "PAUSED"
 def needs_ok_chip(count: int) -> str:
     """The amber Home chip: "1 needs your OK" / "3 need your OK"."""
     return f"{count} needs your OK" if count == 1 else f"{count} need your OK"
-SHOW_WINDOW_TEXT = "Show window"
-BRING_BACK_TEXT = "Bring it back here"
+SHOW_WINDOW_TEXT = live_view.SHOW_WINDOW_TEXT
+BRING_BACK_TEXT = live_view.BRING_BACK_TEXT
 SEE_STEPS_TEXT = "See every step"                    # the link under an Ask's answer in the conversation
 
 
@@ -1047,8 +1047,10 @@ class ReadingView(QWidget):
     Home (SCREEN_HOME = hud.TAB_JARVIS: ``stage`` with the ``hero`` orb, ``echo``, ``captions``, one
     quiet chip, the command bar, the Transcript drawer holding ``conversation``), Briefing (STATUS and
     the orb row, the controls and the panel with the transcript, as before), Approvals (NEEDS YOUR OK),
-    Live (the panel's LIVE page and ACTIVITY), Memory and Follow-ups (the bundle) and Settings. The
-    transcript panel moves to the panel screen that shows; the agenda panel lives in the Day view's
+    Live (round 2, HOLOGRAM_SPEC 16.3: ``live_stage``, a live_view.LiveStage - the strip with ``live_status``
+    (a live_view.LiveReadout), Pop out and Clear, the timeline ``live_log`` with ACTIVITY under it and the
+    focal picture; "LIVE is in its own window, sir." while the pop-out shows it), Memory and Follow-ups
+    (the bundle) and Settings. The transcript panel is on Memory; the agenda panel lives in the Day view's
     drawer (TODAY / DEADLINES) or on the Follow-ups screen (FOLLOW-UPS). Round 2 restyles the screens
     other than Home; what follows describes them as they were.
 
@@ -1222,8 +1224,6 @@ class ReadingView(QWidget):
         self.conversation = hud.ConversationLog()
         self.strip_caption = _label(_caps(hud.mono_font(11, 400, 0.12)), hud.TEXT_DIM, name="stripCaption")
         self.strip_caption.setText(STRIP_CAPTION)
-        self.live_status = hud.LiveStatus()
-        self.live_status.hide()
         self._make_live_page()
         self._make_memory_page()
 
@@ -1238,51 +1238,28 @@ class ReadingView(QWidget):
         page.addWidget(self.memory_view, 1)
 
     def _make_live_page(self) -> None:
-        """The LIVE tab's page: the log, or one line and two links while the pop-out window shows
-        the steps. Pop out and Clear sit in the panel's strip on the LIVE tab (no toolbar row of
-        their own: the log gets that height)."""
+        """The Live screen (round 2, HOLOGRAM_SPEC 16.3): live_view.LiveStage around the timeline
+        (``live_log``). The old names stay: ``live_status`` (the strip's readout), ``live_pop_button``,
+        ``live_clear_button``, ``live_away`` / ``live_away_label`` / ``live_show_button`` /
+        ``live_back_button`` (while the pop-out shows the steps) and ``live_page`` (the stage)."""
         self._live_summary = ""
-        self.live_pop_button = hud.HudButton(POP_OUT_TEXT, hud.LINK)
-        self.live_pop_button.setToolTip(POP_OUT_TIP)
-        self.live_pop_button.clicked.connect(lambda: self.livePopOut.emit())
-        self.live_clear_button = hud.HudButton(CLEAR_TEXT, hud.LINK)
-        self.live_clear_button.setToolTip(CLEAR_TIP)
-        self.live_clear_button.clicked.connect(lambda: self.liveClear.emit())
-        # Both in one box for the strip (shown on the LIVE tab only).
-        self._live_links = QWidget()
-        links_row = QHBoxLayout(self._live_links)
-        links_row.setContentsMargins(0, 0, 0, 0)
-        links_row.setSpacing(_LIVE_LINK_GAP)
-        links_row.addWidget(self.live_pop_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        links_row.addWidget(self.live_clear_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._live_links.hide()
-        self.live_log = hud.LiveLog()
+        self.live_log = hud.LiveLog(thumb=live_view.THUMB)
         self.live_log.linkClicked.connect(self.liveLink)
-        self.live_away = QWidget()
-        away = QVBoxLayout(self.live_away)
-        away.setContentsMargins(14, 14, 14, 14)
-        away.setSpacing(8)
-        self.live_away_label = _label(hud.body_font(13), hud.TEXT_SOFT, wrap=True, name="liveAway")
-        self.live_away_label.setText(LIVE_AWAY_TEXT)
-        self.live_show_button = hud.HudButton(SHOW_WINDOW_TEXT, hud.LINK)
-        self.live_show_button.clicked.connect(lambda: self.liveShowWindow.emit())
-        self.live_back_button = hud.HudButton(BRING_BACK_TEXT, hud.LINK)
-        self.live_back_button.clicked.connect(lambda: self.liveDock.emit())
-        links_holder = QWidget()
-        links = hud.FlowLayout(links_holder, 12, 4)
-        links.addWidget(self.live_show_button)
-        links.addWidget(self.live_back_button)
-        away.addWidget(self.live_away_label)
-        away.addWidget(links_holder)
-        away.addStretch(1)
-        self._live_switch = _PageSwitch()
-        self._live_switch.addWidget(self.live_log)
-        self._live_switch.addWidget(self.live_away)
-        self.live_page = _LivePage(self.conversation)
-        page = QVBoxLayout(self.live_page)
-        page.setContentsMargins(0, 0, 0, 0)
-        page.setSpacing(0)
-        page.addWidget(self._live_switch, 1)
+        self.live_stage = stage = live_view.LiveStage(self.live_log)
+        self.live_page = stage
+        self.live_status = stage.readout
+        self.live_pop_button = stage.pop_button
+        self.live_pop_button.setToolTip(POP_OUT_TIP)
+        self.live_clear_button = stage.clear_button
+        self.live_clear_button.setToolTip(CLEAR_TIP)
+        self.live_away = stage.away
+        self.live_away_label = stage.away_label
+        self.live_show_button = stage.show_button
+        self.live_back_button = stage.back_button
+        stage.popOutClicked.connect(lambda: self.livePopOut.emit())
+        stage.clearClicked.connect(lambda: self.liveClear.emit())
+        stage.showWindowClicked.connect(lambda: self.liveShowWindow.emit())
+        stage.bringBackClicked.connect(lambda: self.liveDock.emit())
         self.set_live_summary("Nothing running")
 
     def _make_buttons(self) -> None:
@@ -1399,19 +1376,13 @@ class ReadingView(QWidget):
         row = QHBoxLayout(self.approvals_screen)
         row.setContentsMargins(holo.GUTTER_SIDE, 0, holo.GUTTER_SIDE, 12)
         row.addWidget(self.approvals_stage, 1)
-        # Live: the panel's LIVE page and, at the right, ACTIVITY (its rows stay visible here).
-        self._right = QWidget()
-        right = QVBoxLayout(self._right)
-        right.setContentsMargins(0, 0, 0, 0)
-        right.addWidget(self.activity_panel, 1)
+        # Live (round 2, HOLOGRAM_SPEC 16.3): the stage - the strip, the timeline with ACTIVITY under it
+        # (spec 11.7: its rows stay on Live) and the focal picture.
         self.live_screen = QWidget()
         row = QHBoxLayout(self.live_screen)
-        row.setContentsMargins(*_SCREEN_MARGINS)
-        row.setSpacing(14)
-        self._live_slot = QVBoxLayout()
-        self._live_slot.setContentsMargins(0, 0, 0, 0)
-        row.addLayout(self._live_slot, 1)
-        row.addWidget(self._right)
+        row.setContentsMargins(holo.GUTTER_SIDE, 0, holo.GUTTER_SIDE, 12)
+        row.addWidget(self.live_stage, 1)
+        self.live_stage.set_activity(self.activity_panel)
         self.memory_screen = QWidget()
         self._memory_slot = QVBoxLayout(self.memory_screen)
         self._memory_slot.setContentsMargins(*_SCREEN_MARGINS)
@@ -1484,7 +1455,7 @@ class ReadingView(QWidget):
 
     def _place_panel(self, index: int) -> None:
         """The transcript panel goes to the panel screen that shows (Live or Memory)."""
-        slot = {SCREEN_LIVE: self._live_slot, SCREEN_MEMORY: self._memory_slot}[index]
+        slot = {SCREEN_MEMORY: self._memory_slot}[index]
         if slot is not self._panel_slot:
             if self._panel_slot is not None:
                 self._panel_slot.removeWidget(self.transcript_panel)
@@ -1725,18 +1696,11 @@ class ReadingView(QWidget):
         doc_layout.addWidget(self._doc_rule)
         strip = self.transcript_panel.strip_layout
         strip.insertWidget(0, self.strip_caption, 1, Qt.AlignmentFlag.AlignVCenter)
-        # The LIVE tab's status tag, in the slot of the briefing's LIVE marker (hidden there).
-        strip.insertWidget(strip.indexOf(self.transcript_panel.live) + 1, self.live_status, 0,
-                           Qt.AlignmentFlag.AlignVCenter)
-        # The LIVE tab's Pop out and Clear (shown on that tab only; Clear gives way on a narrow strip).
-        strip.addWidget(self._live_links, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
         # As tall as the step chips and SECTIONS it stands in for: the strip (and the tab row above
-        # the panel) keeps its height when the tab changes (the links too: on LIVE the caption may
-        # give way to them).
+        # the panel) keeps its height when the tab changes.
         strip_height = max(hud.ChipButton("Sections").sizeHint().height(),
                            self.transcript_panel.steps.sizeHint().height())
         self.strip_caption.setMinimumHeight(strip_height)
-        self._live_links.setMinimumHeight(strip_height)
         self.briefing_page = QWidget()
         briefing = QVBoxLayout(self.briefing_page)
         briefing.setContentsMargins(0, 0, 0, 0)
@@ -1746,7 +1710,7 @@ class ReadingView(QWidget):
         self._pages = _PageSwitch()
         self._pages.addWidget(QWidget())              # hud.TAB_JARVIS: Home (the conversation is its drawer)
         self._pages.addWidget(self.briefing_page)     # hud.TAB_BRIEFING
-        self._pages.addWidget(self.live_page)         # hud.TAB_LIVE
+        self._pages.addWidget(QWidget())              # hud.TAB_LIVE: the Live screen has its own stage (round 2)
         self._pages.addWidget(self.memory_page)       # hud.TAB_MEMORY
         self.transcript_panel.body_layout.addWidget(self._pages, 1)
 
@@ -1755,7 +1719,6 @@ class ReadingView(QWidget):
         if tier == self._tier:
             return
         self._tier = tier
-        self._right.setFixedWidth(tier.right)
         self._fit_short(self._screens_height(self.height() if self.height() > 0 else READING_SIZE.height()))
 
     @staticmethod
@@ -1853,9 +1816,8 @@ class ReadingView(QWidget):
         return self.stage.unread()
 
     def _show_tab_page(self, index: int) -> None:
-        """The panel's page for ``index`` (BRIEFING, LIVE, MEMORY); on LIVE and MEMORY the strip shows
-        its caption instead of the step chips and SECTIONS (both stay in the strip, hidden); on LIVE
-        the briefing's LIVE marker gives its slot to ``live_status``."""
+        """The panel's page for ``index`` (BRIEFING, MEMORY); on MEMORY the strip shows its caption
+        instead of the step chips and SECTIONS (both stay in the strip, hidden)."""
         self._panel_tab = index
         captioned = index in (hud.TAB_LIVE, hud.TAB_MEMORY)
         page = self._pages.widget(index)
@@ -1864,7 +1826,6 @@ class ReadingView(QWidget):
         self.strip_caption.setVisible(captioned)
         self.transcript_panel.steps.setVisible(not captioned)
         self.sections_button.setVisible(not captioned)
-        self._live_links.setVisible(index == hud.TAB_LIVE)   # Clear: _fit_caption decides
         self._sync_marker()
         self._fit_caption()
         if captioned:
@@ -1873,8 +1834,7 @@ class ReadingView(QWidget):
             QTimer.singleShot(0, self._after_briefing_page_shown)
 
     def _sync_marker(self) -> None:
-        """The briefing's LIVE marker on JARVIS / BRIEFING (its space kept while hidden); on the LIVE
-        tab it is out of the strip and ``live_status`` shows in its place."""
+        """The briefing's LIVE marker in the panel's strip (its space kept while hidden)."""
         marker = self.transcript_panel.live
         on_live = self._panel_tab == hud.TAB_LIVE
         policy = marker.sizePolicy()
@@ -1882,7 +1842,6 @@ class ReadingView(QWidget):
             policy.setRetainSizeWhenHidden(not on_live)
             marker.setSizePolicy(policy)
         marker.set_live(self._marker_live and not on_live)
-        self.live_status.setVisible(on_live)
 
     # ---- the LIVE tab --------------------------------------------------------------
 
@@ -1951,21 +1910,19 @@ class ReadingView(QWidget):
             self.dock.set_live_activity(dock_mod.LIVE_WORKING)
 
     def set_live_popped(self, popped: bool) -> None:
-        """The pop-out window shows the steps (the page says so, with Show window and Bring it back
-        here) or the page shows them again."""
-        self._live_switch.setCurrentWidget(self.live_away if popped else self.live_log)
-        self.live_pop_button.setEnabled(not popped)
+        """The pop-out window shows the steps (the screen says so, with Show window and Bring it back)
+        or the screen shows them again."""
+        self.live_stage.set_popped(popped)
 
     def live_popped(self) -> bool:
-        return self._live_switch.currentWidget() is self.live_away
+        return self.live_stage.popped()
 
     def live_room(self) -> int:
-        """The height the Live screen's log has (the panel's page area there; estimated from the screen
-        area while the panel is on another screen)."""
-        if self._panel_slot is self._live_slot and self.transcript_panel.isVisible():
-            return self._pages.height()
-        margins = _SCREEN_MARGINS[1] + _SCREEN_MARGINS[3]
-        return max(0, self._screens.height() - margins - self.transcript_panel.strip.sizeHint().height() - 14)
+        """The height the Live screen's timeline has (estimated from the screen area while Live is not
+        the current screen)."""
+        if self.live_stage.isVisible() and not self.live_stage.popped():
+            return self.live_stage.timeline_room()
+        return max(0, self._screens.height() - 12 - self.live_stage.strip.height() - 12)
 
     def set_live_summary(self, text: str) -> None:
         """The LIVE summary ("3 tasks - 1 running"): the strip's status tag's tooltip and description."""
@@ -1978,13 +1935,10 @@ class ReadingView(QWidget):
 
     def set_live_state(self, state: str, text: str | None = None, *, since: float | None = None,
                        deadline: float | None = None) -> None:
-        """The LIVE tab's strip tag (hud.LiveStatus.set_state); the caption beside it fits again."""
-        old = self.live_status.sizeHint().width()
-        self.live_status.set_state(state, text, since=since, deadline=deadline)
+        """The Live strip's readout (hud.LiveStatus.set_state's arguments)."""
+        self.live_stage.set_state(state, text, since=since, deadline=deadline)
         self._live_state = state
         self._sync_live_dot()
-        if self.live_status.sizeHint().width() != old:
-            self._fit_caption()
 
     def _after_briefing_page_shown(self) -> None:
         if not shiboken6.isValid(self) or self._screen != hud.TAB_BRIEFING:
@@ -2169,35 +2123,19 @@ class ReadingView(QWidget):
         return super().eventFilter(watched, event)
 
     def _fit_caption(self) -> None:
-        """The JARVIS (LIVE, MEMORY) strip's caption in full, or "CONVERSATION" ("LIVE STEPS",
-        "MEMORY") alone where it does not fit; on LIVE after the room for the status tag, Pop out and
-        (where it fits) Clear."""
+        """The JARVIS (MEMORY) strip's caption in full, or "CONVERSATION" ("MEMORY") alone where it does
+        not fit."""
         strip = self.transcript_panel.strip
         margins = strip.layout().contentsMargins()
         spacing = strip.layout().spacing()
         current = self._panel_tab
-        on_live = current == hud.TAB_LIVE
-        tag = self.live_status if on_live else self.transcript_panel.live
+        tag = self.transcript_panel.live
         full, short = _CAPTIONS.get(current, (STRIP_CAPTION, STRIP_CAPTION_SHORT))
         room = (strip.width() - margins.left() - margins.right() - tag.sizeHint().width() - spacing)
-        if on_live:
-            # Pop out always; Clear when it fits beside the tag (else it is in the pop-out window). The
-            # caption comes last and is left out (taking no room) where it does not fit.
-            room -= self.live_pop_button.sizeHint().width() + spacing
-            clear = self.live_clear_button.sizeHint().width() + _LIVE_LINK_GAP
-            fits = room + spacing - clear >= 0
-            if self.live_clear_button.isHidden() == fits:
-                self.live_clear_button.setVisible(fits)
-            if fits:
-                room -= clear
         metrics = QFontMetricsF(self.strip_caption.font())
         text = full if metrics.horizontalAdvance(full) + 2 <= room else short
-        if on_live and metrics.horizontalAdvance(short) + 2 > room:
-            text = ""   # a narrow strip on LIVE: the tab above already says LIVE; the tag and links keep their room
         if self.strip_caption.text() != text:
             self.strip_caption.setText(text)
-        if on_live and self.strip_caption.isHidden() == bool(text):
-            self.strip_caption.setVisible(bool(text))
 
     def set_pending(self, pending: int, total: int) -> None:
         """Pending proposals: the queue's count badge, the STATUS bar, the Dock's amber count, Home's chip
@@ -2792,7 +2730,6 @@ _LIVE_DRAIN_MS = 100       # the feed takes what changed at most this often
 # A LIVE tab shorter than this (a small screen's window) shows hardly a step: with another screen,
 # auto-open "tab" shows the pop-out there instead (without the focus).
 LIVE_DOCKED_MIN_PX = 120
-_LIVE_LINK_GAP = 8          # between Pop out and Clear in the LIVE tab's strip
 # Notion's page and block ids (a fetch error may quote one): never shown in the LIVE view.
 _NOTION_ID_RE = re.compile(r"\b[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}\b")
 
@@ -2937,11 +2874,14 @@ class _LiveFeed(QObject):
 
 
 class LiveWindow(hud.HudWindowFrame):
-    """The LIVE view in a window of its own ("Pop out"): a normal resizable window with its own
-    taskbar button (never on top), for a second screen. Its header has the wordmark, "live - this
-    session", the clock, minimize and close; a toolbar with the strip's status tag, the summary,
-    Dock and Clear; and its own hud.LiveLog fed by the same _LiveFeed as the LIVE tab. Close,
-    Alt+F4 and Dock ask to dock (``dockRequested``): the controller hides it, it never quits.
+    """The LIVE view in a window of its own ("Pop out"; round 2, HOLOGRAM_SPEC 16.3): a normal resizable
+    window with its own taskbar button (never on top), for a second screen, 520 wide. Its 44 px header
+    (``header``, a live_view.PopOutHeader and the drag area: the mini orb, the readout ``status``, Clear
+    ``clear_button``, "Bring it back" ``dock_button``, minimize and close); under it the focal picture
+    full width with its exact text (``focal``) and the timeline as compact rows (``log``, its own
+    hud.LiveLog with the details collapsed, fed by the same _LiveFeed as the Live screen), in one column
+    of at most live_view.POP_COLUMN_MAX. The hologram ground. Close, Alt+F4 and Bring it back ask to
+    dock (``dockRequested``): the controller hides it, it never quits.
     """
 
     dockRequested = Signal()
@@ -2949,36 +2889,30 @@ class LiveWindow(hud.HudWindowFrame):
     linkClicked = Signal(str)
 
     def __init__(self) -> None:
-        super().__init__(margins=(10, 4, 10, 10), always_on_top=False)
+        super().__init__(margins=(16, 4, 16, 16), always_on_top=False, with_header=False)
         self.setObjectName("LiveWindow")
         self.setWindowTitle(LIVE_WINDOW_TITLE)
         self.setWindowIcon(app_icon())
-        assert self.header is not None
-        self.header.set_subtitle(f"live {DOT} this session")
         self.set_resizable(True)
         self.setMinimumSize(LIVE_WINDOW_MIN_SIZE)
         self.resize(LIVE_WINDOW_SIZE)
-        self.status = hud.LiveStatus()
-        self.summary = _ElidedLabel(hud.mono_font(10, 400, 0.04), hud.TEXT_DIM)
-        self.summary.setObjectName("liveWindowSummary")
-        self.dock_button = hud.HudButton(DOCK_TEXT, hud.LINK)
+        self.ground = holo.GroundCache()
+        self.header = live_view.PopOutHeader()
+        self.header.minimizeClicked.connect(self.showMinimized)
+        self.header.closeClicked.connect(self.close)
+        self.status = self.header.readout
+        self.dock_button = self.header.back_button
         self.dock_button.setToolTip(DOCK_TIP)
         self.dock_button.clicked.connect(lambda: self.dockRequested.emit())
-        self.clear_button = hud.HudButton(CLEAR_TEXT, hud.LINK)
+        self.clear_button = self.header.clear_button
         self.clear_button.setToolTip(CLEAR_TIP)
         self.clear_button.clicked.connect(lambda: self.clearRequested.emit())
-        toolbar = QWidget()
-        row = QHBoxLayout(toolbar)
-        row.setContentsMargins(4, 8, 4, 6)
-        row.setSpacing(10)
-        row.addWidget(self.status, 0, Qt.AlignmentFlag.AlignVCenter)
-        row.addWidget(self.summary, 1, Qt.AlignmentFlag.AlignVCenter)
-        row.addWidget(self.dock_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        row.addWidget(self.clear_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.log = hud.LiveLog()
+        self.log = hud.LiveLog(hints=False, thumb=live_view.THUMB)
         self.log.linkClicked.connect(self.linkClicked)
-        self.body_layout.addWidget(toolbar)
-        self.body_layout.addWidget(self.log, 1)
+        self.content = live_view.PopOutBody(self.log)
+        self.focal = self.content.focal
+        self.body_layout.addWidget(self.header)
+        self.body_layout.addWidget(self.content, 1)
         self.set_summary(LiveSummary())
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
@@ -2986,16 +2920,41 @@ class LiveWindow(hud.HudWindowFrame):
         self.dockRequested.emit()
 
     def set_hour24(self, hour24: bool) -> None:
-        assert self.header is not None
-        self.header.set_hour24(hour24)
         self.log.set_hour24(hour24)
 
     def set_summary(self, summary: LiveSummary) -> None:
-        self.summary.set_full_text(summary.text())
-        _show_live_state(self.status.set_state, summary)
+        text = summary.text()
+        self.status.setToolTip(hud.plain_tooltip(text) if text else "")
+        self.status.setAccessibleDescription(text)
+        _show_live_state(self.header.set_state, summary)
 
     def keep_on_screen(self) -> None:
         _keep_on_screen(self)
+
+    def _render_ground(self, dpr: float, center: QPointF | None) -> QPixmap:
+        """The hologram ground (void, the triangle grid, the vignette) inside the window's outline."""
+        size = self.size()
+        image = QImage(max(1, round(size.width() * dpr)), max(1, round(size.height() * dpr)),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(dpr)
+        image.fill(Qt.GlobalColor.transparent)
+        rect = QRectF(0, 0, size.width(), size.height())
+        painter = QPainter(image)
+        try:
+            painter.drawPixmap(rect, self.ground.pixmap(size, dpr), QRectF(0, 0, size.width() * dpr,
+                                                                         size.height() * dpr))
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            outside = QPainterPath()
+            outside.addRect(rect)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.fillPath(outside.subtracted(hud.chamfer_path(rect, self._cut, self._corners)), QColor(0, 0, 0, 255))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.setPen(QPen(holo.LINE, 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(hud.chamfer_path(rect.adjusted(0.5, 0.5, -0.5, -0.5), self._cut, self._corners))
+        finally:
+            painter.end()
+        return QPixmap.fromImage(image)
 
 
 def _show_live_state(set_state: Callable[..., None], summary: LiveSummary) -> None:
@@ -9162,7 +9121,6 @@ class AppController(QObject):
         if window is None:
             window = self._live_window = LiveWindow()
             window.set_hour24(self.config.display.hour24)
-            window.header.set_clock(self._now)
             window.dockRequested.connect(self.dock_live)
             window.clearRequested.connect(self.clear_live)
             window.linkClicked.connect(self._on_live_link)

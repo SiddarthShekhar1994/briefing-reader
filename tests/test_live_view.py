@@ -995,20 +995,36 @@ class AutoOpenShortTests(AppCase):
 
 
 class LiveWindowHeaderTests(unittest.TestCase):
-    def test_the_wordmark_is_whole_at_the_smallest_pop_out(self) -> None:
+    def test_the_header_fits_from_the_smallest_pop_out_up(self) -> None:
+        """Round 2 (HOLOGRAM_SPEC 16.3): the 44 px header - the mini orb, the readout, Clear, Bring it back,
+        minimize and close; narrow, Clear, the mini orb and minimize give way, never the readout, Bring it
+        back or close."""
         window = ui.LiveWindow()
         self.addCleanup(window.deleteLater)
         window.show()
-        for hour24 in (False, True):
-            with self.subTest(hour24=hour24):
-                window.set_hour24(hour24)
-                window.resize(ui.LIVE_WINDOW_MIN_SIZE)
+        header = window.header
+        for size, state in ((ui.LIVE_WINDOW_SIZE, hud.LIVE_IDLE), (ui.LIVE_WINDOW_SIZE, hud.LIVE_COUNTDOWN),
+                            (ui.LIVE_WINDOW_MIN_SIZE, hud.LIVE_COUNTDOWN)):
+            with self.subTest(size=size, state=state):
+                window.resize(size)
+                header.set_state(state, deadline=time.monotonic() + 9 if state == hud.LIVE_COUNTDOWN else None)
                 settle(6)
-                header = window.header
-                self.assertLessEqual(header.minimumSizeHint().width(), header.width())
-                brand, clock = header._brand, header._clock
-                self.assertLessEqual(brand.geometry().right(), clock.geometry().left())
-                self.assertTrue(header._chips_box.isHidden())          # no chips: no room taken
+                self.assertEqual(header.height(), 44)
+                self.assertIs(window.status, header.readout)
+                self.assertGreaterEqual(header.readout.width(), header.readout.sizeHint().width())   # never cut
+                for button in (window.dock_button, header.close_button):
+                    self.assertTrue(button.isVisible())
+                    self.assertLessEqual(button.mapTo(window, QPoint(button.width(), 0)).x(), window.width())
+                visible = [w for w in (header.orb, header.readout, header.clear_button, window.dock_button,
+                                       header.minimize_button, header.close_button) if w.isVisible()]
+                for left, right in zip(visible, visible[1:]):
+                    self.assertLessEqual(left.geometry().right(), right.geometry().left())
+        window.resize(ui.LIVE_WINDOW_SIZE)
+        header.set_state(hud.LIVE_IDLE)
+        settle(6)
+        self.assertTrue(header.orb.isVisible() and header.clear_button.isVisible()   # room for all at 520
+                        and header.minimize_button.isVisible())
+        self.assertEqual(window.dock_button.text(), "Bring it back")
         window.hide()
 
 
@@ -1171,7 +1187,6 @@ class PopOutTests(AppCase):
         self.make(extra='\n[display]\nclock = "24h"\n')
         self.c.pop_out_live(activate=False)
         window = self.c._live_window
-        self.assertTrue(window.header.clock_texts()[1].count(":") == 1 and "M" not in window.header.clock_texts()[1])
         self.assertTrue(window.log.hour24())
         self.assertTrue(self.reading.live_log.hour24())
         prefs = self.c._prefs_store()

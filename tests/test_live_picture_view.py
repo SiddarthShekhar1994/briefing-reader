@@ -788,9 +788,12 @@ class PopOutPictureTests(LogCase):
         changes = self.stream.changes(0)
         window.log.apply(changes)
         settle(4)
-        widget = window.log.step_widget(step.id).picture_widget()
-        self.assertIsNotNone(widget)
-        self.assertLessEqual(widget.width(), window.log.viewport().width())
+        # Round 2 (HOLOGRAM_SPEC 16.3): the pop-out's timeline keeps the details collapsed; the picture is
+        # its focal frame, full width, which opens it larger (and gets the focus back).
+        self.assertIsNone(window.log.step_widget(step.id).picture_widget())
+        widget = window.focal.frame
+        self.assertEqual(widget.step_id(), step.id)
+        self.assertLessEqual(widget.width(), window.log.viewport().width() + 32)
         widget.setFocus(Qt.FocusReason.TabFocusReason)
         QTest.keyClick(widget, Qt.Key.Key_Return)
         settle()
