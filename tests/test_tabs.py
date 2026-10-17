@@ -875,7 +875,6 @@ class ReadingViewScreenTests(unittest.TestCase):
         self.assertFalse(reading.conversation.isVisible())
         self.assertFalse(reading.transcript_panel.isVisible())
         self.assertFalse(reading.sections_button.isVisible())
-        self.assertIs(ui._LivePage, ui._TabPage)
         window.resize(ui.READING_SIZE)
         settle(6)
         self.assertTrue(reading.memory_view.input.isVisible())     # no suggestion waits: the Add field

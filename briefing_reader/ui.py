@@ -123,7 +123,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import (approvals_view, brief_view, briefing_view, followups_view, live_view, memory_view, offer_view,
-               plan_view, settings_view, transcript_view)
+               plan_view, settings_view, states_view, transcript_view)
 from . import dock as dock_mod
 from . import holo, home, hud
 from . import live as _live
@@ -645,21 +645,6 @@ class _ElidedLabel(QLabel):
             self._render()
 
 
-class _TabPage(QWidget):
-    """A tab's page (LIVE, MEMORY) that never needs more height than the JARVIS page (``like``), so
-    the tab row above the panel stays where it is when the tab changes."""
-
-    def __init__(self, like: QWidget) -> None:
-        super().__init__()
-        self._like = like
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(0, self._like.minimumSizeHint().height())
-
-
-_LivePage = _TabPage   # the older name
-
-
 @dataclasses.dataclass
 class _MemoryLink:
     """What a memory link in the conversation acts on (memory only; never logged)."""
@@ -971,24 +956,15 @@ _TIERS = (_Tier(1320, 300, 372, 168), _Tier(1040, 260, 340, 168), _Tier(860, 230
 # A reading view shorter than this (a window under ~580 px; with Ask's command bar, add its height)
 # gets a smaller orb, a 2-line spoken line and a tighter panel strip: room for the JARVIS / BRIEFING tabs.
 _SHORT_VIEW_BELOW = 520
-_SHORT_ORB_PX = 80
 _SHORT_STRIP_PAD = 6
 _SPEECH_LINES = 3          # the spoken line under the orb is cut to this many lines
-_SHORT_SPEECH_LINES = 2
 STRIP_CAPTION = f"Conversation {DOT} this session"   # the centre panel's strip on the JARVIS tab
 STRIP_CAPTION_SHORT = "Conversation"                 # ... when the whole caption does not fit
-LIVE_CAPTION = f"Live steps {DOT} this session"      # ... and on the LIVE tab
-LIVE_CAPTION_SHORT = "Live steps"
-MEMORY_CAPTION = f"Memory {DOT} kept on this PC"     # ... and on the MEMORY tab
-MEMORY_CAPTION_SHORT = "Memory"
 LIVE_AWAY_TEXT = live_view.AWAY_TEXT                  # the Live screen while the pop-out shows the steps
 POP_OUT_TEXT = live_view.POP_OUT_LABEL                # the name of the Live strip's Pop out (an icon)
 POP_OUT_TIP = "Show LIVE in its own window - put it on a second screen"
 CLEAR_TEXT = "Clear"
 CLEAR_TIP = "Clear what is shown here (nothing else changes; nothing was saved)"
-DOCK_TEXT = live_view.BRING_BACK_TEXT                # "Bring it back" in the pop-out header
-# The strip's caption per tab: (in full, where the whole does not fit).
-_CAPTIONS = {hud.TAB_LIVE: (LIVE_CAPTION, LIVE_CAPTION_SHORT), hud.TAB_MEMORY: (MEMORY_CAPTION, MEMORY_CAPTION_SHORT)}
 DOCK_TIP = "Put LIVE back in the main window"
 # The hologram's screens (HOLOGRAM_SPEC 11.1; round 1): Home and the panel pages keep the old tab numbers.
 SCREEN_HOME = hud.TAB_JARVIS
@@ -1004,7 +980,6 @@ _SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING,
                  SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
                  SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS}
 _SLOT_SCREENS = {slot: screen for screen, slot in _SCREEN_SLOTS.items()}
-_PANEL_SCREENS: tuple[int, ...] = ()   # the transcript panel's screens (round 2: each screen has its own stage)
 _LIST_HEIGHT_MAX = 100_000          # ... whose cards take the screen's whole height
 # Statuses the Briefing screen's transport already says (its quiet line leaves them out).
 _QUIET_STATUS_RE = re.compile(r"^(?:Playing|Paused|Finished|Loading)(?: \(([^)]*)\))?(?: - (.*))?$", re.S)
@@ -1030,6 +1005,15 @@ TRANSCRIPT_TITLE = "Transcript"
 _ORB_BASE = {hud.ORB_SPEAKING: orb_mod.SPEAKING, hud.ORB_WORKING: orb_mod.THINKING,
              hud.ORB_LISTENING: orb_mod.LISTENING, hud.ORB_WAITING: orb_mod.WAITING}
 PAUSED_WORD = "PAUSED"
+# Home's error tiles (HOLOGRAM_SPEC 16.7): one sentence and one action each; the first by this order shows.
+ERROR_BRIEFING = "briefing"             # the briefing could not be loaded: Retry (the Briefing screen's own Retry)
+ERROR_SIGN_IN = "claude"                # Claude Code isn't signed in: How to fix (its existing help text)
+ERROR_MAIL = "mail:"                    # + the card's action id: Gmail refused a Reply / Email: Retry (opens it)
+BRIEFING_ERROR = states_view.ErrorInfo(ERROR_BRIEFING, "Not loaded", "Couldn't load your briefing.",
+                                       states_view.RETRY_TEXT)
+SIGN_IN_SENTENCE = "Claude Code isn't signed in."
+SIGN_IN_HELP = "Sign Claude Code in to your claude.ai plan, then ask again."
+MAIL_REFUSED_SENTENCE = "Gmail refused the {what}."
 
 
 def needs_ok_chip(count: int) -> str:
@@ -1038,6 +1022,11 @@ def needs_ok_chip(count: int) -> str:
 SHOW_WINDOW_TEXT = live_view.SHOW_WINDOW_TEXT
 BRING_BACK_TEXT = live_view.BRING_BACK_TEXT
 SEE_STEPS_TEXT = "See every step"                    # the link under an Ask's answer in the conversation
+
+
+def _error_rank(key: str) -> tuple[int, str]:
+    """Home shows the briefing's error first, then Claude Code's sign-in, then a refused mail."""
+    return ({ERROR_BRIEFING: 0, ERROR_SIGN_IN: 1}.get(key, 2), key)
 
 
 class ReadingView(QWidget):
@@ -1059,26 +1048,19 @@ class ReadingView(QWidget):
     ``memory_view``, a memory_view.MemoryStage - the focal suggestion tile, the Add field, the notes), Follow-ups
     (``followups_stage``, a followups_view.FollowupsStage - WAITING ON YOU / OWED TO YOU with the focal row; both
     for the bundle) and Settings (``settings_page``, a settings_view.SettingsStage: the groups, read only). The
-    agenda panel lives in the Day view's drawer (TODAY / DEADLINES). Round 2 restyles the screens other than
-    Home; what follows describes them as they were.
+    agenda panel lives in the Day view's drawer (TODAY / DEADLINES; its Connect link emits ``connectCalendar``).
+    ``tabChanged(index)`` when the current screen changes (the Dock, Ctrl+1..6, Ctrl+,, ``set_tab``).
 
-    Left: compact STATUS telemetry, then one panel with the TODAY / TOMORROW
-    agenda and the DEADLINES list (its Connect link emits
-    ``connectCalendar``). Middle: the orb with its state, the line being
-    spoken, the command bar, the controls, the JARVIS / BRIEFING tabs and the
-    centre panel. JARVIS shows the conversation (``conversation``, a
-    hud.ConversationLog); BRIEFING the transcript (with a moving highlight) and,
-    in the panel's header strip, the step chips and the SECTIONS button that
-    opens the section list (click a row to jump); LIVE (``set_live_available``)
-    every step Jarvis takes (``live_log``, a hud.LiveLog fed by the app's
-    _LiveFeed), or "LIVE is in its own window." while the pop-out shows it
-    (``set_live_popped``); its strip shows ``live_status`` (hud.LiveStatus, the
-    summary as its tooltip) where the briefing's LIVE marker sits on the other
-    tabs, then Pop out and Clear (Clear only where it fits; no toolbar row, so
-    the log has that height); MEMORY (``set_memory_available``, the productivity
-    bundle's notes: ``memory_view``, a hud.MemoryPage the app fills). ``tabChanged(index)``
-    when the current tab changes (a click, Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4, ``set_tab``).
-    Right: the NEEDS YOUR OK cards and the ACTIVITY log.
+    The states (round 2, part 3b, HOLOGRAM_SPEC 16.7): ``set_waiting(waiting, run, readout)`` (the orb waits,
+    "Checking for your AM briefing, sir." and when Jarvis checks), ``set_offline_voice(offline, retry)``
+    (OFFLINE VOICE, the line and the steel WINDOWS VOICE badge), ``set_muted_look`` (MUTED, the pressed mute),
+    ``set_quiet_probe(probe)`` (QUIET HOURS UNTIL 8:00 AM, the idle orb at 70 %) and Home's error tiles
+    (``error_tile``: a briefing that could not load, ``set_ask_signed_out``, ``set_mail_refused``),
+    each with one sentence and one action that only does what the screen it stands for already does.
+
+    The old transcript panel (``transcript_panel``: the briefing's transcript with its step chips and LIVE
+    marker, ``text``) and the hidden STATUS values (``status_panel``) are kept for the app's state; neither is
+    shown since round 2.
     """
 
     playPause = Signal()
@@ -1298,8 +1280,6 @@ class ReadingView(QWidget):
         """Round 1 of the hologram (HOLOGRAM_SPEC 11, 14, 16.0): the Dock, the header, Home's stage,
         echo, captions and chips, and the Settings page."""
         self._screen = -1
-        self._panel_tab = hud.TAB_BRIEFING     # the page the transcript panel shows
-        self._panel_slot: QVBoxLayout | None = None
         self._agenda_slot: QVBoxLayout | None = None
         self._activity = hud.ORB_WORKING
         self._typing = False
@@ -1309,6 +1289,16 @@ class ReadingView(QWidget):
         self._offline_voice = False
         self._paused = False
         self._waiting = False
+        self._waiting_run = ""                    # the run waited for ("AM" / "PM"; "" unknown)
+        self._waiting_readout = ""                # when Jarvis checks for it ("EVERY MINUTE . UNTIL 10:27 AM")
+        self._offline_retry = ""                  # when the usual voice is tried again ("" unknown)
+        self._quiet_probe: Callable[[], str] | None = None   # "8:00 AM" while quiet hours hold (the bundle)
+        self._quiet_until = ""
+        self._address = "sir"
+        self._greeting = ""
+        self._errors: dict[str, states_view.ErrorInfo] = {}   # Home's error tiles (one shows), by key
+        self._mail_errors: dict[str, str] = {}    # error key -> the refused Reply / Email card's action id
+        self._service_states: dict[str, tuple[str, str]] = {}   # the service chips' (status, tooltip), by name
         self._new_briefing = False
         self._offer_infos: tuple[offer_view.OfferInfo, ...] = ()   # the open offers, oldest first
         self._not_now: set[int] = set()                     # offers put away on Home with Not now
@@ -1349,6 +1339,16 @@ class ReadingView(QWidget):
         self.stage.set_side_tile(self.offer_tile)
         self.answer_chip = holo.ActionChip("", holo.CHIP_CYAN)
         self.answer_chip.clicked.connect(self._on_answer_chip)
+        # The states (round 2, part 3b, HOLOGRAM_SPEC 16.7): the waiting readout and the offline voice's steel
+        # badge in the chip row (when no chip shows), an error as ONE tile at the focal point (where an offer's
+        # tile sits; an open offer goes first), and quiet hours read again every half minute.
+        self.waiting_readout = states_view.QuietReadout()
+        self.voice_badge = states_view.StateBadge()
+        self.error_tile = states_view.ErrorTile(self.stage)
+        self.error_tile.actionClicked.connect(self._on_error_action)
+        self._quiet_timer = QTimer(self)
+        self._quiet_timer.setInterval(30_000)
+        self._quiet_timer.timeout.connect(self.refresh_quiet)
         # Home's moments (round 2, part 3a): the day plan (Add block goes through each block's own approval
         # card) and the meeting brief (its reply cards are the approval cards themselves, lent while it shows).
         self.plan_stage = plan_view.PlanStage()
@@ -1361,6 +1361,7 @@ class ReadingView(QWidget):
         self.brief_stage.linkClicked.connect(self.homeLink)
         self.brief_stage.closeRequested.connect(self.close_moment)
         self.approvals.changed.connect(self._schedule_moment_sync)
+        self.approvals.changed.connect(self._check_mail_errors)
         for chip in self._home_chips():
             chip.hide()
         self.settings_page = settings_view.SettingsStage()
@@ -1390,6 +1391,8 @@ class ReadingView(QWidget):
         chips.addStretch(1)
         for chip in self._home_chips():
             chips.addWidget(chip)
+        chips.addWidget(self.waiting_readout)
+        chips.addWidget(self.voice_badge)
         chips.addStretch(1)
         self._chip_row.setFixedHeight(holo.ActionChip.HEIGHT + 2 * holo.ActionChip.MARGIN)
         rest.addWidget(self._chip_row)
@@ -1463,18 +1466,13 @@ class ReadingView(QWidget):
         self.day_drawer.close_drawer()
         self._screen = index
         self._sync_brief_cards()                # a brief's lent reply cards go back before another screen shows
-        if index in _PANEL_SCREENS:
-            self._place_panel(index)
         self._screens.setCurrentWidget(self._screens.widget(index))
         if index == SCREEN_MEMORY:
             self._set_memory_unread(False)
         elif index == SCREEN_APPROVALS:
             self.approvals_stage.open_first()   # the screen opens on the first undecided card
         self._sync_header_countdown()
-        if index in _PANEL_SCREENS:
-            self._show_tab_page(index)
-        else:
-            self.sections_popover.hide()
+        self.sections_popover.hide()
         self.tabChanged.emit(index)
 
     def set_countdown(self, word: str = "", deadline: float | None = None) -> None:
@@ -1490,16 +1488,6 @@ class ReadingView(QWidget):
             self.header.set_countdown()
         else:
             self.header.set_countdown(view[0], view[1])
-
-    def _place_panel(self, index: int) -> None:
-        """The transcript panel goes to the panel screen that shows (none since round 2, part 2b)."""
-        slot = {SCREEN_MEMORY: self._memory_slot}[index]
-        if slot is not self._panel_slot:
-            if self._panel_slot is not None:
-                self._panel_slot.removeWidget(self.transcript_panel)
-            slot.addWidget(self.transcript_panel, 1)
-            self._panel_slot = slot
-            self.transcript_panel.setVisible(True)
 
     def _place_agenda(self, slot: QVBoxLayout, mode: str) -> None:
         """The agenda panel: in the Day view's drawer (TODAY / DEADLINES)."""
@@ -1549,8 +1537,8 @@ class ReadingView(QWidget):
         if base not in (orb_mod.SPEAKING, orb_mod.THINKING):
             if self._typing:
                 base = orb_mod.LISTENING
-            elif self._pending > 0 or self._offers > 0:
-                base = orb_mod.NEEDS
+            elif self._pending > 0 or self._offers > 0 or self._errors:
+                base = orb_mod.NEEDS     # an error waits on the owner's action too (spec 12.6)
             elif self._waiting or base == orb_mod.WAITING:
                 base = orb_mod.WAITING
             else:
@@ -1565,11 +1553,18 @@ class ReadingView(QWidget):
         self.briefing_orb.set_look(orb_mod.IDLE if base == orb_mod.NEEDS else base, muted=muted, offline=offline)
         self.plan_stage.orb.set_look(base, muted=muted, offline=offline)
         word = orb_mod.state_word(base, muted, offline)
+        if word == orb_mod.READOUTS[orb_mod.WAITING]:
+            word = states_view.waiting_word(self._waiting_run)
         if self._paused and base == orb_mod.IDLE and not muted:
             word = PAUSED_WORD
+        # Quiet hours (spec 16.7): the idle orb at 70 % and QUIET HOURS UNTIL 8:00 AM.
+        quiet = bool(self._quiet_until) and word == orb_mod.READOUTS[orb_mod.IDLE]
+        if quiet:
+            word = states_view.quiet_word(self._quiet_until)
+        self.hero.set_dim(states_view.QUIET_DIM if quiet else 1.0)
         if word == orb_mod.READOUTS[orb_mod.NEEDS]:
             tone = home.TONE_AMBER
-        elif muted or word in (PAUSED_WORD, orb_mod.READOUTS[orb_mod.OFFLINE]):
+        elif muted or quiet or word in (PAUSED_WORD, orb_mod.READOUTS[orb_mod.OFFLINE]):
             tone = home.TONE_STEEL
         else:
             tone = home.TONE_HOLO
@@ -1584,22 +1579,182 @@ class ReadingView(QWidget):
         self.header.set_muted(self._muted_look)
         self._sync_look()
 
-    def set_offline_voice(self, offline: bool) -> None:
-        """The Windows voice speaks (the online one is out of reach): OFFLINE VOICE."""
-        if bool(offline) != self._offline_voice:
-            self._offline_voice = bool(offline)
-            self._sync_look()
+    def set_offline_voice(self, offline: bool, retry: str = "") -> None:
+        """The Windows voice speaks (the online one is out of reach; HOLOGRAM_SPEC 16.7): the orb's modifier,
+        OFFLINE VOICE in the header (instead of its service note), Home's resting line "My usual voice is out
+        of reach, sir. I'll keep trying." and the steel WINDOWS VOICE badge (with " . RETRY 10:14" when the
+        app knows when the usual voice is tried again: ``retry``)."""
+        offline = bool(offline)
+        retry = retry if offline else ""
+        if (offline, retry) == (self._offline_voice, self._offline_retry):
+            return
+        self._offline_voice, self._offline_retry = offline, retry
+        self.voice_badge.set_text(states_view.offline_badge(retry))
+        self._sync_service_notes()
+        self._sync_resting()
+        self._sync_look()
+        self._sync_chip()
+
+    def offline_voice(self) -> bool:
+        return self._offline_voice
 
     def set_briefing_paused(self, paused: bool) -> None:
         if bool(paused) != self._paused:
             self._paused = bool(paused)
             self._sync_look()
 
-    def set_waiting(self, waiting: bool) -> None:
-        """A scheduled run waits for its briefing: the orb's waiting state."""
-        if bool(waiting) != self._waiting:
-            self._waiting = bool(waiting)
+    def set_waiting(self, waiting: bool, run: str = "", readout: str = "") -> None:
+        """A run's briefing is waited for (HOLOGRAM_SPEC 16.7): the orb's waiting state, WAITING FOR THE AM
+        BRIEFING (``run``: "AM" / "PM"), Home's resting line "Checking for your AM briefing, sir." and, while
+        Jarvis checks, when (``readout``: "EVERY MINUTE . UNTIL 10:27 AM") in the chip row."""
+        waiting = bool(waiting)
+        run, readout = (run or "", readout or "") if waiting else ("", "")
+        if (waiting, run, readout) == (self._waiting, self._waiting_run, self._waiting_readout):
+            return
+        self._waiting, self._waiting_run, self._waiting_readout = waiting, run, readout
+        self.waiting_readout.set_text(readout)
+        self._sync_resting()
+        self._sync_look()
+        self._sync_chip()
+
+    def waiting(self) -> tuple[bool, str, str]:
+        """(waiting, the run, the readout)."""
+        return self._waiting, self._waiting_run, self._waiting_readout
+
+    # ---- quiet hours, the address and the resting line (HOLOGRAM_SPEC 14.10, 16.7) ------------------
+
+    def set_quiet_probe(self, probe: Callable[[], str] | None) -> None:
+        """Quiet hours (the bundle's [productivity] quiet_from / quiet_until): ``probe()`` says until when
+        ("8:00 AM") while they hold, else "" (None: no quiet hours). Read now and every half minute while the
+        screen shows; offers already stay text only then (the bundle's own rule)."""
+        self._quiet_probe = probe
+        self.refresh_quiet()
+        self._sync_quiet_timer()
+
+    def refresh_quiet(self) -> None:
+        until = ""
+        if self._quiet_probe is not None:
+            try:
+                until = str(self._quiet_probe() or "")
+            except Exception:  # noqa: BLE001 - unknown: no quiet hours shown
+                until = ""
+        if until != self._quiet_until:
+            self._quiet_until = until
             self._sync_look()
+
+    def quiet_until(self) -> str:
+        return self._quiet_until
+
+    def _sync_quiet_timer(self) -> None:
+        if self._quiet_probe is not None and self.isVisible():
+            self._quiet_timer.start()
+        else:
+            self._quiet_timer.stop()
+
+    def set_address(self, address: str) -> None:
+        """How Jarvis addresses the owner in the states' lines ([assistant] address: "sir")."""
+        self._address = address if isinstance(address, str) else "sir"
+        self._sync_resting()
+
+    def _sync_resting(self) -> None:
+        """Home's resting line: "Checking for your AM briefing, sir." while Jarvis waits for one, "My usual
+        voice is out of reach, sir. I'll keep trying." on the Windows voice, else the greeting (an open offer's
+        question shows over any of them)."""
+        if self._waiting:
+            text = states_view.waiting_line(self._waiting_run, self._address)
+        elif self._offline_voice:
+            text = states_view.offline_line(self._address)
+        else:
+            text = self._greeting
+        self.captions.set_resting(text)
+
+    # ---- errors as tiles (HOLOGRAM_SPEC 11.7, 16.7) ----------------------------------------------
+
+    def _set_error(self, key: str, info: states_view.ErrorInfo | None) -> None:
+        if info is None:
+            if self._errors.pop(key, None) is None:
+                return
+        elif self._errors.get(key) == info:
+            return
+        else:
+            self._errors[key] = info
+        self._sync_side()
+        self._sync_service_notes()
+        self._sync_look()
+
+    def errors(self) -> list[states_view.ErrorInfo]:
+        """The errors waiting on Home, the one shown first."""
+        return [self._errors[key] for key in sorted(self._errors, key=_error_rank)]
+
+    def set_ask_signed_out(self, signed_out: bool, help_text: str = "") -> None:
+        """Claude Code isn't signed in (Ask's SIGN IN): Home's error tile; How to fix shows ``help_text`` (the
+        sign-in help Ask already gives) in the tile. Nothing is run from it."""
+        info = (states_view.ErrorInfo(ERROR_SIGN_IN, "Sign-in needed", SIGN_IN_SENTENCE,
+                                      states_view.HOW_TO_FIX_TEXT, help_text or SIGN_IN_HELP)
+                if signed_out else None)
+        self._set_error(ERROR_SIGN_IN, info)
+
+    def set_mail_refused(self, action_id: str, what: str = "reply") -> None:
+        """Gmail refused a Reply / Email (nothing was sent; its card says why): Home's error tile "Gmail refused
+        the reply." with Retry, which only opens that same card on Approvals - its own Retry starts the undo
+        countdown again; nothing is ever sent from the tile. It goes once the card is no longer failed."""
+        card = self.approvals.card(action_id)
+        if card is None or card.status() != hud.CARD_FAILED:
+            return
+        key = f"{ERROR_MAIL}{action_id}"
+        self._mail_errors[key] = action_id
+        self._set_error(key, states_view.ErrorInfo(key, "Not sent", MAIL_REFUSED_SENTENCE.format(what=what or "reply"),
+                                                   states_view.RETRY_TEXT))
+
+    def _check_mail_errors(self) -> None:
+        """A refused card retried, denied or gone: its tile goes."""
+        for key, action_id in list(self._mail_errors.items()):
+            card = self.approvals.card(action_id)
+            if card is None or card.status() != hud.CARD_FAILED:
+                del self._mail_errors[key]
+                self._set_error(key, None)
+
+    def _on_error_action(self, key: str) -> None:
+        """An error tile's ONE action: Retry loads the briefing again exactly as the Briefing screen's Retry
+        does; a refused mail's Retry opens its card on Approvals (the owner's click there decides); How to fix
+        shows its help in the tile (ErrorTile)."""
+        if key == ERROR_BRIEFING:
+            self.playPause.emit()
+        elif key.startswith(ERROR_MAIL):
+            action_id = self._mail_errors.pop(key, "")
+            self._set_error(key, None)                       # seen: the card itself carries it now
+            self.set_tab(SCREEN_APPROVALS)
+            card = self.approvals.card(action_id) if action_id else None
+            if card is not None:
+                self.approvals_stage.select(action_id)
+                card.flash()
+
+    def _sync_side(self) -> None:
+        """Home's ONE tile beside the orb: an open offer's, else the first error's."""
+        offer = self.offer_tile.info() is not None
+        errors = self.errors()
+        shown = errors[0] if errors and not offer else None
+        tile = self.error_tile if shown is not None else self.offer_tile
+        if self.stage.side_tile() is not tile:
+            self.stage.set_side_tile(tile)
+        self.error_tile.set_error(shown)
+        self.stage.place_side_tile()
+
+    def set_service_note(self, name: str, status: str, tooltip: str = "") -> None:
+        """A service chip's state for the header's notes (home.HoloHeader.set_service), except where a state
+        says it now: the Windows voice (OFFLINE VOICE), a briefing that could not load and Claude Code's
+        sign-in (their error tiles)."""
+        self._service_states[name] = (status, tooltip)
+        self._sync_service_notes(name)
+
+    def _sync_service_notes(self, only: str = "") -> None:
+        for name, (status, tooltip) in self._service_states.items():
+            if only and name != only:
+                continue
+            replaced = ((name == "voice" and status == hud.STATUS_WARN and self._offline_voice)
+                        or (name == "notion" and ERROR_BRIEFING in self._errors)
+                        or (name == ASK_CHIP and ERROR_SIGN_IN in self._errors))
+            self.header.set_service(name, hud.STATUS_OFF if replaced else status, tooltip)
 
     def set_offers(self, offers: Sequence[offer_view.OfferInfo]) -> None:
         """The open offers, oldest first (the productivity bundle). Those not put away with Not now count as
@@ -1611,7 +1766,7 @@ class ReadingView(QWidget):
         waiting = offer_view.newest_waiting(self._offer_infos, self._not_now)
         newest = waiting[-1] if waiting else None
         self.offer_tile.set_offer(newest)
-        self.stage.place_side_tile()
+        self._sync_side()
         self.captions.set_question(newest.question if newest is not None else "")
         if len(waiting) != self._offers:
             self._offers = len(waiting)
@@ -1745,8 +1900,10 @@ class ReadingView(QWidget):
 
     def set_greeting(self, text: str) -> None:
         """Home's resting line (spec 14.10: the greeting, at most 6 words); an open offer's question
-        shows instead while it waits."""
-        self.captions.set_resting(text)
+        shows instead while it waits, and a state's line while Jarvis waits for a briefing or speaks with
+        the Windows voice (_sync_resting)."""
+        self._greeting = text or ""
+        self._sync_resting()
 
     def say_caption(self, text: str, *, spoken: bool = True, duration_ms: int = 0) -> None:
         """Jarvis's words as Home's caption (what is spoken, never an email or a card body);
@@ -1788,6 +1945,11 @@ class ReadingView(QWidget):
         answer = resting and not offer and bool(self._answer[0])
         briefing = resting and not (offer or answer) and self._new_briefing
         approvals = resting and not (offer or answer or briefing) and self._pending > 0
+        # Without a chip: when Jarvis checks for the briefing he waits for, else the Windows voice's badge.
+        quiet_row = resting and not (offer or answer or briefing or approvals)
+        readout = quiet_row and self._waiting and bool(self._waiting_readout)
+        self.waiting_readout.setVisible(readout)
+        self.voice_badge.setVisible(quiet_row and not readout and self._offline_voice)
         for chip, shown, text in ((self.answer_chip, answer, self._answer[0]),
                                   (self.approvals_chip, approvals, needs_ok_chip(self._pending))):
             if shown and chip.text() != text:
@@ -1960,33 +2122,14 @@ class ReadingView(QWidget):
     def unread(self) -> bool:
         return self.stage.unread()
 
-    def _show_tab_page(self, index: int) -> None:
-        """The panel's page for ``index`` (BRIEFING, MEMORY); on MEMORY the strip shows its caption
-        instead of the step chips and SECTIONS (both stay in the strip, hidden)."""
-        self._panel_tab = index
-        captioned = index in (hud.TAB_LIVE, hud.TAB_MEMORY)
-        page = self._pages.widget(index)
-        if page is not None:
-            self._pages.setCurrentWidget(page)
-        self.strip_caption.setVisible(captioned)
-        self.transcript_panel.steps.setVisible(not captioned)
-        self.sections_button.setVisible(not captioned)
-        self._sync_marker()
-        self._fit_caption()
-        if captioned:
-            self.sections_popover.hide()
-        else:
-            QTimer.singleShot(0, self._after_briefing_page_shown)
-
     def _sync_marker(self) -> None:
         """The briefing's LIVE marker in the panel's strip (its space kept while hidden)."""
         marker = self.transcript_panel.live
-        on_live = self._panel_tab == hud.TAB_LIVE
         policy = marker.sizePolicy()
-        if policy.retainSizeWhenHidden() == on_live:
-            policy.setRetainSizeWhenHidden(not on_live)
+        if not policy.retainSizeWhenHidden():
+            policy.setRetainSizeWhenHidden(True)
             marker.setSizePolicy(policy)
-        marker.set_live(self._marker_live and not on_live)
+        marker.set_live(self._marker_live)
 
     # ---- the LIVE tab --------------------------------------------------------------
 
@@ -2085,12 +2228,6 @@ class ReadingView(QWidget):
         self._live_state = state
         self._sync_live_dot()
 
-    def _after_briefing_page_shown(self) -> None:
-        if not shiboken6.isValid(self) or self._screen != hud.TAB_BRIEFING:
-            return
-        self._fit_steps()
-        self._apply_highlight(scroll_to=True)
-
     def set_status(self, text: str, is_error: bool = False) -> None:
         self.status.setText(text)
         self.status.setVisible(bool(text))
@@ -2124,6 +2261,9 @@ class ReadingView(QWidget):
             phase = briefing_view.PAUSED if can_skip else briefing_view.READY
         if phase != self.briefing_stage.phase():
             self.briefing_stage.set_phase(phase)
+        # Spec 16.7: a briefing that could not load is also Home's error tile, with the same Retry.
+        failed = phase == briefing_view.FAILED and self.play_button.isEnabled()
+        self._set_error(ERROR_BRIEFING, BRIEFING_ERROR if failed else None)
 
     def pace_line(self, duration_ms: int = 0) -> None:
         """The line just set (set_speech) is being read now: the lens lights its words one by one, over
@@ -2268,14 +2408,12 @@ class ReadingView(QWidget):
         return super().eventFilter(watched, event)
 
     def _fit_caption(self) -> None:
-        """The JARVIS (MEMORY) strip's caption in full, or "CONVERSATION" ("MEMORY") alone where it does
-        not fit."""
+        """The strip's caption in full, or "CONVERSATION" alone where it does not fit."""
         strip = self.transcript_panel.strip
         margins = strip.layout().contentsMargins()
         spacing = strip.layout().spacing()
-        current = self._panel_tab
         tag = self.transcript_panel.live
-        full, short = _CAPTIONS.get(current, (STRIP_CAPTION, STRIP_CAPTION_SHORT))
+        full, short = STRIP_CAPTION, STRIP_CAPTION_SHORT
         room = (strip.width() - margins.left() - margins.right() - tag.sizeHint().width() - spacing)
         metrics = QFontMetricsF(self.strip_caption.font())
         text = full if metrics.horizontalAdvance(full) + 2 <= room else short
@@ -2416,10 +2554,13 @@ class ReadingView(QWidget):
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
         self._apply_highlight(scroll_to=True)    # an item highlighted while hidden comes into view
+        self.refresh_quiet()
+        self._sync_quiet_timer()
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().hideEvent(event)
         self.sections_popover.hide()
+        self._sync_quiet_timer()
 
     def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         if event.key() == Qt.Key.Key_Escape and (self.transcript_drawer.is_open() or self.day_drawer.is_open()):
@@ -2782,7 +2923,7 @@ class BriefingWindow(hud.HudWindowFrame):
         tiles, spec 11.7)."""
         assert self.header is not None
         self.header.set_service(name, status, tooltip)
-        self.reading.header.set_service(name, status, tooltip)
+        self.reading.set_service_note(name, status, tooltip)
 
     def set_speaker_available(self, available: bool) -> None:
         """``[assistant] speak``: the header's speaker button (mute Jarvis's own voice) exists; it shows
@@ -3131,6 +3272,8 @@ STATE_WAITING = "waiting"        # a scheduled run polls with the window hidden 
 STATE_QUITTING = "quitting"
 
 TRAY_TOOLTIP = "Jarvis"
+TOAST_VIEW = "view"                    # the toast's View: the Briefing screen
+TOAST_PREP = "prep"                    # the toast's Prepare brief: Home with the prep offer's tile
 VIEW_BRIEFING_TEXT = "View briefing"   # the announcement's link in the conversation
 VIEW_BRIEFING_LINK = "view-briefing"
 ASK_CANCELLED_ENTRY = "Cancelled; nothing was proposed."   # the conversation's entry for a cancelled Ask
@@ -3151,7 +3294,7 @@ MEMORY_SEVERAL_TEXT = "Which note, {sir}? I've opened MEMORY with the matches."
 # Who gets the notes.
 MEMORY_GIVEN_TO = "every Ask, plan, brief and draft"
 MEMORY_SENT_WORDS = "Sent with your Asks, plans, briefs and drafts; never to web research"
-MEMORY_STATUS = ("Kept only on this PC (memory.json). Given to your Claude with {given} - never to web research. "
+MEMORY_STATUS = ("Kept only on this PC. Given to your Claude with {given} - never to web research. "
                  "{count} " + DOT + " {kb:.1f} of {cap} KB sent.")
 MEMORY_STORED_WORDS = "memory.json (on this PC)"
 MEMORY_DISMISSED_WORDS = ("memory.json keeps a short hash of each word, not the sentence (a common word or a name "
@@ -4261,7 +4404,72 @@ class AppController(QObject):
         reading = self.window.reading
         reading.settings_page.set_paths(str(self._config_path()), str(self.config.data_dir))
         reading.settings_page.set_config(self.config)         # read only: shown, never written back
+        reading.set_address(self.config.assistant.address)
         reading.set_greeting(self._resting_greeting())
+        # Round 2, part 3b (HOLOGRAM_SPEC 16.7): quiet hours are the bundle's (no bundle: none shown), and the
+        # toast is made on its first post.
+        reading.set_quiet_probe(self._quiet_until_text if self.productivity is not None else None)
+        self._toast_window: states_view.Toast | None = None
+
+    # ---- the states (HOLOGRAM_SPEC 16.7) ----------------------------------------------------------------
+
+    def _quiet_until_text(self) -> str:
+        """"8:00 AM" while the bundle's quiet hours ([productivity] quiet_from / quiet_until, the offers' own
+        rule) hold now, else "" (the wall time of the personal calendar's zone, as the offers use)."""
+        if self.productivity is None:
+            return ""
+        from .ask.offers import clock_time, in_quiet_hours
+
+        settings = self.config.productivity
+        start, until = getattr(settings, "quiet_from", "22:00"), getattr(settings, "quiet_until", "08:00")
+        if not in_quiet_hours(self._offer_wall(None), start, until):
+            return ""
+        return states_view.clock_text(clock_time(until), bool(self.config.display.hour24))
+
+    def _waiting_view(self) -> tuple[bool, str, str]:
+        """(waiting, run, readout) for the reading screen: a run due during a reading whose briefing is not in
+        yet, or the run waited for in the background before its fresh briefing lands; the readout says when
+        Jarvis checks ("every minute . until 10:27 AM") while he polls for it."""
+        if self._pending_run and self._pending_briefing is None:
+            run = self._pending_run
+        elif self._keeps_polling():
+            run = self._background_run or self.expected_run or ""
+        else:
+            return False, "", ""
+        readout = ""
+        if self._polling and self._fetch_poll_run == run:
+            readout = states_view.waiting_readout(self._interval_text(), format_time(self._poll_deadline))
+        return True, run, readout
+
+    def _toast(self) -> states_view.Toast:
+        if self._toast_window is None:
+            self._toast_window = states_view.Toast()
+            self._toast_window.actionClicked.connect(self._on_toast_action)
+        return self._toast_window
+
+    def _post_toast(self, line: str, action: str, key: str) -> None:
+        """Jarvis's own toast (never a Windows notification, never the focus), only where the app already
+        surfaces something while the owner is elsewhere: the briefing's announcement, a prep offer that
+        flashes the taskbar button."""
+        if self.state == STATE_QUITTING or self._shut_down or not line:
+            return
+        try:
+            self._toast().post(line, action, key, look=self.window.reading.look())
+        except Exception as exc:  # noqa: BLE001 - the window and the entry already say it
+            logger.debug("No toast (%s)", type(exc).__name__)
+
+    def _on_toast_action(self, key: str) -> None:
+        """The toast's ONE action (the owner's click, so the focus may move): View opens the Briefing screen,
+        Prepare brief opens Home with the prep offer's tile (its own click prepares anything). Nothing runs."""
+        if self.state != STATE_READING or self._shut_down:
+            return
+        reading = self.window.reading
+        if key == TOAST_VIEW:
+            reading.set_tab(SCREEN_BRIEFING)
+        elif key == TOAST_PREP:
+            reading.set_tab(SCREEN_HOME)
+            reading.close_moment()
+        force_foreground(self.window)
 
     def _config_path(self) -> Path:
         return Path(getattr(self.config, "project_root", None) or PROJECT_ROOT) / CONFIG_FILE_NAME
@@ -6521,6 +6729,10 @@ class AppController(QObject):
             self._note_served_todo(action)
         self._show_card_state(action_id)
         self._sync_card_locks()
+        if (action is not None and action.sends_mail and writes_running and status == STATUS_FAILED
+                and (result is None or error is not None)):
+            # Gmail refused it (nothing was sent): Home's error tile; its Retry only opens this card.
+            self.window.reading.set_mail_refused(action_id, "reply" if action.kind == REPLY else "email")
         if plan_block:
             self._plan_focus_next(action_id)
         if self._calendar_worker is not None:
@@ -7189,10 +7401,14 @@ class AppController(QObject):
 
     def _set_ask_chip(self, state: str, tooltip: str) -> None:
         """The header's ``claude`` chip (reading screen only): OK, SIGN IN, LIMIT, OFF or ERR."""
+        from .ask.planner import CHIP_SIGN_IN
         from .ask_ui import CHIP_STATUSES
 
         self.window.set_service(ASK_CHIP, CHIP_STATUSES.get(state, hud.STATUS_OFF), tooltip)
         self.window.header.set_service_visible(ASK_CHIP, self.window.is_reading_view())
+        # Spec 16.7: not signed in is Home's error tile; How to fix shows the chip's own help text.
+        signed_out = state == CHIP_SIGN_IN
+        self.window.reading.set_ask_signed_out(signed_out, tooltip.split(" - ", 1)[-1] if signed_out else "")
 
     def _ask_context(self) -> tuple[Any, list[str]]:
         """What an Ask may see of the briefing (its pending cards, sections and deadlines; never the
@@ -7974,6 +8190,12 @@ class AppController(QObject):
                 QApplication.alert(self.window, 0)   # the taskbar button flashes; the window stays where it is
             except Exception as exc:  # noqa: BLE001
                 logger.debug("No taskbar flash (%s)", type(exc).__name__)
+            if offer.kind == "prep" and offer.start is not None:
+                # The toast's Prepare brief only opens Home with the offer's tile: its own click prepares.
+                minutes = max(0, int(round((offer.start - offer.posted_at).total_seconds() / 60)))
+                self._post_toast(states_view.toast_prep_line(offer.event_title, minutes,
+                                                             self.config.assistant.address),
+                                 states_view.PREP_TEXT, TOAST_PREP)
 
     def _sync_offers_waiting(self, *_args: Any) -> None:
         """Offers that wait for the owner's answer count as Home's needs you; the newest one is Home's ONE
@@ -9850,6 +10072,7 @@ class AppController(QObject):
             logger.info("Announced the %s briefing (held: session locked)", key)
             return True
         self._set_announced(key, self._say(kind, text, key=f"announce:{key}"))
+        self._toast_announcement()
         return True
 
     def _set_announced(self, key: str, spoken: bool) -> None:
@@ -9859,6 +10082,14 @@ class AppController(QObject):
             self.run_state.record_announced(key, how)
         logger.info("Announced the %s briefing (%s)", key, how)
         self._prod_call("on_announced", key)   # the AM one may bring the plan offer (4.3)
+
+    def _toast_announcement(self) -> None:
+        """The announcement made while the owner is elsewhere (a scheduled arrival shown without the focus, a
+        newer briefing over a minimized window, one held for the unlock): Jarvis's toast with View too. Never
+        for the greeting of an open the owner asked for (that one folds the announcement in itself)."""
+        if not self._window_active():
+            self._post_toast(states_view.toast_briefing_line(self._run_label(), self.config.assistant.address),
+                             states_view.VIEW_TEXT, TOAST_VIEW)
 
     def _on_held_timer(self) -> None:
         """An announcement held while the session was locked: said after the unlock, if the
@@ -9873,6 +10104,7 @@ class AppController(QObject):
         if self._new_key() != key or self._is_announced(key):
             return
         self._set_announced(key, self._say(self._held_kind, self._held_text, key=f"announce:{key}"))
+        self._toast_announcement()
 
     # ---- scheduled arrival and newer briefings -----------------------------------------------
 
@@ -10519,7 +10751,7 @@ class AppController(QObject):
         if self.state != STATE_READING:
             return
         reading = self.window.reading
-        reading.set_waiting(bool(self._pending_run) and self._pending_briefing is None)
+        reading.set_waiting(*self._waiting_view())
         reading.set_briefing_paused(self._script is not None and self.player.state == PAUSED)
         if self._script is None:
             if self._utterance:   # Jarvis is saying something himself
@@ -11118,6 +11350,8 @@ class AppController(QObject):
         # Hide first: the media player has (rarely) hung in stop(), and the window
         # should be gone either way. Jarvis's voice has a media player of its own.
         self.window.hide()
+        if getattr(self, "_toast_window", None) is not None:
+            self._toast_window.dismiss()
         try:
             self.voice.shutdown()   # stops speaking and drops what was queued
         except Exception as exc:  # noqa: BLE001 - shutting down goes on

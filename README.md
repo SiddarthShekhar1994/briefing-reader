@@ -119,8 +119,9 @@ your own scheduled routine (see
   [Catch-up and the hotkey](#catch-up-and-the-hotkey) and
   [Start menu shortcut](#start-menu-shortcut).
 
-Both windows use the "Jarvis HUD" look: a dark, frameless sci-fi panel with a
-glowing status orb (see [The look](#the-look-jarvis-hud)).
+The assistant screen is a calm hologram: a dark, frameless window with Jarvis's
+orb in the middle and a rail of screens at its left edge (see
+[The look](#the-look-the-hologram)).
 
 ## How it stays safe
 
@@ -379,7 +380,7 @@ accounts and trusted domains back to their defaults. Then rerun
 from) and point your Start menu shortcut's **Start in** at it.
 
 **The rest of this README is the reference:** [Requirements](#requirements)
-and [Setup](#setup), [the look](#the-look-jarvis-hud),
+and [Setup](#setup), [the look](#the-look-the-hologram),
 [using it](#using-it), [Calendar actions](#calendar-actions) and the other
 cards, [Ask Jarvis](#ask-jarvis-optional) and [web research](#web-research),
 the [proposal](#proposed-actions-format) and [deadline](#deadlines-format)
@@ -859,44 +860,49 @@ cd "<project folder>"
    left alone; see "Disconnecting" in step 8 and
    [Logs and saved files](#logs-and-saved-files).
 
-## The look (Jarvis HUD)
+## The look (the hologram)
 
-The windows follow the "Jarvis HUD - sci-fi" design: a near-black ground with a
-faint cyan grid and glow, panels with cut (chamfered) corners, cyan accents,
-amber for anything that needs your OK, and three fonts (see [Fonts](#fonts)):
-Chakra Petch for the JARVIS wordmark, Sora for text and JetBrains Mono for
-labels and times.
+The assistant screen is a hologram on a near-black ground with a faint cyan
+grid. One thing is bright on each screen (the orb, the card that waits, the
+line being read); the rest stays quiet. Colours mean one thing each: cyan is
+Jarvis (and a fresh, NEW briefing), amber only something that waits for your
+decision, coral only a failure or a NEW RECIPIENT, mint "it's done" and steel
+"off" (muted, the Windows voice, undone). Three fonts (see [Fonts](#fonts)):
+Chakra Petch for the J.A.R.V.I.S. wordmark and headings, Sora for text and
+JetBrains Mono for labels and times. Technical readouts (planner runs, runs
+left, seconds, sizes) never appear on Home or the screens' tiles: LIVE keeps
+them.
 
-- **Frameless window.** The header bar is the title bar: drag it to move the
-  window. The small **X** at its right end closes it (on the assistant screen it
-  is the same as Done; on the classic prompt it counts as Later (10 min)). The
-  **minimize** button (a dash) next to it minimizes the window to its taskbar
-  button; click that button (or the tray icon, or press the hotkey) to bring it
-  back. The window stays on top of other windows. On the assistant screen a
-  **speaker** button left of minimize mutes Jarvis's own voice (**Ctrl+M**; a
-  cyan speaker while he may speak, struck through in amber while muted; see
-  [Jarvis talks](#jarvis-talks)).
-- **Header.** The JARVIS wordmark with "assistant · desktop" next to it (left
-  out when the window is narrow), three service chips and the date and time,
-  such as TUE 06 OCT 1:05 PM (`[display] clock = "24h"` shows 13:05; the
-  small prompt window has room for the time only), and, with Ask Jarvis on, a
-  fourth chip on the reading screen, **claude** (see
-  [Ask Jarvis](#ask-jarvis-optional)):
-  **notion** (grey: checking, green: loaded, amber: retrying, red: error),
-  **voice** (grey: no audio yet, green: online voice, amber: offline Windows
-  voice, red: no speech could be generated) and **calendar** (green:
-  signed in to Google, amber: not signed in yet, grey: turned off or not set
-  up). Hover over a chip for details; the calendar chip also says how many
-  proposals need your OK. The assistant screen has the hologram's own header
-  instead (see below): there a service that is not OK shows as its name with
+- **Frameless window.** The header is the title bar: drag it to move the
+  window. At its left the J.A.R.V.I.S. wordmark and the **state word** with its
+  dot: STANDBY, LISTENING, THINKING, SPEAKING, NEEDS YOU (amber), PAUSED,
+  MUTED, OFFLINE VOICE, QUIET HOURS UNTIL 8:00 AM (steel), WAITING FOR THE AM
+  BRIEFING. At its right the **clock** (time and date, such as 9:51 AM over
+  MON 12 OCT; `[display] clock = "24h"` shows 21:51), which opens the Day
+  view; the **mute** button (**Ctrl+M**; pressed, struck through and steel
+  while Jarvis's own voice is muted; see [Jarvis talks](#jarvis-talks));
+  **minimize** (the window goes to its taskbar button; click that button, the
+  tray icon or press the hotkey to bring it back); and **close**, which is the
+  same as Done. The window stays on top of other windows.
+- **Services in the header.** A service that is not OK shows as its name with
   a dot after the state word (**NOTION**, **VOICE**, **CALENDAR**, **CLAUDE**;
-  steel for amber above, coral for red), with the chip's text as its tooltip;
-  nothing shows while every service is fine.
-- **The orb** shows what the app is doing, with the state written next to it:
-  WAITING ON YOU (amber), WORKING (cyan, while the briefing loads or the reading
-  waits for its audio), SPEAKING (pink, while reading), STANDBY (grey: paused,
-  finished, or something went wrong). It is animated only while the window is
-  visible and not minimized.
+  steel while it may pass, coral for an error), with the details as its
+  tooltip; nothing shows while every service is fine, and nothing shows twice:
+  the Windows voice is the OFFLINE VOICE state, and a briefing that could not
+  load or Claude Code not signed in are error tiles (see [States](#states)).
+  The small classic prompt keeps its earlier header with three chips instead:
+  **notion** (grey: checking, green: loaded, amber: retrying, red: error),
+  **voice** (grey: no audio yet, green: online voice, amber: the Windows
+  voice, red: no speech could be generated) and **calendar** (green: signed in
+  to Google, amber: not signed in yet, grey: turned off or not set up).
+- **The orb** in the middle of Home shows the same state as the header word:
+  it breathes at rest, draws in while you type, races while Jarvis thinks,
+  pulses with his voice, shows an amber arc while something waits for you,
+  turns steel and struck through while muted, flat with a broken outer track on
+  the Windows voice, dim with one slow scanner while he waits for a briefing,
+  and at 70 % in quiet hours. A failure never turns it red: the failure is a
+  tile beside it. It moves only while the window is visible and not minimized
+  (and not while the PC is locked), and slower after two quiet minutes.
 
 ## Using it
 
@@ -920,61 +926,77 @@ greeting was more than 2 minutes ago. Without sound (muted, `[assistant]
 speak = false`, no voice available) the same words are shown in the JARVIS
 tab; `[assistant] greet = false` turns the greeting off.
 
-**The Dock and the screens (the hologram).** A narrow rail of glyphs on the
-window's left edge, the Dock, opens the screens (hover a glyph, or Tab to it,
-for its name and shortcut; Up / Down move along it):
+**The Dock and the screens.** A narrow rail of glyphs on the window's left
+edge, the Dock, opens the screens (hover a glyph, or Tab to it, for its name
+and shortcut; Up / Down move along it). The keyboard: **Ctrl+1** .. **Ctrl+6**
+and **Ctrl+,** open the screens below, **Ctrl+Space** opens Home with the
+command bar ready (while Ask Jarvis is on), **Ctrl+M** mutes Jarvis's own
+voice, **Space** plays or pauses the briefing and **Esc** closes a drawer or a
+list.
 
 - **Home** (**Ctrl+1**; the Dock's glyph is Jarvis's small orb) is Jarvis
-  himself: the large orb in the middle shows what he is doing (STANDBY,
-  LISTENING while you type, THINKING while an Ask, a plan or a brief runs,
-  SPEAKING, NEEDS YOU while something waits for your decision, MUTED, OFFLINE
-  VOICE, WAITING FOR THE AM BRIEFING), the same word sits in the header beside
-  J.A.R.V.I.S., and what he says appears under the orb a few words at a time.
-  Below them: one quiet chip and the command bar (**Ctrl+Space** from any
-  screen). The chip is, first that applies: an offer waiting for your answer
-  (**Plan my day** or **Prepare brief** in amber; it opens the Transcript at
-  the offer, whose link does the work, and the offer's question stays under
-  the orb until you answer or it expires), the plan or brief just made
-  (**Plan ready** / **Brief ready** in cyan; it opens the Transcript there),
-  **Briefing ready** in cyan while a briefing is new, else **2 need your OK**
-  in amber. A request you type plays out on Home: your words under the orb,
-  THINKING with a short line of what he is doing, then his answer a few words
-  at a time; the send arrow is the stop button meanwhile (or Esc). LIVE keeps
-  every step behind its Dock dot. After two quiet minutes the orb breathes
-  slower to save power; a key, a click or anything he does wakes it at once.
-- **Transcript** (the speech-bubble button at Home's bottom left) is this
-  session's conversation, as the JARVIS tab was: the greeting, "Your AM
-  briefing is ready to view." with a **View briefing** link, your Ask requests
-  and Jarvis's whole answers, offers and briefs with their links. A cyan dot on
-  the button says something new came while it was closed. Run counts, seconds
-  and sizes are left out here; LIVE keeps them.
+  himself: the large orb in the middle shows what he is doing, the same word
+  sits in the header, and what he says appears under the orb a few words at a
+  time (at most 14 words a page). Below them: one quiet
+  chip and the command bar (**Ctrl+Space** from any screen). The chip is, first
+  that applies: the plan or brief just made (**Plan ready** / **Brief ready**
+  in cyan; it opens it again), **Briefing ready** in cyan while a briefing is
+  new, else **2 need your OK** in amber. A request you type plays out on Home:
+  your words under the orb, THINKING with a short line of what he is doing,
+  then his answer a few words at a time; the send arrow is the stop button
+  meanwhile (or Esc). LIVE keeps every step behind its Dock dot.
+- **Offers are tiles.** An offer (see
+  [Offers: plan my day and prepare brief](#offers-plan-my-day-and-prepare-brief))
+  is ONE amber tile beside the orb with **Not now** and its commit (**Plan my
+  day** / **Prepare brief**), and its question stays under the orb until you
+  answer or it expires. The tile's commit does exactly what the offer's link in
+  the Transcript does, and nothing is read or run before that click; **Not now**
+  only puts it away on Home. An offer never acts by itself.
+- **Transcript** (the speech-bubble button at Home's bottom left) slides in
+  from the right with this session's whole conversation: the greeting, "Your
+  AM briefing is ready to view." with a **View briefing** link, your requests
+  and Jarvis's whole answers, the plan and the brief in full, offers with their
+  links (Undo, Plan my day, Prepare brief, Remember this, See every step). A
+  cyan dot on the button says something new came while it was closed; Esc or
+  its close button closes it. Run counts, seconds and sizes are left out here;
+  LIVE keeps them.
 - **The clock** in the header opens the **Day view**: TODAY / TOMORROW and
   DEADLINES. Esc closes it.
-- **Briefing** (**Ctrl+2**) is the briefing's text with **Play**, **Skip
-  section**, **Read everything**, **Open in Notion** and **Done**, STATUS,
-  chips for the current section and its neighbours, **SECTIONS**, and the line
-  being spoken marked while it plays.
+- **Briefing** (**Ctrl+2**; a cyan dot while a briefing is NEW) is the briefing
+  as one calm screen: the small orb, the line being read in large type with
+  the line before it, a track with one segment per section (click one to play
+  from there; **Sections** lists them) and **Read everything**, **Play** /
+  **Pause** / **Replay** / **Retry**, **Skip section** and **Open in Notion**.
 - **Approvals** (**Ctrl+3**, an amber count on its glyph) holds the NEEDS YOUR
-  OK cards: countdowns, Undo, Edit and the rest work as before. A card's undo
+  OK cards, the one that waits first, with the queue beside it. A card's undo
   countdown keeps running when you go to another screen (to ask something,
   say): the header then shows it, SENDING IN 7 S in amber, with its own
-  **Undo**. Minimizing still stops it (nothing is sent).
+  **Undo**. Minimizing still stops it (nothing is sent). A NEW RECIPIENT is
+  ticked right on its card (**Send to <address>**): Send stays disabled until
+  it is ticked ("Tick dana@example.com first, then Send.").
 - **Live** (**Ctrl+4**) shows every step Jarvis takes, as it happens, with
-  ACTIVITY beside it (see [LIVE: watch Jarvis work](#live-watch-jarvis-work)).
+  ACTIVITY under it (see [LIVE: watch Jarvis work](#live-watch-jarvis-work)).
 - **Memory** (**Ctrl+5**; a cyan dot while a suggested note waits, or after a
-  note was saved) and **Follow-ups** (**Ctrl+6**) show only while the
-  productivity bundle and its memory / follow-ups are on (see
-  [Memory (the MEMORY tab)](#memory-the-memory-tab)).
-- **Settings** (**Ctrl+,**) says where the settings live and opens
-  `config.toml` or the data folder; nothing there changes a setting.
+  note was saved) and **Follow-ups** (**Ctrl+6**; an amber count while threads
+  wait on you) show only while the productivity bundle and its memory /
+  follow-ups are on (see [Memory (the MEMORY tab)](#memory-the-memory-tab) and
+  [Follow-ups and nudges](#follow-ups-and-nudges)); with the bundle off they
+  are not there at all.
+- **Settings** (**Ctrl+,**) is read only: it shows the settings as Jarvis
+  loaded them (Voice, Briefing times, Ask, Accounts, Quiet hours, LIVE and
+  privacy), says which `config.toml` tables hold them and opens `config.toml`
+  or the data folder. Every setting lives in `config.toml` (secrets in `.env`);
+  change it there and restart Jarvis. Nothing on this screen changes a
+  setting, and it never shows a secret, a token or an email address.
 
 Elsewhere in this README "the JARVIS tab" means Home's Transcript, "the
-BRIEFING / LIVE / MEMORY tab" the screen of that name.
+BRIEFING / LIVE / MEMORY tab" the screen of that name and "the NEEDS YOUR OK
+column" the Approvals screen.
 
 **NEW.** A briefing nobody has looked at yet is NEW: a cyan dot on the Dock's
 Briefing glyph, **Briefing ready** on Home, "Your AM briefing is ready to view"
-under the Briefing screen's orb while nothing is spoken, "new" before the
-Updated time in STATUS and "Jarvis: AM briefing ready to view" on the tray
+under the Briefing screen's orb while nothing is spoken, a cyan NEW badge on
+the Briefing screen and "Jarvis: AM briefing ready to view" on the tray
 icon. It is viewed once the Briefing screen is open while the window is
 active, or as soon as it plays (**Play** switches to Briefing). A briefing more
 than 18 hours old, a page without an "Updated:" line and a setup error are
@@ -1044,46 +1066,28 @@ were typing elsewhere at that moment cannot press one.
   for Show briefing and Dismiss (Quit while reading).
 
 **The assistant screen.** A larger window (about 1120 x 700, resizable down to
-900 x 600; on a smaller screen it fits the screen) with three columns:
-
-- **Left: STATUS, TODAY and DEADLINES.** STATUS shows Progress (sections
-  played of all), Voice (online, or offline for the Windows voice), Updated,
-  and Needs your OK (how many proposals wait for a decision). Below it, one
-  panel lists the day's calendar events and then what is due soon (see
-  [TODAY and DEADLINES](#today-and-deadlines)); it scrolls when it does not fit.
-- **Middle: Jarvis and the briefing.** The orb and its state, the sentence being
-  spoken in large type, the command bar (with Ask Jarvis on), the buttons and
-  the JARVIS / BRIEFING / LIVE tabs. Below them is the panel: on JARVIS the
-  conversation (its strip says CONVERSATION · THIS SESSION); on BRIEFING chips
-  for the current section and its neighbours, a **SECTIONS** button, and the
-  briefing text with the line being spoken marked by a glowing cyan bar; on LIVE
-  every step Jarvis takes. A blinking LIVE marker shows while the briefing
-  plays, on JARVIS and BRIEFING (the LIVE tab shows its own WORKING / SENDING IN
-  tag there instead). The text
-  scrolls along unless you just scrolled yourself. **SECTIONS** opens the list
-  of the briefing's sections: played ones
-  green, the current one cyan, upcoming ones dim, and the Ignore section grey
-  with "not read". Click a section to jump there (the Ignore section after
-  **Read everything**); a click outside the list or Esc closes it.
-- **Right: NEEDS YOUR OK and ACTIVITY.** The proposals (see
-  [Calendar actions](#calendar-actions) and
-  [Other proposals](#other-proposals-replies-invites-to-dos-and-links)) and a log
-  of what the app did, newest first: fetched the briefing, prepared the audio,
-  read a section, Google sign-in, event added, text copied.
+900 x 600; on a smaller screen it fits the screen): the Dock at the left edge,
+the header on top and the current screen in the middle (see
+[The Dock and the screens](#using-it) above). The day's calendar events and
+what is due soon are in the Day view (the header clock; see
+[TODAY and DEADLINES](#today-and-deadlines)), the proposals on Approvals (see
+[Calendar actions](#calendar-actions) and
+[Other proposals](#other-proposals-replies-invites-to-dos-and-links)), and a
+log of what the app did (fetched the briefing, prepared the audio, read a
+section, Google sign-in, event added, text copied) is ACTIVITY on Live.
 
 Buttons:
 
 - **Pause / Play** (Space does the same, unless you moved the keyboard focus to a
   button with Tab: then Space presses that button). It becomes **Replay** at the
   end, and **Retry** if the page could not be loaded (Retry fetches the page
-  again right away). Play, Replay, a section and Read everything on the JARVIS
-  or LIVE tab switch to BRIEFING.
+  again right away; Home shows the same Retry on its error tile). Play, Replay,
+  a section and Read everything from another screen switch to Briefing.
 - **Skip section** jumps to the next section.
 - **Read everything** also reads the Ignore section (shown dimmed with "(not read
   aloud)" until then). It is disabled when the page has no Ignore section.
 - **Open in Notion** opens the page's notion.so link.
-- **Done** closes the app. Closing the window with the X in its header is the
-  same as Done.
+- **Done** is the header's close button: it closes the app.
 
 Minimizing the reading screen (the minimize button in its header) keeps the
 briefing playing; TODAY waits until the window is visible again. An undo
@@ -1093,8 +1097,57 @@ and the activity log says "Undone". Click the window's taskbar button, the tray
 icon or press the hotkey to bring it back.
 
 If the speech for a section could not be generated, that section is skipped: its
-row in SECTIONS says "no audio", and the STATUS panel and the activity log say
-so.
+row in SECTIONS says "no audio", and the Briefing screen's line and ACTIVITY
+say so.
+
+### States
+
+The few states Jarvis can be in each have one look (none of them acts by
+itself, and none adds a new moment when he speaks or shows something):
+
+- **Waiting for the briefing.** While Jarvis waits for a scheduled briefing
+  with the window open (you opened him while the AM run was still checking
+  Notion, or a newer run is due), the orb dims and turns one slow scanner, the
+  header says WAITING FOR THE AM BRIEFING, Home says "Checking for your AM
+  briefing, sir." and, quietly under it, when he checks (EVERY MINUTE · UNTIL
+  10:27 AM). It ends when the briefing lands.
+- **The toast.** When the briefing is announced while you are in another app
+  (the window came up without the focus, or is minimized), and when a prep
+  offer flashes the taskbar button, Jarvis also shows his own small window at
+  the bottom right of the screen: the small orb, one line ("Your AM briefing is
+  ready, sir." / "Project Development check-in in 15 minutes, sir.") and ONE
+  button. It never takes the focus (what you type keeps going where it went),
+  it is not a Windows notification (nothing lands in Windows' notification
+  history), it hides after 8 seconds (pointing at it pauses that) and it is
+  posted nowhere else. **View** opens the Briefing screen; **Prepare brief**
+  opens Home with the offer's tile, which still needs its own click: the toast
+  never reads, prepares or sends anything.
+- **Offline voice.** When the online voice cannot be reached and the Windows
+  voice speaks instead (see [Offline fallback](#offline-fallback)), the header
+  says OFFLINE VOICE (steel), the orb's core goes flat with a broken outer
+  track, Home says "My usual voice is out of reach, sir. I'll keep trying." and
+  a steel **WINDOWS VOICE** badge sits under it. It ends when the usual voice
+  is back.
+- **Muted.** **Ctrl+M** or the header's mute button: the orb turns steel and
+  struck through, the mute button stays pressed, the header says MUTED, and
+  everything Jarvis would say appears as text only (captions at a reading
+  pace); offers still appear as their tile, never spoken.
+- **Quiet hours.** With the productivity bundle on, between `[productivity]
+  quiet_from` and `quiet_until` (22:00-08:00) the header says QUIET HOURS
+  UNTIL 8:00 AM, the resting orb is dimmed to 70 % and offers appear as their
+  tile without being said (as before: unmuting or the end of quiet hours never
+  brings a late sentence).
+- **Errors are tiles.** A failure the app reports is ONE tile beside the orb
+  (an offer's tile goes first), with one sentence and one button, and the orb
+  shows NEEDS YOU, never red:
+  - "Couldn't load your briefing." **Retry** loads it again, exactly as the
+    Briefing screen's Retry.
+  - "Claude Code isn't signed in." **How to fix** shows the sign-in help in
+    the tile (`claude auth login --claudeai`); nothing is run.
+  - "Gmail refused the reply." **Retry** only opens that same card on
+    Approvals. Nothing is sent from the tile: the card's own Retry starts its
+    undo countdown again, with its Undo, as every Send does. The tile goes when
+    the card is no longer failed.
 
 ### Jarvis talks
 
@@ -1199,8 +1252,8 @@ drops the greeting, and `address` changes "sir" (see
 
 ### LIVE: watch Jarvis work
 
-The third tab over the centre panel, **LIVE** (next to JARVIS and BRIEFING,
-**Ctrl+3**), shows every step Jarvis takes, as it happens, so you can check
+The **Live** screen (the Dock, **Ctrl+4**) shows every step Jarvis takes, as
+it happens, so you can check
 that he does only what he should and has the right context. It only shows: it
 never approves, sends, retries or changes anything. Each piece of work is a
 card, newest at the bottom:
@@ -1635,8 +1688,8 @@ spoken, saved or logged.
   never repeating what another guest wrote in another thread read for the
   brief (a whole line of theirs, or 7 of its words in a row: "This draft
   repeats mail from another thread, so Jarvis holds it back"). Every
-  recipient is a NEW RECIPIENT you tick in Edit unless Jarvis wrote to them
-  before. Change a draft with **Edit**, not Deny.
+  recipient is a NEW RECIPIENT you tick on the card unless Jarvis wrote to
+  them before. Change a draft with **Edit**, not Deny.
 - **Spoken**: the meeting's time only (see [Jarvis talks](#jarvis-talks)).
   LIVE opened by the brief gives way to the JARVIS tab when the brief arrives,
   unless you changed tabs meanwhile.
@@ -1916,7 +1969,7 @@ delete the file and restart Jarvis.
 
 ## TODAY and DEADLINES
 
-The left column of the reading screen shows your day next to the briefing.
+The **Day view** (click the header clock; Esc closes it) shows your day.
 
 **TODAY** lists the events on your Google Calendar for today; from 18:00 on it
 says **TOMORROW** and lists tomorrow's (`[agenda] evening_from_hour`). Each row
@@ -2049,10 +2102,11 @@ decide in Jarvis:
   each one, for example "Two calendar invites need your OK. Project sync, Friday
   October 9, 3 to 4 PM, weekly until December 11. ... Approve or deny them on the
   right." Only proposals you have not decided yet are mentioned.
-- Every proposal is a card in the amber **NEEDS YOUR OK** column of the reading
-  screen: the kind (CALENDAR), the title and the details, such as
+- Every proposal is a card on the **Approvals** screen (NEEDS YOUR OK): the
+  kind (CALENDAR), the title and the details, such as
   "Fri Oct 9 · 3:00-4:00 PM · weekly until Dec 11". The prompt's amber chip,
-  the STATUS panel and the column title ("2 PENDING") show how many are waiting.
+  the amber count on the Dock's Approvals glyph and Home's chip show how many
+  are waiting.
 - **Approve** adds the event to Google Calendar. **Deny** dismisses it. Nothing is
   ever created without Approve; Deny, or not deciding at all, never contacts
   Google.
@@ -2390,9 +2444,11 @@ what is next:
    says "This would send to the personal account (ana@example.edu) itself -
    edit the recipients", and the click only says so again (no dialog, no
    countdown). Open **Edit** and **Remove** that address.
-3. While a red NEW RECIPIENT is not confirmed, the click opens **Edit**, with a
-   `Send to <address>` tick under each new address. Tick the ones you mean (or
-   remove the others) and **Save**; the badge then reads "NEW · CONFIRMED".
+3. While a red NEW RECIPIENT is not ticked, **Send** stays disabled and the
+   card says "Tick dana@example.com first, then Send.": tick `Send to
+   <address>` right on the card under each new address you mean (or remove
+   the others in **Edit**); the badge then reads "NEW · CONFIRMED" and Send
+   works. A click on the disabled Send only points at the boxes.
 4. When the card does not show all of the message (more than its ten lines,
    counting a long paragraph as the lines it wraps into, or a subject cut at
    two lines), the click opens **Edit** first, with the whole subject and
@@ -2459,7 +2515,7 @@ extra confirmation only when it is
   default; for example `["example.edu"]`), or
 - an address Jarvis sent to before, from any account.
 
-Every other address needs its tick in Edit before Send. Addresses are compared
+Every other address needs its tick on the card before Send. Addresses are compared
 as plain addresses: a display name ("Ana Lima <...>") is dropped and never
 decides who someone is. Jarvis remembers whom it sent to in
 `%LOCALAPPDATA%\briefing-reader\recipients.json`, as a one-way hash of each
@@ -3188,7 +3244,7 @@ log. Changes apply the next time the app starts.
 | `[actions] heading` | `"Proposed actions"` | The heading the proposals are under: one name, or a list such as `["Proposed actions", "Actions"]`. Matching ignores case and a trailing count. |
 | `[actions] link_hosts` | `[]` | Extra web hosts a card's **Open** may open, besides the built-in Google (mail, docs, drive, calendar, meet), Slack (`*.slack.com`) and Canvas (`*.instructure.com`) hosts: an exact name such as `"forms.example.edu"`, or `"*.example.edu"` for every subdomain. https only; an entry that is not a host name is skipped with a warning. Web research cards do not use this list: they follow the web rule (any public https site; see [Web research](#web-research)). |
 | `[actions] undo_seconds` | `10` | Seconds between a click on Approve / Add block / Accept / Decline / Maybe / Move / Cancel event / Send and the call to Google (3-60). Undo works until then and sends nothing. |
-| `[actions] trusted_domains` | `[]` | Email recipient domains that do not get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). An Ask recipient you did not type yourself is the exception: it is new even in these domains. Any other address must be one Jarvis sent to before, or Send asks you to confirm it in Edit first; the sending account's own address is never sent to (see [Replies and emails](#replies-and-emails)). |
+| `[actions] trusted_domains` | `[]` | Email recipient domains that do not get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). An Ask recipient you did not type yourself is the exception: it is new even in these domains. Any other address must be one Jarvis sent to before, or ticked on its card before Send; the sending account's own address is never sent to (see [Replies and emails](#replies-and-emails)). |
 | `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in, and its first sign-in binds the name to it in `accounts.json` (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
 | `[accounts.<name>] backend` | `"google"` | Who carries out the account's actions. Only `"google"` (your own OAuth client) works in this version; `"composio"` is accepted but its cards say "Composio is not built into this version". |
 | `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send", "gmail_read"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b); `"gmail_read"` lets Ask Jarvis read the threads a request is about, and a [meeting brief](#meeting-prep) your latest thread with each guest of the last 14 days (read only, never used to send; step 8c). Adding a feature means one new Google sign-in for that account. `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
@@ -3228,7 +3284,7 @@ log. Changes apply the next time the app starts.
 | `[assistant] speak_replies` | `true` | Speak Ask's answers (and a short "One moment, sir" while it plans). |
 | `[assistant] speak_results` | `true` | Speak what happened after an approved card was carried out ("Done, sir - ..."). |
 | `[assistant] scheduled_prompt` | `false` | `true`: the scheduled runs and the catch-up show the classic "Hear it now?" prompt (with Later and Read now) instead of announcing the briefing. |
-| `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY, STATUS and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
+| `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
 | `[live] enabled` | `true` | The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)): every step Jarvis takes for an Ask or a card you approved, on screen only. `false`: no LIVE tab, nothing recorded. |
 | `[live] auto_open` | `"tab"` | When Jarvis starts on an Ask or an approved card: `"tab"` brings up the LIVE tab (not for a request typed on Home, not for a card approved on Approvals, not while the briefing plays, not when the window is hidden or minimized), `"window"` shows the LIVE pop-out window without taking the focus, `"off"` never switches. `true` / `false` mean `"tab"` / `"off"`. |
 | `[live] background` | `true` | Also show the reads Jarvis does on his own (agenda, event checks, sign-ins, Claude Code checks) in one compact LIVE row. The productivity bundle's own reads and offers have a row of their own that is always shown. |
@@ -3346,8 +3402,8 @@ needs VLC installed separately.
 edge-tts uses Microsoft's online read-aloud service: it needs internet but no
 account, key or payment. If it fails (for example offline), the section is
 spoken with a Windows built-in voice through pyttsx3 (SAPI). The prompt then
-says "Audio ready (offline voice)", the voice chip in the header turns amber and
-the STATUS panel shows Voice as offline. After a failure the app stays on the
+says "Audio ready (offline voice)" and the assistant screen shows the OFFLINE
+VOICE state (see [States](#states)). After a failure the app stays on the
 offline voice for 2 minutes, then tries edge-tts again. With the offline voice
 the highlight is estimated from the text length instead of word timings, so it
 is less exact.
@@ -4141,12 +4197,13 @@ they are quoted here in normal case, and the log has the same text)
   from your own app. Use Copy (and Open), and remove `"gmail_send"` from that
   account's features so its sign-in asks for the calendar only.
 - **A red NEW RECIPIENT badge**: Jarvis has not sent to that address before.
-  Check it is right, tick `Send to <address>` in Edit, Save, then click Send. To
-  trust a whole domain, add it to `[actions] trusted_domains`.
-- **Send opens Edit instead of counting down**: a new recipient is not ticked
-  yet, or the card does not show all of the message (or its subject) and the
-  dialog has not shown this text to its end yet; the card's note says which.
-  Scroll the dialog to its end, close it, then click Send again.
+  Check it is right, tick `Send to <address>` on the card (Send stays disabled
+  until then), then click Send. To trust a whole domain, add it to
+  `[actions] trusted_domains`.
+- **Send opens Edit instead of counting down**: the card does not show all of
+  the message (or its subject) and the dialog has not shown this text to its
+  end yet; the card's note says so. Scroll the dialog to its end, close it,
+  then click Send again.
 - **"UNKNOWN: CHECK SENT MAIL BEFORE RETRYING"**: the message may or may not
   have gone out. Look in that account's Sent mail, then click Retry or Deny.
   Nothing is ever sent again by itself.

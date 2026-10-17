@@ -45,6 +45,7 @@ OrbWidget(px=HERO)
     square (the halo overflows the orb's box). ``set_ground(fn)`` paints the window ground under the
     orb (``fn(painter, widget)``) and makes the widget opaque, so a frame never repaints the parent.
     ``set_phase(seconds | None)`` freezes the motion (screenshots); ``settle()`` ends transitions.
+    ``set_dim(level)`` draws the whole orb at ``level`` of its strength (quiet hours: 0.7), ``dim()``.
     ``is_animating()``, ``frame_interval()``, ``detail()`` (``"full"`` / ``"compact"``),
     ``sample(now=None) -> OrbFrame`` (the computed values, for tests), ``paint_times()``.
     Accessible name "Jarvis, <state>" (e.g. "Jarvis, needs you").
@@ -1206,6 +1207,7 @@ class OrbWidget(_OrbBase):
         self._tw["voice"] = _Tween(0.0)
         self._tw["pace"] = _Tween(DEEP_PACE if frame_clock().deep() else 1.0)
         self._lag = 0.0                     # seconds the motion fell behind the clock in deep idle
+        self._dim = 1.0                     # quiet hours: the idle orb at 70 % (set_dim)
         self._ink = _Fade(targets.ink)
         self._halo_look = _Fade((targets.halo_color, targets.halo_a, targets.halo_b))
         self._core_look = _Fade(targets.core)
@@ -1260,6 +1262,17 @@ class OrbWidget(_OrbBase):
         self._layer = None
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, painter_fn is not None)
         self.update()
+
+    def set_dim(self, level: float) -> None:
+        """Draw the whole orb at ``level`` (0..1) of its strength over the ground: quiet hours dim the idle
+        orb to 0.7 (HOLOGRAM_SPEC 16.7); 1 is the orb as it is."""
+        level = max(0.0, min(1.0, float(level)))
+        if level != self._dim:
+            self._dim = level
+            self.update()
+
+    def dim(self) -> float:
+        return self._dim
 
     def set_level(self, level: float | None) -> None:
         """The voice envelope 0..1 now (about 30 Hz while speaking); None returns to the synthetic curve."""
@@ -1491,6 +1504,8 @@ class OrbWidget(_OrbBase):
         painter = QPainter(self)
         try:
             self._paint(painter, frame)
+            if self._dim < 1.0:
+                self._paint_dim(painter)
         finally:
             painter.end()
         if self.is_animating():
@@ -1498,6 +1513,17 @@ class OrbWidget(_OrbBase):
                 self._paint_ms.append((time.perf_counter() - started) * 1000.0)
             self._maybe_degrade()
             self._sync()          # the rate follows the look (transitions run at 30 fps, then drop)
+
+    def _paint_dim(self, painter: QPainter) -> None:
+        """The orb at ``dim`` of its strength: the ground (or the void) laid over it at the rest, so where no
+        orb is drawn nothing changes."""
+        painter.resetTransform()
+        painter.setOpacity(1.0 - self._dim)
+        if self._ground is not None:
+            self._ground(painter, self)
+        else:
+            painter.fillRect(self.rect(), QColor(holo.VOID))
+        painter.setOpacity(1.0)
 
     @staticmethod
     def _paint_frame(painter: QPainter, f: OrbFrame, lod: _Lod, color: Callable[[float], QColor],

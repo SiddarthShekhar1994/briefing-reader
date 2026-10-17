@@ -389,7 +389,7 @@ class HomeWindowTests(unittest.TestCase):
         self.assertTrue(reading.day_drawer.is_open())
         self.assertTrue(reading.agenda_panel.isVisible())
         self.assertEqual(reading.agenda_panel.mode(), hud.AGENDA_DAY)
-        self.assertFalse(reading.agenda_panel.followups_section().isVisible())
+        self.assertFalse(hasattr(reading.agenda_panel, "set_followups"))   # FOLLOW-UPS is its own screen
         reading.set_tab(ui.SCREEN_HOME)                               # another screen closes it
         wait(holo.DRAWER_OUT_MS + 80)
         self.assertFalse(reading.day_drawer.isVisible())

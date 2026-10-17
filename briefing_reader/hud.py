@@ -3443,7 +3443,6 @@ class DeadlineRow(QWidget):
 FOLLOWUP_WAITING, FOLLOWUP_OWED = "waiting", "owed"
 FOLLOWUP_DRAFT_WAITING = "draft_waiting"   # a Reply card for its thread waits under NEEDS YOUR OK (R31)
 FOLLOWUP_CHECKING = "checking"             # its headers are read again after a reply was sent (R47)
-_FOLLOWUP_BARS = {FOLLOWUP_WAITING: AMBER, FOLLOWUP_OWED: ACCENT}
 
 
 @dataclass(frozen=True)
@@ -3478,120 +3477,8 @@ class FollowupsInfo:
     owed_label: str = "OWED TO YOU"
 
 
-class FollowupRow(QAbstractButton):
-    """A follow-up: a 3 px bar (amber: waiting on you; cyan: owed to you), who and the age on the first
-    line (a dim state tag after the age), the subject dim and elided under it. Focusable with Tab; a
-    click, Space or Enter emits ``activated(row_id)``. Never painted as HTML."""
-
-    activated = Signal(str)
-    HEIGHT = 42
-    _PAD = 8
-    _GAP = 10
-
-    def __init__(self, info: FollowupRowInfo, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setFixedHeight(self.HEIGHT)
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self._who_font = body_font(13)
-        self._age_font = mono_font(11)
-        self._tag_font = mono_font(10, 400, 0.06)
-        self._subject_font = body_font(12)
-        self._focus_visible = False
-        self._info = info
-        self.clicked.connect(lambda: self.activated.emit(self._info.row_id))
-        self.set_info(info)
-
-    def info(self) -> FollowupRowInfo:
-        return self._info
-
-    def set_info(self, info: FollowupRowInfo) -> None:
-        self._info = info
-        words = [info.who, info.age, info.state_text, info.subject]
-        self.setAccessibleName(", ".join(word for word in words if word))
-        self.setToolTip(plain_tooltip(info.tooltip or info.subject))
-        self.update()
-
-    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(220, self.HEIGHT)
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(120, self.HEIGHT)
-
-    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.click()
-            return
-        super().keyPressEvent(event)
-
-    def focusInEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        self._focus_visible = _focus_ring_after(event.reason(), self._focus_visible)
-        super().focusInEvent(event)
-        self.update()
-
-    def focusOutEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        super().focusOutEvent(event)
-        self.update()
-
-    def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        super().enterEvent(event)
-        self.update()
-
-    def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        super().leaveEvent(event)
-        self.update()
-
-    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
-        info = self._info
-        bar = _FOLLOWUP_BARS.get(info.kind, ACCENT)
-        painter = QPainter(self)
-        try:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            rect = QRectF(self.rect())
-            if self.underMouse() and self.isEnabled():
-                painter.fillRect(rect, rgba(bar, 0.06))
-            painter.fillRect(QRectF(self._PAD, round((rect.height() - 30) / 2), 3, 30), QColor(bar))
-            left = self._PAD + 3 + self._GAP
-            width = rect.width() - left - 6
-            who_metrics, sub_metrics = QFontMetricsF(self._who_font), QFontMetricsF(self._subject_font)
-            top = round((rect.height() - who_metrics.height() - sub_metrics.height()) / 2)
-            right = rect.width() - 6
-            age_metrics = QFontMetricsF(self._age_font)
-            painter.setFont(self._age_font)
-            painter.setPen(QColor(TEXT_SOFT))
-            age_width = age_metrics.horizontalAdvance(info.age)
-            painter.drawText(QPointF(right - age_width, top + who_metrics.ascent()), info.age)
-            right -= age_width + (8 if info.age else 0)
-            if info.state_text:
-                tag_metrics = QFontMetricsF(self._tag_font)
-                # The tag gets what the name leaves (at least half the line); the name is elided after it.
-                room = max((right - left) * 0.5, right - left - who_metrics.horizontalAdvance(info.who) - 8)
-                tag = _elide(tag_metrics, info.state_text.upper(), max(0.0, room))
-                painter.setFont(self._tag_font)
-                painter.setPen(QColor(TEXT_DIM))
-                tag_width = tag_metrics.horizontalAdvance(tag)
-                painter.drawText(QPointF(right - tag_width, top + who_metrics.ascent()), tag)
-                right -= tag_width + 8
-            painter.setFont(self._who_font)
-            painter.setPen(QColor(TEXT_BODY if self.isEnabled() else TEXT_DIM))
-            painter.drawText(QPointF(left, top + who_metrics.ascent()), _elide(who_metrics, info.who, right - left))
-            painter.setFont(self._subject_font)
-            painter.setPen(QColor(TEXT_DIM))
-            painter.drawText(QPointF(left, top + who_metrics.height() + sub_metrics.ascent()),
-                             _elide(sub_metrics, info.subject, width))
-            if self.hasFocus() and self._focus_visible:
-                painter.setPen(QPen(QColor(ACCENT), 2))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRect(rect.adjusted(1, 1, -1, -1))
-        finally:
-            painter.end()
-
-
 AGENDA_ALL = "all"
-AGENDA_DAY = "day"              # TODAY / DEADLINES only (the hologram's Day view)
-AGENDA_FOLLOWUPS = "followups"  # FOLLOW-UPS only (the hologram's Follow-ups screen)
+AGENDA_DAY = "day"              # TODAY / DEADLINES (the hologram's Day view)
 
 
 class AgendaPanel(ChamferPanel):
@@ -3602,17 +3489,11 @@ class AgendaPanel(ChamferPanel):
     instead, with an optional link button (``link_button``, ``linkClicked``).
     ``set_deadlines(rows, empty_text)`` and ``set_deadlines_meta(text)`` fill
     the DEADLINES part. Row widgets are reused, so a refresh does not flicker.
-    ``set_followups(info)`` fills the FOLLOW-UPS section under DEADLINES (None hides it): its rows
-    emit ``followupActivated(row_id)``, its fix lines' links ``followupsLinkClicked(link_id)`` and its
-    "..." button ``followupsMenuRequested()``. ``set_mode(AGENDA_ALL | AGENDA_DAY | AGENDA_FOLLOWUPS)``
-    shows everything, only TODAY / DEADLINES (the hologram's Day view) or only FOLLOW-UPS (its
-    Follow-ups screen, without the panel's TODAY title); the content is kept either way.
+    ``set_mode(AGENDA_DAY)`` names the hologram's Day view (the panel lives in its drawer; the FOLLOW-UPS
+    section moved to the Follow-ups screen in round 2).
     """
 
     linkClicked = Signal()
-    followupActivated = Signal(str)
-    followupsLinkClicked = Signal(str)
-    followupsMenuRequested = Signal()
     EVENT_GAP = 4
 
     def __init__(self, title: str = "Today", parent: QWidget | None = None) -> None:
@@ -3645,27 +3526,16 @@ class AgendaPanel(ChamferPanel):
         agenda.addSpacing(2)
         agenda.addLayout(self._deadline_layout)
         agenda.addWidget(self.deadlines_empty)
-        self._followups_part = QWidget()
-        part = QVBoxLayout(self._followups_part)
-        part.setContentsMargins(0, 0, 0, 0)
-        part.setSpacing(0)
-        self._followups_box = self._make_followups()
-        part.addWidget(self._followups_box)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 6, 0)   # keeps the rows off the scroll bar
         layout.setSpacing(0)
         layout.addWidget(self._agenda_box)
-        layout.addWidget(self._followups_part)
         layout.addStretch(1)
         self.body_layout.addWidget(self._scroll, 1)
 
     def set_mode(self, mode: str) -> None:
-        """AGENDA_ALL, AGENDA_DAY (TODAY / DEADLINES only) or AGENDA_FOLLOWUPS (FOLLOW-UPS only)."""
-        if mode not in (AGENDA_ALL, AGENDA_DAY, AGENDA_FOLLOWUPS):
-            mode = AGENDA_ALL
-        self._mode = mode
-        self._agenda_box.setVisible(mode != AGENDA_FOLLOWUPS)
-        self._followups_part.setVisible(mode != AGENDA_DAY)
+        """AGENDA_ALL or AGENDA_DAY (TODAY / DEADLINES: the same rows since FOLLOW-UPS left the panel)."""
+        self._mode = mode if mode in (AGENDA_ALL, AGENDA_DAY) else AGENDA_ALL
         self._sync_header()
         self._fit_metas()
 
@@ -3673,10 +3543,7 @@ class AgendaPanel(ChamferPanel):
         return self._mode
 
     def _sync_header(self) -> None:
-        if self._mode == AGENDA_FOLLOWUPS:
-            self._header.hide()
-        else:
-            self._header.setVisible(bool(self.title_label.text() or self.meta_label.text()))
+        self._header.setVisible(bool(self.title_label.text() or self.meta_label.text()))
 
     def set_title(self, text: str) -> None:
         super().set_title(text)
@@ -3713,70 +3580,6 @@ class AgendaPanel(ChamferPanel):
 
     def _on_link(self) -> None:
         self.linkClicked.emit()
-
-    def _make_followups(self) -> QWidget:
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(2)
-        header = QWidget()
-        row = QHBoxLayout(header)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        self.followups_title = make_label("FOLLOW-UPS", mono_font(11, 400, 0.16), ACCENT)
-        caps = mono_font(10, 400, 0.12)
-        caps.setCapitalization(QFont.Capitalization.AllUppercase)
-        # The meta has a line of its own under the title (a narrow column has no room beside it).
-        self.followups_meta = make_label("", caps, TEXT_DIM, wrap=True)
-        self.followups_meta.hide()
-        self.followups_menu_button = HudButton("...", LINK)
-        self.followups_menu_button.set_link_color(ACCENT)
-        self.followups_menu_button.setToolTip("Follow-ups: rescan, hidden rows, turn off on this PC")
-        self.followups_menu_button.setAccessibleName("Follow-ups menu")
-        self.followups_menu_button.clicked.connect(self.followupsMenuRequested.emit)
-        row.addWidget(self.followups_title)
-        row.addStretch(1)
-        row.addWidget(self.followups_menu_button)
-        layout.addWidget(header)
-        layout.addWidget(self.followups_meta)
-        self._followup_notes = QVBoxLayout()
-        self._followup_notes.setContentsMargins(0, 0, 0, 0)
-        self._followup_notes.setSpacing(2)
-        layout.addLayout(self._followup_notes)
-        self._note_widgets: list[QWidget] = []
-        self.followups_empty = make_label("", mono_font(11, 400, 0.02), TEXT_DIM, wrap=True)
-        self.followups_empty.hide()
-        layout.addWidget(self.followups_empty)
-        self._followup_rows: dict[str, list[FollowupRow]] = {FOLLOWUP_WAITING: [], FOLLOWUP_OWED: []}
-        self._followup_labels: dict[str, QLabel] = {}
-        self._followup_layouts: dict[str, QVBoxLayout] = {}
-        self._followup_more: dict[str, HudButton] = {}
-        self._expanded: set[str] = set()
-        for kind in (FOLLOWUP_WAITING, FOLLOWUP_OWED):
-            label = make_label("", mono_font(10, 400, 0.12), TEXT_DIM)
-            label.hide()
-            layout.addWidget(label)
-            rows = QVBoxLayout()
-            rows.setContentsMargins(0, 0, 0, 0)
-            rows.setSpacing(0)
-            layout.addLayout(rows)
-            more = HudButton("", LINK)
-            more.set_link_color(ACCENT)
-            more.hide()
-            more.clicked.connect(lambda _checked=False, which=kind: self._toggle_more(which))
-            layout.addWidget(more, 0, Qt.AlignmentFlag.AlignLeft)
-            self._followup_labels[kind], self._followup_layouts[kind], self._followup_more[kind] = label, rows, more
-        self._followups_info: FollowupsInfo | None = None
-        box.hide()
-        return box
-
-    def _toggle_more(self, kind: str) -> None:
-        if kind in self._expanded:
-            self._expanded.discard(kind)
-        else:
-            self._expanded.add(kind)
-        if self._followups_info is not None:
-            self.set_followups(self._followups_info)
 
     # ---- narrow columns -------------------------------------------------------------
 
@@ -3835,61 +3638,6 @@ class AgendaPanel(ChamferPanel):
         self.deadlines_meta.setText(text)
         self._fit_metas()
 
-    def set_followups(self, info: FollowupsInfo | None) -> None:
-        """The FOLLOW-UPS section (None hides it): the meta, the fix lines, the rows of each kind (the
-        first ``shown``, then "+N more" expanding in place) or the empty line. Rows are reused."""
-        self._followups_info = info
-        if info is None:
-            self._followups_box.hide()
-            return
-        self.followups_meta.setText(info.meta)
-        set_label_color(self.followups_meta, info.meta_color)
-        self.followups_meta.setVisible(bool(info.meta))
-        while len(self._note_widgets) > 0:
-            widget = self._note_widgets.pop()
-            self._followup_notes.removeWidget(widget)
-            widget.hide()
-            widget.deleteLater()
-        for text, link_text, link_id in info.notes:
-            line = QWidget()
-            row = QVBoxLayout(line)
-            row.setContentsMargins(0, 2, 0, 2)
-            row.setSpacing(0)
-            label = make_label(text, mono_font(11, 400, 0.02), TEXT_SOFT, wrap=True)
-            row.addWidget(label)
-            if link_text:
-                button = HudButton(link_text, LINK)
-                button.set_link_color(ACCENT)
-                button.clicked.connect(lambda _checked=False, target=link_id: self.followupsLinkClicked.emit(target))
-                row.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
-            self._followup_notes.addWidget(line)
-            self._note_widgets.append(line)
-        any_rows = bool(info.waiting or info.owed)
-        for kind, rows, label_text in ((FOLLOWUP_WAITING, info.waiting, info.waiting_label),
-                                       (FOLLOWUP_OWED, info.owed, info.owed_label)):
-            limit = len(rows) if kind in self._expanded else max(1, info.shown)
-            shown = rows[:limit]
-            _reuse_rows(self._followup_rows[kind], self._followup_layouts[kind], shown, self._followup_row)
-            label = self._followup_labels[kind]
-            label.setText(label_text)
-            label.setVisible(bool(rows))
-            more = self._followup_more[kind]
-            hidden = len(rows) - len(shown)
-            if hidden > 0:
-                more.setText(f"+{hidden} more")
-            elif kind in self._expanded and len(rows) > max(1, info.shown):
-                more.setText("Show fewer")
-            more.setVisible(hidden > 0 or (kind in self._expanded and len(rows) > max(1, info.shown)))
-        self.followups_empty.setText(info.empty_text)
-        self.followups_empty.setVisible(not any_rows and bool(info.empty_text))
-        self._followups_box.show()
-        self._fit_metas()
-
-    def _followup_row(self, info: FollowupRowInfo) -> FollowupRow:
-        row = FollowupRow(info)
-        row.activated.connect(self.followupActivated.emit)
-        return row
-
     # ---- for tests ---------------------------------------------------------------
 
     def events(self) -> list[AgendaRowInfo]:
@@ -3910,31 +3658,6 @@ class AgendaPanel(ChamferPanel):
 
     def scroll_area(self) -> QScrollArea:
         return self._scroll
-
-    def followups_visible(self) -> bool:
-        return not self._followups_box.isHidden()
-
-    def followup_rows(self) -> list[FollowupRow]:
-        return [row for kind in (FOLLOWUP_WAITING, FOLLOWUP_OWED) for row in self._followup_rows[kind]]
-
-    def followup_row(self, row_id: str) -> FollowupRow | None:
-        return next((row for row in self.followup_rows() if row.info().row_id == row_id), None)
-
-    def followup_notes(self) -> list[str]:
-        return [label.text() for widget in self._note_widgets for label in widget.findChildren(QLabel)
-                if not isinstance(label, QAbstractButton)]
-
-    def followup_more(self, kind: str) -> HudButton:
-        return self._followup_more[kind]
-
-    def followups_section(self) -> QWidget:
-        return self._followups_box
-
-    def reveal_followups(self) -> None:
-        """Scroll the panel so the FOLLOW-UPS section's header is at the top ("Show follow-ups")."""
-        if self._followups_box.isVisible():
-            self._scroll.widget().layout().activate()
-            self._scroll.verticalScrollBar().setValue(self._followups_box.y())
 
 
 def _reuse_rows(rows: list, layout: QVBoxLayout, infos: Sequence[Any],
@@ -9064,23 +8787,19 @@ _ENTRY_TOP_GAP = 6     # a long entry followed from its top keeps this much room
 # --------------------------------------------------------------------------
 
 MEMORY_ADD_PLACEHOLDER = "Add a note..."
-MEMORY_ADD_TEXT = "Add"
 MEMORY_EDIT_TEXT = "Edit"
 MEMORY_DELETE_TEXT = "Delete"
 MEMORY_UNDO_TEXT = "Undo"
-MEMORY_SAVE_TEXT = "Save"
-MEMORY_DISMISS_TEXT = "Dismiss"
 MEMORY_SHOW_ALL_TEXT = "Show all"
 MEMORY_DELETED_TEXT = "Deleted."
 MEMORY_NOT_SENT_TEXT = "NOT SENT"
 MEMORY_NOT_SENT_TIP = "Past the 4 KB your Claude gets with each request: not sent until newer notes go"
-MEMORY_SUGGESTS_TITLE = "Jarvis suggests"
-MEMORY_NOTES_TITLE = "Your notes"
 MEMORY_EMPTY_TEXT = 'No notes yet. Add one above, or type "remember that ..." in the bar.'
 MEMORY_FILTER_TEXT = 'Showing notes with "{words}"'
 MEMORY_READ_ONLY_TEXT = ("memory.json can't be read, so Jarvis won't change it. Fix or delete the file, then "
                          "restart Jarvis.")
 MEMORY_NOT_SAVED_TEXT = "Not saved to disk - kept for this session only."
+# The plain QLineEdit look (NudgeWordsDialog's field; the old MEMORY page's before round 2).
 _MEMORY_EDIT_STYLE = ("QLineEdit {{ color: {text}; background: #030a10; border: 1px solid {border}; padding: 4px 6px;"
                       " selection-background-color: {selection}; selection-color: {bright}; }}"
                       " QLineEdit:focus {{ border: 1px solid {focus}; }}"
@@ -9118,12 +8837,6 @@ def _memory_edit_style() -> str:
                                      dim=TEXT_DIM)
 
 
-def _holds_focus(widget: QWidget) -> bool:
-    """The keyboard focus is on ``widget`` or inside it."""
-    focused = QApplication.focusWidget()
-    return focused is not None and (focused is widget or widget.isAncestorOf(focused))
-
-
 def _memory_line_edit(placeholder: str = "") -> QLineEdit:
     edit = QLineEdit()
     edit.setFont(body_font(13))
@@ -9156,494 +8869,6 @@ class _PlainWrapLabel(QLabel):
         return self._plain
 
 
-class _MemoryEdit(QLineEdit):
-    """A row's inline edit field: Enter saves (``submitted``), Esc cancels (``cancelled``)."""
-
-    submitted = Signal()
-    cancelled = Signal()
-
-    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        if event.key() == Qt.Key.Key_Escape and event.modifiers() == Qt.KeyboardModifier.NoModifier:
-            event.accept()
-            self.cancelled.emit()
-            return
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            event.accept()
-            self.submitted.emit()
-            return
-        super().keyPressEvent(event)
-
-
-class _MemoryRow(QWidget):
-    """One note: its text (wrapped, selectable), then a meta line with Edit and Delete; while
-    editing, a field (Enter saves, Esc cancels); after Delete, "Deleted." with Undo. Why an Edit or
-    an Undo was not kept shows under the row (``set_refusal``). When a control the keyboard is on
-    goes away (Enter or Esc in the field, Delete, Undo), the row's control that takes its place gets
-    the focus, never a control of another note. Each button's accessible name says which note."""
-
-    editRequested = Signal(str)
-    editSubmitted = Signal(str, str)
-    editCancelled = Signal(str)
-    deleteRequested = Signal(str)
-    undoRequested = Signal(str)
-
-    def __init__(self, info: MemoryRowInfo) -> None:
-        super().__init__()
-        self._info = info
-        self._editing = False
-        self._read_only = False
-        self._refusal = ""
-        self.text_label = _PlainWrapLabel(info.text, body_font(13), TEXT_BODY)
-        self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        self.edit_field = _MemoryEdit()
-        self.edit_field.setFont(body_font(13))
-        self.edit_field.setMaxLength(400)
-        self.edit_field.setStyleSheet(_memory_edit_style())
-        self.edit_field.setAccessibleName("Change the note")
-        self.edit_field.hide()
-        self.edit_field.submitted.connect(lambda: self.editSubmitted.emit(self._info.id, self.edit_field.text()))
-        self.edit_field.cancelled.connect(lambda: self.editCancelled.emit(self._info.id))
-        self.meta_label = make_label(info.meta, mono_font(10, 400, 0.08), TEXT_DIM)
-        self.not_sent_label = make_label(MEMORY_NOT_SENT_TEXT, mono_font(10, 500, 0.08), AMBER)
-        self.not_sent_label.setToolTip(MEMORY_NOT_SENT_TIP)
-        self.edit_button = HudButton(MEMORY_EDIT_TEXT, LINK, compact=True)
-        self.delete_button = HudButton(MEMORY_DELETE_TEXT, LINK, compact=True)
-        self.undo_button = HudButton(MEMORY_UNDO_TEXT, LINK, compact=True)
-        self.edit_button.clicked.connect(lambda: self.editRequested.emit(self._info.id))
-        self.delete_button.clicked.connect(lambda: self.deleteRequested.emit(self._info.id))
-        self.undo_button.clicked.connect(lambda: self.undoRequested.emit(self._info.id))
-        self.refusal_label = make_label("", body_font(12), AMBER, wrap=True, name="memoryRowRefusal")
-        self.refusal_label.hide()
-        meta = QWidget()
-        flow = FlowLayout(meta, 10, 2)
-        for widget in (self.meta_label, self.not_sent_label, self.edit_button, self.delete_button, self.undo_button):
-            flow.addWidget(widget)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        layout.addWidget(self.text_label)
-        layout.addWidget(self.edit_field)
-        layout.addWidget(meta)
-        layout.addWidget(self.refusal_label)
-        self._apply()
-
-    def info(self) -> MemoryRowInfo:
-        return self._info
-
-    def set_info(self, info: MemoryRowInfo) -> None:
-        if info.id != self._info.id:
-            self._editing = False
-        if info.id != self._info.id or info.deleted != self._info.deleted:
-            self._refusal = ""
-        self._info = info
-        self._apply()
-
-    def editing(self) -> bool:
-        return self._editing
-
-    def set_editing(self, editing: bool, *, focus: bool = True) -> None:
-        """Open the field with the note's text, all selected (``focus``: and the keyboard on it), or
-        close it. Opening a field that is open keeps what the owner typed."""
-        editing = bool(editing) and not self._info.deleted and not self._read_only
-        if editing != self._editing:
-            if editing:
-                self.edit_field.setText(self._info.text)
-            self._editing = editing
-            self._refusal = ""
-            self._apply()
-        if editing and focus:
-            self.edit_field.setFocus(Qt.FocusReason.OtherFocusReason)
-            self.edit_field.selectAll()
-
-    def set_read_only(self, read_only: bool) -> None:
-        self._read_only = bool(read_only)
-        if self._read_only:
-            self._editing = False
-        self._apply()
-
-    def set_refusal(self, text: str) -> None:
-        """Why this note's Edit or Undo was not kept ("" hides it; it goes when the edit closes)."""
-        self._refusal = text or ""
-        self._apply()
-
-    def refusal(self) -> str:
-        return self._refusal
-
-    def _apply(self) -> None:
-        info = self._info
-        deleted = info.deleted
-        self.text_label.setText(MEMORY_DELETED_TEXT if deleted else info.text)
-        set_label_color(self.text_label, TEXT_DIM if deleted else TEXT_BODY)
-        self.meta_label.setText(info.meta)
-        self.meta_label.setVisible(not deleted)
-        self.not_sent_label.setVisible(not deleted and not info.sent)
-        self.refusal_label.setText(self._refusal)
-        self.refusal_label.setVisible(bool(self._refusal))
-        controls = {self.edit_field: self._editing,
-                    self.edit_button: not deleted and not self._editing and not self._read_only,
-                    self.delete_button: not deleted and not self._editing and not self._read_only,
-                    self.undo_button: deleted and not self._read_only}
-        held = next((widget for widget in controls if widget.hasFocus()), None)
-        # The new controls first: hiding the one the keyboard is on hands the focus to the next
-        # control in the chain, which must not be another note's.
-        for widget, visible in controls.items():
-            if visible:
-                widget.setVisible(True)
-        self.text_label.setVisible(not self._editing)
-        for widget, visible in controls.items():
-            if not visible:
-                widget.setVisible(False)
-        if held is not None and not controls[held]:
-            target = next((widget for widget in (self.edit_button, self.undo_button, self.delete_button)
-                           if controls[widget]), None)
-            if target is not None:
-                target.setFocus(Qt.FocusReason.OtherFocusReason)
-        self.edit_button.setAccessibleName(f"{MEMORY_EDIT_TEXT} note: {info.text}")
-        self.delete_button.setAccessibleName(f"{MEMORY_DELETE_TEXT} note: {info.text}")
-        self.undo_button.setAccessibleName(f"{MEMORY_UNDO_TEXT} delete")
-        self.setAccessibleName(MEMORY_DELETED_TEXT if deleted else f"Note: {info.text}")
-
-
-class _SuggestionRow(QWidget):
-    """A suggested note with Save and Dismiss."""
-
-    saveRequested = Signal(int)
-    dismissRequested = Signal(int)
-
-    def __init__(self, info: SuggestionRowInfo) -> None:
-        super().__init__()
-        self._info = info
-        self.text_label = _PlainWrapLabel(info.text, body_font(13), TEXT_SOFT)
-        self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        self.save_button = HudButton(MEMORY_SAVE_TEXT, LINK, compact=True)
-        self.dismiss_button = HudButton(MEMORY_DISMISS_TEXT, LINK, compact=True)
-        self.save_button.clicked.connect(lambda: self.saveRequested.emit(self._info.id))
-        self.dismiss_button.clicked.connect(lambda: self.dismissRequested.emit(self._info.id))
-        links = QWidget()
-        flow = FlowLayout(links, 10, 2)
-        flow.addWidget(self.save_button)
-        flow.addWidget(self.dismiss_button)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        layout.addWidget(self.text_label)
-        layout.addWidget(links)
-        self._name()
-
-    def info(self) -> SuggestionRowInfo:
-        return self._info
-
-    def set_info(self, info: SuggestionRowInfo) -> None:
-        self._info = info
-        self.text_label.setText(info.text)
-        self._name()
-
-    def _name(self) -> None:
-        """Accessible names that say which suggestion a button acts on."""
-        text = self._info.text
-        self.setAccessibleName(f"Suggested note: {text}")
-        self.save_button.setAccessibleName(f"{MEMORY_SAVE_TEXT} suggested note: {text}")
-        self.dismiss_button.setAccessibleName(f"{MEMORY_DISMISS_TEXT} suggested note: {text}")
-
-
-class MemoryPage(QScrollArea):
-    """The MEMORY tab: the owner's notes, kept only on this PC (memory.json).
-
-    A status line (where the notes are kept, who gets them, how many and how much of the 4 KB
-    the planner gets), a banner while memory.json can't be read (nothing can change then) or a
-    write failed, the "Add a note..." field (Enter or Add; ``added(text)``; a refusal shows under
-    it, ``set_refusal``), JARVIS SUGGESTS (``set_suggestions``: Save / Dismiss), then the notes
-    newest first (``set_rows``: text, TOLD / SUGGESTED and the date, NOT SENT past the 4 KB, Edit
-    inline - Enter saves, Esc cancels - and Delete, after which the row reads "Deleted." with Undo
-    while the controller keeps it). ``set_filter(words)`` shows 'Showing notes with "Ana"' and
-    Show all (``filterCleared``). A plain view: the controller holds the notes and decides; the
-    page never reads or writes a file. Each note keeps its row widget across refreshes (an open
-    edit keeps its draft and focus); Tab goes through the page in the order it shows; a refused
-    Edit or Undo says why under its note. The Add field stays usable while an Ask runs (the
-    command bar is read-only then)."""
-
-    added = Signal(str)
-    edited = Signal(str, str)
-    deleted = Signal(str)
-    undoDelete = Signal(str)
-    suggestionSaved = Signal(int)
-    suggestionDismissed = Signal(int)
-    filterCleared = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        content = _transparent_scroll(self)
-        self._layout = QVBoxLayout(content)
-        self._layout.setContentsMargins(_CONVERSATION_MARGIN, 10, _CONVERSATION_MARGIN, 10)
-        self._layout.setSpacing(8)
-        self.status_label = make_label("", mono_font(10, 400, 0.02), TEXT_SUB, wrap=True, name="memoryStatus")
-        self.banner_label = make_label("", body_font(12), AMBER, wrap=True, name="memoryBanner")
-        self.banner_label.hide()
-        self.input = _memory_line_edit(MEMORY_ADD_PLACEHOLDER)
-        self.input.setAccessibleName("Add a note to Jarvis's memory")
-        self.input.returnPressed.connect(self._submit)
-        self.add_button = HudButton(MEMORY_ADD_TEXT, SECONDARY, compact=True)
-        self.add_button.clicked.connect(self._submit)
-        add_row = QHBoxLayout()
-        add_row.setContentsMargins(0, 0, 0, 0)
-        add_row.setSpacing(8)
-        add_row.addWidget(self.input, 1)
-        add_row.addWidget(self.add_button, 0)
-        self.refusal_label = make_label("", body_font(12), AMBER, wrap=True, name="memoryRefusal")
-        self.refusal_label.hide()
-        self.filter_label = make_label("", body_font(12), TEXT_SOFT, wrap=True, name="memoryFilter")
-        self.show_all_button = HudButton(MEMORY_SHOW_ALL_TEXT, LINK, compact=True)
-        self.show_all_button.clicked.connect(self._clear_filter)
-        self._filter_box = QWidget()
-        filter_layout = QVBoxLayout(self._filter_box)
-        filter_layout.setContentsMargins(0, 0, 0, 0)
-        filter_layout.setSpacing(0)
-        filter_layout.addWidget(self.filter_label)
-        show_all_row = QHBoxLayout()
-        show_all_row.setContentsMargins(0, 0, 0, 0)
-        show_all_row.addWidget(self.show_all_button)
-        show_all_row.addStretch(1)
-        filter_layout.addLayout(show_all_row)
-        self._filter_box.hide()
-        self.suggests_title = make_label(MEMORY_SUGGESTS_TITLE.upper(), mono_font(10, 500, 0.14), ACCENT)
-        self._suggestion_box = QWidget()
-        self._suggestion_layout = QVBoxLayout(self._suggestion_box)
-        self._suggestion_layout.setContentsMargins(0, 0, 0, 4)
-        self._suggestion_layout.setSpacing(10)
-        self.notes_title = make_label(MEMORY_NOTES_TITLE.upper(), mono_font(10, 500, 0.14), TEXT_MUTED)
-        self._notes_box = QWidget()
-        self._notes_layout = QVBoxLayout(self._notes_box)
-        self._notes_layout.setContentsMargins(0, 0, 0, 0)
-        self._notes_layout.setSpacing(12)
-        self.empty_label = make_label(MEMORY_EMPTY_TEXT, body_font(13), TEXT_DIM, wrap=True, name="memoryEmpty")
-        # The notes get the room of the short panel: the banner (when there is one) and the Add field
-        # first, the status line (where the notes are kept, who gets them) last.
-        self._layout.addWidget(self.banner_label)
-        self._layout.addLayout(add_row)
-        for widget in (self.refusal_label, self._filter_box, self.suggests_title, self._suggestion_box,
-                       self.notes_title, self._notes_box, self.empty_label, self.status_label):
-            self._layout.addWidget(widget)
-        self._layout.addStretch(1)
-        self._rows: list[_MemoryRow] = []
-        self._suggestions: list[_SuggestionRow] = []
-        self._read_only = False
-        self._filter = ""
-        self._editing = ""
-        self.set_suggestions(())
-        self.set_rows(())
-
-    # ---- what the controller shows ----------------------------------------------------------------
-
-    def set_status(self, text: str) -> None:
-        self.status_label.setText(text)
-
-    def status(self) -> str:
-        return self.status_label.text()
-
-    def set_banner(self, text: str) -> None:
-        """The read-only banner or the write warning ("" hides it); a new one is scrolled into view."""
-        new = bool(text) and (text != self.banner_label.text() or self.banner_label.isHidden())
-        self.banner_label.setText(text)
-        self.banner_label.setVisible(bool(text))
-        if new:
-            self.verticalScrollBar().setValue(0)
-
-    def banner(self) -> str:
-        return self.banner_label.text() if not self.banner_label.isHidden() else ""
-
-    def set_read_only(self, read_only: bool) -> None:
-        """memory.json can't be read: Add, Edit and Delete are off."""
-        self._read_only = bool(read_only)
-        self.input.setEnabled(not self._read_only)
-        self.add_button.setEnabled(not self._read_only)
-        for row in self._rows:
-            row.set_read_only(self._read_only)
-        for suggestion in self._suggestions:
-            suggestion.save_button.setEnabled(not self._read_only)
-        self.empty_label.setVisible(not self._rows and not self._filter and not self._read_only)
-        if self._read_only:
-            self._editing = ""
-
-    def read_only(self) -> bool:
-        return self._read_only
-
-    def set_refusal(self, text: str, entry_id: str = "") -> None:
-        """Why the last Add or Save was not kept, under the Add field ("" hides it); with
-        ``entry_id``, why that note's Edit or Undo was not kept, under the note (scrolled into view)."""
-        row = next((row for row in self._rows if row.info().id == entry_id), None) if entry_id else None
-        if row is not None:
-            row.set_refusal(text)
-            if text:
-                self.reveal(row.refusal_label)
-            return
-        self.refusal_label.setText(text)
-        self.refusal_label.setVisible(bool(text))
-
-    def refusal(self, entry_id: str = "") -> str:
-        """The refusal under the Add field (or under the note ``entry_id``); "" when none shows."""
-        if entry_id:
-            row = next((row for row in self._rows if row.info().id == entry_id), None)
-            return row.refusal() if row is not None else ""
-        return self.refusal_label.text() if not self.refusal_label.isHidden() else ""
-
-    def clear_input(self) -> None:
-        self.input.clear()
-
-    def set_filter(self, words: str) -> None:
-        """'Showing notes with "<words>"' and Show all ("" hides it); the controller passes the
-        matching rows."""
-        self._filter = " ".join(str(words or "").split())
-        self.filter_label.setText(MEMORY_FILTER_TEXT.format(words=self._filter) if self._filter else "")
-        self._filter_box.setVisible(bool(self._filter))
-
-    def filter_words(self) -> str:
-        return self._filter
-
-    def set_rows(self, rows: Sequence[MemoryRowInfo]) -> None:
-        """The notes, newest first. Each note keeps its own row widget whatever moves around it (a
-        note added above, a Deleted placeholder that goes), so an edit in progress keeps what the
-        owner typed, its cursor and its focus. When the row the keyboard is on goes, the row now
-        in its place takes the focus (never a field outside MEMORY's rows)."""
-        rows = tuple(rows)
-        focused = next((index for index, row in enumerate(self._rows) if _holds_focus(row)), None)
-        old: dict[str, _MemoryRow] = {}
-        for row in self._rows:
-            old.setdefault(row.info().id, row)
-        kept: list[_MemoryRow] = []
-        for info in rows:
-            row = old.pop(info.id, None)
-            if row is None:
-                row = self._make_row(info)
-            elif row.info() != info:
-                row.set_info(info)
-            kept.append(row)
-        for index, row in enumerate(kept):   # in order (a moved widget stays shown: no focus change)
-            if self._notes_layout.indexOf(row) != index:
-                self._notes_layout.removeWidget(row)
-                self._notes_layout.insertWidget(index, row)
-        lost_focus = focused is not None and self._rows[focused] not in kept
-        for row in old.values():
-            self._notes_layout.removeWidget(row)
-            row.hide()
-            row.deleteLater()
-        self._rows = kept
-        for row in self._rows:
-            row.set_read_only(self._read_only)
-            if row.info().id == self._editing and not row.editing():
-                row.set_editing(True, focus=False)
-            elif row.info().id != self._editing and row.editing():
-                row.set_editing(False)
-        if self._editing and not any(row.info().id == self._editing for row in self._rows):
-            self._editing = ""
-        if lost_focus and self._rows:
-            assert focused is not None
-            row = self._rows[min(focused, len(self._rows) - 1)]
-            target = next((button for button in (row.edit_button, row.undo_button) if not button.isHidden()), None)
-            if target is not None:
-                target.setFocus(Qt.FocusReason.OtherFocusReason)
-        self._notes_box.setVisible(bool(rows))
-        self.notes_title.setVisible(bool(rows))
-        self.empty_label.setVisible(not rows and not self._filter and not self._read_only)
-        self._chain_tab_order()
-
-    def rows(self) -> list[_MemoryRow]:
-        return list(self._rows)
-
-    def row_infos(self) -> list[MemoryRowInfo]:
-        return [row.info() for row in self._rows]
-
-    def set_suggestions(self, rows: Sequence[SuggestionRowInfo]) -> None:
-        rows = tuple(rows)
-        _reuse_rows(self._suggestions, self._suggestion_layout, rows, self._make_suggestion)
-        self.suggests_title.setVisible(bool(rows))
-        self._suggestion_box.setVisible(bool(rows))
-        self._chain_tab_order()
-
-    def _chain_tab_order(self) -> None:
-        """Tab goes through MEMORY in the order it shows: Add, Show all, each suggestion's Save and
-        Dismiss, then each note's field and links (rows made later would otherwise come last in
-        the window's focus chain, after everything built after the page)."""
-        chain: list[QWidget] = [self.input, self.add_button, self.show_all_button]
-        for suggestion in self._suggestions:
-            chain += [suggestion.save_button, suggestion.dismiss_button]
-        for row in self._rows:
-            chain += [row.edit_field, row.edit_button, row.delete_button, row.undo_button]
-        for first, second in zip(chain, chain[1:]):
-            QWidget.setTabOrder(first, second)
-
-    def suggestion_rows(self) -> list[_SuggestionRow]:
-        return list(self._suggestions)
-
-    def edit_row(self, entry_id: str) -> None:
-        """Open a note's inline edit field (Edit), scrolled into view."""
-        if self._read_only:
-            return
-        self._editing = entry_id
-        for row in self._rows:
-            row.set_editing(row.info().id == entry_id)
-            if row.info().id == entry_id:
-                self.reveal(row.edit_field)
-
-    def reveal(self, widget: QWidget) -> None:
-        """Scroll ``widget`` (a row or its field) into view once the layout has placed it."""
-        def scroll() -> None:
-            if not (shiboken6.isValid(self) and shiboken6.isValid(widget) and widget.isVisibleTo(self)):
-                return
-            # Place the rows (and the field inside its row) now: a field just shown has no place yet.
-            for holder in (self.widget(), widget.parentWidget()):
-                layout = holder.layout() if holder is not None else None
-                if layout is not None:
-                    layout.activate()
-            # A field's own row (a QLineEdit would only bring its text cursor into view).
-            parent = widget.parentWidget()
-            target = parent if isinstance(parent, (_MemoryRow, _SuggestionRow)) else widget
-            self.ensureWidgetVisible(target, 0, 8)
-
-        scroll()
-        QTimer.singleShot(0, scroll)
-
-    def editing(self) -> str:
-        return self._editing
-
-    def stop_editing(self) -> None:
-        self._editing = ""
-        for row in self._rows:
-            row.set_editing(False)
-
-    # ---- the owner's clicks ---------------------------------------------------------------------
-
-    def deleted_row(self) -> _MemoryRow | None:
-        return next((row for row in self._rows if row.info().deleted), None)
-
-    def _make_row(self, info: MemoryRowInfo) -> _MemoryRow:
-        row = _MemoryRow(info)
-        row.set_read_only(self._read_only)
-        row.editRequested.connect(self.edit_row)
-        row.editSubmitted.connect(self.edited)
-        row.editCancelled.connect(lambda _entry_id: self.stop_editing())
-        row.deleteRequested.connect(self.deleted)
-        row.undoRequested.connect(self.undoDelete)
-        return row
-
-    def _make_suggestion(self, info: SuggestionRowInfo) -> _SuggestionRow:
-        row = _SuggestionRow(info)
-        row.save_button.setEnabled(not self._read_only)
-        row.saveRequested.connect(self.suggestionSaved)
-        row.dismissRequested.connect(self.suggestionDismissed)
-        return row
-
-    def _submit(self) -> None:
-        text = " ".join(self.input.text().split())
-        if text and not self._read_only:
-            self.added.emit(text)
-
-    def _clear_filter(self) -> None:
-        self.set_filter("")
-        self.filterCleared.emit()
-
-
 # --------------------------------------------------------------------------
 # LIVE view: every step Jarvis takes, as it happens (live.py's stream)
 # --------------------------------------------------------------------------
@@ -9663,7 +8888,6 @@ LIVE_FIELD_LABEL_PX = 104       # the field labels' column ...
 LIVE_FIELDS_WIDE_PX = 360       # ... when the details are at least this wide
 LIVE_FIELDS_MEDIUM_PX = 200     # narrower down to this: a column as wide as the longest label word (else above)
 LIVE_FIELD_LABEL_MIN_PX = 76    # ... but at least this wide ("MAY ASK TO" on one line)
-LIVE_PILL_WRAP_PX = 320         # a task header narrower than this puts its status pill under the title
 LIVE_CONTENT_MAX_PX = 960       # the log's column is at most this wide (centred in a wider view)
 _LIVE_INDENT = 22               # step titles and details start here (after the glyph column)
 

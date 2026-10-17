@@ -1118,13 +1118,14 @@ class HomeStage(QWidget):
         self._side: QWidget | None = None
 
     def set_side_tile(self, tile: QWidget | None) -> None:
-        """The one amber tile bottom-right of the orb (an offer: offer_view.OfferTile), tethered to it; the
-        hero gives it room (220 px at least) while it shows. None: no tile."""
+        """The one tile bottom-right of the orb (an offer: offer_view.OfferTile; an error: states_view.ErrorTile),
+        tethered to it; the hero gives it room (220 px at least) while it shows. None: no tile."""
         if self._side is not None and self._side is not tile and shiboken6.isValid(self._side):
             self._side.removeEventFilter(self)
         self._side = tile
         if tile is not None:
-            tile.setParent(self)
+            if tile.parentWidget() is not self:
+                tile.setParent(self)        # (a new parent hides it; a tile already here keeps its look)
             tile.installEventFilter(self)
         self._relayout()
 
