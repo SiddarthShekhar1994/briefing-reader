@@ -74,7 +74,7 @@ class FollowupsAppCase(unittest.TestCase):
         app.c.ask.start()
         self.assertTrue(wait_for(lambda: app.c.ask.ready is not None), "readiness checked")
         self.app, self.c, self.reading = app, app.c, app.c.window.reading
-        self.panel = self.reading.agenda_panel
+        self.panel = self.reading.followups_stage          # the Follow-ups screen (round 2, part 2b)
         return app
 
     def scan(self) -> None:
@@ -124,7 +124,8 @@ class ScanAndDraftTests(FollowupsAppCase):
             rows = self.rows()
             self.assertEqual([(info.kind, info.who, info.age) for info in rows],
                              [("waiting", "Ana Fu", "3d"), ("owed", "Ben Fu", "5d")])
-            self.assertEqual(self.panel.followups_meta.text(), f"1 waiting {hud.MIDDLE_DOT} 1 owed")
+            self.assertTrue(self.panel.followups_meta.text().startswith(
+                f"1 waiting {hud.MIDDLE_DOT} 1 owed {hud.MIDDLE_DOT} updated "), self.panel.followups_meta.text())
             self.assertEqual(self.reading.activity.entries()[0][2], "Follow-ups: 1 waiting, 1 owed")
             items = self.menu(self.row().row_id)
             self.assertEqual(list(items), [ui.FOLLOWUP_MENU_DRAFT["waiting"], ui.FOLLOWUP_MENU_WORDS,
@@ -443,7 +444,8 @@ class TypedAndMenuTests(FollowupsAppCase):
     def test_off_without_the_bundle_or_a_mail_reader(self) -> None:
         app = AppHarness(self, readers={"work": FakeScanReader("work", {}, meta={})})
         app.reading(autoplay=False)
-        self.assertFalse(app.c.window.reading.agenda_panel.followups_visible())
+        self.assertFalse(app.c.window.reading.followups_stage.followups_visible())
+        self.assertFalse(app.c.window.reading.followups_available())
 
 
 if __name__ == "__main__":

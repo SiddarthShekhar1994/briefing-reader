@@ -801,6 +801,10 @@ ICONS: dict[str, tuple[str, ...]] = {
     "calendar": ("M5.5 5h13a2 2 0 0 1 2 2v11.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z", "M3.5 10h17",
                  "M8 3v4M16 3v4"),
     "warning": ("M12 4l9 16H3z", "M12 10v4.5", "M12 17.5v.01"),
+    # Round 2, part 2b (Memory and Follow-ups).
+    "plus": ("M12 5v14M5 12h14",),
+    "more": ("M4.6 12a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0-2.8 0z", "M10.6 12a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0-2.8 0z",
+             "M16.6 12a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0-2.8 0z"),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",

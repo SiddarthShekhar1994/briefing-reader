@@ -122,7 +122,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import approvals_view, briefing_view, live_view
+from . import approvals_view, briefing_view, followups_view, live_view, memory_view, settings_view
 from . import dock as dock_mod
 from . import holo, home, hud
 from . import live as _live
@@ -1003,8 +1003,7 @@ _SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING,
                  SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
                  SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS}
 _SLOT_SCREENS = {slot: screen for screen, slot in _SCREEN_SLOTS.items()}
-_PANEL_SCREENS = (SCREEN_MEMORY,)     # the transcript panel's screen (round 2: Live has its own stage)
-_SCREEN_MARGINS = (16, 4, 16, 14)
+_PANEL_SCREENS: tuple[int, ...] = ()   # the transcript panel's screens (round 2: each screen has its own stage)
 _LIST_HEIGHT_MAX = 100_000          # ... whose cards take the screen's whole height
 # Statuses the Briefing screen's transport already says (its quiet line leaves them out).
 _QUIET_STATUS_RE = re.compile(r"^(?:Playing|Paused|Finished|Loading)(?: \(([^)]*)\))?(?: - (.*))?$", re.S)
@@ -1049,10 +1048,12 @@ class ReadingView(QWidget):
     the orb row, the controls and the panel with the transcript, as before), Approvals (NEEDS YOUR OK),
     Live (round 2, HOLOGRAM_SPEC 16.3: ``live_stage``, a live_view.LiveStage - the strip with ``live_status``
     (a live_view.LiveReadout), Pop out and Clear, the timeline ``live_log`` with ACTIVITY under it and the
-    focal picture; "LIVE is in its own window, sir." while the pop-out shows it), Memory and Follow-ups
-    (the bundle) and Settings. The transcript panel is on Memory; the agenda panel lives in the Day view's
-    drawer (TODAY / DEADLINES) or on the Follow-ups screen (FOLLOW-UPS). Round 2 restyles the screens
-    other than Home; what follows describes them as they were.
+    focal picture; "LIVE is in its own window, sir." while the pop-out shows it), Memory (round 2, part 2b:
+    ``memory_view``, a memory_view.MemoryStage - the focal suggestion tile, the Add field, the notes), Follow-ups
+    (``followups_stage``, a followups_view.FollowupsStage - WAITING ON YOU / OWED TO YOU with the focal row; both
+    for the bundle) and Settings (``settings_page``, a settings_view.SettingsStage: the groups, read only). The
+    agenda panel lives in the Day view's drawer (TODAY / DEADLINES). Round 2 restyles the screens other than
+    Home; what follows describes them as they were.
 
     Left: compact STATUS telemetry, then one panel with the TODAY / TOMORROW
     agenda and the DEADLINES list (its Connect link emits
@@ -1228,14 +1229,9 @@ class ReadingView(QWidget):
         self._make_memory_page()
 
     def _make_memory_page(self) -> None:
-        """The MEMORY tab's page (the productivity bundle's notes; the tab is hidden until
-        ``set_memory_available(True)``)."""
-        self.memory_view = hud.MemoryPage()
-        self.memory_page = _TabPage(self.conversation)
-        page = QVBoxLayout(self.memory_page)
-        page.setContentsMargins(0, 0, 0, 0)
-        page.setSpacing(0)
-        page.addWidget(self.memory_view, 1)
+        """The Memory screen's stage (round 2, part 2b: memory_view.MemoryStage; the productivity bundle's
+        notes, its Dock slot hidden until ``set_memory_available(True)``)."""
+        self.memory_view = memory_view.MemoryStage()
 
     def _make_live_page(self) -> None:
         """The Live screen (round 2, HOLOGRAM_SPEC 16.3): live_view.LiveStage around the timeline
@@ -1340,7 +1336,7 @@ class ReadingView(QWidget):
         self.answer_chip.clicked.connect(lambda: self.open_transcript(self._answer[1]))
         for chip in self._home_chips():
             chip.hide()
-        self.settings_page = home.SettingsPage()
+        self.settings_page = settings_view.SettingsStage()
         self.settings_page.openConfig.connect(self.openConfig)
         self.settings_page.openDataFolder.connect(self.openDataFolder)
         self.command_bar.statusChanged.connect(self._on_bar_status)
@@ -1383,12 +1379,16 @@ class ReadingView(QWidget):
         row.setContentsMargins(holo.GUTTER_SIDE, 0, holo.GUTTER_SIDE, 12)
         row.addWidget(self.live_stage, 1)
         self.live_stage.set_activity(self.activity_panel)
+        # Memory and Follow-ups (round 2, part 2b, HOLOGRAM_SPEC 16.6): each its own stage.
         self.memory_screen = QWidget()
         self._memory_slot = QVBoxLayout(self.memory_screen)
-        self._memory_slot.setContentsMargins(*_SCREEN_MARGINS)
+        self._memory_slot.setContentsMargins(0, 0, 0, 0)
+        self._memory_slot.addWidget(self.memory_view, 1)
         self.followups_screen = QWidget()
         self._followups_slot = QVBoxLayout(self.followups_screen)
-        self._followups_slot.setContentsMargins(*_SCREEN_MARGINS)
+        self._followups_slot.setContentsMargins(0, 0, 0, 0)
+        self.followups_stage = followups_view.FollowupsStage()
+        self._followups_slot.addWidget(self.followups_stage, 1)
         self.home_screen = self._build_home()
         self._screens = _PageSwitch()
         for screen in (self.home_screen, self.briefing_screen, self.live_screen, self.memory_screen,
@@ -1425,8 +1425,6 @@ class ReadingView(QWidget):
         self._screen = index
         if index in _PANEL_SCREENS:
             self._place_panel(index)
-        elif index == SCREEN_FOLLOWUPS:
-            self._place_agenda(self._followups_slot, hud.AGENDA_FOLLOWUPS)
         self._screens.setCurrentWidget(self._screens.widget(index))
         if index == SCREEN_MEMORY:
             self._set_memory_unread(False)
@@ -1454,7 +1452,7 @@ class ReadingView(QWidget):
             self.header.set_countdown(view[0], view[1])
 
     def _place_panel(self, index: int) -> None:
-        """The transcript panel goes to the panel screen that shows (Live or Memory)."""
+        """The transcript panel goes to the panel screen that shows (none since round 2, part 2b)."""
         slot = {SCREEN_MEMORY: self._memory_slot}[index]
         if slot is not self._panel_slot:
             if self._panel_slot is not None:
@@ -1464,7 +1462,7 @@ class ReadingView(QWidget):
             self.transcript_panel.setVisible(True)
 
     def _place_agenda(self, slot: QVBoxLayout, mode: str) -> None:
-        """The agenda panel: in the Day view's drawer (TODAY / DEADLINES) or on Follow-ups."""
+        """The agenda panel: in the Day view's drawer (TODAY / DEADLINES)."""
         if slot is not self._agenda_slot:
             if self._agenda_slot is not None:
                 self._agenda_slot.removeWidget(self.agenda_panel)
@@ -1498,8 +1496,6 @@ class ReadingView(QWidget):
 
     def open_day_view(self) -> None:
         """The Day view (the header clock): TODAY / DEADLINES in a drawer over the current screen."""
-        if self._screen == SCREEN_FOLLOWUPS:
-            self.set_tab(SCREEN_HOME)
         self._place_agenda(self.day_drawer.body_layout, hud.AGENDA_DAY)
         self.transcript_drawer.close_drawer()
         self.day_drawer.open_drawer(self.header.clock)
@@ -1711,7 +1707,7 @@ class ReadingView(QWidget):
         self._pages.addWidget(QWidget())              # hud.TAB_JARVIS: Home (the conversation is its drawer)
         self._pages.addWidget(self.briefing_page)     # hud.TAB_BRIEFING
         self._pages.addWidget(QWidget())              # hud.TAB_LIVE: the Live screen has its own stage (round 2)
-        self._pages.addWidget(self.memory_page)       # hud.TAB_MEMORY
+        self._pages.addWidget(QWidget())              # hud.TAB_MEMORY: the Memory screen has its own stage (round 2)
         self.transcript_panel.body_layout.addWidget(self._pages, 1)
 
     def _apply_tier(self, width: int) -> None:
@@ -4109,6 +4105,7 @@ class AppController(QObject):
         orb_mod.set_lock_probe(self._locked)        # the lock screen check the announcements use
         reading = self.window.reading
         reading.settings_page.set_paths(str(self._config_path()), str(self.config.data_dir))
+        reading.settings_page.set_config(self.config)         # read only: shown, never written back
         reading.set_greeting(self._resting_greeting())
 
     def _config_path(self) -> Path:
@@ -4686,6 +4683,8 @@ class AppController(QObject):
         window.set_service("notion", *self._notion_chip())
         window.set_service("voice", *self._voice_chip())
         window.set_service("calendar", *self._calendar_chip())
+        states = getattr(self, "_accounts_state", {})
+        window.reading.settings_page.set_connected({alias: state[0] for alias, state in states.items()})
 
     def _notion_chip(self) -> tuple[str, str]:
         if self.startup_error:
@@ -7607,10 +7606,14 @@ class AppController(QObject):
         controller.dayChanged.connect(self._update_done_tooltip)
         controller.ticked.connect(self._on_prod_ticked)
         controller.followupsChanged.connect(self._on_followups_changed)
-        panel = self.window.reading.agenda_panel
-        panel.followupActivated.connect(self._on_followup_activated)
-        panel.followupsLinkClicked.connect(self._on_followups_link)
-        panel.followupsMenuRequested.connect(self._on_followups_menu)
+        stage = self.window.reading.followups_stage
+        stage.followupActivated.connect(self._on_followup_activated)
+        stage.followupsLinkClicked.connect(self._on_followups_link)
+        stage.followupsMenuRequested.connect(self._on_followups_menu)
+        stage.draftRequested.connect(self._on_followup_draft)
+        stage.wordsRequested.connect(self._words_row)
+        stage.hideRequested.connect(self._on_followup_hide)
+        stage.openRequested.connect(self._open_row)
         self.window.visibilityChanged.connect(self._prod_sync)
         return controller
 
@@ -7916,7 +7919,7 @@ class AppController(QObject):
         (with "draft waiting" / "replied - checking", R31 / R47) or why it is empty; hidden while off."""
         controller = getattr(self, "productivity", None)
         reading = self.window.reading
-        panel = reading.agenda_panel
+        panel = reading.followups_stage
         if controller is None or not self._followups_section_on() or self.state == STATE_QUITTING:
             panel.set_followups(None)
             reading.set_followups_available(False)
@@ -7959,16 +7962,16 @@ class AppController(QObject):
         waiting = tuple(row(item) for item in view.waiting)
         owed = tuple(row(item) for item in view.owed)
         color = hud.TEXT_DIM
+        updated = (f"updated {clock_text(self._offer_wall(view.scanned_at), hour24)}"
+                   if view.scanned_at is not None else "")
         if view.scanning:
             meta = FOLLOWUPS_SCANNING_META
         elif view.partial:
-            meta, color = FOLLOWUPS_PARTIAL_META, hud.AMBER
-        elif waiting or owed:
-            meta = followups_meta(len(waiting), len(owed))
-        elif view.scanned_at is not None:
-            meta = f"updated {clock_text(self._offer_wall(view.scanned_at), hour24)}"
+            meta, color = FOLLOWUPS_PARTIAL_META, hud.TEXT_BODY    # not amber: no decision waits on it
+        elif waiting or owed:   # the header readout: "2 waiting . 1 owed . updated 10:41 AM" (spec 16.6)
+            meta = f" {DOT} ".join(part for part in (followups_meta(len(waiting), len(owed)), updated) if part)
         else:
-            meta = ""
+            meta = updated
         empty = FOLLOWUPS_EMPTY if view.scanned_at is not None and not view.scanning and not notes else ""
         panel.set_followups(hud.FollowupsInfo(meta=meta, meta_color=color, waiting=waiting, owed=owed,
                                               shown=int(settings.followups_shown), notes=tuple(notes),
@@ -7998,7 +8001,7 @@ class AppController(QObject):
             return
         if controller.checking(row_id):
             return
-        panel = self.window.reading.agenda_panel
+        panel = self.window.reading.followups_stage
         widget = panel.followup_row(row_id)
         menu = QMenu(self.window)
         pending = self._pending_reply(item.alias, item.thread_id)
@@ -8049,7 +8052,36 @@ class AppController(QObject):
         else:
             menu.addAction(FOLLOWUPS_MENU_OFF).triggered.connect(
                 lambda _checked=False: self._prod_call("set_off", True))
-        self._popup(menu, self.window.reading.agenda_panel.followups_menu_button)
+        self._popup(menu, self.window.reading.followups_stage.followups_menu_button)
+
+    def _on_followup_draft(self, row_id: str) -> None:
+        """The open row's Draft a reply / Draft a nudge (or Show the draft while a draft for its thread waits):
+        what the row menu's first item does. A draft is only a draft (its card, the approval, the countdown)."""
+        controller = self.productivity
+        item = controller.item(row_id) if controller is not None else None
+        if item is None or self.state == STATE_QUITTING:
+            logger.info("Follow-ups: that row is gone")
+            return
+        if controller.checking(row_id):
+            return
+        pending = self._pending_reply(item.alias, item.thread_id)
+        if pending is not None:
+            self._show_draft(pending.id)
+        else:
+            self._draft_row(row_id)
+
+    def _on_followup_hide(self, row_id: str) -> None:
+        """The open row's Hide: for how long (the row menu's two choices), under the button."""
+        controller = self.productivity
+        if controller is None or controller.item(row_id) is None or self.state == STATE_QUITTING:
+            return
+        menu = QMenu(self.window)
+        menu.addAction(FOLLOWUP_MENU_HIDE_DAYS).triggered.connect(
+            lambda _checked=False: self._prod_call("hide", row_id, days=3))
+        menu.addAction(FOLLOWUP_MENU_HIDE_NEW).triggered.connect(
+            lambda _checked=False: self._prod_call("hide", row_id, days=None))
+        row = self.window.reading.followups_stage.followup_row(row_id)
+        self._popup(menu, row.hide_button if row is not None else None)
 
     def _on_followups_link(self, link_id: str) -> None:
         """A fix line's link (also from the conversation): Turn on, Confirm (that account's Google account)
@@ -8630,7 +8662,9 @@ class AppController(QObject):
         logger.info("Memory: a suggestion was offered")
         self._render_memory()                       # the Dock counts it ("Memory, 1 suggestion")
 
-    def _memory_save_suggestion(self, suggestion: Any, *, from_conversation: bool) -> None:
+    def _memory_save_suggestion(self, suggestion: Any, *, from_conversation: bool) -> MemoryEntry | None:
+        """Keep a pending suggestion (the owner's click: Remember this, or Keep on Memory's focal tile); the
+        note kept, None when it was refused."""
         store = self.memory_store
         assert store is not None
         result = store.add(suggestion.text, source=SOURCE_SUGGESTED)
@@ -8641,7 +8675,7 @@ class AppController(QObject):
                              link=(MEMORY_OPEN_TEXT, MEMORY_OPEN_LINK) if result == "full" else ("", ""))
             else:
                 self.window.reading.memory_view.set_refusal(text)
-            return
+            return None
         self._memory_suggestions = [item for item in self._memory_suggestions if item.id != suggestion.id]
         self.window.reading.set_memory_suggestions(len(self._memory_suggestions))
         old = self._memory_links.pop(suggestion.link, None)
@@ -8656,6 +8690,7 @@ class AppController(QObject):
             self._memory_entry(suggestion.entry_id, text)
         logger.info("Memory: suggestion saved")
         self._memory_saved(result, SOURCE_SUGGESTED)
+        return result
 
     # ---- MEMORY's own clicks
 
@@ -8740,7 +8775,10 @@ class AppController(QObject):
     def _on_memory_suggestion_saved(self, suggestion_id: int) -> None:
         suggestion = next((item for item in self._memory_suggestions if item.id == suggestion_id), None)
         if suggestion is not None and self.memory_store is not None:
-            self._memory_save_suggestion(suggestion, from_conversation=False)
+            kept = self._memory_save_suggestion(suggestion, from_conversation=False)
+            if kept is not None:   # the focal tile: KEPT and the time, the note as kept (HOLOGRAM_SPEC 16.6)
+                self.window.reading.memory_view.show_kept(
+                    kept.text, _memory_meta(kept), clock_text(self._now(), self.config.display.hour24))
 
     def _on_memory_suggestion_dismissed(self, suggestion_id: int) -> None:
         store = self.memory_store
@@ -9032,7 +9070,8 @@ class AppController(QObject):
         elif link_id.startswith(OFFER_LINK):
             self._offer_link(link_id[len(OFFER_LINK):])
         elif link_id == FOLLOWUPS_SHOW:
-            self.window.reading.agenda_panel.reveal_followups()
+            self.window.reading.set_tab(SCREEN_FOLLOWUPS)
+            self.window.reading.followups_stage.reveal_followups()
         elif link_id == FOLLOWUPS_ON or link_id.startswith((FU_CONFIRM_LINK, FU_SIGN_IN_LINK)):
             self._on_followups_link(link_id)
         elif link_id.startswith(NUDGE_WORDS_LINK):

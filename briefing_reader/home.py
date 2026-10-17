@@ -47,9 +47,7 @@ Public API
     and a close button; Esc closes it and the focus goes back to the opener. ``body_layout`` holds
     the content (the Transcript's conversation, the Day view's agenda).
 
-``SettingsPage``
-    Round 1 Settings: where the settings live, with ``Open config.toml`` (``openConfig``) and
-    ``Open the data folder`` (``openDataFolder``). No settings logic.
+Settings has its own module since round 2, part 2b (settings_view.SettingsStage).
 """
 
 from __future__ import annotations
@@ -1389,72 +1387,3 @@ class Drawer(QWidget):
             painter.drawPath(path)
         finally:
             painter.end()
-
-
-# --------------------------------------------------------------------------
-# Settings (round 1, spec 16.8 comes in round 2)
-# --------------------------------------------------------------------------
-
-SETTINGS_TITLE = "Settings"
-SETTINGS_TEXT = ("Jarvis's settings live in config.toml, next to the app. Change them there, then restart "
-                 "Jarvis. Nothing on this screen changes a setting.")
-DATA_TEXT = "What Jarvis keeps on this PC (memory, decisions, voice cache, logs) is in the data folder."
-OPEN_CONFIG_TEXT = "Open config.toml"
-OPEN_DATA_TEXT = "Open the data folder"
-
-
-class SettingsPage(QWidget):
-    """Round 1 Settings: where the settings live and two buttons; see the module docstring."""
-
-    openConfig = Signal()
-    openDataFolder = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        title = QLabel(SETTINGS_TITLE)
-        title.setFont(holo.font("screen_title"))
-        title.setIndent(holo.HoloButton.MARGIN)       # the text lines up with the buttons' drawn edge
-        holo_label_color(title, holo.INK_1)
-        self.text_label = QLabel(SETTINGS_TEXT)
-        self.data_label = QLabel(DATA_TEXT)
-        for label in (self.text_label, self.data_label):
-            label.setWordWrap(True)
-            label.setFont(holo.font("body"))
-            label.setIndent(holo.HoloButton.MARGIN)
-            holo_label_color(label, holo.INK_2)
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.config_path = QLabel("")
-        self.data_path = QLabel("")
-        for label in (self.config_path, self.data_path):
-            label.setFont(holo.font("body_sm"))
-            label.setIndent(holo.HoloButton.MARGIN)
-            holo_label_color(label, holo.INK_4)
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            label.setWordWrap(True)
-        self.config_button = holo.HoloButton(OPEN_CONFIG_TEXT, holo.GHOST)
-        self.config_button.clicked.connect(self.openConfig)
-        self.data_button = holo.HoloButton(OPEN_DATA_TEXT, holo.GHOST)
-        self.data_button.clicked.connect(self.openDataFolder)
-        column = QVBoxLayout()
-        column.setSpacing(10)
-        column.addWidget(title)
-        column.addSpacing(6)
-        column.addWidget(self.text_label)
-        column.addWidget(self.config_path)
-        column.addWidget(self.config_button, 0, Qt.AlignmentFlag.AlignLeft)
-        column.addSpacing(12)
-        column.addWidget(self.data_label)
-        column.addWidget(self.data_path)
-        column.addWidget(self.data_button, 0, Qt.AlignmentFlag.AlignLeft)
-        column.addStretch(1)
-        holder = QWidget()
-        holder.setLayout(column)
-        holder.setMaximumWidth(600)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(holo.GUTTER_SIDE + 16, holo.GUTTER_TOP + 12, holo.GUTTER_SIDE, holo.GUTTER_BOTTOM)
-        layout.addWidget(holder, 1)
-        layout.addStretch(0)
-
-    def set_paths(self, config_path: str, data_dir: str) -> None:
-        self.config_path.setText(config_path)
-        self.data_path.setText(data_dir)

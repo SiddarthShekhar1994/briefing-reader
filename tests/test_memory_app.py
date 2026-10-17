@@ -25,7 +25,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
-from briefing_reader import hud, live, ui
+from briefing_reader import hud, live, memory_view, ui
 from briefing_reader.memory import MEMORY_FILE, SOURCE_TOLD, MemoryStore
 from tests.ask_fakes import GatedProcess, stream
 from tests.ui_fakes import AppHarness, fonts, plan, settle, wait_for
@@ -340,8 +340,11 @@ class SuggestionAppTests(MemoryAppCase):
         self.assertEqual(entry.entry[2], f'Shall I remember this, sir? "{SUGGESTION}."')
         self.assertEqual(entry.entry[3], ui.MEMORY_SUGGESTION_SUB)
         self.assertEqual(entry.link()[0], ui.MEMORY_REMEMBER_TEXT)
-        self.assertEqual([row.info().text for row in self.view.suggestion_rows()], [SUGGESTION])
-        self.assertTrue(self.view.suggests_title.isVisibleTo(self.view))
+        self.assertEqual([info.text for info in self.view.suggestions()], [SUGGESTION])
+        tile = self.view.suggestion_tile                   # Memory's focal tile: the question, Keep / Dismiss
+        self.assertTrue(tile.isVisibleTo(self.view))
+        self.assertEqual((tile.state(), tile.kicker()), ("pending", memory_view.SUGGESTION_KICKER))
+        self.assertEqual(tile.question(), memory_view.question_text(SUGGESTION))
         self.assertNotIn(SUGGESTION, " ".join(app.voice.texts()))   # never spoken
         self.assertIn("Memory: a suggestion was offered", "\n".join(logs.output))
         self.assertEqual(self.notes(), [])
@@ -351,7 +354,8 @@ class SuggestionAppTests(MemoryAppCase):
         self.assertEqual(self.c.memory_store.entries()[0].source, "suggested")
         self.assertEqual(entry.entry[2], f'Remembered: "{SUGGESTION}."')
         self.assertEqual(entry.link()[0], ui.MEMORY_UNDO_TEXT)
-        self.assertEqual(self.view.suggestion_rows(), [])
+        self.assertEqual(self.view.suggestions(), [])
+        self.assertEqual(self.view.suggestion_tile.state(), "")    # kept from the conversation: no KEPT tile
         self.assertEqual(self.activity()[0], "Memory: suggestion saved")
         entry.link_button.click()                                   # Undo of the kept suggestion
         settle()
@@ -369,14 +373,17 @@ class SuggestionAppTests(MemoryAppCase):
         self.assertEqual(entries[0].link()[0], "")
         self.assertEqual(entries[0].entry[3], "")                             # no "kept only on this PC"
         self.assertEqual(entries[5].entry[3], ui.MEMORY_SUGGESTION_SUB)       # still pending: it stays
-        self.assertEqual([row.info().text for row in self.view.suggestion_rows()], texts[1:6])
-        rows = self.view.suggestion_rows()
-        rows[0].save_button.click()
+        self.assertEqual([info.text for info in self.view.suggestions()], texts[1:6])
+        tile = self.view.suggestion_tile                   # the oldest pending one is the focal tile
+        self.assertEqual((tile.info().text, tile.kicker()), (texts[1], f"SUGGESTION {ui.DOT} 1 OF 5"))
+        tile.keep_button.click()
         settle()
         self.assertEqual(entries[1].entry[2], f'Remembered: "{texts[1]}."')  # saved there: no link
         self.assertEqual(entries[1].link()[0], "")
         self.assertEqual(entries[1].entry[3], "")
-        self.view.suggestion_rows()[0].dismiss_button.click()
+        self.assertEqual((tile.state(), tile.info().text, tile.kicker()),     # the next one waits: no KEPT
+                         ("pending", texts[2], f"SUGGESTION {ui.DOT} 1 OF 4"))
+        tile.dismiss_button.click()
         settle()
         self.assertEqual(entries[2].entry[2], ui.MEMORY_NOT_KEPT_TEXT)
         self.assertEqual(entries[2].link()[0], "")
@@ -412,7 +419,7 @@ class SuggestionAppTests(MemoryAppCase):
         app = self.make(suggestion_plan(), suggestion_plan())
         self.ask_for_suggestion(app)
         self.ask_for_suggestion(app)
-        self.assertEqual(len(self.view.suggestion_rows()), 1)
+        self.assertEqual(len(self.view.suggestions()), 1)
         self.assertEqual(self.memory_steps()[-1].title,
                          "Suggestion not offered: the same suggestion is already waiting")
 
@@ -427,7 +434,7 @@ class SuggestionAppTests(MemoryAppCase):
         self.ask_for_suggestion(app)
         argv = app.factory.runner.started[0].argv
         self.assertNotIn("remember", argv[argv.index("--json-schema") + 1])   # never asked for one
-        self.assertEqual(self.view.suggestion_rows(), [])
+        self.assertEqual(self.view.suggestions(), [])
         self.assertEqual(path.read_bytes(), b"{zq7memo not json")
 
     def test_logs_and_activity_hold_no_note(self) -> None:
@@ -706,7 +713,7 @@ class MemorySpeechAndLiveTests(MemoryAppCase):
 
 
 class MemoryPageKeyboardTests(unittest.TestCase):
-    """hud.MemoryPage alone: where the keyboard goes after Enter, Esc, Delete and Undo, the Tab order
+    """memory_view.MemoryStage alone: where the keyboard goes after Enter, Esc, Delete and Undo, the Tab order
     with rows made after the window, and button names that say which note."""
 
     def setUp(self) -> None:
@@ -714,7 +721,7 @@ class MemoryPageKeyboardTests(unittest.TestCase):
         layout = QVBoxLayout(self.window)
         self.bar = QLineEdit()                                     # a field outside MEMORY (the command bar)
         layout.addWidget(self.bar)
-        self.page = hud.MemoryPage()
+        self.page = memory_view.MemoryStage()
         layout.addWidget(self.page)
         self.after = QPushButton("Approve")                        # built after the page, like a card
         self.after.setFocusPolicy(Qt.FocusPolicy.TabFocus)
@@ -778,26 +785,36 @@ class MemoryPageKeyboardTests(unittest.TestCase):
         while widget is not page.input and len(chain) < 40:
             chain.append(widget)
             widget = widget.nextInFocusChain()
-        mine = [page.add_button, page.show_all_button, page.suggestion_rows()[0].save_button,
-                page.suggestion_rows()[0].dismiss_button]
+        tile = page.suggestion_tile
+        mine = [page.add_button, page.show_all_button]
         for row in page.rows():
-            mine += [row.edit_field, row.edit_button, row.delete_button, row.undo_button]
+            mine += [row.edit_field, row.cancel_button, row.save_button, row.edit_button, row.delete_button,
+                     row.undo_button]
+
+        def next_stop(widget: QWidget) -> QWidget:
+            widget = widget.nextInFocusChain()
+            while not widget.focusPolicy() & Qt.FocusPolicy.TabFocus:
+                widget = widget.nextInFocusChain()
+            return widget
+
+        self.assertIs(next_stop(tile.dismiss_button), tile.keep_button)          # the focal tile first:
+        self.assertIs(next_stop(tile.keep_button), page.input)                   # Dismiss, Keep, then Add
         positions = [chain.index(widget) for widget in mine]
         self.assertEqual(positions, sorted(positions))
         self.assertLess(positions[-1], chain.index(self.after))     # every note before what follows MEMORY
         if self.focus(page.add_button):
-            QTest.keyClick(page.add_button, Qt.Key.Key_Tab)        # Show all is hidden: Save comes next
-            self.assertIs(QApplication.focusWidget(), page.suggestion_rows()[0].save_button)
+            QTest.keyClick(page.add_button, Qt.Key.Key_Tab)        # Show all is hidden: the first note's Edit
+            self.assertIs(QApplication.focusWidget(), page.rows()[0].edit_button)
 
     def test_buttons_say_which_note(self) -> None:
         page = self.page
         page.set_suggestions([hud.SuggestionRowInfo(1, "Sam Example runs the sync")])
         page.set_rows(self.rows("a"))
-        row, suggestion = page.rows()[0], page.suggestion_rows()[0]
+        row, suggestion = page.rows()[0], page.suggestion_tile
         self.assertEqual(row.edit_button.accessibleName(), "Edit note: note a text")
         self.assertEqual(row.delete_button.accessibleName(), "Delete note: note a text")
         self.assertEqual(row.undo_button.accessibleName(), "Undo delete")
-        self.assertEqual(suggestion.save_button.accessibleName(), "Save suggested note: Sam Example runs the sync")
+        self.assertEqual(suggestion.keep_button.accessibleName(), "Keep suggested note: Sam Example runs the sync")
         self.assertEqual(suggestion.dismiss_button.accessibleName(),
                          "Dismiss suggested note: Sam Example runs the sync")
         page.set_rows([hud.MemoryRowInfo("a", "Ana prefers mornings", f"TOLD {ui.DOT} OCT 4")])

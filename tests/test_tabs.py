@@ -698,12 +698,13 @@ class ReadingViewScreenTests(unittest.TestCase):
                     self.assert_inside(reading.dock.button(slot), window)
         self.assertEqual(seen[:len(dock.SLOTS)], [ui._SLOT_SCREENS[slot] for slot in dock.SLOTS][1:] + [
             ui.SCREEN_HOME])
-        # The panel is on Memory (round 2: Briefing and Live have their own stages); the agenda follows
-        # Follow-ups.
+        # Round 2: every screen has its own stage (no transcript panel anywhere); the agenda lives in the
+        # Day view's drawer.
         reading.set_tab(hud.TAB_MEMORY)
         settle()
-        self.assertTrue(reading.memory_screen.isAncestorOf(reading.transcript_panel))
-        self.assertTrue(reading.transcript_panel.isVisible())
+        self.assertTrue(reading.memory_screen.isAncestorOf(reading.memory_view))
+        self.assertTrue(reading.memory_view.isVisible())
+        self.assertFalse(reading.transcript_panel.isVisible())
         reading.set_tab(hud.TAB_LIVE)
         settle()
         self.assertTrue(reading.live_screen.isAncestorOf(reading.live_stage))
@@ -718,11 +719,15 @@ class ReadingViewScreenTests(unittest.TestCase):
         self.assertTrue(reading.approvals_stage.isAncestorOf(reading.approvals))
         reading.set_tab(ui.SCREEN_FOLLOWUPS)
         settle()
-        self.assertTrue(reading.followups_screen.isAncestorOf(reading.agenda_panel))
-        self.assertEqual(reading.agenda_panel.mode(), hud.AGENDA_FOLLOWUPS)
-        reading.open_day_view()                      # the clock: the Day view over Home
+        self.assertTrue(reading.followups_screen.isAncestorOf(reading.followups_stage))
+        self.assertFalse(reading.followups_screen.isAncestorOf(reading.agenda_panel))
+        reading.set_tab(ui.SCREEN_SETTINGS)
         settle()
-        self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
+        self.assertTrue(reading.settings_page.isVisible())
+        reading.set_tab(ui.SCREEN_FOLLOWUPS)
+        reading.open_day_view()                      # the clock: the Day view over the current screen
+        settle()
+        self.assertEqual(reading.current_tab(), ui.SCREEN_FOLLOWUPS)
         self.assertTrue(reading.day_drawer.isAncestorOf(reading.agenda_panel))
         self.assertEqual(reading.agenda_panel.mode(), hud.AGENDA_DAY)
         window.hide()
@@ -866,15 +871,15 @@ class ReadingViewScreenTests(unittest.TestCase):
         settle(4)
         self.assertEqual(reading.current_tab(), hud.TAB_MEMORY)
         self.assertTrue(reading.memory_view.isVisible())
+        self.assertTrue(reading.memory_screen.isAncestorOf(reading.memory_view))   # its own stage (round 2)
         self.assertFalse(reading.conversation.isVisible())
-        self.assertTrue(reading.strip_caption.isVisible())
-        self.assertIn(reading.strip_caption.text(), (ui.MEMORY_CAPTION, ui.MEMORY_CAPTION_SHORT))
+        self.assertFalse(reading.transcript_panel.isVisible())
         self.assertFalse(reading.sections_button.isVisible())
-        self.assertIsInstance(reading.memory_page, ui._TabPage)
         self.assertIs(ui._LivePage, ui._TabPage)
         window.resize(ui.READING_SIZE)
         settle(6)
-        self.assertEqual(reading.strip_caption.text(), ui.MEMORY_CAPTION)
+        self.assertTrue(reading.memory_view.input.isVisible())     # no suggestion waits: the Add field
+        self.assertFalse(reading.memory_view.suggestion_tile.isVisible())
         reading.set_memory_available(False)
         self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
         window.hide()
@@ -917,15 +922,24 @@ class ReadingViewScreenTests(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         window.hide()
 
-    def test_the_whole_caption_at_the_default_size(self) -> None:
+    def test_memory_followups_and_settings_fit(self) -> None:
+        """Round 2, part 2b: Memory, Follow-ups and Settings are their own stages, inside the window at the
+        default and the smallest size."""
         window = self.window(False)
-        window.resize(ui.READING_SIZE)
-        window.reading.set_memory_available(True)
-        window.reading.set_tab(hud.TAB_MEMORY)              # round 2: the panel (and its caption) is on Memory
-        settle(6)
-        caption = window.reading.strip_caption
-        self.assertEqual(caption.text(), ui.MEMORY_CAPTION)
-        self.assertLessEqual(caption.sizeHint().width(), caption.width() + 1)
+        reading = window.reading
+        reading.set_memory_available(True)
+        reading.set_followups_available(True)
+        for size in ((ui.READING_SIZE.width(), ui.READING_SIZE.height()), (900, 600)):
+            window.resize(*size)
+            for screen, stage in ((hud.TAB_MEMORY, reading.memory_view),
+                                  (ui.SCREEN_FOLLOWUPS, reading.followups_stage),
+                                  (ui.SCREEN_SETTINGS, reading.settings_page)):
+                with self.subTest(size=size, screen=screen):
+                    reading.set_tab(screen)
+                    settle(4)
+                    self.assertTrue(stage.isVisible())
+                    self.assert_inside(stage, window)
+        self.assertFalse(reading.memory_view.horizontalScrollBar().isVisible())
         window.hide()
 
     def test_conversation_hour24_follows_the_window(self) -> None:
