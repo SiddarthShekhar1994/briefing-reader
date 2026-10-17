@@ -953,8 +953,8 @@ class OfferSpeechTests(unittest.TestCase):
         self.assertEqual(persona.offer_cost_sub(17, 20, 12), f"1 planner run {dot} 12 Ask runs left today")
         self.assertEqual(persona.offer_cost_sub(17, 20, 40, prep=True, as_of="1:40 PM"),
                          f"1 planner run (none without recent mail) {dot} 17 of 20 left today {dot} as of 1:40 PM")
-        self.assertEqual(persona.prod_hint_text(), "Prep offers and follow-ups work while I'm open or minimized, "
-                                                   "sir - minimize instead of Done to keep them.")
+        self.assertEqual(persona.prod_hint_text(), "Prep offers and follow-ups work while I'm open or minimised, "
+                                                   "sir - minimise instead of Done to keep them.")
         self.assertEqual(persona.DONE_PREP_TOOLTIP,
                          "Closes Jarvis - meeting prep offers stop until you open him again")
 

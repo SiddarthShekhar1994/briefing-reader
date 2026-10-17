@@ -347,7 +347,7 @@ class EventCheck:
     Everything but ``allowed`` / ``reason`` / ``mismatch`` is shown on the card only, never logged.
     """
 
-    text: str               # "Google: Project sync \u00b7 Thu Oct 8 \u00b7 12:00-1:00 PM \u00b7 you organize"
+    text: str               # "Google: Project sync \u00b7 Thu Oct 8 \u00b7 12:00-1:00 PM \u00b7 you organise"
     allowed: bool           # Jarvis may carry the card out on this event
     reason: str = ""        # why not (the card's amber note)
     mismatch: str = ""      # MISMATCH_*: Google's title or time is not the line's ("" = they agree)
@@ -1242,8 +1242,14 @@ def run_undo(executor: Executor, action: ProposedAction, record: UndoRecord, *,
     result: ExecResult | None = None
     error: ExecError | None = None
     running = False
+    # "running" names the forward result it reverses: a crash mid-Undo then keeps that result on the card
+    # (check the calendar), never an UNKNOWN whose Retry would apply the change again.
+    forward = saved.get("status", "")
+    if forward not in (STATUS_CREATED, STATUS_EXISTS, STATUS_SENT):
+        forward = STATUS_CREATED if action.kind in (CALENDAR, TODO) else STATUS_SENT
     try:
-        if not store.set(action.id, STATUS_RUNNING, kind=action.kind, account=action.account):
+        if not store.set(action.id, STATUS_RUNNING, link=saved.get("link", ""), message=saved.get("message", ""),
+                         kind=action.kind, account=action.account, undo=forward):
             raise ExecError(UNDO_NOT_SAVED_MESSAGE)
         running = True
         result = executor.undo(action, record)
@@ -1723,7 +1729,7 @@ def check_event(action: ProposedAction, details: EventDetails, today: date) -> E
     The text leads with Google's own title and time - what shows that the line's event id
     is the event the card means -, then who organizes it and your answer, and ends with the
     address Google answered as: "Google: Project sync \u00b7 Thu Oct 8 \u00b7 12:00-1:00 PM \u00b7
-    you organize \u00b7 as ana@example.edu". A long title is shortened (the tooltip has all of
+    you organise \u00b7 as ana@example.edu". A long title is shortened (the tooltip has all of
     it). When Google's title or time is not the line's, ``mismatch`` says which and the text
     starts "Google (other time): ..." instead.
     """
@@ -1734,9 +1740,9 @@ def check_event(action: ProposedAction, details: EventDetails, today: date) -> E
     elif details.recurring_instance:
         parts.append("one occurrence")
     if details.organizer_self:
-        parts.append("you organize")
+        parts.append("you organise")
     else:
-        parts.append(f"organized by {details.organizer}" if details.organizer else "organized by someone else")
+        parts.append(f"organised by {details.organizer}" if details.organizer else "organised by someone else")
     reason = ""
     if action.kind == RSVP:
         if details.self_email:
@@ -1747,7 +1753,7 @@ def check_event(action: ProposedAction, details: EventDetails, today: date) -> E
         if details.series:
             reason = "This is a whole repeating series; Jarvis moves single events only - open it"
         elif not (details.organizer_self or details.guests_can_modify):
-            reason = "You don't organize this event, so Jarvis can't move it - open it to answer instead"
+            reason = "You don't organise this event, so Jarvis can't move it - open it to answer instead"
         elif details.all_day:
             reason = "All-day events can't be moved from here - open it"
         elif not details.organizer_self:
@@ -1756,7 +1762,7 @@ def check_event(action: ProposedAction, details: EventDetails, today: date) -> E
         if details.series:
             reason = "This is a whole repeating series; Jarvis cancels single events only - open it"
         elif not details.organizer_self:
-            reason = "You don't organize this event, so Jarvis can't cancel it - open it to decline instead"
+            reason = "You don't organise this event, so Jarvis can't cancel it - open it to decline instead"
     identity = details.account_email
     if identity:
         parts.append(f"as {identity}")

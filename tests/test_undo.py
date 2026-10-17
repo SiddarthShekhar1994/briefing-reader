@@ -22,6 +22,7 @@ from briefing_reader.actions import (
     STATUS_RUNNING,
     STATUS_SENT,
     STATUS_UNKNOWN,
+    UNDO_INTERRUPTED,
     ActionStore,
     parse_action_line,
 )
@@ -285,6 +286,36 @@ class ExecutorUndoTests(unittest.TestCase):
                     failed = run_undo(self.executor, action, outcome.result.undo, store=self.store)
                 self.assertEqual(failed.status, status)
                 self.assertEqual(self.store.get(action.id)["status"], saved["status"])
+
+    def test_an_undo_jarvis_stopped_during_keeps_the_result_at_the_next_start(self) -> None:
+        # S4: the file a crash mid-Undo leaves; the next start never turns it into UNKNOWN (whose Retry
+        # would apply the change again) but keeps the forward result with "undo" = interrupted.
+        for line in (MOVE_LINE, RSVP_LINE, CALENDAR_LINE):
+            with self.subTest(line=line[:10]):
+                action, outcome = self.carry(line)
+                saved = self.store.get(action.id)
+                snapshot = self.store.path.with_name("mid-undo.json")
+                calendar = self.personal if line is CALENDAR_LINE else self.work
+                original = calendar._undo
+
+                def crash_here(*call: Any, original: Any = original) -> Any:
+                    snapshot.write_bytes(self.store.path.read_bytes())   # the file as a crash now leaves it
+                    return original(*call)
+
+                calendar._undo = crash_here
+                with self.assertLogs("briefing_reader", level="INFO"):
+                    run_undo(self.executor, action, outcome.result.undo, store=self.store)
+                calendar._undo = original
+                on_disk = json.loads(snapshot.read_text(encoding="utf-8"))[action.id]
+                self.assertEqual((on_disk["status"], on_disk["undo"]), (STATUS_RUNNING, saved["status"]))
+                with self.assertLogs("briefing_reader.actions", level="WARNING") as logs:
+                    entry = ActionStore(snapshot).get(action.id)
+                self.assertEqual((entry["status"], entry["link"], entry["message"], entry["undo"]),
+                                 (saved["status"], saved["link"], saved["message"], UNDO_INTERRUPTED))
+                self.assertIn("1 Undo(s) were interrupted", "\n".join(logs.output))
+        self.store.set("fwd1", STATUS_RUNNING, kind="move", account="work")   # a forward change: UNKNOWN as before
+        with self.assertLogs("briefing_reader.actions", level="WARNING"):
+            self.assertEqual(ActionStore(self.store.path).get("fwd1")["status"], STATUS_UNKNOWN)
 
     def test_an_undo_never_signs_in(self) -> None:
         action, outcome = self.carry(MOVE_LINE)

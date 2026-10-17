@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 import unittest
 from datetime import datetime
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import QApplication
 from briefing_reader import actions, dock, hud, ui
 from briefing_reader.actions import ActionStore, parse_action_line
 from briefing_reader.ask import routes
+from briefing_reader.notion_client import fetch_briefing
 from tests.ui_fakes import B_CALENDAR, MOVE_LINE, PDT, AppHarness, fonts, settle, wait_for
 
 _app: QApplication | None = None
@@ -342,6 +344,85 @@ class HoldTests(UndoAppTestCase):
         entry = ActionStore(self.app.store.path).get(action.id)
         self.assertEqual((entry["status"], entry["message"]), (actions.STATUS_FAILED, "Not sent - Jarvis closed first"))
 
+    def test_a_newer_briefing_waits_for_the_hold_and_never_ends_it_early(self) -> None:
+        # S1: an automatic arrival (the background poll's newer briefing) never sends a held card early.
+        action = self.action("email")
+        card = self.approve(action)
+        self.assertEqual(self.c.player.state, "idle")               # nothing plays: it would show at once
+        newer = fetch_briefing(self.app.client, self.app.config.page_id)
+        with self.assertLogs("briefing_reader.ui", level="INFO") as logs:
+            self.c._newer_briefing(newer)
+        settle()
+        self.assertIn("it shows when the hold is over", "\n".join(logs.output))
+        self.assertIsNotNone(self.c._send_hold)                      # the Undo the card offers stays
+        self.assertIs(self.c._pending_briefing, newer)
+        self.assertIs(self.reading.action_card(action.id), card)
+        self.assertEqual((card.status(), card.undo_text()), (hud.CARD_SENT, "Undo"))
+        self.assertEqual(self.sender.sent, [])
+        self.click_undo(action)                                      # the owner's Undo still works ...
+        self.assertTrue(wait_for(lambda: self.c._pending_briefing is None, 5))   # ... then the newer one shows
+        self.assertTrue(wait_for(lambda: False, 0.3) or True)
+        self.assertEqual(self.sender.sent, [])                       # nothing was sent
+
+    def test_a_newer_briefing_after_the_hold_shows_once_it_went(self) -> None:
+        action = self.action("email")
+        self.approve(action)
+        self.c._newer_briefing(fetch_briefing(self.app.client, self.app.config.page_id))
+        settle()
+        self.assertEqual(self.sender.sent, [])
+        self.end_hold()
+        self.assertTrue(wait_for(lambda: len(self.sender.sent) == 1 and self.c._pending_briefing is None, 10))
+        self.assertTrue(wait_for(lambda: False, 0.3) or True)
+        self.assertEqual(len(self.sender.sent), 1)                   # exactly one send, at the hold's end
+
+    def test_a_hold_whose_call_waits_behind_another_job_still_goes_when_jarvis_closes(self) -> None:
+        # S2: the hold ended, its call is queued behind a slow read, and the owner quits: it still goes.
+        action = self.action("email")
+        self.approve(action)
+        worker = self.c._calendar_worker
+        started, release = threading.Event(), threading.Event()
+        dispatch = worker._dispatch
+
+        def slow(job):
+            if job == "slow read":
+                started.set()
+                release.wait(5)
+                return
+            dispatch(job)
+
+        worker._dispatch = slow
+        worker._jobs.put("slow read")
+        self.assertTrue(started.wait(5))
+        self.end_hold()                                              # queued behind the slow read
+        threading.Timer(0.3, release.set).start()
+        with self.assertLogs("briefing_reader.ui", level="INFO") as logs:
+            self.c.shutdown()
+        self.assertEqual(len(self.sender.sent), 1)                   # the card said Sent: it went
+        self.assertEqual(ActionStore(self.app.store.path).get(action.id)["status"], actions.STATUS_SENT)
+        self.assertIn("Waiting up to 5 s for the held send", "\n".join(logs.output))
+
+    def test_a_second_key_press_right_after_undo_never_sends_again(self) -> None:
+        # S3: Undo counts as a decision click, so a bounce or habitual second tap within 1 s is ignored.
+        now = [100.0]
+        self.c._click_clock = lambda: now[0]
+        action = self.action("email")
+        card = self.approve(action)
+        now[0] = 101.5
+        self.click_undo(action)
+        self.assertEqual(card.status(), hud.CARD_PENDING)
+        now[0] = 101.6
+        with self.assertLogs("briefing_reader.ui", level="INFO") as logs:
+            card.approve_button.click()
+        settle()
+        self.assertIn("Ignored a second approval click within 1 s", "\n".join(logs.output))
+        self.assertIsNone(self.c._send_hold)
+        self.assertEqual(card.status(), hud.CARD_PENDING)
+        now[0] = 103.0                                               # a deliberate Send later still works
+        card.approve_button.click()
+        settle()
+        self.assertIsNotNone(self.c._send_hold)
+        self.assertEqual(self.sender.sent, [])
+
 
 class NextStartTests(unittest.TestCase):
     def test_a_hold_jarvis_could_not_finish_shows_not_sent_at_the_next_start(self) -> None:
@@ -358,6 +439,26 @@ class NextStartTests(unittest.TestCase):
         self.assertEqual(card.status(), hud.CARD_FAILED)
         self.assertIn("Not sent - Jarvis closed first", card.note())
         self.assertEqual(app.senders["work"].sent, [])
+
+    def test_an_undo_jarvis_stopped_during_keeps_the_result_and_offers_no_retry(self) -> None:
+        # S4: never UNKNOWN with the forward Retry, which would move the event (and email guests) again.
+        app = AppHarness(self, ask=False, lines=(MOVE_LINE,))
+        action = parse_action_line(MOVE_LINE)
+        path = Path(app.root) / "actions.json"
+        path.write_text(json.dumps({action.id: {"status": "running", "undo": "sent", "at": "2026-10-04T13:50:00-07:00",
+                                                "link": "", "message": "", "kind": "move", "account": "work"}}),
+                        encoding="utf-8")
+        with self.assertLogs("briefing_reader.actions", level="WARNING"):
+            app.c._store = ActionStore(path)
+        app.reading(autoplay=False)
+        card = app.c.window.reading.action_card(action.id)
+        self.assertEqual(card.status(), hud.CARD_SENT)               # the move stands as far as Jarvis knows
+        self.assertEqual(card.note(), actions.UNDO_INTERRUPTED_NOTE)
+        self.assertEqual(card.undo_text(), "")
+        self.assertFalse(card.approve_button.isVisibleTo(card))     # no Retry
+        app.c.approve_action(action.id)
+        settle()
+        self.assertEqual([call for call in app.calendars["work"].calls if call[0] in ("move", "undo_move")], [])
 
 
 class SurfaceTests(UndoAppTestCase):

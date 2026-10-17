@@ -74,7 +74,7 @@ class ToCardsTests(unittest.TestCase):
         self.assertEqual(self.one(move(event="evtINVENTED")).error, validate.UNKNOWN_EVENT)
         self.assertEqual(self.one(move(acct="personal")).error, validate.UNKNOWN_EVENT)   # another account's id
         self.assertEqual(self.one(move(event="evt0002bb")).error,
-                         "You don't organize this event, so Jarvis can't move it - ask for an email to the organizer")
+                         "You don't organise this event, so Jarvis can't move it - ask for an email to the organiser")
         cancel = "Cancel: acct=work | event=evt0002bb | cal=primary | notify=all | title=Dept | at= | link= | body="
         self.assertIn("can't cancel it", self.one(cancel).error)
         rsvp = "RSVP: acct=work | event={} | cal=primary | answer=yes | notify=all | title=x | at= | due= | link= | body="

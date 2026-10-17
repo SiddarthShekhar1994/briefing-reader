@@ -5038,6 +5038,8 @@ class _TickHint(_BreakableLabel):
 
     def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().paintEvent(event)
+        if not self.text():
+            return   # an emptied hint only keeps its room: never a bare glyph
         holo = _holo()
         painter = QPainter(self)
         try:
@@ -5692,8 +5694,6 @@ class ActionCard(QWidget):
         # keyboard focus to the next card's button or link (and scroll the list to
         # it), so a second Space would act on that card: keep the focus on this card.
         focus = QApplication.focusWidget()
-        undo_had_focus = focus is not None and focus is self.undo_button
-        focus_here = focus is not None and (focus is self or self.isAncestorOf(focus))
         if self._status not in _UNDO_STATUSES:
             self._undo_text = ""   # Undo only ever stands beside an ADDED / SENT result
         if focus is not None and ((not show_buttons and self._buttons.isAncestorOf(focus))
@@ -5715,11 +5715,9 @@ class ActionCard(QWidget):
         self.failure_label.set_line(text if failed else "")
         self._stack.setCurrentWidget(self._buttons if show_buttons else self._result)
         self._sync_buttons()
-        # The keyboard follows the decision: an Undo that took the card back to waiting hands the focus
-        # back to the right-hand button (set_undo hands it to a new Undo).
-        del focus_here
-        if undo_had_focus and show_buttons and self.approve_button.isEnabled():
-            self.approve_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        # An Undo that took the card back to waiting keeps the focus on the card itself, never on Send /
+        # Approve: a second Space there would re-send or re-apply what was just undone (set_undo hands the
+        # focus to a new Undo).
         slot = self._actionable or bool(text)
         self._slot.setVisible(slot)
         self._texts.setContentsMargins(0, 0, self._PAD_RIGHT, 0 if slot else self._PAD_BOTTOM)
@@ -5789,11 +5787,17 @@ class ActionCard(QWidget):
         return holo.TILE_NEEDS_FOCUS if self._focal else holo.TILE_NEEDS
 
     def _sync_look(self) -> None:
-        """The kicker's and the title's colours follow the tile (HOLOGRAM_SPEC 5)."""
+        """The kicker's and the title's colours follow the tile (HOLOGRAM_SPEC 5); so do the text links
+        (Open, Copy, Undo): amber only on an amber needs-you tile, holo cyan on done, steel and error tiles
+        (spec 6; amber only when a decision waits)."""
         holo = _holo()
-        style = holo.TILE_STYLES[self.tile_state()]
+        tile = self.tile_state()
+        style = holo.TILE_STYLES[tile]
         set_label_color(self.kind_label, style.kicker)
         set_label_color(self.title_label, style.title)
+        link = holo.LINK if tile in (holo.TILE_NEEDS, holo.TILE_NEEDS_FOCUS) else holo.LINK_CYAN
+        for button in (self.source_button, self.copy_button, self.undo_button):
+            button.set_face(link)
         self.update()
 
     def set_note(self, text: str) -> None:
@@ -9566,7 +9570,7 @@ class _LiveBlock(QWidget):
         self.toggle = _WrapLink("")
         self.toggle.clicked.connect(self.flip)
         self.not_kept = _live_label("", fonts.note, TEXT_DIM)
-        self.caption = _live_label(LIVE_UNTRUSTED_TEXT, fonts.note, AMBER_META)
+        self.caption = _live_label(LIVE_UNTRUSTED_TEXT, fonts.note, _holo().INK_4)   # provenance: ink-4
         self.cut_label = _live_label("", fonts.note, TEXT_DIM)
         self.text_edit: _LiveText | None = None
         self._layout = QVBoxLayout(self)
@@ -9649,16 +9653,29 @@ PICTURE_VIEWER_PAGE_W = 960       # a page picture at its own width, at most thi
 PICTURE_SEE_ALL = "Enter: see all"
 PICTURE_TAG = "PICTURE"
 PICTURE_HINT = "Enter: larger"
-PICTURE_TONE_COLORS = {
-    live_pictures.TONE_WILL: AMBER, live_pictures.TONE_DOING: ACCENT, live_pictures.TONE_DONE: GREEN,
-    live_pictures.TONE_FAILED: RED, live_pictures.TONE_UNDONE: TEXT_DIM, live_pictures.TONE_CHECK: AMBER,
-}
+
+
+def picture_tone_color(tone: str) -> str:
+    """A picture's state word in the hologram tokens (HOLOGRAM_SPEC 0.2: amber only when something waits):
+    amber for what will happen (not approved yet) and a check to look at; cyan doing, mint done, alert
+    failed, ink-4 undone."""
+    holo = _holo()
+    return {live_pictures.TONE_WILL: holo.AMBER, live_pictures.TONE_DOING: holo.HOLO,
+            live_pictures.TONE_DONE: holo.OK, live_pictures.TONE_FAILED: holo.ALERT_TX,
+            live_pictures.TONE_UNDONE: holo.INK_4, live_pictures.TONE_CHECK: holo.AMBER}.get(tone, holo.AMBER)
+
+
+def _rsvp_chip_color(chip: str) -> str:
+    """An answer's chip: mint yes, alert no, ink maybe (an answer given is no decision waiting)."""
+    holo = _holo()
+    return {"YES": holo.OK, "NO": holo.ALERT_TX}.get(chip, holo.INK_2)
+
+
 _PICTURE_MAX = {
     live_pictures.KIND_EMAIL: LIVE_PICTURE_MAIL_MAX_PX, live_pictures.KIND_OUTGOING: LIVE_PICTURE_MAIL_MAX_PX,
     live_pictures.KIND_DAY: LIVE_PICTURE_DAY_MAX_PX, live_pictures.KIND_WEEK: LIVE_PICTURE_WEEK_MAX_PX,
     live_pictures.KIND_PAGE: LIVE_PICTURE_PAGE_MAX_PX, live_pictures.KIND_SEARCH: LIVE_PICTURE_SEARCH_MAX_PX,
 }
-_RSVP_CHIP_COLORS = {"YES": GREEN, "NO": RED, "MAYBE": AMBER}
 _PIC_PAD = 12
 _PIC_FADE = 24
 _PIC_LABEL_W = 64
@@ -9713,7 +9730,7 @@ def _pic_stamp(painter: QPainter | None, stamp: tuple[str, str], x: float, y: fl
     else:
         rect, bar = QRectF(x, y + 22, min(pill_w, width), 18), 40.0
     if painter is not None:
-        _paint_pill(painter, rect, words, _LiveFonts.get().word, PICTURE_TONE_COLORS.get(tone, AMBER), filled=False)
+        _paint_pill(painter, rect, words, _LiveFonts.get().word, picture_tone_color(tone), filled=False)
     return bar
 
 
@@ -9740,7 +9757,7 @@ def _paint_mail(painter: QPainter | None, rect: QRectF, picture: Any, stamp: tup
     y += _pic_stamp(painter, stamp, left, y, width, chip_w) + 6
     if not mail.outgoing:
         caption = _TextLines(LIVE_UNTRUSTED_TEXT, "pic_small", width, max_lines=2)
-        _pic_draw(painter, caption, left, y, AMBER_META)
+        _pic_draw(painter, caption, left, y, _holo().INK_4)   # provenance, not a decision: ink-4
         y += caption.height + 6
     head = mail.head
     # (label, value, font, most lines): To and Cc are never cut - every recipient shows (an outgoing
@@ -9821,7 +9838,8 @@ def _paint_mail(painter: QPainter | None, rect: QRectF, picture: Any, stamp: tup
 def _pic_block_colors(role: str) -> tuple[QColor, QColor, str, str]:
     """(fill, border, title colour, tag) of a day picture's block."""
     if role == live_pictures.ROLE_BEFORE:
-        return rgba(AMBER, 0.06), rgba(AMBER, 0.7), TEXT_MUTED, "was"
+        steel = _holo().STEEL   # the time it had: no decision waits there (amber only when one does)
+        return rgba(steel, 0.08), rgba(steel, 0.8), TEXT_MUTED, "was"
     if role == live_pictures.ROLE_AFTER:
         return rgba(ACCENT, 0.28), QColor(ACCENT), TEXT_BRIGHT, "new"
     if role == live_pictures.ROLE_NEW:
@@ -9862,7 +9880,7 @@ def _paint_day_block(painter: QPainter, rect: QRectF, block: Any) -> None:
             chip_w = _text_advance(fonts.pic_tag, block.chip) + 10
             if chip_w < inner.width() - 20:
                 _paint_pill(painter, QRectF(right - chip_w, inner.top() + 1, chip_w, 14), block.chip, fonts.pic_tag,
-                            _RSVP_CHIP_COLORS.get(block.chip, AMBER), filled=True)
+                            _rsvp_chip_color(block.chip), filled=True)
                 right -= chip_w + 4
         elif tag:
             tag_w = _text_advance(fonts.pic_tiny, tag) + 2
@@ -9932,7 +9950,8 @@ def _paint_arrow(painter: QPainter, start: QRectF, end: QRectF) -> None:
         halo.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(halo)
         painter.drawPath(path)
-        pen = QPen(QColor(AMBER), 1.6)
+        arrow = QColor(_holo().INK_4)   # from the old time to the new one: no decision waits there
+        pen = QPen(arrow, 1.6)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
         painter.drawPath(path)
@@ -9940,7 +9959,7 @@ def _paint_arrow(painter: QPainter, start: QRectF, end: QRectF) -> None:
         left = QPointF(tip.x() - ux * size - uy * size * 0.55, tip.y() - uy * size + ux * size * 0.55)
         right = QPointF(tip.x() - ux * size + uy * size * 0.55, tip.y() - uy * size - ux * size * 0.55)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(AMBER))
+        painter.setBrush(arrow)
         painter.drawPolygon(QPolygonF([tip, left, right]))
     finally:
         painter.restore()
@@ -10316,7 +10335,7 @@ def _paint_search(painter: QPainter | None, rect: QRectF, picture: Any, stamp: t
             y += lines.height + 2
     if search.hits:
         caption = _TextLines(LIVE_UNTRUSTED_TEXT, "pic_small", width, max_lines=2)
-        _pic_draw(painter, caption, left, y + 2, AMBER_META)
+        _pic_draw(painter, caption, left, y + 2, _holo().INK_4)   # provenance, not a decision: ink-4
         y += caption.height + 2
     y += 6
     _pic_rule(painter, left, y, width)
@@ -10324,7 +10343,7 @@ def _paint_search(painter: QPainter | None, rect: QRectF, picture: Any, stamp: t
     if not search.hits:
         words = live_pictures.SEARCH_UNREAD if search.unread else live_pictures.SEARCH_EMPTY
         lines = _TextLines(words, "pic_small", width, max_lines=2)
-        _pic_draw(painter, lines, left, y, AMBER if search.unread else TEXT_DIM)
+        _pic_draw(painter, lines, left, y, _holo().INK_3 if search.unread else TEXT_DIM)
         y += lines.height
     for index, hit in enumerate(search.hits):
         if stop is not None and y > stop:

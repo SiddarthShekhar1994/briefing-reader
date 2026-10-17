@@ -1816,7 +1816,7 @@ class MoveTests(EventCallTestCase):
 
     def test_refusals_send_nothing(self) -> None:
         cases = {
-            "not yours": (_event_item(organizer_self=False), {}, "don't organize"),
+            "not yours": (_event_item(organizer_self=False), {}, "don't organise"),
             "all day": (_event_item(all_day=("2026-10-08", "2026-10-09")), {}, "All-day"),
             "series": (_event_item(recurrence=True), {}, "repeating series"),
             "past": (_event_item(), {"now": datetime(2026, 10, 9, 9, 0, tzinfo=EDT)}, "already begun"),

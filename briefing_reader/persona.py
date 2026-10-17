@@ -1038,7 +1038,7 @@ PREP_OFFER_SPEECH = "Your meeting at {at} starts in about {minutes}, {sir}. Shal
 PREP_OFFERS_SPEECH = "You have meetings at {ats}, {sir}. Shall I prepare briefs?"
 PLAN_COST_SUB = "1 planner run"
 PREP_COST_SUB = "1 planner run (none without recent mail)"
-PROD_HINT_TEXT = ("Prep offers and follow-ups work while I'm open or minimized, {sir} - minimize instead of Done to "
+PROD_HINT_TEXT = ("Prep offers and follow-ups work while I'm open or minimised, {sir} - minimise instead of Done to "
                   "keep them.")
 DONE_PREP_TOOLTIP = "Closes Jarvis - meeting prep offers stop until you open him again"
 

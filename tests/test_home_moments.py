@@ -180,7 +180,14 @@ class PlanStageTests(unittest.TestCase):
         self.assertTrue(all(tile.add_button.variant() == holo.AMBER_COMMIT for tile in tiles))
         self.assertEqual(stage.due_strip.due(), (("DUE TONIGHT", "LING essay draft"),))
         self.assertEqual(stage.day_label.text(), f"TODAY {DOT} MON 12 OCT")
-        self.assertEqual(stage.caption_text(), "Three blocks for today, the first at 10:30 AM.")   # <= 10 words
+        self.assertEqual(stage.caption_text(), "Three blocks for today, the first at 10:30 AM.")   # whole sentences
+        # L1: never a page cut mid-sentence; whole sentences up to 14 words, the first one always whole.
+        self.assertEqual(plan_view.side_caption("I've lined up two blocks for today, the first at 11 AM. Each one "
+                                                "waits for your OK, sir."),
+                         "I've lined up two blocks for today, the first at 11 AM.")
+        self.assertEqual(plan_view.side_caption("Two blocks for today. Each waits for you."),
+                         "Two blocks for today. Each waits for you.")
+        self.assertEqual(plan_view.side_caption(""), "")
         texts = " ".join([stage.day_label.text(), stage.caption_text(), stage.caption.accessibleName()]).upper()
         self.assertFalse([word for word in READOUTS if word in texts])          # no technical readout
         timeline = stage.timeline
@@ -247,7 +254,7 @@ class BriefStageTests(unittest.TestCase):
                                             "FROM YOUR NOTES", "OWES YOU AN ANSWER"])
         rows = stage.people_rows()
         self.assertEqual([(row.person.name, row.person.badge, row.person.tone) for row in rows],
-                         [("Ana Lima", "ORGANIZER", holo.TONE_CYAN), ("Ben Ode", "ACCEPTED", holo.TONE_CYAN),
+                         [("Ana Lima", "ORGANISER", holo.TONE_CYAN), ("Ben Ode", "ACCEPTED", holo.TONE_CYAN),
                           ("Dana Park", "NO ANSWER YET", holo.TONE_STEEL)])
         self.assertEqual(rows[0].person.line, '"Budget numbers", Oct 8')     # their subject stays in quotes
         self.assertEqual(rows[2].person.line, "")

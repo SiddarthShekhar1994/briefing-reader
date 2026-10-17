@@ -1070,7 +1070,7 @@ class GoogleCalendar:
                 raise NotAllowed("This is a whole repeating series; Jarvis moves single events or "
                                  "occurrences only - open it in Google Calendar")
             if not (details.organizer_self or details.guests_can_modify):
-                raise NotAllowed("You don't organize this event, so it can't be moved - "
+                raise NotAllowed("You don't organise this event, so it can't be moved - "
                                  "answer the invitation instead")
             if details.start is None or details.end is None:
                 raise NotAllowed("All-day events can't be moved from here")
@@ -1114,7 +1114,7 @@ class GoogleCalendar:
                 raise NotAllowed("This is a whole repeating series; Jarvis cancels single events or "
                                  "occurrences only - open it in Google Calendar")
             if not details.organizer_self:
-                raise NotAllowed("You don't organize this event - decline it instead")
+                raise NotAllowed("You don't organise this event - decline it instead")
             service = self._get_service(interactive=interactive)
             self._require_change_allowed()
             request = service.events().delete(calendarId=calendar, eventId=event_id,

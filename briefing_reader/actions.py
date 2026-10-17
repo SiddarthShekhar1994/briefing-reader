@@ -124,6 +124,11 @@ STATUSES = (STATUS_CREATED, STATUS_EXISTS, STATUS_DENIED, STATUS_FAILED, STATUS_
 DECIDED_STATUSES = frozenset({STATUS_CREATED, STATUS_EXISTS, STATUS_DENIED, STATUS_DONE, STATUS_SENT,
                               STATUS_RUNNING, STATUS_HELD})
 INTERRUPTED_MESSAGE = "Jarvis stopped while this was running; check before retrying"
+# An entry's optional "undo": while an Undo runs, the forward result it reverses ("created", "sent", ...);
+# after Jarvis stopped during that Undo, UNDO_INTERRUPTED (the card keeps its result, with no Retry).
+UNDO_INTERRUPTED = "interrupted"
+UNDO_INTERRUPTED_NOTE = "Jarvis stopped during the Undo - check the calendar: it may or may not be undone."
+_UNDO_FORWARD = frozenset({STATUS_CREATED, STATUS_EXISTS, STATUS_SENT})
 # A hold Jarvis could not finish before it closed (the next start shows the card as not sent).
 CLOSED_FIRST_MESSAGE = "Not sent - Jarvis closed first"
 CLOSED_FIRST_CANCEL_MESSAGE = "Not cancelled - Jarvis closed first"
@@ -2570,12 +2575,15 @@ def _logged_alias(account: str) -> str:
 
 class ActionStore:
     """Persisted decisions: %LOCALAPPDATA%\\briefing-reader\\actions.json
-    {id: {status, at, link, message, kind, account}} (``kind`` and ``account`` only when known).
+    {id: {status, at, link, message, kind, account, undo}} (``kind`` and ``account`` only when known;
+    ``undo`` only while an Undo runs or after one was interrupted).
 
     "failed" is remembered (for the card's message) but is not a decision: the
     proposal stays pending and can be approved again; so is "unknown". An
     entry still "running" when the file is read (Jarvis stopped mid-call)
-    becomes "unknown"; one still "held" (Jarvis closed before the hidden hold
+    becomes "unknown" - unless it was an Undo, whose card then keeps its
+    result and says to check the calendar (never a Retry that would apply
+    the change again); one still "held" (Jarvis closed before the hidden hold
     of a Reply, Email or Cancel could finish: nothing was sent) becomes
     "failed" with "Not sent - Jarvis closed first"; the next ``prune()`` saves
     that. A corrupt or
@@ -2597,9 +2605,10 @@ class ActionStore:
             return dict(entry) if entry is not None else None
 
     def set(self, action_id: str, status: str, *, link: str = "", message: str = "",
-            kind: str = "", account: str = "") -> bool:
+            kind: str = "", account: str = "", undo: str = "") -> bool:
         """Remember ``status`` for ``action_id``; True when it was written to the file (False:
-        logged, and kept in memory for this run only)."""
+        logged, and kept in memory for this run only). ``undo``: with "running", the forward result an
+        Undo reverses (what the card keeps should Jarvis stop mid-Undo)."""
         if status not in STATUSES:
             raise ValueError(f"unknown action status {status!r}")
         entry = {"status": status, "at": self._clock().isoformat(timespec="seconds"),
@@ -2608,6 +2617,8 @@ class ActionStore:
             entry["kind"] = kind
         if account:
             entry["account"] = account
+        if undo in _UNDO_FORWARD or undo == UNDO_INTERRUPTED:
+            entry["undo"] = undo
         with self._lock:
             self._entries[action_id] = entry
             saved = _write_entries(self.path, self._entries)
@@ -2705,16 +2716,25 @@ def _clean_entry(value: object) -> dict[str, str] | None:
     for name in ("kind", "account"):   # optional; files from before they existed have neither
         if isinstance(value.get(name), str) and value[name]:
             entry[name] = value[name]
+    if value.get("undo") in _UNDO_FORWARD or value.get("undo") == UNDO_INTERRUPTED:
+        entry["undo"] = value["undo"]
     return entry
 
 
 def _mark_interrupted(entries: dict[str, dict[str, str]]) -> bool:
-    """"running" entries (Jarvis stopped mid-call) become "unknown"; "held" ones (Jarvis closed before
-    the hidden hold could finish: nothing was sent) become "failed" with CLOSED_FIRST_MESSAGE, so the
-    card never says "Sent" for a message that did not go. True when any changed."""
-    count = held = 0
+    """"running" entries (Jarvis stopped mid-call) become "unknown"; an Undo's "running" (its forward
+    result in "undo") gets that result back with "undo" = UNDO_INTERRUPTED: the card says to check the
+    calendar and offers no Retry, which would apply the change the owner was undoing again. "held" ones
+    (Jarvis closed before the hidden hold could finish: nothing was sent) become "failed" with
+    CLOSED_FIRST_MESSAGE, so the card never says "Sent" for a message that did not go. True when any
+    changed."""
+    count = held = undos = 0
     for entry in entries.values():
-        if entry["status"] == STATUS_RUNNING:
+        if entry["status"] == STATUS_RUNNING and entry.get("undo") in _UNDO_FORWARD:
+            entry["status"] = entry["undo"]
+            entry["undo"] = UNDO_INTERRUPTED
+            undos += 1
+        elif entry["status"] == STATUS_RUNNING:
             entry["status"] = STATUS_UNKNOWN
             entry["message"] = INTERRUPTED_MESSAGE
             count += 1
@@ -2726,7 +2746,9 @@ def _mark_interrupted(entries: dict[str, dict[str, str]]) -> bool:
         logger.warning("%d action(s) were interrupted; marked unknown", count)
     if held:
         logger.warning("%d held action(s) were not sent before Jarvis closed; marked failed", held)
-    return bool(count or held)
+    if undos:
+        logger.warning("%d Undo(s) were interrupted; their cards keep the result and say to check", undos)
+    return bool(count or held or undos)
 
 
 def _write_entries(path: Path, entries: dict[str, dict[str, str]]) -> bool:

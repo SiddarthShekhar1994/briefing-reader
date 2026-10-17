@@ -22,7 +22,7 @@ from PySide6.QtGui import QTextDocument
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QWidget
 
-from briefing_reader import config, hud
+from briefing_reader import config, holo, hud
 
 _app: QApplication | None = None
 IMG = '<img src="file://203.0.113.9/share/x.png">'
@@ -491,6 +491,34 @@ class MailCardTests(unittest.TestCase):
         self.assertEqual(hud._with_soft_breaks("ana@example.edu"), "ana@example.edu")   # a card detail: as before
         self.assertEqual(hud._with_soft_breaks("ana@example.edu", 0).split("\u200b"), ["ana@", "example", ".edu"])
 
+    def test_an_emptied_tick_hint_draws_no_glyph(self) -> None:
+        # L3: the hint keeps its room once its NEW recipient goes, but never as a bare amber circled-i.
+        def amber_pixels(widget: QWidget) -> int:
+            image = widget.grab().toImage()
+            colours = [image.pixelColor(x, y) for x in range(0, image.width(), 2) for y in range(0, image.height(), 2)]
+            return sum(1 for c in colours if c.red() > 200 and 120 < c.green() < 220 and c.blue() < 120)
+
+        hint = hud._TickHint()
+        hint.resize(260, 40)
+        hint.set_hint("Tick dana@example.com first, then Send.", False)
+        self.assertGreater(amber_pixels(hint), 0)
+        hint.set_hint("", False)
+        hint.show()                       # as _sync_tick_hint keeps it: its room stays
+        self.assertEqual(amber_pixels(hint), 0)
+        hint.close()
+
+    def test_text_links_are_amber_only_while_a_decision_waits(self) -> None:
+        # L2: Open / Copy / Undo are amber on a needs-you tile, holo cyan beside a done (mint) result.
+        card = self.make()
+        self.assertEqual({card.copy_button.face(), card.source_button.face()}, {holo.LINK})
+        card.set_status(hud.CARD_SENT, "Sent")
+        card.set_undo("Undo")
+        self.assertEqual({card.copy_button.face(), card.source_button.face(), card.undo_button.face()},
+                         {holo.LINK_CYAN})
+        card.set_status(hud.CARD_PENDING)
+        self.assertEqual(card.copy_button.face(), holo.LINK)
+        card.close()
+
     def test_space_on_send_hands_the_focus_to_undo(self) -> None:
         card = self.make()
         card.activateWindow()
@@ -507,8 +535,8 @@ class MailCardTests(unittest.TestCase):
         card.set_undo("Undo")                                      # ... is never pulled back
         self.assertIs(QApplication.focusWidget(), card.copy_button)
         card.undo_button.setFocus(Qt.FocusReason.TabFocusReason)
-        card.set_status(hud.CARD_PENDING)   # Undo: back to the right-hand button
-        self.assertIs(QApplication.focusWidget(), card.approve_button)
+        card.set_status(hud.CARD_PENDING)   # Undo: the focus stays on the card, never on Send (S3)
+        self.assertIs(QApplication.focusWidget(), card)
         card.close()
 
     def test_the_card_never_shrinks_when_the_recipients_change(self) -> None:

@@ -830,30 +830,30 @@ class CheckEventTests(unittest.TestCase):
     def test_rsvp(self) -> None:
         check = check_event(example("RSVP"), details(organizer_self=False, organizer="Ana Example", **SPEAKER),
                             TODAY)
-        line = (f"Google: Speaker Series: Dr. Example{DOT}Tue Oct 6{DOT}5:00-6:00 PM{DOT}organized by Ana Example"
+        line = (f"Google: Speaker Series: Dr. Example{DOT}Tue Oct 6{DOT}5:00-6:00 PM{DOT}organised by Ana Example"
                 f"{DOT}you haven't answered{DOT}as you@example.edu")
         self.assertEqual(check, EventCheck(   # Google's own title and time first: is it the right event?
             line, allowed=True, title="Speaker Series: Dr. Example", identity="you@example.edu", link=EVENT_LINK,
             tooltip=line))
         accepted = check_event(example("RSVP"), details(me="accepted", **SPEAKER), TODAY)
-        self.assertIn(f"{DOT}you organize{DOT}you accepted{DOT}", accepted.text)
+        self.assertIn(f"{DOT}you organise{DOT}you accepted{DOT}", accepted.text)
         refused = check_event(example("RSVP"), details(organizer_self=False, me="", **SPEAKER), TODAY)
         self.assertFalse(refused.allowed)
         self.assertIn("not on this event's guest list", refused.reason)
-        self.assertIn("organized by someone else", refused.text)
+        self.assertIn("organised by someone else", refused.text)
         self.assertEqual(refused.identity, "")   # no attendee entry, not the organizer
 
     def test_move(self) -> None:
-        line = f"Google: Project sync{DOT}Thu Oct 8{DOT}12:00-1:00 PM{DOT}you organize{DOT}as you@example.edu"
+        line = f"Google: Project sync{DOT}Thu Oct 8{DOT}12:00-1:00 PM{DOT}you organise{DOT}as you@example.edu"
         self.assertEqual(check_event(example("Move"), details(), TODAY),
                          EventCheck(line, allowed=True, title="Project sync", identity="you@example.edu",
                                     link=EVENT_LINK, tooltip=line))
         guest = check_event(example("Move"), details(organizer_self=False, guests_can_modify=True), TODAY)
         self.assertTrue(guest.allowed)
-        self.assertIn(f"{DOT}organized by someone else{DOT}guests may change it{DOT}", guest.text)
+        self.assertIn(f"{DOT}organised by someone else{DOT}guests may change it{DOT}", guest.text)
         self.assertIn(f"12:00-1:00 PM{DOT}one occurrence{DOT}",
                       check_event(example("Move"), details(instance=True), TODAY).text)
-        for item, words in ((details(organizer_self=False), "don't organize"),
+        for item, words in ((details(organizer_self=False), "don't organise"),
                             (details(series=True), "whole repeating series"),
                             (details(all_day=True), "All-day")):
             with self.subTest(words=words):

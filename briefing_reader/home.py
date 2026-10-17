@@ -605,7 +605,7 @@ _MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT",
 _MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August", "September",
                 "October", "November", "December")
 MUTE_LABEL = "Mute Jarvis"
-MINIMIZE_LABEL = "Minimize"
+MINIMIZE_LABEL = "Minimise"
 CLOSE_LABEL = "Done, close Jarvis"
 
 
@@ -901,7 +901,8 @@ class HoloHeader(QWidget):
         self._service_row.setSpacing(12)
         self.hold = _HoldNote()
         self.hold.hide()
-        self.undo_button = holo.HoloButton("Undo", holo.LINK, size=holo.SIZE_SM)
+        # Beside the mint SENT: a holo link (amber only when a decision waits, spec 6 / decision 0.2).
+        self.undo_button = holo.HoloButton("Undo", holo.LINK_CYAN, size=holo.SIZE_SM)
         self.undo_button.setAccessibleName("Undo, nothing is sent")
         self.undo_button.clicked.connect(self.undoClicked)
         self.undo_button.hide()

@@ -1090,5 +1090,20 @@ class SearchPictureViewTests(LogCase):
         self.assertTrue(self.in_view(log, log.step_widget(pending.id).row))  # (the step still comes into view)
 
 
+class PictureToneTests(unittest.TestCase):
+    def test_amber_only_where_something_waits(self) -> None:
+        # L5: the hologram tokens; amber only for what will happen (not approved yet) and a check to look at.
+        from briefing_reader import holo
+        tones = (pictures.TONE_WILL, pictures.TONE_DOING, pictures.TONE_DONE, pictures.TONE_FAILED,
+                 pictures.TONE_UNDONE, pictures.TONE_CHECK)
+        amber = {tone for tone in tones if hud.picture_tone_color(tone) == holo.AMBER}
+        self.assertEqual(amber, {pictures.TONE_WILL, pictures.TONE_CHECK})
+        self.assertEqual((hud.picture_tone_color(pictures.TONE_DOING), hud.picture_tone_color(pictures.TONE_DONE)),
+                         (holo.HOLO, holo.OK))
+        fill, border, _title, tag = hud._pic_block_colors(pictures.ROLE_BEFORE)   # an approved move's old time
+        self.assertEqual((tag, border.name().upper()[:7]), ("was", holo.STEEL.upper()))
+        self.assertNotEqual(hud._rsvp_chip_color("MAYBE"), holo.AMBER)
+
+
 if __name__ == "__main__":
     unittest.main()

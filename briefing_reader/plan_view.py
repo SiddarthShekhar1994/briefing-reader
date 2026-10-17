@@ -15,8 +15,9 @@ Public API
     Home's plan moment: the DUE strip and the day label over a vertical day timeline (8 AM - 8 PM, wider when
     a block or an event falls outside, 52 px an hour, a ``holo`` now-line with its dot), existing events as
     quiet tiles, each proposed block as an amber dashed tile with its own **Add block** (never an "add all":
-    one click per block); on the right the compact orb (``orb``), the caption (caption-sm, at most 10 words a
-    page) and See every step. ``set_plan(info)``; ``sync_cards(lookup)`` reads each block's approval card
+    one click per block); on the right the compact orb (``orb``), the caption (caption-sm: whole sentences,
+    at most 14 words, ``side_caption``) and See every step. ``set_plan(info)``; ``sync_cards(lookup)`` reads each
+    block's approval card
     (``lookup(action_id) -> hud.ActionCard | None``) and shows its state: Add block (off, with the card's
     reason, while the card's own button is off), ADDING... while it goes to Google (at once: no countdown,
     no number), then ADDED and the block as a solid cyan event with Undo beside it (while the card offers
@@ -33,6 +34,7 @@ Public API
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -56,8 +58,9 @@ BLOCK_MIN = 52               # a block's tile is at least this tall (its two lin
 EVENT_MIN = 22
 SIDE_WIDTH = 280
 STRIP_MAX = 244
-CAPTION_WORDS = 10
-PAGE_MS = 4000
+CAPTION_WORDS = 14          # the side caption: whole sentences only, at most this many words (spec rule 2)
+CAPTION_LINES = 3
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 ADD_TEXT = "Add block"
 UNDO_TEXT = "Undo"
 OPEN_TEXT = "Open"
@@ -573,6 +576,19 @@ class _DueStrip(QWidget):
 # The plan moment
 # --------------------------------------------------------------------------
 
+def side_caption(text: str) -> str:
+    """The plan's caption beside the timeline: whole sentences only (the first always, whole), at most
+    CAPTION_WORDS words, never a page that stops mid-sentence; the spoken caption under the Ask bar says
+    the rest as Jarvis says it."""
+    sentences = [part.strip() for part in _SENTENCE_END.split(" ".join((text or "").split())) if part.strip()]
+    shown: list[str] = []
+    for sentence in sentences:
+        if shown and len(" ".join([*shown, sentence]).split()) > CAPTION_WORDS:
+            break
+        shown.append(sentence)
+    return " ".join(shown)
+
+
 class PlanStage(QWidget):
     """Home's plan moment; see the module docstring."""
 
@@ -587,8 +603,6 @@ class PlanStage(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAccessibleName("Plan my day")
         self._info: PlanInfo | None = None
-        self._pages: list[str] = []
-        self._page = 0
         self.day_label = QLabel()
         self.day_label.setFont(holo.font("label"))
         hud.set_label_color(self.day_label, holo.INK_KICKER)
@@ -615,7 +629,7 @@ class PlanStage(QWidget):
         self.caption.setWordWrap(True)
         self.caption.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.caption.setTextFormat(Qt.TextFormat.PlainText)
-        self.caption.setFixedHeight(2 * holo.line_height("caption_sm") + 4)
+        self.caption.setFixedHeight(CAPTION_LINES * holo.line_height("caption_sm") + 4)
         hud.set_label_color(self.caption, holo.INK_1)
         self.steps_button = holo.HoloButton(SEE_STEPS_TEXT, holo.LINK_CYAN, size=holo.SIZE_SM)
         self.steps_button.clicked.connect(self._on_steps)
@@ -640,9 +654,6 @@ class PlanStage(QWidget):
         row.setSpacing(24)
         row.addLayout(left, 1)
         row.addWidget(self._side)
-        self._page_timer = QTimer(self)
-        self._page_timer.setInterval(PAGE_MS)
-        self._page_timer.timeout.connect(self._next_page)
         self.hide()
 
     # ---- what it shows ------------------------------------------------------------------------
@@ -655,13 +666,8 @@ class PlanStage(QWidget):
             tile.addClicked.connect(self.addBlock)
             tile.undoClicked.connect(self.undoBlock)
             tile.openClicked.connect(self.openLink)
-        from .home import paginate
-
-        self._pages = paginate(info.caption, CAPTION_WORDS) if info is not None and info.caption else []
-        self._page = 0
-        self.caption.setText(self._pages[0] if self._pages else "")
+        self.caption.setText(side_caption(info.caption) if info is not None else "")
         self.caption.setAccessibleName(info.caption if info is not None else "")
-        self._sync_pages()
         self.steps_button.setVisible(bool(info is not None and info.steps_link))
         QTimer.singleShot(0, self._scroll_to_first)
 
@@ -686,29 +692,6 @@ class PlanStage(QWidget):
 
     def caption_text(self) -> str:
         return self.caption.text()
-
-    # ---- caption pages ------------------------------------------------------------------------
-
-    def _sync_pages(self) -> None:
-        if len(self._pages) > 1 and self._page < len(self._pages) - 1 and self.isVisible():
-            if not self._page_timer.isActive():
-                self._page_timer.start()
-        else:
-            self._page_timer.stop()
-
-    def _next_page(self) -> None:
-        if self._page < len(self._pages) - 1:
-            self._page += 1
-            self.caption.setText(self._pages[self._page])
-        self._sync_pages()
-
-    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        super().showEvent(event)
-        self._sync_pages()
-
-    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        self._page_timer.stop()
-        super().hideEvent(event)
 
     def _scroll_to_first(self) -> None:
         """The first block (or now) in view, never by moving the keyboard focus."""

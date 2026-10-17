@@ -6,7 +6,7 @@ Public API
 ``BriefPerson`` / ``BriefInfo``
     What the brief shows (memory only, never logged or spoken): the meeting's ``title``, ``when`` ("tomorrow
     2:00-3:00 PM") and account ``alias``; WHO'S COMING (``people``: each name, the response ``badge``
-    ("ORGANIZER", "ACCEPTED", "NO ANSWER YET"), its ``tone`` (cyan, or steel for no answer / declined) and the
+    ("ORGANISER", "ACCEPTED", "NO ANSWER YET"), its ``tone`` (cyan, or steel for no answer / declined) and the
     last thread line Jarvis wrote from the headers he read ('"Budget numbers", Oct 8' - the subject, written
     by someone else, stays in quotes - or why there is none: "no email in the last 14 days")); LAST THREADS,
     STILL OPEN, POINTS TO RAISE and FROM YOUR NOTES as lines; the ``note`` (why no mail was read); the
@@ -86,10 +86,10 @@ class BriefInfo:
 
 
 def badge_of(words: str) -> tuple[str, str]:
-    """(badge, tone) from Jarvis's response words ("organizer, accepted" -> "ORGANIZER", cyan; "no answer
-    yet" -> steel)."""
+    """(badge, tone) from Jarvis's response words ("organizer, accepted" -> "ORGANISER", cyan: British
+    spelling on screen; "no answer yet" -> steel)."""
     text = " ".join(str(words or "").split())
-    first = text.split(",")[0].strip() if text.startswith("organizer") else text
+    first = "organiser" if text.startswith("organizer") else text
     tone = TONE_STEEL if any(word in text.casefold() for word in _QUIET) else TONE_CYAN
     return first.upper(), tone
 

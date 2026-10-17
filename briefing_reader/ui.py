@@ -154,6 +154,8 @@ from .actions import (
     TODO,
     CLOSED_FIRST_CANCEL_MESSAGE,
     CLOSED_FIRST_MESSAGE,
+    UNDO_INTERRUPTED,
+    UNDO_INTERRUPTED_NOTE,
     ActionStore,
     CardView,
     EditInvalid,
@@ -3562,7 +3564,9 @@ class _ExecJob:
     right before its call to Google and the result right after, by the worker. ``expected_from``: a
     Reply / Email goes out only from this address (the one its card showed at the Send). ``flush``:
     Jarvis is closing during the hold, so it goes now (the owner already saw "Sent"): it runs even
-    though the worker is stopping, never signs in, and sets ``done`` when it is over."""
+    though the worker is stopping, never signs in, and sets ``done`` when it is over. ``hold_end``:
+    the call of a hold that ended; should Jarvis close before the worker reaches it, it still goes
+    like a flushed one (never a sign-in then), since the card already said Sent."""
 
     action: ProposedAction
     writes_running: bool
@@ -3570,6 +3574,7 @@ class _ExecJob:
     live: Any = None                    # the card's LIVE view task (live.LiveTask), None without one
     flush: bool = False
     done: threading.Event | None = None
+    hold_end: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3693,12 +3698,12 @@ class _ActionWorker:
         self._jobs.put(_ExecJob(action, writes_running=False))
 
     def execute(self, action: ProposedAction, expected_from: str = "", live: Any = None, *,
-                flush: bool = False, done: threading.Event | None = None) -> None:
+                flush: bool = False, done: threading.Event | None = None, hold_end: bool = False) -> None:
         """An approved proposal: "running", the one call, the result. A Reply / Email goes out only
         from ``expected_from``. ``live``: its LIVE view task (finished here). ``flush``: Jarvis is
-        closing during its hold (see _ExecJob)."""
+        closing during its hold; ``hold_end``: the call at the end of its hold (see _ExecJob)."""
         self._jobs.put(_ExecJob(action, writes_running=True, expected_from=expected_from, live=live,
-                                flush=flush, done=done))
+                                flush=flush, done=done, hold_end=hold_end))
 
     def undo(self, action: ProposedAction, record: Any) -> None:
         """The owner's click on that card's Undo: reverse exactly Jarvis's own change (executor.run_undo)."""
@@ -3733,7 +3738,7 @@ class _ActionWorker:
             with self._taking:
                 if job is None:
                     return
-                if self._stop.is_set() and not (isinstance(job, _ExecJob) and job.flush):
+                if self._stop.is_set() and not (isinstance(job, _ExecJob) and (job.flush or job.hold_end)):
                     continue   # closing: only a hold the owner already saw as "Sent" still goes
                 self._idle.clear()
             try:
@@ -3905,7 +3910,9 @@ class _ActionWorker:
         def on_stage(stage: str) -> None:
             self._emit("actionProgress", action.id, stage)
 
-        if job.flush and not self._executor.signed_in(action):
+        # A hold's call Jarvis reaches only once it is closing goes like a flushed one (never a sign-in).
+        flush = job.flush or (job.hold_end and self._stop.is_set())
+        if flush and not self._executor.signed_in(action):
             # Closing: no browser sign-in may open now, so it is not sent (the card says so next time).
             logger.info("Action %s (%s, %s) not sent: Jarvis closed first", action.id, action.kind,
                         logged_alias(action.account))
@@ -3922,7 +3929,9 @@ class _ActionWorker:
                 self._emit("actionResult", action.id, None, ExecError(problem), STATUS_FAILED)
                 return
         extra = {"live": job.live} if job.live is not None else {}
-        proceed = (lambda: True) if job.flush else (lambda: not self._stop.is_set())
+        # Closing only stops a call that waited for a browser sign-in; a hold's call needing none goes.
+        steady = flush or (job.hold_end and self._executor.signed_in(action))
+        proceed = (lambda: True) if steady else (lambda: not self._stop.is_set())
         outcome = run_action(self._executor, action, store=self._store if job.writes_running else None,
                              writes_running=job.writes_running, on_stage=on_stage, proceed=proceed, **extra)
         _live_exec_finished(task, action, outcome)
@@ -4627,6 +4636,7 @@ class AppController(QObject):
         self._jobs: dict[str, str] = {}            # action id -> _STAGE_* while held, queued, running or undoing
         self._running: dict[str, tuple[ProposedAction, bool]] = {}   # id -> (what was sent, writes_running)
         self._send_hold: _SendHold | None = None   # at most one: the other cards are locked meanwhile
+        self._hold_ends: list[threading.Event] = []   # a hold's call queued at its end: set when it is over
         self._undos: dict[str, _UndoOffer] = {}    # action id -> the Undo its card offers (calendar changes)
         self._result_notes: dict[str, str] = {}    # action id -> why its Undo left the change as it is
         self._calendar_signed_in = False
@@ -5666,6 +5676,8 @@ class AppController(QObject):
                 card.set_undo("")
                 if self._result_notes.get(action_id):
                     card.set_note(self._result_notes[action_id])
+                elif entry.get("undo") == UNDO_INTERRUPTED:   # its result, no Retry: check the calendar
+                    card.set_note(UNDO_INTERRUPTED_NOTE)
             return
         if event:
             card.set_note(self._event_note(action, status, entry))
@@ -6399,6 +6411,7 @@ class AppController(QObject):
         self._pump_voice()   # what waited for the hold may be said now (never "Done": the result says that)
         if hold is None:
             return
+        self._after_send_hold()
         action = hold.action
         worker = self._calendar_worker
         if self.state == STATE_QUITTING or worker is None:
@@ -6426,7 +6439,11 @@ class AppController(QObject):
         self._show_card_state(action.id)
         _live_hold_ended(hold)
         task = hold.task
-        worker.execute(action, expected_from=hold.sender, live=task if task is not _live.NO_TASK else None)
+        # The owner already saw Sent: Jarvis closing before the worker reaches it still sends it (hold_end).
+        done = threading.Event()
+        self._hold_ends = [event for event in self._hold_ends if not event.is_set()] + [done]
+        worker.execute(action, expected_from=hold.sender, live=task if task is not _live.NO_TASK else None,
+                       hold_end=True, done=done)
 
     def _undo_send_hold(self) -> None:
         """The header's Undo: the held card is on another screen than Approvals."""
@@ -6451,6 +6468,8 @@ class AppController(QObject):
                 logger.info("Ignored an Undo click right after the approval")
                 return
             action = hold.action
+            # An Undo counts as a decision click: a second Space / Enter right after it never re-sends.
+            self._decision_clicked_at = self._click_now()
             self._cancel_send_hold("undone")
             self._activity(hud.TAG_STOP, f"Undone: {_action_phrase(action)}",
                            f"{kind_label(action).upper()} {DOT} nothing was sent")
@@ -6473,6 +6492,7 @@ class AppController(QObject):
         if worker is None:
             return
         action = offer.action
+        self._decision_clicked_at = self._click_now()   # a second Space right after never re-applies it
         self._jobs[action_id] = _STAGE_UNDOING
         logger.info("Undo of action %s (%s, %s) asked for", action_id, action.kind,
                     logged_alias(account_of(action)))
@@ -6559,6 +6579,7 @@ class AppController(QObject):
         self._pump_voice()
         if hold is None:
             return
+        self._after_send_hold()
         action = hold.action
         action_id = action.id
         self._jobs.pop(action_id, None)
@@ -10405,16 +10426,20 @@ class AppController(QObject):
 
     def _newer_briefing(self, briefing: Briefing) -> None:
         """Show the newer briefing at once when nothing is playing; never cut a listen short (it
-        shows when this reading ends; Done quits as usual)."""
+        shows when this reading ends; Done quits as usual), nor a Send's / Cancel's hidden hold (it
+        shows when the hold is over: the Undo the card offers stays the whole hold)."""
         run = self._background_run or self.expected_run or ""
         self._background_run = None
         self._stop_fetch()
-        if self.player.state in (IDLE, FINISHED):
+        if self.player.state in (IDLE, FINISHED) and self._send_hold is None:
             self._replace_briefing(briefing)
             return
-        logger.info("The %s briefing is ready; it shows when this reading ends", run)
         self._pending_briefing = briefing
         self._pending_run = run or "new"
+        if self.player.state in (IDLE, FINISHED):
+            logger.info("The %s briefing is ready; it shows when the hold is over", run)
+            return
+        logger.info("The %s briefing is ready; it shows when this reading ends", run)
         self._flash_note(self._pending_note(), sticky=True)
 
     def _replace_briefing(self, briefing: Briefing) -> None:
@@ -11202,13 +11227,19 @@ class AppController(QObject):
             QTimer.singleShot(0, self._offer_pending_run)   # outside the player's signal
 
     def _offer_pending_run(self) -> None:
-        """The reading ended while a newer run was due: show that briefing now (or, in the classic
-        mode, ask about it)."""
-        if self.state == STATE_READING and self._pending_run and self.player.state == FINISHED:
+        """The reading ended (or a Send's / Cancel's hold is over) while a newer run was due: show that
+        briefing now (or, in the classic mode, ask about it). Never during a hold: its Undo stays."""
+        if (self.state == STATE_READING and self._pending_run and self._send_hold is None
+                and self.player.state in (IDLE, FINISHED)):
             if self._pending_briefing is not None:
                 self._replace_briefing(self._pending_briefing)
             else:
                 self._back_to_prompt(self._pending_run, take_focus=False)
+
+    def _after_send_hold(self) -> None:
+        """A hold is over (sent or undone): what waited for it shows now, outside the click or the tick."""
+        if self._pending_run and self.state == STATE_READING:
+            QTimer.singleShot(0, self._offer_pending_run)
 
     def _on_player_error(self, message: str) -> None:
         logger.warning("Playback problem: %s", message)
@@ -11501,9 +11532,10 @@ class AppController(QObject):
         if not run or not self._reading_is_outdated(run):
             force_foreground(self.window)
             return
-        if self._script is not None and self.player.state in (PLAYING, WAITING, PAUSED):
-            # Never cut off a listen in progress: ask about the new run when it ends
-            # (or on Done).
+        if self._send_hold is not None or (self._script is not None
+                                           and self.player.state in (PLAYING, WAITING, PAUSED)):
+            # Never cut off a listen in progress, nor a Send's / Cancel's hold (its Undo stays the whole
+            # hold): ask about the new run when it ends (or on Done).
             logger.info("The %s briefing is due; asking about it after this reading", run)
             self._pending_run = run
             self._flash_note(self._pending_note(), sticky=True)
@@ -11522,7 +11554,8 @@ class AppController(QObject):
     def _back_to_prompt(self, run: str, *, take_focus: bool) -> None:
         """Close the reading screen (nothing is playing) and ask about ``run``'s briefing."""
         logger.info("Leaving the reading screen to ask about the %s briefing", run)
-        self._reset_reading("the reading screen closed")   # never send from a hidden card
+        # A hold still running here is the owner's own Done (arrivals and launches wait for it): it goes now.
+        self._reset_reading("the reading screen closed")
         self.state = STATE_PROMPT
         self._switch_expected_run(run)
         self.show_prompt(take_focus=take_focus)
@@ -11605,9 +11638,13 @@ class AppController(QObject):
         if self._tts is not None:
             self._tts.stop()
         if self._calendar_worker is not None:
-            if flushed is not None:
+            # A hold that ended just before (its call still queued behind another job) goes too: the
+            # worker takes it even though it is stopping, like a flushed one.
+            held = [event for event in (flushed, *self._hold_ends) if event is not None and not event.is_set()]
+            if held:
                 logger.info("Waiting up to %d s for the held send", int(_QUIT_SEND_WAIT_S))
-                finished = flushed.wait(_QUIT_SEND_WAIT_S)
+                deadline = time.monotonic() + _QUIT_SEND_WAIT_S
+                finished = all(event.wait(max(0.0, deadline - time.monotonic())) for event in held)
                 logger.info("The held send %s", "finished" if finished
                             else "did not finish in time; the next start shows its card as not sent or unknown")
             elif self._send_in_flight():
