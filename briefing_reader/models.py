@@ -176,13 +176,18 @@ class AudioSegment:
 
     ``marks`` are (start_ms, item_index) pairs sorted by start_ms, where
     item_index indexes ``Section.items``. ``pause_after_ms`` is silence the
-    player inserts after this segment (dividers).
+    player inserts after this segment (dividers). ``words``: (start_ms,
+    end_ms, word) from edge-tts's word boundaries; ``envelope``: the Windows
+    voice's level 0..1 at voice_fx.ENVELOPE_HZ (the orb's voice spikes and
+    Home's word-by-word caption; neither is ever logged).
     """
 
     path: Path
     duration_ms: int
     marks: tuple[tuple[int, int], ...]
     pause_after_ms: int = 0
+    words: tuple[tuple[int, int, str], ...] = field(default=(), repr=False)
+    envelope: tuple[float, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)

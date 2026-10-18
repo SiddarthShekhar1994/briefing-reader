@@ -353,7 +353,9 @@ class OpenTests(unittest.TestCase):
                             CalendarEvent("All day thing", all_day_start=NOW.date())]
         c.start()
         flow.attempt()
-        self.assertTrue(flow.voice.texts()[0].endswith("Your next event is Project sync at 3 PM."))
+        # Part B of the motion prototype: counts and times only - the title shows on Home's tile, never in speech.
+        self.assertTrue(flow.voice.texts()[0].endswith("Your next meeting is at 3 PM."), flow.voice.texts()[0])
+        self.assertNotIn("Project sync", flow.voice.texts()[0])
 
     def test_greeting_context_off(self) -> None:
         flow = Flow(self, launch=LAUNCH_OPEN, greeting_context=False, lines=(B_CALENDAR,))

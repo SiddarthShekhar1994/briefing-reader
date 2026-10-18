@@ -45,6 +45,7 @@ from edge_tts import communicate as edge_communicate
 from edge_tts import constants as edge_constants
 from edge_tts.exceptions import NoAudioReceived
 
+from . import voice_fx
 from .models import ITEM_PAUSE, AudioSegment, Section, SectionAudio
 
 logger = logging.getLogger(__name__)
@@ -408,6 +409,7 @@ class _Clip:
     duration_ms: int
     words: tuple[tuple[int, str], ...]
     engine: str
+    envelope: tuple[float, ...] = ()     # the Windows voice's level (voice_fx.wav_envelope)
 
 
 class SpeechSynthesizer:
@@ -553,7 +555,7 @@ class SpeechSynthesizer:
         except Exception as exc:  # noqa: BLE001 - reported as TtsError below
             raise TtsError("Speech synthesis failed: edge-tts is unavailable and Windows SAPI failed "
                            f"({_describe_error(exc)})") from exc
-        clip = _Clip(path, max(0, int(duration_ms)), (), SAPI)
+        clip = _Clip(path, max(0, int(duration_ms)), (), SAPI, envelope=voice_fx.wav_envelope(path))
         self._cache[key] = clip
         return clip
 
@@ -564,7 +566,9 @@ class SpeechSynthesizer:
         else:
             marks = proportional_marks(len(text), starts, clip.duration_ms)
         return AudioSegment(path=clip.path, duration_ms=clip.duration_ms, marks=marks,
-                            pause_after_ms=pause_after_ms)
+                            pause_after_ms=pause_after_ms,
+                            words=voice_fx.segment_words(text, clip.words, clip.duration_ms),
+                            envelope=clip.envelope)
 
     # ---- cache ------------------------------------------------------------
 

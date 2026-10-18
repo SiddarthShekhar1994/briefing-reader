@@ -51,6 +51,18 @@ OrbWidget(px=HERO)
     in all; calm: no turn, slower, about 1.6 s) at 30 fps; ``start`` is the orb time it began (stills).
     ``intro_running()``; ``settle()`` (and so ``set_phase``) ends it; never under reduced motion.
     ``set_dim(level)`` draws the whole orb at ``level`` of its strength (quiet hours: 0.7), ``dim()``.
+    The voice (the motion prototype, part B; hero only): while speaking a ring of ``SPIKES`` short radial bars
+    just outside the frame (from r ``SPIKE_R``) pulses with the voice - each bar ``SPIKE_MIN`` + up to
+    ``SPIKE_MAX`` units (calm: ``SPIKE_CALM_MAX``, its pattern changing more slowly; ``[ui] motion`` off or
+    reduced motion: none), faded in and out in 350 ms - and the rings boost (``SPEAK_BOOST``, calm
+    ``SPEAK_BOOST_CALM``: eased in over 600 ms and out over 900 ms, never a jump; the ring layer then turns at
+    ``RING_LAYER_BOOST_MS``). ``set_voice(level_fn | None)``: ``level_fn()`` returns the voice's level 0..1 now
+    (voice_fx.level_at of the utterance's word boundaries or envelope) or None (unknown: the synthetic curve);
+    it is read once a frame. ``set_voice_room(px)``: the stage may give the hero's widget up to ``px`` square
+    so the bars fit (``voice_side(px)`` is all they need); the widget grows to it (by a multiple of 8 px, so a
+    stage that centres it on whole device pixels never shifts the orb) only while the spikes show, and shrinks
+    back once they faded, so the idle orb paints exactly as before. ``spike_room()`` is the longest bar that
+    fits; each bar is drawn as 1 px hairline strands (Qt's fast antialiased path).
     ``is_animating()``, ``frame_interval()``, ``detail()`` (``"full"`` / ``"compact"``),
     ``sample(now=None) -> OrbFrame`` (the computed values, for tests), ``paint_times()``.
     Accessible name "Jarvis, <state>" (e.g. "Jarvis, needs you").
@@ -138,6 +150,18 @@ DEGRADE_MS = 4.0
 LEVEL_FRESH_S = 0.3
 LOCK_POLL_MS = 2000
 RING_LAYER_MS = FRAME_IDLE_MS  # active looks: the backdrop + R1-R6 layer is rebuilt this often
+RING_LAYER_BOOST_MS = 50       # ... and this often while the voice boosts the rings
+SPIKES = 64                    # the voice spikes (the motion prototype's 64 bars outside the frame)
+SPIKE_R = 178.0                # where they start (units of 360: just outside the frame's ticks)
+SPIKE_MIN = 4.0                # their length at rest ...
+SPIKE_MAX = 30.0               # ... and at the loudest (lively)
+SPIKE_CALM_MAX = 15.0          # calm: gentler
+SPIKE_STEP_S = 0.085           # their pattern changes this often (eased between steps; calm 0.14 s)
+SPIKE_CALM_STEP_S = 0.14
+SPIKE_FADE_S = 0.35
+SPEAK_BOOST = 0.3              # the rings' boost while speaking (thinking: 1)
+SPEAK_BOOST_CALM = 0.12
+VOICE_ROOM = 0.09              # the bars need this much of the orb's size more on each side
 _FILL_OPAQUE = Qt.GlobalColor.black  # under a ground: an opaque pixmap (no alpha) copies fastest
 BREATH_STEPS = 5               # cached backdrops per look: the halo breath (.7 .. 1) in five steps
 
@@ -177,6 +201,47 @@ def widget_side(px: int) -> int:
     and 175 % scaling too (never a column of the window left unpainted)."""
     side = px + 2 * math.ceil(px * 0.045)
     return side + (-side) % 4
+
+
+def voice_side(px: int) -> int:
+    """The square widget a hero of ``px`` needs for its full voice spikes: ``widget_side(px)`` grown by a
+    multiple of 8 px."""
+    base = widget_side(px)
+    need = max(0, px + 2 * math.ceil(px * VOICE_ROOM) - base)
+    return base + 8 * math.ceil(need / 8)
+
+
+def speak_boost(level: str | None = None) -> float:
+    """The rings' boost while speaking at ``level`` (holo.motion_level() by default): lively, calm, off (0)."""
+    level = holo.motion_level() if level is None else level
+    return {holo.MOTION_LIVELY: SPEAK_BOOST, holo.MOTION_CALM: SPEAK_BOOST_CALM}.get(level, 0.0)
+
+
+def _spike_noise(i: int, step: int) -> float:
+    value = math.sin(i * 12.9898 + step * 78.233) * 43758.5453
+    return value - math.floor(value)
+
+
+def spike_lengths(level: float, t: float, *, calm: bool = False, longest: float = SPIKE_MAX) -> tuple[float, ...]:
+    """The ``SPIKES`` bar lengths (units) for the voice's ``level`` 0..1 at time ``t`` (s): each bar a share of
+    the level that changes every ``SPIKE_STEP_S`` (eased between steps), every eighth a little longer; at
+    least ``SPIKE_MIN``, at most ``longest`` (calm: at most ``SPIKE_CALM_MAX``)."""
+    top = min(longest, SPIKE_CALM_MAX) if calm else longest
+    span = max(0.0, top - SPIKE_MIN)
+    level = max(0.0, min(1.0, level))
+    period = SPIKE_CALM_STEP_S if calm else SPIKE_STEP_S
+    position = t / period
+    step = math.floor(position)
+    x = position - step
+    ease = x * x * (3.0 - 2.0 * x)
+    out = []
+    for i in range(SPIKES):
+        a = _spike_noise(i, step)
+        b = _spike_noise(i, step + 1)
+        n = a + (b - a) * ease
+        amp = level * (0.3 + 0.7 * n) + (0.2 * level if i % 8 == 0 else 0.0)
+        out.append(SPIKE_MIN + span * min(1.0, amp))
+    return tuple(out)
 
 # --------------------------------------------------------------------------
 # Targets per look (spec 12.4 orbVals, generalised to base + modifiers)
@@ -1172,6 +1237,8 @@ class OrbFrame:
     dashed: bool
     compact: bool
     fine: bool
+    spikes: float = 0.0                       # the voice spikes' opacity (hero, speaking)
+    spike_lens: tuple[float, ...] = ()        # their lengths (units)
 
 
 class OrbWidget(_OrbBase):
@@ -1217,6 +1284,9 @@ class OrbWidget(_OrbBase):
         self._tw["crown_mix"] = _Tween(1.0)
         self._tw["core_mix"] = _Tween(1.0)
         self._tw["voice"] = _Tween(0.0)
+        self._tw["spikes"] = _Tween(0.0)
+        self._voice_fn: Callable[[], float | None] | None = None
+        self._room = 0                      # the square the stage may give the widget for the voice spikes
         self._tw["pace"] = _Tween(DEEP_PACE if frame_clock().deep() else 1.0)
         self._lag = 0.0                     # seconds the motion fell behind the clock in deep idle
         self._dim = 1.0                     # quiet hours: the idle orb at 70 % (set_dim)
@@ -1233,7 +1303,7 @@ class OrbWidget(_OrbBase):
 
     def set_orb_size(self, px: int) -> None:
         self._px = int(px)
-        side = widget_side(self._px)
+        side = self._side()
         self.setFixedSize(side, side)
         self._backdrops.clear()
         self._layer = None
@@ -1248,8 +1318,52 @@ class OrbWidget(_OrbBase):
         return QRectF(off, off, self._px, self._px)
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        side = widget_side(self._px)
+        side = self._side()
         return QSize(side, side)
+
+    def _voice_room_side(self) -> int:
+        """The widget's side while the spikes show: as much of ``voice_side`` as the stage allows."""
+        base = widget_side(self._px)
+        if self._room <= base or self._compact():
+            return base
+        return base + 8 * ((min(voice_side(self._px), self._room) - base) // 8)
+
+    def _side(self) -> int:
+        spikes = self._tw.get("spikes") if hasattr(self, "_tw") else None
+        showing = spikes is not None and (spikes.value(self._now()) > 0.0 or not spikes.done(self._now()))
+        return self._voice_room_side() if showing else widget_side(self._px)
+
+    def _sync_side(self) -> None:
+        """Grow for the voice spikes, or shrink back once they faded (the stage re-centres the widget)."""
+        if not shiboken6.isValid(self):
+            return
+        side = self._side()
+        if side != self.width():
+            self.setFixedSize(side, side)
+            self._backdrops.clear()
+            self._layer = None
+            self.update()
+
+    def set_voice_room(self, px: int) -> None:
+        """The stage may give the widget up to ``px`` square for the voice spikes (0: just the halo's room)."""
+        px = max(0, int(px))
+        if px != self._room:
+            self._room = px
+            self._sync_side()
+
+    def spike_room(self) -> float:
+        """The longest voice spike (units) that fits in the widget while they show."""
+        k = self._px / 360.0
+        if k <= 0.0:
+            return 0.0
+        free = (self._voice_room_side() / 2.0 - 1.5) / k - SPIKE_R
+        return max(0.0, min(SPIKE_MAX, free))
+
+    def set_voice(self, level_fn: Callable[[], float | None] | None) -> None:
+        """The voice's level now, read once a frame while speaking (None: the synthetic curve)."""
+        self._voice_fn = level_fn
+        if level_fn is None:
+            self.set_level(None)
 
     def detail(self) -> str:
         """``"full"`` (hero, all 18 layers), ``"reduced"`` (hero without the fine layers, after slow
@@ -1340,7 +1454,14 @@ class OrbWidget(_OrbBase):
         tw["slow"].to(new.slow, now, 0.8, _STD)
         tw["lit"].to(float(new.lit), now, 0.6, _EASE)
         boost = tw["boost"]
-        boost.to(new.boost, now, 0.6 if new.boost > boost.value(now) else 0.9, _IN_OUT)
+        voiced = self._base == SPEAKING and not self._compact()
+        target = max(new.boost, speak_boost() if voiced else 0.0)
+        boost.to(target, now, 0.6 if target > boost.value(now) else 0.9, _IN_OUT)
+        tw["spikes"].to(1.0 if voiced and holo.motion_level() != holo.MOTION_OFF else 0.0, now, SPIKE_FADE_S,
+                        _EASE)
+        if self._frozen is not None or holo.reduced_motion():
+            tw["spikes"].settle()
+        self._sync_side()
         if new.alert and not old.alert:
             self._alert_since = now
             tw["alert"].to(1.0, now, 0.0)
@@ -1471,6 +1592,14 @@ class OrbWidget(_OrbBase):
                 self._angles[i] = (self._angles[i] + speed * pace * dt) % 360.0
             self._sweep_angle = (self._sweep_angle + 288.0 * pace * dt) % 360.0
             self._scan_angle = (self._scan_angle + 60.0 * pace * dt) % 360.0
+        if self._voice_fn is not None and self._base == SPEAKING:
+            try:
+                heard = self._voice_fn()
+            except Exception:  # noqa: BLE001 - the voice only animates: the synthetic curve instead
+                heard = None
+            if heard is not None:
+                self._level_target = max(0.0, min(1.0, float(heard)))
+                self._level_at = time.monotonic()
         fresh = self._level_target is not None and time.monotonic() - self._level_at <= LEVEL_FRESH_S
         voice = self._tw["voice"]
         voice.to(1.0 if fresh else 0.0, now, 0.25, _EASE)
@@ -1570,6 +1699,11 @@ class OrbWidget(_OrbBase):
             alert=alert, arc=arc, dot=dot, slash=tw["slash"].value(now), core_looks=looks, halos=halos,
             dashed=new.dashed, compact=self._compact(), fine=not (self._compact() or self._degraded),
         )
+        spikes = tw["spikes"].value(now)
+        if spikes > 0.003 and not still and holo.motion_level() != holo.MOTION_OFF:
+            frame.spikes = spikes
+            frame.spike_lens = spike_lengths(level, t, calm=holo.motion_level() == holo.MOTION_CALM,
+                                             longest=self.spike_room())
         self._apply_intro(frame, now)
         return frame
 
@@ -1592,6 +1726,8 @@ class OrbWidget(_OrbBase):
                 self._paint_ms.append((time.perf_counter() - started) * 1000.0)
             self._maybe_degrade()
             self._sync()          # the rate follows the look (transitions run at 30 fps, then drop)
+        if self.width() != self._side():
+            QTimer.singleShot(0, self._sync_side)     # the spikes faded: back to the halo's room
 
     def _paint_dim(self, painter: QPainter) -> None:
         """The orb at ``dim`` of its strength: the ground (or the void) laid over it at the rest, so where no
@@ -1639,7 +1775,11 @@ class OrbWidget(_OrbBase):
         if frame_interval_ms(self._base, self._muted, frame_clock().deep()) >= RING_LAYER_MS:
             return False                      # idle rates: every frame turns the rings anyway
         tw, now = self._tw, f.t
-        if tw["boost"].value(now) > 0.0 or not (tw["boost"].done(now) and tw["slow"].done(now)):
+        # the voice's boost (speaking) turns in the layer; the thinking boost and its ramps paint every frame
+        voiced = self._base == SPEAKING and self._targets.boost <= 0.0
+        if not voiced and (tw["boost"].value(now) > 0.0 or not tw["boost"].done(now)):
+            return False
+        if not tw["slow"].done(now):
             return False
         return all(tw[f"s{i}"].done(now) and tw[f"o{i}"].done(now) for i in range(6))
 
@@ -1648,7 +1788,8 @@ class OrbWidget(_OrbBase):
         backdrop = self._steady_backdrop(f, dpr)
         key = (backdrop.cacheKey(), f.ink.rgba(), f.scales, f.opacities, f.compact, f.fine)
         layer = self._layer
-        if layer is not None and key == self._layer_key and 0.0 <= f.t - self._layer_at < RING_LAYER_MS / 1000.0:
+        every = RING_LAYER_BOOST_MS if self._tw["boost"].value(f.t) > 0.01 else RING_LAYER_MS
+        if layer is not None and key == self._layer_key and 0.0 <= f.t - self._layer_at < every / 1000.0:
             return layer
         if layer is None or layer.size() != backdrop.size():
             layer = QPixmap(backdrop.size())
@@ -1776,6 +1917,24 @@ class OrbWidget(_OrbBase):
             if f.frame > 0.0 and not f.frame_steady:
                 self._paint_frame(painter, f, lod, color, pixel)
             self._paint_rings(painter, f, lod, color, pixel, with_amp=True)
+        # the voice spikes (hero, speaking): 64 radial hairlines outside the frame
+        if f.spikes > 0.003 and f.spike_lens:
+            # each 2-unit bar as round(width) parallel 1 px hairlines carrying its coverage (the fast path)
+            width = 2.0 * pixel
+            strands = max(1, round(width))
+            painter.setOpacity(0.85 * f.spikes)
+            painter.setPen(_pen(_rgba(QColor(holo.HOLO_HI), min(1.0, width / strands)), 1.0, True))
+            offsets = [(j - (strands - 1) / 2.0) / pixel for j in range(strands)]
+            spikes = []
+            for i, length in enumerate(f.spike_lens):
+                a = math.radians(i * 360.0 / SPIKES - 90.0)
+                ca, sa = math.cos(a), math.sin(a)
+                r1 = SPIKE_R + length
+                for o in offsets:
+                    ox, oy = -sa * o, ca * o
+                    spikes.append(QLineF(SPIKE_R * ca + ox, SPIKE_R * sa + oy, r1 * ca + ox, r1 * sa + oy))
+            painter.drawLines(spikes)
+            painter.setOpacity(1.0)
         # 11 crown
         if f.crown_op > 0.003:
             painter.setOpacity(f.crown_op)

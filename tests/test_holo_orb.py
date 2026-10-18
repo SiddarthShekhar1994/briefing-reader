@@ -253,11 +253,13 @@ class StateTests(_OrbCase):
         clock[0] += 2.0                           # the look's transitions are over
         widget.grab()
         self.assertEqual(widget.ring_layer_builds(), 1)
-        for step in (0.033, 0.033):               # 30 fps frames inside 100 ms reuse the layer
+        # Speaking boosts the rings (part B of the motion prototype): the layer then turns every
+        # RING_LAYER_BOOST_MS (20 fps) instead of the idle rate; frames inside that reuse it.
+        for step in (0.02, 0.02):
             clock[0] += step
             widget.grab()
         self.assertEqual(widget.ring_layer_builds(), 1)
-        clock[0] += orb.RING_LAYER_MS / 1000.0
+        clock[0] += orb.RING_LAYER_BOOST_MS / 1000.0
         widget.grab()
         self.assertEqual(widget.ring_layer_builds(), 2)
         # The layered frame looks like the frame painted ring by ring at the same moment.

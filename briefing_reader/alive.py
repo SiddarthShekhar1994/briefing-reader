@@ -17,6 +17,13 @@ also while Windows' "Show animations in Windows" is off).
 ``ScanSweep(parent)``
     The start-up's one scan line: a 2 px cyan line with a soft glow crossing ``parent`` top to bottom
     in 1.6 s (``play()``, ``is_running()``, ``line_y()``); it repaints only the band it crosses.
+``CardFlight(parent)``
+    A card leaving Home's plan or brief for Approvals (part B): ``fly(widget, target)`` paints a snapshot of
+    ``widget`` (taken at once, from where it is on ``parent``) shrinking to 15 % and fading as it flies to
+    ``target`` (a rect on ``parent``: the Dock's Approvals item) in ``FLIGHT_MS``
+    (``cubic-bezier(.5,0,.75,0)``, the prototype's ``out``); calm: a plain fade where it is; off: nothing.
+    Purely visual: the card itself, its hold, Undo and timings are untouched. ``is_running()``, ``flights()``,
+    ``progress()``.
 ``StartupPresence(play, clock=time.monotonic)``
     When the start-up plays: ``arm()`` (the app started), then ``note_shown(bool)`` as the window
     is shown, hidden or minimised: the first time it is shown after ``arm()``, and again when it is
@@ -39,12 +46,14 @@ from PySide6.QtWidgets import QApplication, QWidget
 from . import holo
 
 REPLAY_AFTER_S = 30 * 60
+FLIGHT_MS = 600
 WIPE_BAND = 120.0
 _ENDING_EVENTS = (QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick,
                   QEvent.Type.Wheel)
 _OUT = holo.bezier(holo.EASE_OUT)
 _WIPE_EASE = holo.bezier((0.5, 0.0, 0.5, 1.0))
 _IN_OUT = holo.bezier(holo.CSS_EASE_IN_OUT)
+_FLIGHT = holo.bezier((0.5, 0.0, 0.75, 0.0))
 
 
 def _clamp(value: float) -> float:
@@ -376,6 +385,100 @@ class ScanSweep(_Overlay):
             glow.setColorAt(1.0, holo.alpha(holo.HOLO_HI, 0.0))
             painter.fillRect(QRectF(0.0, y - self.GLOW, self.width(), 2 * self.GLOW), glow)
             painter.fillRect(QRectF(0.0, y - 1.0, self.width(), 2.0), QColor(holo.HOLO_HI))
+        finally:
+            painter.end()
+
+
+class CardFlight(_Overlay):
+    """See the module docstring."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._flights: list[tuple[QPixmap, QRectF, QRectF, float]] = []   # (snapshot, from, to, started)
+        self._calm = False
+        self._dirty = QRect()
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._on_tick)
+        self.hide()
+
+    def fly(self, widget: QWidget, target: QRectF | QRect) -> bool:
+        """Fly a snapshot of ``widget`` to ``target``; False when nothing flies (motion off, hidden)."""
+        parent = self.parentWidget()
+        level = holo.motion_level()
+        if (level == holo.MOTION_OFF or parent is None or not parent.isVisible() or not shiboken6.isValid(widget)
+                or widget.width() <= 0 or widget.height() <= 0):
+            return False
+        source = QRectF(QRect(widget.mapTo(parent, QPoint(0, 0)), widget.size()))
+        if not QRectF(parent.rect()).intersects(source):
+            return False
+        dpr = max(1.0, widget.devicePixelRatioF())
+        snapshot = QPixmap(round(widget.width() * dpr), round(widget.height() * dpr))
+        snapshot.setDevicePixelRatio(dpr)
+        snapshot.fill(Qt.GlobalColor.transparent)
+        widget.render(snapshot, QPoint(0, 0), QRegion(),
+                      QWidget.RenderFlag.DrawChildren)
+        self._calm = level == holo.MOTION_CALM
+        self._flights.append((snapshot, source, QRectF(target), time.monotonic()))
+        self._cover()
+        if not self._timer.isActive():
+            self._timer.start()
+        self._dirty = source.toAlignedRect().adjusted(-2, -2, 2, 2)
+        self.update(self._dirty)
+        return True
+
+    def flights(self) -> int:
+        return len(self._flights)
+
+    def is_running(self) -> bool:
+        return bool(self._flights) and self.isVisible()
+
+    def progress(self, index: int = 0, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else now
+        return _clamp((now - self._flights[index][3]) / (FLIGHT_MS / 1000.0))
+
+    def frame(self, index: int = 0, now: float | None = None) -> tuple[QRectF, float]:
+        """(rect, opacity) of a flight now."""
+        snapshot, source, target, _started = self._flights[index]
+        p = self.progress(index, now)
+        if self._calm:
+            return QRectF(source), 1.0 - _OUT(p)
+        e = _FLIGHT(p)
+        scale = 1.0 - 0.85 * e
+        c0, c1 = source.center(), target.center()
+        cx, cy = c0.x() + (c1.x() - c0.x()) * e, c0.y() + (c1.y() - c0.y()) * e
+        w, h = source.width() * scale, source.height() * scale
+        return QRectF(cx - w / 2, cy - h / 2, w, h), 1.0 - e
+
+    def _on_tick(self) -> None:
+        now = time.monotonic()
+        self._flights = [flight for flight in self._flights if now - flight[3] < FLIGHT_MS / 1000.0]
+        if not self._flights:
+            self._timer.stop()
+            self.hide()
+            return
+        dirty = QRect()
+        for index in range(len(self._flights)):
+            dirty = dirty.united(self.frame(index, now)[0].toAlignedRect().adjusted(-2, -2, 2, 2))
+        self.update(dirty.united(self._dirty))     # only where the cards were and are
+        self._dirty = dirty
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().hideEvent(event)
+        self._timer.stop()
+        self._flights = []
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        if not self._flights:
+            return
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            now = time.monotonic()
+            for index, (snapshot, _source, _target, _started) in enumerate(self._flights):
+                rect, opacity = self.frame(index, now)
+                painter.setOpacity(max(0.0, min(1.0, opacity)))
+                painter.drawPixmap(rect, snapshot, QRectF(snapshot.rect()))
         finally:
             painter.end()
 

@@ -16,9 +16,14 @@ Public API
     One caption at a time under the hero orb. ``set_resting(text)`` (the greeting, at most 6 words),
     ``set_question(text)`` (an open offer's question: shown instead of the greeting, in question type,
     until it is answered or expires; spec 14.5), ``set_thinking(text)`` (``ink-2`` line with the scan
-    line under it), ``say(text, spoken=True, duration_ms=0)`` (pages of at most 14 words revealed word
-    by word: over ``duration_ms`` when the audio's length is known (a briefing item), else at the
-    voice's estimated pace, ``SPOKEN_WPS``; muted or silent: ``MUTED_WPS``), ``finish()`` (the voice
+    line under it), ``say(text, spoken=True, duration_ms=0, timeline=None, position=None)`` (pages of at
+    most 14 words revealed word by word: with the utterance's voice_fx.VoiceTimeline and ``position()`` (how
+    far its audio is, ms) each word shows as it is said - on edge-tts's word boundaries, else evenly over the
+    audio's length; otherwise over ``duration_ms`` when the audio's length is known (a briefing item), else at
+    the voice's estimated pace, ``SPOKEN_WPS``; muted or silent: ``MUTED_WPS``. Lively: the page's words wait
+    as a faint blurred ghost and each one fades in from blurred to sharp as it is said (the motion prototype);
+    calm: a plain fade; ``[ui] motion`` off or reduced motion: each page whole at once. The whole line is the
+    accessible description from the start), ``finish()`` (the voice
     stopped: the last page shows whole and holds ``HOLD_SPOKEN_MS``, then fades to the resting line; a
     silent caption holds ``HOLD_MUTED_MS``). Times on a page (``10:30 AM``, the hour in "at 10") are
     ``holo``; amber never appears. ``state()`` is one of ``RESTING``, ``THINKING``, ``SPEAKING``,
@@ -42,6 +47,9 @@ Public API
     18 px corner brackets, a faint hairline through the orb, and the Transcript button bottom-left
     (``transcript_button``). Round 2, part 3a: ``set_side_tile(tile)`` puts the one amber tile (an offer,
     offer_view.OfferTile) bottom-right of the orb, tethered to it; the orb gives it room while it shows.
+    Part B of the motion prototype: ``context`` (a context_view.ContextTiles) flies the greeting's context
+    tiles out of the orb into the free places around it (never over the side tile or the Transcript button);
+    a click on one emits ``contextClicked(target)``. The hero's widget gets room for its voice spikes.
 
 ``EchoPill``
     ``YOU`` + the owner's request in mono 13, under the orb while it is handled.
@@ -86,7 +94,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import find_view, holo, offer_view
+from . import context_view, find_view, holo, offer_view, voice_fx
 from . import orb as orb_mod
 
 # --------------------------------------------------------------------------
@@ -241,6 +249,15 @@ def _ease_out(p: float) -> float:
     return 1.0 - (1.0 - p) ** 3
 
 
+GHOST_OPACITY = 0.08       # lively: the words not said yet wait as a faint blurred ghost (the motion prototype)
+BLUR_PX = 2.2              # ... and each word goes from this blur to sharp as it is said
+
+
+def _caption_still() -> bool:
+    """Captions show each page whole: ``[ui] motion`` off or reduced motion."""
+    return holo.reduced_motion() or holo.motion_level() == holo.MOTION_OFF
+
+
 class CaptionView(QWidget):
     """The caption band under the hero orb; see the module docstring."""
 
@@ -260,6 +277,10 @@ class CaptionView(QWidget):
         self._revealed_at: list[float] = []
         self._spoken = True
         self._pace_ms = 0                   # a word's interval from the audio's known length (0: estimated)
+        self._full = ""                     # the whole line (the accessible description from the start)
+        self._times: list[int] = []         # when each word of the line is said (ms into the audio; timed)
+        self._offsets: list[int] = []       # the line's index of each page's first word
+        self._position: Callable[[], int] | None = None
         self._question = ""
         self._finished = False
         self._state = RESTING
@@ -310,12 +331,23 @@ class CaptionView(QWidget):
     def thinking(self) -> str:
         return self._thinking
 
-    def say(self, text: str, *, spoken: bool = True, duration_ms: int = 0) -> None:
+    def say(self, text: str, *, spoken: bool = True, duration_ms: int = 0,
+            timeline: voice_fx.VoiceTimeline | None = None, position: Callable[[], int] | None = None) -> None:
         """Show ``text`` as pages revealed word by word (``spoken`` False: no voice, the muted pace;
-        ``duration_ms``: how long the audio says it, which paces the words; 0: the estimated pace)."""
+        ``duration_ms``: how long the audio says it, which paces the words; 0: the estimated pace;
+        ``timeline`` + ``position``: each word as the voice says it)."""
         pages = paginate(text)
         if not pages:
             return
+        self._full = " ".join(pages)
+        self._offsets, count = [], 0
+        for page in pages:
+            self._offsets.append(count)
+            count += len(page.split())
+        timed = bool(spoken) and timeline is not None and position is not None
+        self._times = voice_fx.word_times(self._full.split(), timeline) if timed else []
+        self._position = position if timed else None
+        self.setAccessibleDescription(self._full)
         self._hold_timer.stop()
         self._page_timer.stop()
         self._pages = pages
@@ -346,6 +378,7 @@ class CaptionView(QWidget):
         self._page_timer.stop()
         self._hold_timer.stop()
         self._pages, self._page, self._words, self._revealed_at = [], -1, [], []
+        self._full, self._times, self._offsets, self._position = "", [], [], None
         self._fade, self._fade_from = 1.0, 0.0
         self._set_state(THINKING if self._thinking else RESTING)
         self._sync_frame()
@@ -365,6 +398,17 @@ class CaptionView(QWidget):
 
     def revealed_words(self) -> int:
         return len(self._revealed_at)
+
+    def full_text(self) -> str:
+        """The whole line being said (the accessible description from its start)."""
+        return self._full
+
+    def word_times(self) -> list[int]:
+        """When each word of the line is said (ms into the audio); [] when not timed by the voice."""
+        return list(self._times)
+
+    def is_timed(self) -> bool:
+        return bool(self._times) and self._position is not None
 
     def shown_text(self) -> str:
         """What the band shows now (the revealed words of the page, the thinking or the resting line)."""
@@ -401,8 +445,8 @@ class CaptionView(QWidget):
         self._words = self._pages[index].split()
         self._revealed_at = []
         now = time.monotonic()
-        self._swap_from = now if index > 0 and not holo.reduced_motion() else 0.0
-        if reveal_all or holo.reduced_motion():
+        self._swap_from = now if index > 0 and not _caption_still() else 0.0
+        if reveal_all or _caption_still():
             self._reveal_all()
             if not reveal_all:
                 self._page_done()
@@ -412,15 +456,44 @@ class CaptionView(QWidget):
         self.update()
 
     def _reveal_all(self) -> None:
-        now = time.monotonic() - (0.0 if holo.reduced_motion() else REVEAL_MS / 1000.0)
+        now = time.monotonic() - (0.0 if _caption_still() else REVEAL_MS / 1000.0)
         while len(self._revealed_at) < len(self._words):
             self._revealed_at.append(now)
         self._word_timer.stop()
-        self.setAccessibleDescription(self.page_text())
+        self.setAccessibleDescription(self._full or self.page_text())
         self.update()
+
+    def _position_ms(self) -> int:
+        try:
+            return int(self._position()) if self._position is not None else -1
+        except Exception:  # noqa: BLE001 - an unknown position waits a little
+            return -1
+
+    def _next_timed(self) -> None:
+        """Each word as the voice says it: every word whose time came, then a timer to the next one."""
+        now_ms = self._position_ms()
+        base = self._offsets[self._page] if self._page < len(self._offsets) else 0
+        revealed = False
+        while (now_ms >= 0 and len(self._revealed_at) < len(self._words)
+               and base + len(self._revealed_at) < len(self._times)
+               and self._times[base + len(self._revealed_at)] <= now_ms):
+            self._revealed_at.append(time.monotonic())
+            revealed = True
+        if revealed:
+            self._sync_frame()
+            self.update()
+        if len(self._revealed_at) < len(self._words):
+            index = base + len(self._revealed_at)
+            due = self._times[index] - now_ms if now_ms >= 0 and index < len(self._times) else 40
+            self._word_timer.start(max(15, min(1500, due)))
+            return
+        self._page_done()
 
     def _next_word(self) -> None:
         if self._state != SPEAKING or not self._words:
+            return
+        if self.is_timed():
+            self._next_timed()
             return
         if len(self._revealed_at) < len(self._words):
             self._revealed_at.append(time.monotonic())
@@ -434,10 +507,17 @@ class CaptionView(QWidget):
     def _page_done(self) -> None:
         """The page is revealed whole: the next page after a beat, or the hold."""
         self._word_timer.stop()
-        self.setAccessibleDescription(self.page_text())
+        self.setAccessibleDescription(self._full or self.page_text())
         self.pageShown.emit(self.page_text())
         if self._page < len(self._pages) - 1:
-            self._page_timer.start(self._interval_ms())
+            if self.is_timed():           # the next page when its first word is said
+                now_ms = self._position_ms()
+                first = self._times[self._offsets[self._page + 1]]
+                self._page_timer.start(40 if now_ms < 0 else max(0, min(5000, first - now_ms)))
+            elif _caption_still() and not self._finished:   # a whole page holds for its words' time
+                self._page_timer.start(self._interval_ms() * max(1, len(self._words)))
+            else:
+                self._page_timer.start(self._interval_ms())
             return
         if self._finished:
             self._set_state(HOLDING)
@@ -448,7 +528,7 @@ class CaptionView(QWidget):
             self._show_page(self._page + 1)
 
     def _start_fade(self) -> None:
-        if holo.reduced_motion():
+        if _caption_still():
             self.clear()
             return
         self._fade_from = time.monotonic()
@@ -457,7 +537,7 @@ class CaptionView(QWidget):
     # ---- animation ----------------------------------------------------------------------------
 
     def _animating(self, now: float) -> bool:
-        if holo.reduced_motion() or not self.isVisible():
+        if _caption_still() or not self.isVisible():
             return False
         if self._fade_from:
             return True
@@ -565,7 +645,8 @@ class CaptionView(QWidget):
         lines = self._lines(font, width)
         top = (self.height() - line_h * len(lines)) / 2
         now = time.monotonic()
-        still = holo.reduced_motion()
+        still = _caption_still()
+        lively = not still and holo.motion_level() == holo.MOTION_LIVELY
         marks = self._highlights()
         newest = len(self._revealed_at) - 1
         swap = 1.0
@@ -587,11 +668,30 @@ class CaptionView(QWidget):
                     color = QColor(holo.HOLO if i in marks else holo.INK_1)
                     if i != newest and i not in marks:
                         color.setAlphaF(0.9)
-                    painter.setOpacity(max(0.0, min(1.0, opacity)))
-                    painter.setPen(color)
-                    painter.drawText(QPointF(x, baseline + rise), word)
+                    blur = (1.0 - _ease_out(p)) if lively else 0.0
+                    _draw_word(painter, QPointF(x, baseline + rise), word, color, opacity, blur)
+                elif lively and self._state == SPEAKING:
+                    _draw_word(painter, QPointF(x, baseline), word, QColor(holo.INK_1),
+                               GHOST_OPACITY * self._fade * swap, 1.0)
                 x += w + space
         painter.setOpacity(1.0)
+
+
+def _draw_word(painter: QPainter, at: QPointF, word: str, color: QColor, opacity: float, blur: float) -> None:
+    """One caption word at ``opacity``; ``blur`` 0..1 smears it (soft copies either side) on its way to sharp."""
+    opacity = max(0.0, min(1.0, opacity))
+    if opacity <= 0.003:
+        return
+    painter.setPen(color)
+    if blur > 0.02:
+        d = BLUR_PX * blur
+        painter.setOpacity(opacity * 0.32 * blur)
+        for dx, dy in ((-d, 0.0), (d, 0.0), (0.0, -d * 0.6), (0.0, d * 0.6)) if blur < 1.0 else ((-d, 0.0), (d, 0.0)):
+            painter.drawText(QPointF(at.x() + dx, at.y() + dy), word)
+        if blur >= 1.0:
+            return
+    painter.setOpacity(opacity * (1.0 - 0.55 * blur))
+    painter.drawText(at, word)
 
 
 # --------------------------------------------------------------------------
@@ -1139,6 +1239,8 @@ SIDE_GAP = 40              # between the orb and its side tile (spec 16.0)
 class HomeStage(QWidget):
     """The hero orb, the stage brackets, the hairline and the Transcript button; see the module docs."""
 
+    contextClicked = Signal(str)        # a context tile's screen (context_view.TARGET_*): it never acts
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -1147,6 +1249,17 @@ class HomeStage(QWidget):
                                                  parent=self)
         self._unread = False
         self._side: QWidget | None = None
+        self.context = context_view.ContextTiles(self, self._context_geometry, on_click=self.contextClicked.emit)
+        self.hero.installEventFilter(self)      # it grows for its voice spikes while they show: centred again
+
+    def _context_geometry(self) -> tuple[QPointF, float, QRectF, list[QRectF]]:
+        """(the orb's centre, its radius, the hero widget's rect, the rects the context tiles keep clear of)."""
+        hero = QRectF(self.hero.geometry())
+        keep = [QRectF(self.transcript_button.geometry()).adjusted(-6, -6, 6, 6)]
+        if self._side_shown():
+            assert self._side is not None
+            keep.append(QRectF(self._side.geometry()).adjusted(-8, -8, 8, 8))
+        return hero.center(), self.hero.orb_size() / 2.0, hero, keep
 
     def set_side_tile(self, tile: QWidget | None) -> None:
         """The one tile bottom-right of the orb (an offer: offer_view.OfferTile; an error: states_view.ErrorTile),
@@ -1170,6 +1283,8 @@ class HomeStage(QWidget):
     def eventFilter(self, watched: Any, event: Any) -> bool:  # noqa: N802 - Qt override
         if watched is self._side and event.type() in (QEvent.Type.Show, QEvent.Type.Hide):
             QTimer.singleShot(0, self._relayout_if_valid)
+        elif watched is self.hero and event.type() == QEvent.Type.Resize:
+            self._place_hero()
         return super().eventFilter(watched, event)
 
     def place_side_tile(self) -> None:
@@ -1184,6 +1299,7 @@ class HomeStage(QWidget):
         px = self.orb_px()
         if px != self.hero.orb_size():
             self.hero.set_orb_size(px)
+        self.hero.set_voice_room(min(self.width() - 2 * STAGE_BRACKET, self.height() - 8))
         self._place_hero()
         self.update()
 
@@ -1263,6 +1379,7 @@ class HomeStage(QWidget):
         if (x, y) != (self.hero.x(), self.hero.y()):
             self.hero.move(x, y)
         self._place_side()
+        self.context.relayout()
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)

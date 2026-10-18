@@ -122,8 +122,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import (alive, approvals_view, brief_view, briefing_view, find_view, followups_view, live_view, memory_view,
-               offer_view, plan_view, settings_view, states_view, transcript_view)
+from . import (alive, approvals_view, brief_view, briefing_view, context_view, find_view, followups_view, live_view,
+               memory_view, offer_view, plan_view, settings_view, states_view, transcript_view, voice_fx)
 from . import dock as dock_mod
 from . import holo, home, hud
 from . import live as _live
@@ -315,7 +315,6 @@ from .persona import (
     SPOKEN_REFUSALS,
     Greeting,
     announcement,
-    approvals_sentence,
     ask_failure_speech,
     ask_reply_note_speech,
     ask_reply_speech,
@@ -329,7 +328,6 @@ from .persona import (
     memory_saved_speech,
     memory_saved_text,
     memory_suggestion_text,
-    next_event_sentence,
     not_sent_text,
     nudge_decided_text,
     nudge_drafted_text,
@@ -1011,6 +1009,7 @@ def _briefing_notice(status: str) -> str:
     return f" {hud.MIDDLE_DOT} ".join(part for part in (extra[:1].upper() + extra[1:], note) if part)
 
 HOME_BRIEFING_CHIP = "Briefing ready"
+_CONFIRMED_CARDS = (hud.CARD_ADDED, hud.CARD_EXISTS, hud.CARD_DONE, hud.CARD_SENT)  # a card that flies to Approvals
 HOME_PLAN_CHIP = "Plan ready"        # cyan: the plan just made is in the Transcript (its blocks on Approvals)
 HOME_BRIEF_CHIP = "Brief ready"      # cyan: the meeting brief just made is in the Transcript
 MOMENT_PLAN = "plan"                 # Home's plan moment (plan_view.PlanStage, HOLOGRAM_SPEC 16.4)
@@ -1355,6 +1354,8 @@ class ReadingView(QWidget):
         self.stage = home.HomeStage()
         self.hero = self.stage.hero
         self.stage.transcript_button.clicked.connect(self.open_transcript)
+        self.stage.contextClicked.connect(self._on_context_clicked)
+        self._filed: set[str] = set()       # brief reply cards whose Send / Cancel went: back on Approvals
         self.echo = home.EchoPill()
         _retain_size(self.echo)
         self.echo.hide()
@@ -1489,6 +1490,7 @@ class ReadingView(QWidget):
         # the Find list over everything. All of them ignore the mouse except the open Find list.
         self.transition = alive.ScreenTransition(self._screens)
         self.scan_sweep = alive.ScanSweep(self)
+        self.card_flight = alive.CardFlight(self)    # a card leaving Home's plan or brief flies to Approvals
         self.startup = alive.StartupPresence(self._play_startup)
         self.find_overlay = find_view.FindOverlay(self)
         self.find_overlay.picked.connect(self._on_find_pick)
@@ -1507,6 +1509,8 @@ class ReadingView(QWidget):
         self.transcript_drawer.close_drawer()
         self.day_drawer.close_drawer()
         self.find_overlay.close_list()
+        if index != SCREEN_HOME:
+            self.stage.context.dismiss()        # the context tiles go when the owner leaves Home
         self._screen = index
         self._sync_brief_cards()                # a brief's lent reply cards go back before another screen shows
         page = self._screens.widget(index)
@@ -1949,6 +1953,7 @@ class ReadingView(QWidget):
         for card in self.brief_stage.held():
             self.brief_stage.release(card)
             self.approvals.take_back(card)
+        self._filed.clear()
         self.brief_stage.set_brief(info)
         self._set_moment(MOMENT_BRIEF)
 
@@ -1976,6 +1981,8 @@ class ReadingView(QWidget):
         return self._moment
 
     def _set_moment(self, moment: str) -> None:
+        if moment:
+            self.stage.context.dismiss()        # the plan or the brief takes the orb's place
         self._moment = moment
         page = {MOMENT_PLAN: self.plan_stage, MOMENT_BRIEF: self.brief_stage}.get(moment, self._home_rest)
         self._home_pages.setCurrentWidget(page)
@@ -1991,6 +1998,12 @@ class ReadingView(QWidget):
         if not shiboken6.isValid(self):
             return
         if self.plan_stage.info() is not None:
+            if self._moment == MOMENT_PLAN and self._screen == SCREEN_HOME:
+                # an added block whose card was cleared flies to Approvals instead of vanishing (visual only)
+                for tile in self.plan_stage.timeline.tiles():
+                    if (tile.isVisible() and tile.mode() == plan_view.MODE_ADDED
+                            and self.approvals.card(tile.block.action_id) is None):
+                        self.fly_to_approvals(tile)
             self.plan_stage.sync_cards(self.approvals.card)
         self._sync_brief_cards()
 
@@ -1998,9 +2011,12 @@ class ReadingView(QWidget):
         """The brief's reply cards are NEEDS YOUR OK's own cards: lent while the brief shows on Home, back in
         their place otherwise (so Send, the tick, Sent and its Undo are the same everywhere)."""
         wanted = self._moment == MOMENT_BRIEF and self._screen == SCREEN_HOME
-        ids = self.brief_stage.card_ids() if wanted else ()
+        ids = tuple(i for i in self.brief_stage.card_ids() if i not in self._filed) if wanted else ()
         for card in self.brief_stage.held():
             if card.action_id not in ids or self.approvals.card(card.action_id) is not card:
+                if (wanted and shiboken6.isValid(card) and card.action_id not in self._filed
+                        and card.status() in _CONFIRMED_CARDS and self.approvals.card(card.action_id) is None):
+                    self.fly_to_approvals(card)     # a confirmed card cleared from the brief (visual only)
                 self.brief_stage.release(card)
                 self.approvals.take_back(card)
         held = self.brief_stage.held()
@@ -2024,6 +2040,8 @@ class ReadingView(QWidget):
 
     def _on_typing(self, typing: bool) -> None:
         self._typing = bool(typing)
+        if typing:
+            self.stage.context.dismiss()        # the owner types: the context tiles go
         self._sync_look()
 
     def _on_bar_status(self, text: str, tone: str) -> None:
@@ -2038,11 +2056,74 @@ class ReadingView(QWidget):
         self._greeting = text or ""
         self._sync_resting()
 
-    def say_caption(self, text: str, *, spoken: bool = True, duration_ms: int = 0) -> None:
+    def say_caption(self, text: str, *, spoken: bool = True, duration_ms: int = 0,
+                    timeline: voice_fx.VoiceTimeline | None = None,
+                    position: Callable[[], int] | None = None) -> None:
         """Jarvis's words as Home's caption (what is spoken, never an email or a card body);
-        ``duration_ms``: how long the audio says them (a briefing item), which paces the words."""
-        self.captions.say(text, spoken=spoken, duration_ms=duration_ms)
+        ``duration_ms``: how long the audio says them (a briefing item), which paces the words;
+        ``timeline`` + ``position()``: each word as the voice says it (part B of the motion prototype)."""
+        self.captions.say(text, spoken=spoken, duration_ms=duration_ms, timeline=timeline, position=position)
         self._sync_echo()
+
+    def set_voice(self, timeline: voice_fx.VoiceTimeline | None, position: Callable[[], int] | None) -> None:
+        """The utterance being said drives the hero's voice spikes (None: none, or not timed: the synthetic
+        curve)."""
+        if timeline is None or position is None or not (timeline.has_words or timeline.has_envelope):
+            self.hero.set_voice(None)
+            return
+
+        def level() -> float | None:
+            try:
+                ms = int(position())
+            except Exception:  # noqa: BLE001 - unknown: the synthetic curve
+                return None
+            return voice_fx.level_at(timeline, ms) if ms >= 0 else None
+
+        self.hero.set_voice(level)
+
+    # ---- Home's context tiles and cards flying to Approvals (part B of the motion prototype) ----------
+
+    def show_context(self, infos: Sequence[context_view.TileInfo]) -> int:
+        """The greeting's context tiles fly out of the orb, when Home shows the orb (else nothing); how many."""
+        if (self._screen != SCREEN_HOME or self._moment or not self.isVisible() or not infos
+                or not self.stage.isVisible()):
+            return 0
+        return self.stage.context.show_tiles(infos)
+
+    def dismiss_context(self) -> None:
+        self.stage.context.dismiss()
+
+    def _on_context_clicked(self, target: str) -> None:
+        """A context tile never acts: it only opens its screen (the Day view, Follow-ups, Approvals)."""
+        self.stage.context.dismiss()
+        if target == context_view.TARGET_APPROVALS:
+            self.set_tab(SCREEN_APPROVALS)
+        elif target == context_view.TARGET_FOLLOWUPS and self.followups_available():
+            self.set_tab(SCREEN_FOLLOWUPS)
+        elif target == context_view.TARGET_DAY:
+            self.open_day_view()
+
+    def approvals_target(self) -> QRectF:
+        """The Dock's Approvals item on this view (where a leaving card flies)."""
+        button = self.dock.button(dock_mod.APPROVALS)
+        return QRectF(QRect(button.mapTo(self, QPoint(0, 0)), button.size()))
+
+    def fly_to_approvals(self, widget: QWidget) -> bool:
+        """A snapshot of ``widget`` shrinks and flies to the Dock's Approvals item (visual only)."""
+        return self.card_flight.fly(widget, self.approvals_target())
+
+    def file_card(self, action_id: str) -> bool:
+        """A Send's or Cancel's hold ended: its reply card on Home's brief flies to Approvals and is shown
+        there from now on (the card, its result and timings are untouched); False when it is not on Home."""
+        if self._moment != MOMENT_BRIEF or self._screen != SCREEN_HOME:
+            return False
+        card = next((held for held in self.brief_stage.held() if held.action_id == action_id), None)
+        if card is None or not card.isVisible():
+            return False
+        self.fly_to_approvals(card)
+        self._filed.add(action_id)
+        self._sync_brief_cards()
+        return True
 
     def end_caption(self) -> None:
         """The voice stopped: the last page holds, then the band rests."""
@@ -2053,6 +2134,7 @@ class ReadingView(QWidget):
         the last answer's chip goes."""
         self.echo.set_text(text)
         self._answer = ("", 0, "")
+        self.stage.context.dismiss()            # the owner asks: the context tiles go
         self.close_moment()                     # a new request: the orb and its captions again
         self._sync_echo()
         self._sync_chip()
@@ -3451,7 +3533,6 @@ _RESULT_TONES = {OUTCOME_GOOD: hud.TONE_GOOD, OUTCOME_ERROR: hud.TONE_ERROR, OUT
 _GREETING_WAIT_MS = 3000          # an opening greeting waits this long for the first fetch answer
 _GREETING_REPEAT_S = 120.0        # an open of a hidden or minimized window greets again after this
 _LOCK_RECHECK_MS = 5000           # a held announcement checks the lock screen again this often
-_NEXT_EVENT_WITHIN = timedelta(hours=3)   # the greeting may name an event starting this soon
 
 LOADING_TEXT = "Fetching your briefing from Notion..."
 ACTIONS_FILE = "actions.json"
@@ -4831,6 +4912,8 @@ class AppController(QObject):
         self._agenda_requested_at = -math.inf     # time.monotonic() of the last read
         self._page_deadlines: list[Deadline] = []  # the page's "Deadlines" section
         self._merged_deadlines: list[Deadline] = []   # DEADLINES as last shown (page + calendar; a plan's d rows)
+        self._context_tiles: list[context_view.TileInfo] = []   # Home's context tiles waiting for the line to start
+        self._context_timer: QTimer | None = None
 
     def _init_talk_state(self, prefs: AssistantPrefs | None, locked: Callable[[], bool] | None) -> None:
         """NEW / announced / viewed, the greeting and the conversation (memory only)."""
@@ -6569,6 +6652,7 @@ class AppController(QObject):
         self._jobs[action.id] = _STAGE_WORKING
         self._running[action.id] = (action, True)
         self._show_card_state(action.id)
+        self.window.reading.file_card(action.id)   # on Home's brief it flies to Approvals (visual only)
         _live_hold_ended(hold)
         task = hold.task
         # The owner already saw Sent: Jarvis closing before the worker reaches it still sends it (hold_end).
@@ -9851,10 +9935,33 @@ class AppController(QObject):
         reading = self.window.reading
         reading.set_speech(self._utterance or self._briefing_speech)
         if text:
-            reading.say_caption(text)              # Home's caption: what he says now, as he says it
-        elif not self._briefing_speech or self.player.state != PLAYING:
-            reading.end_caption()
+            # Home's caption: what he says now, each word as he says it; the orb's spikes follow his voice
+            timeline = self._voice_timeline()
+            reading.say_caption(text, timeline=timeline, position=self._voice_position)
+            reading.set_voice(timeline, self._voice_position)
+            self._show_context_tiles()             # the greeting's tiles fly out as he starts the line
+        else:
+            reading.set_voice(None, None)
+            if not self._briefing_speech or self.player.state != PLAYING:
+                reading.end_caption()
         self._update_reading_controls()
+
+    def _voice_timeline(self) -> voice_fx.VoiceTimeline | None:
+        """The utterance being said: its word boundaries or level envelope (None: unknown)."""
+        try:
+            getter = getattr(self.voice, "timeline", None)
+            timeline = getter() if callable(getter) else None
+        except Exception:  # noqa: BLE001 - the timing only animates
+            return None
+        return timeline if isinstance(timeline, voice_fx.VoiceTimeline) else None
+
+    def _voice_position(self) -> int:
+        """How far the utterance's audio is (ms); -1 when unknown."""
+        try:
+            getter = getattr(self.voice, "position_ms", None)
+            return int(getter()) if callable(getter) else -1
+        except Exception:  # noqa: BLE001 - unknown: the caption waits a moment
+            return -1
 
     def _set_briefing_speech(self, text: str) -> None:
         """The speech line for the briefing (the line being read; "" for its fallback). While Jarvis
@@ -10397,32 +10504,87 @@ class AppController(QObject):
         spoken = self._say(KIND_GREETING, text, key=f"announce:{key}" if fold else "")
         logger.info("Greeting %s%s (%s)", line.id, " with the announcement" if fold else "",
                     "spoken" if spoken else "text only")
+        self._queue_context_tiles(spoken)
         if fold and key is not None:
             self._set_announced(key, spoken)
         elif key is not None:
             self._announce()   # e.g. held while the session is locked
 
     def _greeting_context(self) -> str:
-        """One fact that is safe to say aloud: proposals waiting for the owner's OK, else the next
-        timed event within 3 hours (only when the agenda is loaded; never waits for Google)."""
+        """ONE short sentence that is safe to say aloud: counts and times only, never a name, a title, a subject
+        or an address ("Your next meeting is at 2 PM, and two replies are waiting."); proposals waiting alone
+        keep "Two proposals are waiting for your OK." Only data already loaded; never waits for Google."""
         try:
-            pending = len(self._pending_actions())
-            if pending:
-                return approvals_sentence(pending)
-            if self._agenda_status != _AGENDA_OK or not self._agenda_events:
-                return ""
-            now = self._now()
-            upcoming = [event for event in self._agenda_events
-                        if event.start is not None and not event.all_day
-                        and now < event.start <= now + _NEXT_EVENT_WITHIN]
-            if not upcoming:
-                return ""
-            first = min(upcoming, key=lambda event: event.start)
-            start = first.start.astimezone(now.tzinfo) if now.tzinfo is not None else first.start
-            return next_event_sentence(first.title, start)
+            return context_view.spoken_context(self._context_facts())
         except Exception as exc:  # noqa: BLE001 - the greeting goes on without a fact
             logger.debug("No greeting fact (%s)", type(exc).__name__)
             return ""
+
+    def _context_facts(self) -> context_view.ContextFacts:
+        """What Home's context tiles show (memory only, never logged): the next timed meeting today, the oldest
+        thread waiting on the owner (the bundle's follow-ups), the nearest deadline and the waiting proposals."""
+        now = self._now()
+        meeting = None
+        if self._agenda_status == _AGENDA_OK and self._agenda_events:
+            today = []
+            for event in self._agenda_events:
+                if event.start is None or event.all_day:
+                    continue
+                start = event.start.astimezone(now.tzinfo) if now.tzinfo is not None else event.start
+                if now < event.start and start.date() == now.date():
+                    today.append((event.start, start, event.title))
+            if today:
+                _key, start, title = min(today, key=lambda item: item[0])
+                meeting = (start, title)
+        thread, replies = None, 0
+        controller = getattr(self, "productivity", None)
+        if controller is not None and self._followups_section_on():
+            view = controller.followups()
+            if not view.off and view.waiting:
+                oldest = view.waiting[0]                  # oldest first
+                thread, replies = (oldest.who, oldest.subject), len(view.waiting)
+        deadline, deadline_at = None, None
+        agenda = self.config.agenda
+        from_calendar = deadlines_from_events(self._agenda_events or (), now, agenda.deadline_days,
+                                              agenda.deadline_keywords)
+        for item in merge_deadlines(self._page_deadlines, from_calendar, now, agenda.deadline_days):
+            label, _urgency = due_label(item.due, now)
+            if label == "OVERDUE":
+                continue
+            deadline = (label, item.title)
+            if isinstance(item.due, datetime):
+                due = item.due.astimezone(now.tzinfo) if (item.due.tzinfo and now.tzinfo) else item.due
+                if due.date() == now.date():
+                    deadline_at = due
+            break
+        return context_view.ContextFacts(meeting=meeting, thread=thread, deadline=deadline,
+                                         deadline_at=deadline_at, approvals=len(self._pending_actions()),
+                                         replies=replies)
+
+    def _queue_context_tiles(self, spoken: bool) -> None:
+        """The greeting or the announcement was said: Home's context tiles fly out as the line starts (at once
+        when it is shown as text only; at the latest after 8 s). Logged by kind and count only."""
+        try:
+            infos = context_view.context_tiles(self._context_facts())
+        except Exception as exc:  # noqa: BLE001 - Home goes on without its tiles
+            logger.debug("No context tiles (%s)", type(exc).__name__)
+            return
+        if not infos or self.state != STATE_READING:
+            return
+        logger.info("Home context: %d tile(s) (%s)", len(infos), ", ".join(info.kind for info in infos))
+        self._context_tiles = list(infos)
+        if self._context_timer is None:
+            self._context_timer = QTimer(self)
+            self._context_timer.setSingleShot(True)
+            self._context_timer.timeout.connect(self._show_context_tiles)
+        self._context_timer.start(8000 if spoken else 0)
+
+    def _show_context_tiles(self) -> None:
+        infos, self._context_tiles = self._context_tiles, []
+        if self._context_timer is not None:
+            self._context_timer.stop()
+        if infos and self.state == STATE_READING:
+            self.window.reading.show_context(infos)
 
     def _locked_now(self) -> bool:
         try:
@@ -10460,8 +10622,10 @@ class AppController(QObject):
             self._held_timer.start(_LOCK_RECHECK_MS)
             logger.info("Announced the %s briefing (held: session locked)", key)
             return True
-        self._set_announced(key, self._say(kind, text, key=f"announce:{key}"))
+        spoken = self._say(kind, text, key=f"announce:{key}")
+        self._set_announced(key, spoken)
         self._toast_announcement()
+        self._queue_context_tiles(spoken)
         return True
 
     def _set_announced(self, key: str, spoken: bool) -> None:

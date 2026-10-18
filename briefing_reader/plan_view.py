@@ -73,6 +73,7 @@ _ADDED = "added"
 _DENIED = "denied"
 _FAILED = "failed"
 MODES = (_ADD, _WORKING, _ADDED, _DENIED, _FAILED)
+MODE_ADDED = _ADDED            # a block added (its card confirmed): ui flies it to Approvals when it is cleared
 
 
 @dataclass(frozen=True)

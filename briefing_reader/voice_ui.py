@@ -6,6 +6,9 @@ speaks through (speech.Voice).
         (so the silent harnesses at volume 0 stay silent), following the default output device like
         player.BriefingPlayer. ``play(seq, audio)`` plays one utterance's segments back to back;
         ``finished(seq)`` when it ended or could not be played; ``stop()`` ends it quietly.
+        ``position_ms()``: how far into the utterance the audio is (the segments before, their pauses and
+        the player's position, carried forward smoothly between its updates; -1 when nothing plays),
+        ``timeline()``: its voice_fx.VoiceTimeline (word boundaries or the level envelope).
 
     AssistantVoice(worker=..., player=..., briefing_player=..., hold_active=..., prefs=...)
         speech.SpeechLane (the queue policy) + speech.SayWorker (the "tts-say" thread; its results
@@ -23,7 +26,8 @@ speaks through (speech.Voice).
         * every text goes through persona.scrub_for_speech; the log names kinds, lengths, the
           engine and timings, never the text.
         ``speakingChanged(text)``: the utterance being said ("" when none), for the orb and the
-        speech line.
+        speech line. ``timeline()`` / ``position_ms()``: the utterance's voice_fx.VoiceTimeline and how far
+        its audio is (the orb's voice spikes and the caption's word reveal follow them; None / -1 when none).
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from typing import Any
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 
+from . import voice_fx
 from .persona import scrub_for_speech
 from .player import PAUSED, PLAYING, WAITING
 from .speech import SpeechLane, Utterance
@@ -73,6 +78,11 @@ class UtterancePlayer(QObject):
         self._index = 0
         self._source = QUrl()
         self._media_ready = False
+        self._timeline: voice_fx.VoiceTimeline | None = None
+        self._offsets: tuple[int, ...] = ()       # where each segment starts in the utterance (ms)
+        self._anchor: tuple[float, int] | None = None   # (monotonic, position) of the last position report
+        self._gap_from = 0.0
+        self._player.positionChanged.connect(self._on_position)
 
     @property
     def playing(self) -> bool:
@@ -87,13 +97,47 @@ class UtterancePlayer(QObject):
         self._seq = int(seq)
         self._segments = tuple(getattr(audio, "segments", ()) or ())
         self._index = 0
+        offsets, base = [], 0
+        for segment in self._segments:
+            offsets.append(base)
+            base += max(0, int(getattr(segment, "duration_ms", 0) or 0))
+            base += max(0, int(getattr(segment, "pause_after_ms", 0) or 0))
+        self._offsets = tuple(offsets)
+        try:
+            self._timeline = voice_fx.timeline_from_audio(audio)
+        except Exception:  # noqa: BLE001 - the timing only animates; the audio still plays
+            self._timeline = None
         self._play_segment()
+
+    def timeline(self) -> voice_fx.VoiceTimeline | None:
+        """The utterance's word boundaries / level envelope (None when nothing plays)."""
+        return self._timeline if self._seq is not None else None
+
+    def position_ms(self) -> int:
+        """See the module docstring."""
+        if self._seq is None or self._index >= len(self._offsets):
+            return -1
+        base = self._offsets[self._index]
+        if self._gap.isActive():
+            duration = int(getattr(self._segments[self._index], "duration_ms", 0) or 0)
+            return base + duration + int((time.monotonic() - self._gap_from) * 1000)
+        anchor = self._anchor
+        if anchor is None or not self._media_ready:
+            return base
+        playing = self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        ahead = min(250, int((time.monotonic() - anchor[0]) * 1000)) if playing else 0
+        return base + anchor[1] + max(0, ahead)
+
+    def _on_position(self, position: int) -> None:
+        if self._is_current():
+            self._anchor = (time.monotonic(), max(0, int(position)))
 
     def stop(self) -> None:
         """End the utterance now (no ``finished``) and let go of its file."""
         self._gap.stop()
         self._seq = None
         self._segments = ()
+        self._timeline = None
         self._release()
 
     def _play_segment(self) -> None:
@@ -109,6 +153,7 @@ class UtterancePlayer(QObject):
             return
         self._release()
         self._media_ready = False
+        self._anchor = (time.monotonic(), 0)
         self._source = QUrl.fromLocalFile(str(path))
         self._player.setSource(self._source)
         if self._seq is not None and self._player.source() == self._source:
@@ -122,6 +167,7 @@ class UtterancePlayer(QObject):
         pause_ms = int(getattr(self._segments[self._index], "pause_after_ms", 0) or 0)
         if self._index + 1 < len(self._segments) and pause_ms > 0:
             self._release()
+            self._gap_from = time.monotonic()
             self._gap.start(pause_ms)
         else:
             self._next_segment()
@@ -129,6 +175,7 @@ class UtterancePlayer(QObject):
     def _finish(self) -> None:
         seq, self._seq = self._seq, None
         self._segments = ()
+        self._timeline = None
         self._release()
         if seq is not None:
             self.finished.emit(seq)
@@ -228,6 +275,23 @@ class AssistantVoice(QObject):
             self._tick.start()
         self.pump()
         return True
+
+    def timeline(self) -> voice_fx.VoiceTimeline | None:
+        """The utterance being said: its word boundaries or level envelope (None when none is said)."""
+        current = self._lane.current
+        if current is None or current.audio is None:
+            return None
+        try:   # from the utterance's own audio: known as soon as it starts (before the player has it)
+            return voice_fx.timeline_from_audio(current.audio)
+        except Exception:  # noqa: BLE001 - the timing only animates
+            return None
+
+    def position_ms(self) -> int:
+        """How far the utterance being said is (ms); -1 when none plays."""
+        if self._lane.current is None:
+            return -1
+        getter = getattr(self._player, "position_ms", None)
+        return int(getter()) if callable(getter) else -1
 
     def cancel_key(self, key: str) -> None:
         self._forget(self._lane.cancel_key(key))
