@@ -680,6 +680,7 @@ class ReadingViewScreenTests(unittest.TestCase):
         reading = window.reading
         reading.set_memory_available(True)
         reading.set_followups_available(True)
+        reading.set_meetings_available(True)
         seen: list[int] = []
         reading.tabChanged.connect(seen.append)
         for size in ((900, 600), (1120, 700)):

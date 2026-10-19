@@ -1114,7 +1114,6 @@ class HoloHeader(QWidget):
         layout = self.layout()
         index = layout.indexOf(self.hold)
         layout.insertWidget(index, badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.insertSpacing(index + 1, 12)
         self._fit_notes()
 
     def set_hold(self, word: str = "") -> None:
