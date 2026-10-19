@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JarvisMeetingSummary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "decisions", "action_items", "open_questions", "follow_ups", "memory_suggestions"],
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "description": "Write this first. A short title for the meeting, in your own words."
+    },
+    "decisions": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {"type": "string", "minLength": 1, "maxLength": 300},
+      "description": "What was agreed, one short sentence each."
+    },
+    "action_items": {
+      "type": "array",
+      "maxItems": 15,
+      "description": "Who will do what: who is exactly \"you\" or exactly one name from <guests>.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["who", "what"],
+        "properties": {
+          "who": {"type": "string", "minLength": 1, "maxLength": 80},
+          "what": {"type": "string", "minLength": 1, "maxLength": 300},
+          "due": {"type": "string", "maxLength": 10, "description": "YYYY-MM-DD when one is named, else \"\"."}
+        }
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {"type": "string", "minLength": 1, "maxLength": 300},
+      "description": "What was asked but not settled."
+    },
+    "follow_ups": {
+      "type": "array",
+      "maxItems": 3,
+      "description": "Short email drafts from the owner, each to exactly one name from <guests>; usually none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["to", "subject", "body"],
+        "properties": {
+          "to": {"type": "string", "minLength": 1, "maxLength": 80},
+          "subject": {"type": "string", "minLength": 1, "maxLength": 150},
+          "body": {"type": "string", "minLength": 1, "maxLength": 3000}
+        }
+      }
+    },
+    "memory_suggestions": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {"type": "string", "minLength": 1, "maxLength": 160},
+      "description": "Lasting facts worth keeping in the owner's notes; usually none."
+    }
+  }
+}

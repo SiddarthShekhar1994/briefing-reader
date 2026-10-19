@@ -362,7 +362,7 @@ def approve_label(action: ProposedAction) -> str:
     if not action.decidable:
         return ""
     if action.kind == CALENDAR:
-        return ADD_BLOCK_TEXT if action.mode == MODE_PLAN else "Approve"
+        return ADD_BLOCK_TEXT if action.mode in (MODE_PLAN, MODE_MEETING) else "Approve"
     if action.kind == TODO and action.start is not None:
         return "Add block"
     if action.kind == RSVP:
@@ -379,6 +379,7 @@ def approve_label(action: ProposedAction) -> str:
 SEND_TEXT = "Send"
 ADD_BLOCK_TEXT = "Add block"
 MODE_PLAN = "plan"            # ProposedAction.mode of a day plan's time block (ask.modes.MODE_PLAN)
+MODE_MEETING = "meeting"      # ... of a meeting summary's card: a follow-up or an Add block (ask.modes.MODE_MEETING)
 _RSVP_BUTTONS = {"yes": "Accept", "no": "Decline", "maybe": "Maybe"}
 
 

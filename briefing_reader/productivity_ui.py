@@ -34,6 +34,12 @@ opens cancels a running scan between two reads (R19) and bumps nothing until it 
 listed thread's headers again (_RefetchJob, R47). request_scan / hide / unhide / set_off / followups()
 / participants() / followup_counts() are what the app asks; nothing here reads a body or calls Claude.
 
+The record offer (meetings part 2, only while [meetings] is on: ``record_offer_on``): shortly before a timed
+meeting with another guest (from RECORD_LEAD before its start until RECORD_LATE after it), "Record this
+meeting?" with one link that only opens the start card - the consent tick and Start there are the owner's own,
+every meeting; nothing is ever recorded from the offer. It is text only (never spoken) and goes when the meeting
+is RECORD_LATE in or over.
+
 An offer never acts: nothing is read from mail and no planner runs until the owner clicks its link
 (the app then starts the B2 plan or the B3 brief as a click-started mode run). The day schedule is
 read by a daemon thread of its own ("prod"; never the calendar worker that runs approvals, never
@@ -92,6 +98,9 @@ FIRST_SCAN_AFTER = timedelta(seconds=20)    # the first header scan waits this l
 FIRST_SCAN_MS = 20_500
 READ_OFF_NOTE = "read_off"                  # FollowupView.notes: [ask] read_mail is off
 _LIVE_PLAN_KEY = "plan-offer"
+RECORD_LEAD = timedelta(minutes=5)          # a record offer from this long before a meeting's start ...
+RECORD_LATE = timedelta(minutes=10)         # ... until this long after it (a late start)
+RECORD_SUB = "Opens the start card only - nothing records until you tick the consent box and click Start"
 _LIVE_DAY_KEY = "day"
 LINK_GONE = "gone"                          # a click on a link with no valid offer behind it (used, retired, unknown)
 # Not a meeting worth a LIVE line or a log line: all day, declined, already under way (or about to start).
@@ -335,7 +344,7 @@ class Offer:
     ``event_title`` is shown on screen only; the repr names kinds and states."""
 
     id: int
-    kind: str                          # offers.KIND_PLAN | offers.KIND_PREP
+    kind: str                          # offers.KIND_PLAN | offers.KIND_PREP | offers.KIND_RECORD
     posted_at: datetime                # the clock's time at posting
     expires_at: datetime               # plan: the wall time of plan_offer_until; prep: the meeting's end
     slot_key: str = ""                 # plan: today's "YYYY-MM-DD AM"
@@ -360,6 +369,7 @@ class Offer:
     flash: bool = False                # the app flashes the taskbar button (minimized prep offer)
     sub: str = ""                      # the sub line as last shown (R49)
     live_key: str = field(default="", repr=False)
+    brief: Any = field(default=None, repr=False)   # record: the event as read (the start card's title and invite)
 
     def __repr__(self) -> str:
         return f"Offer({self.id}, {self.kind}, {self.speech_state})"
@@ -430,6 +440,9 @@ class ProductivityController(QObject):
         settings = self.settings
         self._plan_on = bool(getattr(settings, "plan_offer", False))
         self._prep_on = bool(getattr(settings, "prep_offers", False))
+        # Meetings part 2: the app says whether a record offer may be posted ([meetings] on, nothing recording).
+        self.record_offer_on: Callable[[], bool] = lambda: False
+        self._record_offered: set[str] = set()
         # The schedule (memory only, never logged: counts only).
         self._day: dict[str, tuple[EventBrief, ...]] = {}
         self._day_statuses: dict[str, str] = {}
@@ -581,6 +594,7 @@ class ProductivityController(QObject):
         if act == ACT_VISIBLE and self._scan_due(now):
             self.request_scan(READ_TICK)
         self._evaluate_prep_offers(now, act)
+        self._evaluate_record_offers(now, act)
         self._evaluate_plan_offer(now, "tick")
         self._refresh_sub_lines()
         self._requeue_dropped(now)
@@ -1174,7 +1188,7 @@ class ProductivityController(QObject):
         nothing more is read once the plan offer was posted or settled)."""
         if not getattr(self.sources, "calendars", None):
             return False
-        if self._prep_on:
+        if self._prep_on or self._record_on():
             return True
         if not self._plan_on or not self._plan_candidate or self._plan_offer is not None:
             return False
@@ -1228,6 +1242,7 @@ class ProductivityController(QObject):
         act = self._safe_activity()
         self._evaluate_plan_offer(now, "day")
         self._evaluate_prep_offers(now, act)
+        self._evaluate_record_offers(now, act)
 
     def _on_job_failed(self, seq: int, kind: str) -> None:
         if kind == JOB_SCAN:
@@ -1390,6 +1405,75 @@ class ProductivityController(QObject):
                                                 offered=self._prep_offered, ignored=self._ignored,
                                                 offered_today=self._prep_count(now))
                 self._post_prep_group(group, now, act, stale=False, read_at=checked)
+
+    # ---- the record offer (meetings part 2) ---------------------------------------------------
+
+    def _record_on(self) -> bool:
+        try:
+            return bool(self.record_offer_on())
+        except Exception:  # noqa: BLE001 - unknown: no offer
+            return False
+
+    def _evaluate_record_offers(self, now: datetime, act: str) -> None:
+        """"Record this meeting?" for a timed meeting with another guest (not declined) from RECORD_LEAD before
+        its start until RECORD_LATE after it, once per meeting; never while a meeting records or [meetings] is
+        off. The offer only opens the start card."""
+        if self._closed or act == ACT_OFF or not self._day or not self._record_on():
+            return
+        own = self._own()
+        for alias, briefs in list(self._day.items()):
+            for event in briefs:
+                key = "record|" + offers.offer_key(alias, event)
+                if key in self._record_offered:
+                    continue
+                span = offers.event_span(event, now)
+                if span is None or event.self_response == "declined" or other_guests(event, own) < 1:
+                    continue
+                start, end = span
+                if not start - RECORD_LEAD <= now < min(end, start + RECORD_LATE):
+                    continue
+                self._record_offered.add(key)
+                self._post_record_offer(alias, event, now, own, key)
+                if not self._record_on():
+                    return
+
+    def _post_record_offer(self, alias: str, event: EventBrief, now: datetime, own: frozenset[str],
+                           key: str) -> None:
+        if event.start is None:
+            return
+        self._offer_seq += 1
+        end = event.end if event.end is not None else event.start
+        guests = other_guests(event, own)
+        offer = Offer(self._offer_seq, offers.KIND_RECORD, now, min(max(end, event.start), event.start + RECORD_LATE),
+                      alias=alias, event=EventRef(alias, event.calendar_id, event.event_id, event.start),
+                      event_title=event.title, start=event.start, guests=guests, read_at=self._day_read_at,
+                      speech_state=TEXT_ONLY, held_reason="record", sub=RECORD_SUB, live_key=f"record:{key}",
+                      brief=event)
+        self._offers[offer.id] = offer
+        when = persona.clock_text(_wall(event.start, self.day_zone()), self._hour24())
+        self._live_offer(f"Offered to record: {when}, {guests} guest{'' if guests == 1 else 's'}",
+                         key=offer.live_key, fields=[("Its click", "opens the start card only"),
+                                                     ("Records", "only after your consent tick and Start"),
+                                                     ("Spoken", "no (text only)")])
+        logger.info("Record offer: posted (%d guest(s))", guests)
+        self.offerPosted.emit(offer)
+
+    def retire_record_offers(self) -> int:
+        """A meeting started recording (from anywhere): the open record offers go (their entries say so)."""
+        open_ones = [offer for offer in self._offers.values() if offer.kind == offers.KIND_RECORD]
+        for offer in open_ones:
+            self._retire(offer, RETIRE_ENDED)
+        return len(open_ones)
+
+    def record_used(self, offer_id: int) -> Offer | None:
+        """The record offer's click opened the start card: the offer is done with (its entry says so)."""
+        offer = self._offers.get(offer_id)
+        if offer is None or offer.kind != offers.KIND_RECORD or offer.used:
+            return None
+        offer.clicked = offer.used = True
+        offer.read_at = self._now()
+        self._retire(offer, RETIRE_USED)
+        return offer
 
     def _hour_checked_at(self, alias: str, event: EventBrief, now: datetime) -> datetime | None:
         """The read time of a minimized hour read within the last 30 minutes that covered the event's
@@ -1856,6 +1940,8 @@ class ProductivityController(QObject):
     def sub_line(self, offer: Offer) -> str:
         """The offer's sub line (R49): the cost against the binding limit, from the cached CapCheck;
         a prep offer adds the schedule's read time."""
+        if offer.kind == offers.KIND_RECORD:
+            return RECORD_SUB
         caps = self._safe_caps()
         max_runs = int(getattr(self.settings, "max_runs_per_day", 20))
         left_bundle = int(getattr(caps, "left_bundle_day", 0)) if caps is not None else 0
@@ -2036,7 +2122,7 @@ _DOT = "\u00b7"
 
 
 def _kind_word(offer: Offer) -> str:
-    return "Plan" if offer.kind == offers.KIND_PLAN else "Prep"
+    return {offers.KIND_PLAN: "Plan", offers.KIND_RECORD: "Record"}.get(offer.kind, "Prep")
 
 
 def _speech_order(offer: Offer) -> tuple[int, float, int]:

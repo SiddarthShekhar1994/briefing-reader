@@ -352,7 +352,9 @@ Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
 **Plan my day** - see [Plan my day](#plan-my-day);
 **Meeting prep** - see [Meeting prep](#meeting-prep);
 **Plan and prep offers** - see [Offers](#offers-plan-my-day-and-prepare-brief);
-**Follow-up nudges** - see [Follow-ups and nudges](#follow-ups-and-nudges).
+**Follow-up nudges** - see [Follow-ups and nudges](#follow-ups-and-nudges);
+**Meeting recording and summaries** (only with the consent of everyone in the
+meeting) - see [Meetings](#meetings-recording-and-summaries).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (proposals, your click, every step visible in LIVE):
@@ -362,7 +364,6 @@ keep the same rules (proposals, your click, every step visible in LIVE):
 - **Radar**: internships, hackathons, deadlines and subscriptions (renewals,
   trials that end) worth your attention.
 - **Push-to-talk voice**: hold a key and say your request.
-- **Meeting summaries**, only with the consent of everyone in the meeting.
 
 ## About the name
 
@@ -2004,6 +2005,90 @@ If `memory.json` can't be read (edited by hand into broken JSON, also while
 Jarvis runs), MEMORY says so and Jarvis leaves the file exactly as it is: Asks
 get no notes, and nothing can be added, changed or removed until you fix or
 delete the file and restart Jarvis.
+
+### Meetings: recording and summaries
+
+Off in the public `config.toml` (`[meetings] enabled = false`); on for this PC
+with the line `JARVIS_MEETINGS_ENABLED=true` in `.env`, then a restart. Off,
+there is no Meetings screen, no Record anywhere and no record offer.
+
+**Consent.** California and some other places need everyone's consent before a
+call is recorded. Before every recording, the start card has an unticked box
+"Everyone in this meeting has agreed to be recorded"; Start stays disabled
+until you tick it, every meeting (it is never remembered), and the meeting
+keeps that you confirmed it and when. The tick is your confirmation, not legal
+advice: ask everyone first.
+
+- **Recording** starts only from your click on Start on that card: never by
+  itself, never by voice, never from an offer. Record a meeting is on the
+  Meetings screen and in the Find list (Ctrl+K). Jarvis records your microphone
+  as "You" and the call audio from your speakers or headset (Windows loopback)
+  as "Others"; pick the devices in Settings > Meetings, otherwise the Windows
+  defaults are followed.
+- **Visible the whole time**: a red REC with the time in the header on every
+  screen, the orb's recording look, a small pill on top of every window (also
+  while Jarvis is minimised) with Stop, and "Recording" in the tray tooltip.
+- **Stop** on the pill, the header, Home or the Meetings screen. It also stops
+  by itself 15 minutes after the meeting's end, after 10 minutes of silence on
+  both channels, or at 3 hours, and closing Jarvis stops and saves.
+- **On this PC only**: everything is kept in
+  `%LOCALAPPDATA%\briefing-reader\meetings\<id>\` (never a folder that syncs);
+  the audio is deleted after 7 days, the transcript and the summary after 30
+  days, and **Delete** on a meeting removes all of it at once. Nothing is
+  uploaded.
+- **Written down on this PC** with faster-whisper (model medium.en, about
+  1.5 GB, downloaded from Hugging Face only when you click **Download** in
+  Settings > Meetings or on the Meetings screen). The Python add-ons
+  (faster-whisper; PyAudioWPatch or soundcard) are installed with your OK, never
+  by Jarvis; the Meetings screen says exactly what is missing.
+
+**The summary.** Once a meeting is written down, your own Claude Code (the
+same signed-in [Ask Jarvis](#ask-jarvis-optional) run as Plan my day and the
+meeting brief: no API key, no paid API) writes its summary by itself - your
+click on Record and the consent tick started the chain. A meeting written down
+before summaries existed, or one whose summary failed or was cancelled (Esc on
+the command bar), has **Summarise** on the Meetings screen. Without Ask Jarvis
+there is no summary, and the list says so.
+
+- **What Claude gets**: the transcript, marked as text written by other people
+  (data, never instructions - a request said in the meeting is never followed),
+  the meeting's title, time and length, and the calendar invite's guests by
+  name only. Never their addresses, your mail, your notes or the audio. It runs
+  in the background: nothing is said, paused or switched, and while it runs the
+  command bar says "Writing the meeting summary..." (Esc cancels).
+- **Checked strictly**: the answer must be exactly the summary's shape (a
+  title, decisions, action items with who and what and a due date only as a
+  real date, open questions, at most 3 follow-ups, at most 3 notes) or it is
+  refused whole and the meeting shows **Retry**. An action item is kept only
+  for you or a guest of the invite; anything else is left out and counted.
+- **The summary view** (Open summary on the meeting): Decisions, Action items
+  (yours first), Open questions, the follow-up drafts, the notes worth
+  remembering, and **See every step** (LIVE, this session).
+- **Follow-ups are drafts**: each one goes only to a guest of the calendar
+  invite, from the meeting's account, as an ordinary approval card (also under
+  NEEDS YOUR OK): a new recipient waits for its tick on the card, your own
+  address is refused, and Send shows Sent at once while the real send waits a
+  few hidden seconds so **Undo** truly stops it. Nothing is sent without your
+  click.
+- **Add block** on one of your action items proposes a calendar card for the
+  next free half hour Jarvis sees on your agenda (by its due date when it has
+  one): only on your click, and nothing is added until that card's own **Add**
+  (with **Undo**).
+- **Notes** the summary suggests wait for **Keep** or **Dismiss** - Memory's
+  own, also under MEMORY > JARVIS SUGGESTS. Nothing is kept without Keep; the
+  same rules as other suggestions apply (no address, link, number or secret).
+
+**The record offer.** With the [productivity bundle](#offers-plan-my-day-and-prepare-brief)
+and meetings on, shortly before a meeting with other guests (from 5 minutes
+before its start until 10 minutes after it) Jarvis offers "Record this
+meeting?" in the JARVIS tab and as Home's tile. Like every offer it never
+acts: its one link only opens the start card for that meeting, unticked; it is
+never spoken, and it goes once the meeting is under way. No offer while a
+meeting records.
+
+**Logs** carry ids, kinds, counts, durations and statuses only - never the
+transcript, a title, a name or an address. LIVE may show the run's steps; the
+transcript stays in memory there.
 
 ## TODAY and DEADLINES
 

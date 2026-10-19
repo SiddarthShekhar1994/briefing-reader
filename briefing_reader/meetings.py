@@ -17,15 +17,18 @@ Public API
 ==========
 
 ``meetings_root(config)`` / ``models_root(config)``; ``unsafe_root(path)`` (why a root is refused, or "").
-``MeetingInfo(title, start, end, event_id, guests)``: the calendar meeting a recording belongs to (or an
-    unscheduled call: ``MeetingInfo()``). ``repr`` carries no title or name.
+``MeetingInfo(title, start, end, event_id, guests, alias, calendar_id, invite)``: the calendar meeting a
+    recording belongs to (or an unscheduled call: ``MeetingInfo()``); ``invite`` the guests' (name, address) from
+    the calendar invite (part 2: a follow-up draft only ever goes to one of them). ``repr`` carries no title or
+    name.
 ``StartRequest(info, consent, consent_at, mic, call_audio)``: what the start card hands over; ``consent`` must
     be True (``ConsentMissing`` otherwise).
 ``MeetingRecord``: one meeting's ``meeting.json`` (``status`` one of STATUS_*; ``status_text()``).
 ``MeetingStore(root, now=)``: ``create(request, devices)``, ``load(id)``, ``save(record)``, ``list()`` (newest
     first), ``delete(id)``, ``cleanup(now)`` -> (audio removed, meetings removed), ``recover(active=())``
     (meetings left "recording" by a crash become RECORDED, their WAV headers repaired), ``folder(id)``,
-    ``audio_path(id, channel)``.
+    ``audio_path(id, channel)``; part 2: ``summary_path(id)``, ``save_summary(id, data)``, ``load_summary(id)``
+    (summary.json in the meeting's folder: it goes with the folder at 30 days or on Delete).
 ``DevicePrefs(root)``: the devices picked in Settings > Meetings (``microphone``, ``call_audio``; "" follows
     the Windows default), saved in ``meetings\\devices.json``.
 """
@@ -51,6 +54,7 @@ MEETINGS_DIR = "meetings"
 MODELS_DIR = "models"
 RECORD_FILE = "meeting.json"
 TRANSCRIPT_FILE = "transcript.json"
+SUMMARY_FILE = "summary.json"     # part 2: the summary (the meeting's folder only; never uploaded or logged)
 DEVICES_FILE = "devices.json"
 MIC = "mic"                       # the microphone: "You"
 LOOPBACK = "loopback"             # the call audio from the speakers / headset: "Others"
@@ -67,11 +71,12 @@ RECORD_VERSION = 1
 STATUS_RECORDING = "recording"
 STATUS_RECORDED = "recorded"              # saved; waiting to be written down
 STATUS_TRANSCRIBING = "transcribing"      # "Writing it down 40%"
-STATUS_TRANSCRIBED = "transcribed"        # the transcript is ready (part 2 adds the summary)
-STATUS_SUMMARY_READY = "summary_ready"    # part 2
+STATUS_TRANSCRIBED = "transcribed"        # the transcript is ready (no summary yet, or it failed: Summarise)
+STATUS_SUMMARISING = "summarising"        # part 2: the owner's Claude Code writes the summary
+STATUS_SUMMARY_READY = "summary_ready"    # part 2: the summary is in summary.json
 STATUS_FAILED = "failed"
-STATUSES = (STATUS_RECORDING, STATUS_RECORDED, STATUS_TRANSCRIBING, STATUS_TRANSCRIBED, STATUS_SUMMARY_READY,
-            STATUS_FAILED)
+STATUSES = (STATUS_RECORDING, STATUS_RECORDED, STATUS_TRANSCRIBING, STATUS_TRANSCRIBED, STATUS_SUMMARISING,
+            STATUS_SUMMARY_READY, STATUS_FAILED)
 
 STOP_BUTTON = "button"            # Stop on the pill, the header, Home or the Meetings screen
 STOP_END_TIME = "end_time"        # the meeting's end time + 15 minutes
@@ -144,10 +149,14 @@ class MeetingInfo:
     end: datetime | None = None
     event_id: str = field(default="", repr=False)
     guests: tuple[str, ...] = field(default=(), repr=False)
+    alias: str = ""                                                  # the calendar account it is on
+    calendar_id: str = field(default="", repr=False)
+    invite: tuple[tuple[str, str], ...] = field(default=(), repr=False)   # (name, address) of each guest
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "title", " ".join(str(self.title or "").split()))
         object.__setattr__(self, "guests", tuple(str(name) for name in self.guests or () if str(name).strip()))
+        object.__setattr__(self, "invite", clean_invite(self.invite))
 
     @property
     def scheduled(self) -> bool:
@@ -170,6 +179,27 @@ class StartRequest:
     def __post_init__(self) -> None:
         if self.consent is not True:
             raise ConsentMissing("the consent tick is required to record")
+
+
+def clean_invite(items: Any) -> tuple[tuple[str, str], ...]:
+    """(name, address) pairs with a plain address each, every mailbox once, at most 50."""
+    from .actions import email_address
+
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in items or ():
+        if isinstance(item, Mapping):
+            name, address = item.get("name"), item.get("email")
+        elif isinstance(item, (tuple, list)) and len(item) == 2:
+            name, address = item
+        else:
+            continue
+        plain = email_address(str(address or ""))
+        if not plain or plain.casefold() in seen:
+            continue
+        seen.add(plain.casefold())
+        found.append((" ".join(str(name or "").split())[:120], plain))
+    return tuple(found[:50])
 
 
 def new_meeting_id(moment: datetime) -> str:
@@ -211,6 +241,10 @@ class MeetingRecord:
     devices: dict[str, Any] = field(default_factory=dict, repr=False)
     device_changes: list[dict[str, Any]] = field(default_factory=list, repr=False)
     audio_deleted_at: datetime | None = None
+    alias: str = ""                                                       # part 2: the invite's account
+    calendar_id: str = field(default="", repr=False)
+    invite: tuple[tuple[str, str], ...] = field(default=(), repr=False)   # part 2: (name, address) per guest
+    summary_error: str = ""              # part 2: why the last summary run failed (a short code)
 
     def shown_title(self) -> str:
         return self.title or UNSCHEDULED_TITLE
@@ -223,7 +257,11 @@ class MeetingRecord:
         if self.status == STATUS_TRANSCRIBING:
             return f"Writing it down {max(0, min(100, int(self.progress)))}%"
         if self.status == STATUS_TRANSCRIBED:
-            return "Transcript ready"
+            if self.summary_error == "cancelled":
+                return "Summary cancelled"
+            return "Summary failed" if self.summary_error else "Transcript ready"
+        if self.status == STATUS_SUMMARISING:
+            return "Writing the summary"
         if self.status == STATUS_SUMMARY_READY:
             return "Summary ready"
         if self.status == STATUS_FAILED:
@@ -241,7 +279,10 @@ class MeetingRecord:
                 "duration_s": round(float(self.duration_s), 1), "stop_reason": self.stop_reason,
                 "status": self.status, "progress": int(self.progress), "error": self.error,
                 "devices": dict(self.devices), "device_changes": list(self.device_changes),
-                "audio": dict(AUDIO_FILES), "audio_deleted_at": _iso(self.audio_deleted_at)}
+                "audio": dict(AUDIO_FILES), "audio_deleted_at": _iso(self.audio_deleted_at),
+                "alias": self.alias, "calendar_id": self.calendar_id,
+                "invite": [{"name": name, "email": address} for name, address in self.invite],
+                "summary_error": self.summary_error}
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> MeetingRecord:
@@ -267,7 +308,10 @@ class MeetingRecord:
                    duration_s=duration, stop_reason=str(data.get("stop_reason") or ""), status=status,
                    progress=progress, error=str(data.get("error") or ""), devices=dict(devices),
                    device_changes=[dict(c) for c in changes if isinstance(c, Mapping)],
-                   audio_deleted_at=_parse(data.get("audio_deleted_at")))
+                   audio_deleted_at=_parse(data.get("audio_deleted_at")),
+                   alias=str(data.get("alias") or "")[:40], calendar_id=str(data.get("calendar_id") or "")[:300],
+                   invite=clean_invite(data.get("invite") if isinstance(data.get("invite"), list) else ()),
+                   summary_error=str(data.get("summary_error") or "")[:40])
 
 
 # --------------------------------------------------------------------------
@@ -311,6 +355,20 @@ class MeetingStore:
     def transcript_path(self, meeting_id: str) -> Path:
         return self.folder(meeting_id) / TRANSCRIPT_FILE
 
+    def summary_path(self, meeting_id: str) -> Path:
+        return self.folder(meeting_id) / SUMMARY_FILE
+
+    def save_summary(self, meeting_id: str, data: Mapping[str, Any]) -> None:
+        """summary.json (atomic) in the meeting's folder; it goes with the folder (Delete, 30 days)."""
+        _write_json(self.summary_path(meeting_id), dict(data))
+
+    def load_summary(self, meeting_id: str) -> Any:
+        """summary.json as read (None when it is missing or can't be read)."""
+        try:
+            return json.loads(self.summary_path(meeting_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
     def create(self, request: StartRequest, devices: Mapping[str, Any] | None = None) -> MeetingRecord:
         """A new meeting folder and record (status RECORDING) for the owner's Start."""
         if not isinstance(request, StartRequest) or request.consent is not True:
@@ -326,7 +384,8 @@ class MeetingStore:
         record = MeetingRecord(id=meeting_id, title=info.title, event_id=info.event_id, guests=info.guests,
                                scheduled_start=info.start, scheduled_end=info.end, consent_confirmed=True,
                                consent_at=request.consent_at, started_at=now, status=STATUS_RECORDING,
-                               devices=dict(devices or {}))
+                               devices=dict(devices or {}), alias=info.alias, calendar_id=info.calendar_id,
+                               invite=info.invite)
         self.folder(meeting_id).mkdir(parents=True, exist_ok=False)
         self.save(record)
         logger.info("Meeting %s: created (scheduled: %s, guests: %d)", meeting_id, info.scheduled, len(info.guests))
@@ -428,7 +487,8 @@ class MeetingStore:
     def recover(self, active: Iterable[str] = ()) -> list[str]:
         """Meetings still marked RECORDING (Jarvis ended without closing) that are not ``active``: their WAV
         headers are repaired and they become RECORDED (stop reason STOP_INTERRUPTED). Returns their ids.
-        Meetings left TRANSCRIBING go back to RECORDED (their worker is gone)."""
+        Meetings left TRANSCRIBING go back to RECORDED (their worker is gone); meetings left SUMMARISING go back to
+        TRANSCRIBED (their run is gone; Summarise starts it again on the owner's click)."""
         from .meeting_audio import repair_wav, wav_seconds
 
         busy = set(active)
@@ -452,6 +512,9 @@ class MeetingStore:
                 logger.info("Meeting %s: saved after an unexpected end (%.0f s)", record.id, seconds)
             elif record.status == STATUS_TRANSCRIBING:
                 record.status, record.progress = STATUS_RECORDED, 0
+                self.save(record)
+            elif record.status == STATUS_SUMMARISING:
+                record.status = STATUS_TRANSCRIBED
                 self.save(record)
         return recovered
 

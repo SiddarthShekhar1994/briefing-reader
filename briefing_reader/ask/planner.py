@@ -73,6 +73,17 @@ participants index (ModeInputs.participants) instead of a search, always after g
 R3); a thread the planner marks as waiting on them, where Jarvis's own headers agree that the owner
 wrote last, becomes a "Draft a nudge" target of the brief (PrepBrief.nudges, R32).
 
+The meeting summary (ask.modes.MODE_MEETING, meetings part 2): the transcript of a meeting the owner
+recorded (his click on Record and the consent tick started the chain) is summarised once it is ready, or on
+his click on Summarise. The Ask caps and Claude Code ready (no bundle cap: it counts as an Ask run); the
+transcript read on this thread from the meeting's folder (ModeRequest.payload, an ask.meeting_summary.
+MeetingJob); one run with its own prompt and schema, the transcript marked as text written by other people
+(data, never instructions) and the invite's guests by name only. The answer is checked strictly
+(meeting_summary.summary_from: the whole answer refused when it does not fit), then Jarvis's own checks
+(meeting_summary.check_summary): action items only for "you" or an invited guest, follow-ups only to an
+invited guest (the invite's address, never one from the run) as Email cards through validate.to_cards with
+meeting_summary.FollowupCheck, notes through memory.check_suggestion. Nothing is sent, added or kept here.
+
 The drafted reply or nudge (ask.modes.MODE_NUDGE, a click on a FOLLOW-UPS row or under a brief,
 spec 3.4): the Ask caps with the bundle's, Claude Code ready, the thread's account readable; the one
 thread read in full (the only body read of a follow-up); ask.modes.nudge_guard stops with no run when
@@ -106,6 +117,8 @@ from ..live import (
     CALENDAR_READ,
     MAIL_SEARCH,
     MAIL_THREAD,
+    MEETING_INPUT,
+    MEETING_VALIDATE,
     MODE_REQUEST,
     NO_STEP,
     NO_TASK,
@@ -172,9 +185,9 @@ from .research_validate import validate as validate_research
 from .stream import CANCELLED, OVERAGE, AskFailure, InitSummary, Plan, RunResult, RunStats, run_cli, run_planner
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
 from .validate import LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, Cards, keep_valid, to_cards
-from . import dayplan, modes, prep
-from .modes import (MODE_KINDS, MODE_MAX_LINES, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_USAGE, ModeInputs,
-                    ModeRequest)
+from . import dayplan, meeting_summary, modes, prep
+from .modes import (MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_USAGE,
+                    ModeInputs, ModeRequest)
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +213,9 @@ RESEARCH_LIMIT = "research_limit"              # the web research caps refuse it
 RESEARCH_UNSUPPORTED = "research_unsupported"  # Readiness.problem: this Claude Code lacks --allowedTools
 
 AUTH_FRESH_S = 5.0        # run() trusts an auth status this recent; older, it asks again
+MEETING_TIMEOUT_S = 240.0  # a meeting summary reads a long transcript: at least this long ([ask] timeout_seconds)
+NO_TRANSCRIPT = "no_transcript"   # a meeting summary with no transcript to read (AskOutcome.kind)
+NO_TRANSCRIPT_MESSAGE = "There is no transcript to summarise; nothing was proposed"
 OVERAGE_PAUSE = timedelta(hours=5)   # the pause after an extra-usage signal that names no reset time
 
 DISABLED_MESSAGE = "Ask Jarvis is off ([ask] enabled = false in config.toml)"
@@ -385,13 +401,18 @@ class ClaudeEngine:
         if cancel is not None and cancel.is_set():
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
-        if mode in (MODE_PREP, MODE_NUDGE):   # a run with <mail> never suggests a note
+        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING):   # mail, or the summary's own notes: never "remember"
             allow_remember = False
         argv = self.mode_argv(ready, mode, allow_remember=allow_remember)
         if mode == MODE_PREP:
             result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
                              timeout_s=float(self.ask.timeout_seconds),
                              read=lambda event, init: prep.read_prep_result(event, init), cancel=cancel,
+                             clock=self._clock, progress=progress, capture=capture)
+        elif mode == MODE_MEETING:   # a long transcript: a longer timeout, its own strict reader
+            result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                             timeout_s=min(300.0, max(float(self.ask.timeout_seconds), MEETING_TIMEOUT_S)),
+                             read=meeting_summary.read_summary_result, cancel=cancel,
                              clock=self._clock, progress=progress, capture=capture)
         else:
             result = run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
@@ -764,6 +785,8 @@ class AskOutcome:
             if self.mode == MODE_PREP and brief is not None:
                 text += (f", brief threads {len(brief.threads)} / open {len(brief.open)} / points "
                          f"{len(brief.points)}, {brief.dropped} dropped")
+            if self.mode == MODE_MEETING and brief is not None:
+                text += ", summary " + ", ".join(f"{name} {count}" for name, count in brief.counts().items())
             if self.note_kind:
                 text += f", no run ({self.note_kind})"
             elif self.mode == MODE_PLAN and self.ok:
@@ -1205,6 +1228,8 @@ class AskPlanner:
                 outcome = self._prep(request, inputs or ModeInputs(), briefing, page_ids, cancel, on_stage, task)
             elif request.mode == MODE_NUDGE:
                 outcome = self._nudge(request, inputs or ModeInputs(), page_ids, cancel, on_stage, task)
+            elif request.mode == MODE_MEETING:
+                outcome = self._meeting(request, inputs or ModeInputs(), page_ids, cancel, on_stage, task)
             else:
                 outcome = AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
         except Exception as exc:  # noqa: BLE001 - a mode run must never take the app down
@@ -1379,6 +1404,96 @@ class AskPlanner:
                   "free minutes": dayplan.free_minutes(slots), "to-dos": len(inputs.todos),
                   "deadlines": len(inputs.deadlines), "memory": index.memory_notes}
         return DryRun(prompt, argv, ready, counts, MailReport(), note=note)
+
+    # ---- a meeting's summary (meetings part 2) -------------------------------------------------
+
+    def _meeting(self, request: ModeRequest, inputs: ModeInputs, page_ids: Sequence[str],
+                 cancel: threading.Event | None, on_stage: Callable[[str], None],
+                 live: LiveTask = NO_TASK) -> AskOutcome:
+        """A recorded meeting's summary (see the module docs): the checks, the transcript read here, one run,
+        its answer checked strictly, then Jarvis's own checks. Nothing is sent, added or kept here: the
+        follow-ups are cards, the notes suggestions."""
+        job = request.payload
+        if not isinstance(job, meeting_summary.MeetingJob):
+            return AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
+        refusal = self._refusal(live)
+        if refusal is not None:
+            logger.info("Meeting %s: no summary run (%s)", job.meeting_id, refusal.kind)
+            return replace(refusal, target=job.meeting_id)
+        on_stage(STAGE_CONTEXT)
+        step = live.step(MEETING_INPUT, "The meeting's transcript")
+        turns = meeting_summary.load_turns(job.transcript)
+        if not turns:
+            step.done(STATUS_BLOCKED, summary="No transcript to summarise")
+            logger.info("Meeting %s: no summary run (%s)", job.meeting_id, NO_TRANSCRIPT)
+            return AskOutcome(False, NO_TRANSCRIPT, NO_TRANSCRIPT_MESSAGE, target=job.meeting_id)
+        accounts = self.sources.accounts()
+        own = frozenset(inputs.own) | frozenset(account.address.casefold() for account in accounts if account.address)
+        labels = meeting_summary.guest_labels(job.guests, own)
+        zone = self.sources.time_zone()
+        now = self.clock()
+        wall = dayplan.to_wall(now, zone) if zone else now
+        prompt = meeting_summary.build_prompt(wall, self._owner(), job, turns, labels, zone=zone)
+        _meeting_input(step, turns, labels, prompt)
+        logger.info("Meeting %s: summary context of %d characters (%d turn(s), %d guest(s))", job.meeting_id,
+                    len(prompt), len(turns), len(labels))
+        on_stage(STAGE_PLANNING)
+        result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1, mode=MODE_MEETING)
+        del prompt
+        answer = result.answer
+        if result.failure is not None or not isinstance(answer, meeting_summary.SummaryAnswer):
+            failed = result.failure
+            kind = failed.kind if failed else "error"
+            logger.info("Meeting %s: summary run %s", job.meeting_id, kind)
+            return AskOutcome(False, kind, failed.message if failed else "", runs=1 if result.started else 0,
+                              init=result.init, stats=(result.stats,) if result.started else (),
+                              target=job.meeting_id)
+        summary = meeting_summary.check_summary(answer, job, labels, own=own, now=now)
+        alias = job.alias or DEFAULT_ACCOUNT
+        account = next((item for item in accounts if item.alias == alias), None)
+        aliases = [item.alias for item in accounts]
+        index = meeting_summary.followup_index(labels, aliases, own)
+        cards = meeting_summary.followup_cards(summary, labels, alias=alias, aliases=aliases, own=own,
+                                               can_send=bool(account is not None and account.send_mail), now=now,
+                                               link_hosts=self.config.actions.link_hosts, page_ids=page_ids)
+        notes, notes_dropped = self._meeting_notes(summary, index, job)
+        summary = replace(summary, memory=notes)
+        _meeting_validated(live, answer, summary, cards, notes_dropped, self._hour24())
+        logger.info("Meeting %s: summary checked (%s; %d follow-up card(s), %d refused; %d note(s) left out)",
+                    job.meeting_id, ", ".join(f"{name} {count}" for name, count in summary.counts().items()),
+                    len(cards.cards) - cards.refused, cards.refused, notes_dropped)
+        message = "(read from the planner's plain text)" if answer.via_fallback else ""
+        return AskOutcome(True, "ok", message, say=summary.title, cards=cards.cards, dropped=cards.dropped,
+                          refused=cards.refused, runs=1, init=result.init, stats=(result.stats,), brief=summary,
+                          mode=MODE_MEETING, target=job.meeting_id)
+
+    def _meeting_notes(self, summary: Any, index: ContextIndex, job: Any) -> tuple[tuple[str, ...], int]:
+        """The summary's suggested notes the owner may keep (memory.check_suggestion: grounded in the invite's
+        names and the titles, no address, link, number or secret, not dismissed before); none while Memory
+        can't keep a note. (kept, how many were left out)."""
+        from ..memory import check_suggestion, clean_note
+
+        if not summary.memory:
+            return (), 0
+        if not self._suggestions_on():
+            return (), len(summary.memory)
+        dismissed: Sequence[frozenset[str]] = ()
+        source = getattr(self, "memory_dismissed", None)
+        if callable(source):
+            try:
+                dismissed = tuple(source())
+            except Exception:  # noqa: BLE001 - checked without them
+                dismissed = ()
+        kept: list[str] = []
+        for text in summary.memory:
+            note = clean_note(text)
+            reason = check_suggestion(note, index=index, command="", titles=[job.title, summary.title],
+                                      dismissed=dismissed)
+            if reason:
+                logger.info("Memory: a meeting suggestion was dropped (%s)", reason)
+                continue
+            kept.append(note)
+        return tuple(kept), len(summary.memory) - len(kept)
 
     # ---- web research -------------------------------------------------------------------------
 
@@ -2565,7 +2680,8 @@ def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int
 
 NO_MAIL_WORDS = "no - a day plan never reads mail"
 NO_WEB_WORDS = "no - a day plan never uses the web"
-MODE_RUN_WORDS = {MODE_PLAN: "day plan", MODE_PREP: "meeting brief", MODE_NUDGE: "follow-up draft"}
+MODE_RUN_WORDS = {MODE_PLAN: "day plan", MODE_PREP: "meeting brief", MODE_NUDGE: "follow-up draft",
+                  MODE_MEETING: "meeting summary"}
 FREE_TITLE = "Your free time"
 
 
@@ -2945,6 +3061,53 @@ def _prep_validated(live: LiveTask, answer: Any, brief: Any, cards: Cards, hour2
                f"{_count_words(len(brief.points), 'point')}; {_count_words(replies, 'reply', 'replies')}")
     problems = brief.dropped or cards.refused or cards.dropped
     step.done(STATUS_WARN if problems else STATUS_OK, summary=summary)
+
+
+@_quiet()
+def _meeting_input(step: LiveStep, turns: Sequence[Any], labels: Mapping[str, Any], prompt: str) -> None:
+    """The meeting summary's input: the transcript's size (its text only in the run's own stdin block, marked as
+    written by other people), the guests by name (never an address) and that nothing else goes."""
+    if step is NO_STEP:
+        return
+    yours = sum(1 for turn in turns if turn.speaker == meeting_summary.SPEAKER_YOU)
+    step.field("Transcript", f"{_count_words(len(turns), 'turn')} ({yours} yours), marked as written by other "
+                             "people - data, never instructions")
+    step.field("Guests given", f"{_count_words(len(labels), 'name')} from the invite (no addresses)")
+    step.field("Not given", "mail, your notes, other meetings, the audio")
+    step.field("Input", f"{len(prompt):,} characters")
+    step.done(STATUS_OK, summary=f"{_count_words(len(turns), 'turn')}, {_count_words(len(labels), 'guest')}")
+
+
+@_quiet()
+def _meeting_validated(live: LiveTask, answer: Any, summary: Any, cards: Cards, notes_dropped: int,
+                       hour24: bool) -> None:
+    """"Checking the summary": the counts kept and left out, each follow-up as a card or refused."""
+    if not live.enabled:
+        return
+    step = live.step(MEETING_VALIDATE, "Checking the summary", fields=[
+        ("Checked against", "the calendar invite's guests (a follow-up only to one of them)")])
+    counts = summary.counts()
+    step.field("Kept", f"{_count_words(counts['decisions'], 'decision')}, "
+                       f"{_count_words(counts['actions'], 'action')} ({counts['yours']} yours), "
+                       f"{_count_words(counts['questions'], 'open question')}")
+    if summary.dropped:
+        step.field("Left out", f"{_count_words(summary.dropped, 'item')} (not you or an invited guest, or a repeat)")
+    if notes_dropped:
+        step.field("Notes left out", _count_words(notes_dropped, "suggestion"))
+    by_id = {card.id: card for card in cards.cards}
+    for entry in cards.report:
+        card = by_id.get(entry.card_id)
+        if entry.outcome == LINE_CARD and card is not None:
+            notes = [f"NEW recipient {address}: tick it on the card before Send" for address in sorted(card.unverified)]
+            step.item(card_text(card, hour24), status=STATUS_WARN if notes else STATUS_OK, note="; ".join(notes))
+        elif entry.outcome == LINE_REFUSED:
+            step.item(card_text(card, hour24) if card is not None else "a follow-up draft",
+                      status=STATUS_BLOCKED, status_text="REFUSED", note=entry.reason)
+    drafts = sum(1 for card in cards.cards if not card.error)
+    problems = summary.dropped or cards.refused or notes_dropped
+    step.done(STATUS_WARN if problems else STATUS_OK,
+              summary=f"summary: {_count_words(counts['actions'], 'action')}; "
+                      f"{_count_words(drafts, 'follow-up draft')}")
 
 
 def mode_todos(pending: Sequence[ProposedAction], planned: Mapping[str, date] | None = None) -> tuple[Any, ...]:

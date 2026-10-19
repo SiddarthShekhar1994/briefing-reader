@@ -35,6 +35,7 @@ from ..prepseries import IGNORED_LIMIT, series_key
 from .prep import other_guests
 
 KIND_PLAN, KIND_PREP = "plan", "prep"
+KIND_RECORD = "record"              # meetings part 2: "Record this meeting?" - its click only opens the start card
 TEXT_ONLY_REASONS = frozenset({"muted", "quiet_hours", "stale"})          # + "meeting" for a prep offer (R37)
 HELD_REASONS = frozenset({"hidden", "locked", "minimized", "not_heard", "playing", "card_busy", "busy", "spacing"})
 TRANSIENT_PLAN_REASONS = frozenset({"early", "not_ready", "caps", "no_day"})   # R36

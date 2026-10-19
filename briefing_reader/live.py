@@ -93,13 +93,14 @@ TASK_MEMORY = "memory"            # the owner's notes kept on this PC (the produ
 TASK_PLAN = "plan"                # a day plan (the productivity bundle's "plan my day")
 TASK_PREP = "prep"                # a meeting brief (the productivity bundle's "prep me")
 TASK_NUDGE = "nudge"              # a drafted reply or nudge (the productivity bundle's follow-ups)
+TASK_MEETING = "meeting"          # a recorded meeting's summary (meetings part 2)
 TASK_OWN_READS = "own_reads"      # Jarvis's own reads and offers (the day read for prep offers, the header
                                   # scan, a re-fetch, each offer made or not): always shown (R6)
 TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB, TASK_MEMORY, TASK_PLAN, TASK_PREP,
-              TASK_OWN_READS, TASK_NUDGE)
+              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING)
 TASK_TAGS = {TASK_ASK: "ASK", TASK_ACTION: "ACTION", TASK_BRIEFING: "BRIEFING", TASK_BACKGROUND: "BACKGROUND",
              TASK_WEB: "WEB", TASK_MEMORY: "MEMORY", TASK_PLAN: "PLAN", TASK_PREP: "PREP", TASK_OWN_READS: "READS",
-             TASK_NUDGE: "NUDGE"}
+             TASK_NUDGE: "NUDGE", TASK_MEETING: "MEETING"}
 # Tasks that open the LIVE view by themselves ([live] auto_open) and set the tab's dot.
 ATTENTION_KINDS = frozenset({TASK_ASK, TASK_ACTION, TASK_WEB, TASK_PLAN, TASK_PREP, TASK_NUDGE})
 COMPACT_KINDS = frozenset({TASK_BRIEFING, TASK_BACKGROUND, TASK_MEMORY, TASK_OWN_READS})
@@ -145,12 +146,14 @@ PREP_VALIDATE = "prep.validate"           # its answer checked: brief items kept
 CALENDAR_DAY = "calendar.day"             # Jarvis's own read of today's events (for prep offers), counts only
 OFFER_MADE = "offer.made"                 # an offer posted (or not, and why; spoken, held or text only)
 MAIL_SCAN = "mail.scan"                   # Jarvis's own header scan of one account (or one thread again), counts
+MEETING_INPUT = "meeting.input"           # a meeting summary's input: the transcript (as data), the guests' names
+MEETING_VALIDATE = "meeting.validate"     # its answer checked: items kept or dropped, follow-up drafts, notes
 STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, PLANNER_RUN, ASK_VALIDATE,
               ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_HOLD, ACTION_SIGNIN, ACTION_CHECKS,
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
               WEB_FETCH, WEB_SOURCE, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE, MEMORY_SAVE, MODE_REQUEST,
               PLAN_FREE, PLAN_VALIDATE, PREP_MEETING, PREP_PEOPLE, PREP_VALIDATE, CALENDAR_DAY, OFFER_MADE,
-              MAIL_SCAN)
+              MAIL_SCAN, MEETING_INPUT, MEETING_VALIDATE)
 
 # Internal link ids a Field may carry besides a Jarvis-made Google result link: "tab:jarvis" (a tab),
 # "live:3" (a task), "picture:12" (step 12's picture shown larger; the step itself while it has none).

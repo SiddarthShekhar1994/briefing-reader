@@ -82,8 +82,8 @@ from . import hud
 from .actions import is_web_open, link_host
 from .ask import planner as ask_planner
 from .ask.context import COMMAND_CAP
-from .ask.modes import (MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES, ORIGIN_CHOICE, ORIGIN_TYPED,
-                        ModeInputs, ModeRequest)
+from .ask.modes import (MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES, ORIGIN_AUTO,
+                        ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs, ModeRequest)
 from .ask.research import forced_question
 from .ask.research_validate import NO_ANSWER, cards_words, source_card_ids
 from .ask.routes import MEMORY_ROUTES, NO_ROUTE, ROUTE_FOLLOWUPS, ROUTE_PLAN, ROUTE_PREP, RouteFlags, route
@@ -129,7 +129,8 @@ STAGE_TEXTS = {
 _TIMED_STAGES = (ask_planner.STAGE_PLANNING, ask_planner.STAGE_PLANNING_AGAIN, ask_planner.STAGE_RESEARCH)
 # A planner mode's status while it runs (with the seconds; the meta line says Esc cancels).
 MODE_STATUS = {MODE_PLAN: "Planning your day...", MODE_PREP: "Preparing your brief...",
-               MODE_NUDGE: "Drafting a reply..."}
+               MODE_NUDGE: "Drafting a reply...", MODE_MEETING: "Writing the meeting summary..."}
+MEETING_READY_TEXT = "Your meeting summary is ready on the Meetings screen"
 # A click on an offer while a request runs: refused, nothing queued, the link stays (spec 4.1).
 CLICK_BUSY_TEXT = "Jarvis is busy with another request; click the offer again when it's done"
 CHOICE_BUSY_TEXT = "Jarvis is busy with another request; click Prep this one again when it's done"
@@ -410,6 +411,11 @@ class AskController(QObject):
         return self._monotonic() - self.caps_at if self.caps is not None else math.inf
 
     @property
+    def running_mode(self) -> str:
+        """The running request's planner mode (ask.modes.MODE_MEETING ...; "" for an Ask or when idle)."""
+        return self._running.mode if self._running is not None else ""
+
+    @property
     def running_kind(self) -> str:
         """The running request's LIVE task kind: live.TASK_WEB for "web:" (web research only),
         live.TASK_ASK otherwise; "" when idle."""
@@ -516,7 +522,8 @@ class AskController(QObject):
             inputs = ModeInputs()
         self._seq += 1
         kind = MODE_TASKS.get(request.mode, TASK_ASK)
-        task = _mode_task(self.live, request, words, kind=kind, memory=self._memory_given())
+        task = _mode_task(self.live, request, words, kind=kind,
+                          memory=None if request.mode == MODE_MEETING else self._memory_given())
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind,
                            typed=request.typed_route, mode=request.mode, clear_text=clear_text)
         self._running = running
@@ -674,6 +681,8 @@ class AskController(QObject):
             from .persona import PREP_READY_STATUS
 
             return outcome.message if getattr(outcome, "note_kind", "") else PREP_READY_STATUS
+        if getattr(outcome, "mode", "") == MODE_MEETING and getattr(outcome, "brief", None) is not None:
+            return MEETING_READY_TEXT   # never the title: the summary is on its own screen
         if getattr(outcome, "note_kind", ""):
             return outcome.message
         parts = [part for part in (outcome.say, outcome.question) if part]
@@ -745,6 +754,9 @@ class AskController(QObject):
             parts.append(f"{words} under ASK" if report.sources or proposals else words)
         elif outcome is not None and outcome.ok and getattr(outcome, "mode", "") == MODE_PREP:
             parts += _prep_meta(outcome)
+        elif outcome is not None and outcome.ok and getattr(outcome, "mode", "") == MODE_MEETING:
+            drafts = sum(1 for card in outcome.cards if not card.error)
+            parts.append("summary" + (f" + {_plural(drafts, 'follow-up draft')} under ASK" if drafts else ""))
         elif outcome is not None and outcome.ok:
             cards = sum(1 for card in outcome.cards if not card.error)
             noun = "block" if getattr(outcome, "mode", "") == MODE_PLAN else "proposal"
@@ -908,6 +920,10 @@ def _mode_task(live: LiveStream | None, request: ModeRequest, words: str, *, kin
     if task is NO_TASK:
         return NO_TASK
     fields = [("You typed" if request.typed_route else "You clicked", words or title)]
+    if request.mode == MODE_MEETING:   # a meeting summary: what started it, and that it gets no notes or mail
+        started = ("the transcript being ready (you clicked Record and ticked the consent box)"
+                   if request.origin == ORIGIN_AUTO else "your click on Summarise")
+        fields = [("Started by", started), ("Given", "the transcript and the invite's guest names only")]
     if memory is not None:
         fields.append(("Memory given", memory_words(*memory)))
     step = task.step(MODE_REQUEST, "Your request", fields=fields)
@@ -1016,6 +1032,8 @@ def _finish_words(outcome: Any, *, cancelled: bool) -> tuple[str, str]:
         return STATUS_OK, words
     if outcome.ok and getattr(outcome, "mode", "") == MODE_PREP:
         return _prep_finish_words(outcome)
+    if outcome.ok and getattr(outcome, "mode", "") == MODE_MEETING:
+        return _meeting_finish_words(outcome)
     if outcome.ok and getattr(outcome, "mode", "") == MODE_NUDGE and getattr(outcome, "note_kind", ""):
         from .persona import nudge_no_run_words
 
@@ -1073,6 +1091,25 @@ def _prep_finish_words(outcome: Any) -> tuple[str, str]:
     problems = [part for part in (f"{brief.dropped} item(s) left out" if brief.dropped else "",
                                   f"{outcome.refused} refused" if outcome.refused else "",
                                   f"{outcome.dropped} dropped" if outcome.dropped else "",
+                                  f"{_plural(new, 'recipient')} you didn't type" if new else "") if part]
+    if problems:
+        return STATUS_WARN, f"{words}, {', '.join(problems)}"
+    return STATUS_OK, words
+
+
+def _meeting_finish_words(outcome: Any) -> tuple[str, str]:
+    """A meeting summary's LIVE task end: "summary ready (3 actions), 1 follow-up draft"; CHECK when an item was
+    left out, a draft refused, or a draft has a recipient you didn't type (NEW until its tick)."""
+    summary = getattr(outcome, "brief", None)
+    counts = summary.counts() if summary is not None else {}
+    drafts = sum(1 for card in outcome.cards if not card.error)
+    words = f"summary ready ({_plural(int(counts.get('actions', 0)), 'action')})"
+    if drafts:
+        words += f", {_plural(drafts, 'follow-up draft')}"
+    new = sum(len(card.unverified) for card in outcome.cards if not card.error)
+    dropped = int(counts.get("dropped", 0))
+    problems = [part for part in (f"{dropped} item(s) left out" if dropped else "",
+                                  f"{outcome.refused} refused" if outcome.refused else "",
                                   f"{_plural(new, 'recipient')} you didn't type" if new else "") if part]
     if problems:
         return STATUS_WARN, f"{words}, {', '.join(problems)}"

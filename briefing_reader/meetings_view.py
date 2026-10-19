@@ -17,9 +17,15 @@ Public API
     ``dismiss()``, ``text()``; ``stopClicked``.
 ``MeetingRowInfo`` / ``MeetingsStage``: the Meetings screen - Record a meeting, what is missing (exact add-ons and
     the model, with Download), the start card, then the meetings (date, title, length, status: Recording /
-    Writing it down 40% / Transcript ready / Failed + Retry) with Delete (asked twice: audio, transcript and
-    summary go at once). Signals ``recordClicked``, ``stopClicked``, ``deleteClicked(id)``, ``retryClicked(id)``,
-    ``downloadClicked``, ``cancelDownloadClicked``, ``startRequested(StartRequest)``.
+    Writing it down 40% / Transcript ready / Writing the summary / Summary ready / Failed + Retry) with Delete
+    (asked twice: audio, transcript and summary go at once). Signals ``recordClicked``, ``stopClicked``,
+    ``deleteClicked(id)``, ``retryClicked(id)``, ``downloadClicked``, ``cancelDownloadClicked``,
+    ``startRequested(StartRequest)``. Part 2: a meeting with its summary opens it (``openSummaryClicked(id)``;
+    the list gives way to meeting_summary_view.SummaryView, ``show_summary(info)`` / ``show_list()``); one written
+    down before summaries existed, or whose summary failed, has Summarise (``summariseClicked(id)``: the owner's
+    click; nothing is sent). The summary view's clicks come out as ``addBlockClicked(id, index)``,
+    ``keepNoteClicked(id, index)``, ``dismissNoteClicked(id, index)``, ``summaryLinkClicked(link)``;
+    ``pageChanged()`` when the list or a summary comes up.
 ``MeetingsSettingsPanel``: Settings > Meetings - the microphone and the call-audio device (Follow the Windows
     default, or one picked from a menu), the speech model with Download; ``microphonePicked(str)``,
     ``callAudioPicked(str)`` ("" = follow the default), ``downloadClicked``.
@@ -34,11 +40,12 @@ from typing import Any
 
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication, QPainter, QPen
-from PySide6.QtWidgets import (QAbstractButton, QHBoxLayout, QMenu, QScrollArea, QSizePolicy, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QAbstractButton, QHBoxLayout, QMenu, QScrollArea, QSizePolicy, QStackedWidget,
+                               QVBoxLayout, QWidget)
 
 from . import holo, hud
 from . import meetings as mt
+from .meeting_summary_view import SummaryInfo, SummaryView
 from .memory_view import COLUMN_MAX, PANEL_PAD, PanelFrame, Rule, SectionHead, body_label
 
 MEETINGS_TITLE = "MEETINGS"
@@ -50,6 +57,9 @@ DELETE_TEXT = "Delete"
 DELETE_SURE_TEXT = "Delete for good"
 KEEP_TEXT = "Keep"
 RETRY_TEXT = "Retry"
+OPEN_SUMMARY_TEXT = "Open summary"
+SUMMARISE_TEXT = "Summarise"
+SUMMARY_OFF_NOTE = "A summary needs Ask Jarvis (your Claude Code) to be on"
 DOWNLOAD_BUTTON = "Download"
 CANCEL_DOWNLOAD = "Stop the download"
 CARD_KICKER = "RECORD A MEETING"
@@ -426,21 +436,34 @@ class MeetingRowInfo:
     status_text: str = ""
     tone: str = TONE_QUIET
     note: str = field(default="", repr=False)
+    can_summarise: bool = False          # Summarise shows (a transcript and no summary; Ask Jarvis on)
+    summary_failed: bool = False
 
 
-def row_info(record: mt.MeetingRecord, *, elapsed: str = "") -> MeetingRowInfo:
-    """A meeting record as the list shows it (``elapsed`` for the one recording now)."""
+def row_info(record: mt.MeetingRecord, *, elapsed: str = "", summaries: bool = True,
+             waiting: bool = False) -> MeetingRowInfo:
+    """A meeting record as the list shows it (``elapsed`` for the one recording now; ``summaries``: Ask Jarvis is on,
+    so a transcript can be summarised; ``waiting``: its summary waits for Jarvis to finish another request)."""
     started = record.started_at
     when = f"{started:%a %d %b} {_clock(started)}" if started is not None else ""
+    failed = record.status == mt.STATUS_TRANSCRIBED and bool(record.summary_error)
     tone = {mt.STATUS_RECORDING: TONE_RECORDING, mt.STATUS_TRANSCRIBING: TONE_WORKING,
-            mt.STATUS_TRANSCRIBED: TONE_READY, mt.STATUS_SUMMARY_READY: TONE_READY,
-            mt.STATUS_FAILED: TONE_FAILED}.get(record.status, TONE_QUIET)
+            mt.STATUS_TRANSCRIBED: TONE_READY, mt.STATUS_SUMMARISING: TONE_WORKING,
+            mt.STATUS_SUMMARY_READY: TONE_READY, mt.STATUS_FAILED: TONE_FAILED}.get(record.status, TONE_QUIET)
+    if failed:
+        tone = TONE_FAILED
     length = elapsed if record.status == mt.STATUS_RECORDING else mt.length_text(record.duration_s)
     note = mt.STOP_WORDS.get(record.stop_reason, "") if record.status != mt.STATUS_RECORDING else ""
     if record.device_changes:
         note = (note + " \u00b7 " if note else "") + "the call audio switched device during the meeting"
-    return MeetingRowInfo(record.id, when, record.shown_title(), length, record.status, record.status_text(), tone,
-                          note)
+    status_text = record.status_text()
+    if record.status == mt.STATUS_TRANSCRIBED and waiting:
+        status_text = "Summary waits for Jarvis to finish another request"
+    elif record.status == mt.STATUS_TRANSCRIBED and not summaries:
+        note = (note + " \u00b7 " if note else "") + SUMMARY_OFF_NOTE
+    return MeetingRowInfo(record.id, when, record.shown_title(), length, record.status, status_text, tone,
+                          note, can_summarise=summaries and record.status == mt.STATUS_TRANSCRIBED and not waiting,
+                          summary_failed=failed)
 
 
 class MeetingRow(QWidget):
@@ -449,6 +472,8 @@ class MeetingRow(QWidget):
     deleteClicked = Signal(str)
     retryClicked = Signal(str)
     stopClicked = Signal()
+    openClicked = Signal(str)
+    summariseClicked = Signal(str)
 
     def __init__(self, info: MeetingRowInfo, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -463,6 +488,15 @@ class MeetingRow(QWidget):
         self.retry_button = holo.HoloButton(RETRY_TEXT, holo.GHOST, size=holo.SIZE_SM)
         self.retry_button.clicked.connect(lambda: self.retryClicked.emit(self.info.id))
         self.retry_button.setVisible(info.status == mt.STATUS_FAILED)
+        self.open_button = holo.HoloButton(OPEN_SUMMARY_TEXT, holo.GO, size=holo.SIZE_SM)
+        self.open_button.setAccessibleName(f"{OPEN_SUMMARY_TEXT}: {info.title}")
+        self.open_button.clicked.connect(lambda: self.openClicked.emit(self.info.id))
+        self.open_button.setVisible(info.status == mt.STATUS_SUMMARY_READY)
+        self.summarise_button = holo.HoloButton(RETRY_TEXT if info.summary_failed else SUMMARISE_TEXT, holo.GHOST,
+                                                size=holo.SIZE_SM)
+        self.summarise_button.setAccessibleName(f"{SUMMARISE_TEXT}: {info.title}")
+        self.summarise_button.clicked.connect(lambda: self.summariseClicked.emit(self.info.id))
+        self.summarise_button.setVisible(info.can_summarise)
         self.stop_button = holo.HoloButton(STOP_TEXT, holo.DANGER_GHOST, size=holo.SIZE_SM)
         self.stop_button.setAccessibleName("Stop recording")
         self.stop_button.clicked.connect(self.stopClicked)
@@ -495,7 +529,8 @@ class MeetingRow(QWidget):
         middle.setSpacing(holo.BUTTON_GAP)
         middle.addWidget(self.status_label)
         middle.addStretch(1)
-        for button in (self.retry_button, self.stop_button, self.delete_button):
+        for button in (self.retry_button, self.summarise_button, self.open_button, self.stop_button,
+                       self.delete_button):
             middle.addWidget(button)
         column = QVBoxLayout(self)
         column.setContentsMargins(*PANEL_PAD)
@@ -521,7 +556,8 @@ class MeetingRow(QWidget):
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
-            state = holo.TILE_ERROR if self.info.status == mt.STATUS_FAILED else holo.TILE_DEFAULT
+            failed = self.info.status == mt.STATUS_FAILED or self.info.summary_failed
+            state = holo.TILE_ERROR if failed else holo.TILE_DEFAULT
             holo.paint_tile(painter, QRectF(self.rect()).adjusted(1, 1, -1, -1), state)
         finally:
             painter.end()
@@ -540,6 +576,13 @@ class MeetingsStage(QWidget):
     downloadClicked = Signal()
     cancelDownloadClicked = Signal()
     startRequested = Signal(object)
+    openSummaryClicked = Signal(str)
+    summariseClicked = Signal(str)
+    addBlockClicked = Signal(str, int)
+    keepNoteClicked = Signal(str, int)
+    dismissNoteClicked = Signal(str, int)
+    summaryLinkClicked = Signal(str)
+    pageChanged = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -588,11 +631,21 @@ class MeetingsStage(QWidget):
         for widget in (self.missing_panel, self.card, self.empty_label):
             self._list.addWidget(widget)
         self._list.addStretch(1)
+        # Part 2: a meeting's summary takes the list's place (All meetings brings the list back).
+        self.summary = SummaryView()
+        self.summary.backClicked.connect(self.show_list)
+        self.summary.addBlockClicked.connect(lambda index: self.addBlockClicked.emit(self.showing_summary(), index))
+        self.summary.keepClicked.connect(lambda index: self.keepNoteClicked.emit(self.showing_summary(), index))
+        self.summary.dismissClicked.connect(lambda index: self.dismissNoteClicked.emit(self.showing_summary(), index))
+        self.summary.linkClicked.connect(self.summaryLinkClicked)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.scroll)
+        self.pages.addWidget(self.summary)
         column = QVBoxLayout()
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(12)
         column.addLayout(head_row)
-        column.addWidget(self.scroll, 1)
+        column.addWidget(self.pages, 1)
         holder = QWidget()
         holder.setLayout(column)
         holder.setMaximumWidth(COLUMN_MAX + 120)
@@ -615,6 +668,8 @@ class MeetingsStage(QWidget):
             row.deleteClicked.connect(self.deleteClicked)
             row.retryClicked.connect(self.retryClicked)
             row.stopClicked.connect(self.stopClicked)
+            row.openClicked.connect(self.openSummaryClicked)
+            row.summariseClicked.connect(self.summariseClicked)
             if info.id in asking and info.status != mt.STATUS_RECORDING:
                 row._ask()
             self._list.insertWidget(_TOP_WIDGETS + index, row)
@@ -648,6 +703,30 @@ class MeetingsStage(QWidget):
         self.record_button.setEnabled(not recording)
         if recording:
             self.card.close_card()
+
+    # ---- part 2: a meeting's summary ------------------------------------------------------------------
+
+    def show_summary(self, info: SummaryInfo) -> None:
+        """The summary of one meeting in the list's place."""
+        self.summary.set_summary(info)
+        if self.pages.currentWidget() is not self.summary:
+            self.pages.setCurrentWidget(self.summary)
+        self.pageChanged.emit()
+
+    def show_list(self) -> None:
+        """Back to the list (All meetings, Esc); the summary's lent cards go back to NEEDS YOUR OK."""
+        if self.pages.currentWidget() is self.list_page():
+            return
+        self.pages.setCurrentWidget(self.list_page())
+        self.pageChanged.emit()
+
+    def list_page(self) -> QWidget:
+        return self.scroll
+
+    def showing_summary(self) -> str:
+        """The meeting whose summary shows ("" while the list shows)."""
+        info = self.summary.info()
+        return info.meeting_id if info is not None and self.pages.currentWidget() is self.summary else ""
 
 
 # --------------------------------------------------------------------------

@@ -87,6 +87,7 @@ class MeetingsApp(unittest.TestCase):
             m.audio_missing = lambda: audio_missing
             m.speech_missing = lambda: speech_missing
             m.process_factory = FakeJob
+            m.summary_runner = None     # part 1's tests: no summary run (part 2's tests in test_meeting_summary_app)
             self.session = FakeSession(MODEL_FILES)
             m.downloader_factory = lambda target, progress, cancel: sp.ModelDownloader(
                 target, session=self.session, progress=progress, cancel=cancel)

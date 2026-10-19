@@ -642,8 +642,8 @@ class ModeArgvTests(unittest.TestCase):
     def test_the_prep_schema_text(self) -> None:
         self.assertEqual(cli.mode_schema_text("prep"), cli.compact_json(json.loads(
             cli.PREP_SCHEMA_FILE.read_text(encoding="utf-8"))))
-        self.assertEqual(set(cli.MODE_PROMPTS), {"plan", "prep", "nudge"})
-        self.assertEqual(set(cli.MODE_SCHEMAS), {"plan", "prep", "nudge"})
+        self.assertEqual(set(cli.MODE_PROMPTS), {"plan", "prep", "nudge", "meeting"})
+        self.assertEqual(set(cli.MODE_SCHEMAS), {"plan", "prep", "nudge", "meeting"})
         self.assertEqual(cli.mode_schema_text("nudge"), cli.compact_json(json.loads(
             cli.NUDGE_SCHEMA_FILE.read_text(encoding="utf-8"))))
 

@@ -8834,7 +8834,7 @@ LIVE_TAG_COLORS = {
     live_events.TASK_ASK: PINK, live_events.TASK_ACTION: AMBER, live_events.TASK_BRIEFING: TEXT_MUTED,
     live_events.TASK_BACKGROUND: TEXT_DIM, live_events.TASK_WEB: ACCENT, live_events.TASK_MEMORY: GREEN,
     live_events.TASK_PLAN: LAVENDER, live_events.TASK_PREP: PEACH, live_events.TASK_OWN_READS: TEXT_DIM,
-    live_events.TASK_NUDGE: AMBER_HOVER,
+    live_events.TASK_NUDGE: AMBER_HOVER, live_events.TASK_MEETING: PEACH,
 }
 LIVE_TEXT_MAX_PX = 320          # an open text block grows to this height, then scrolls
 LIVE_FIELD_LABEL_PX = 104       # the field labels' column ...

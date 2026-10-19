@@ -43,7 +43,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, NamedTuple
 
 from .. import live
-from ..actions import CALENDAR, REPLY, TODO, ProposedAction
+from ..actions import CALENDAR, EMAIL, REPLY, TODO, ProposedAction
 from ..gcal import EventBrief
 from . import usage
 from .context import (
@@ -66,12 +66,20 @@ from .context import (
 from .mail import MailThread, trim_threads
 
 MODE_PLAN, MODE_PREP, MODE_NUDGE = "plan", "prep", "nudge"
+# Meetings part 2: a recorded meeting's summary (ask.meeting_summary). Not a bundle run: it counts as an Ask run.
+MODE_MEETING = "meeting"
 ORIGIN_OFFER, ORIGIN_TYPED, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_BRIEF = "offer", "typed", "choice", "list", "brief"
-MODE_KINDS = {MODE_PLAN: frozenset({CALENDAR}), MODE_PREP: frozenset({REPLY}), MODE_NUDGE: frozenset({REPLY})}
-MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1}
-MODE_TASKS = {MODE_PLAN: live.TASK_PLAN, MODE_PREP: live.TASK_PREP, MODE_NUDGE: live.TASK_NUDGE}
-MODE_USAGE = {MODE_PLAN: usage.KIND_PLAN_DAY, MODE_PREP: usage.KIND_PREP, MODE_NUDGE: usage.KIND_NUDGE}
-MODE_TITLES = {MODE_PLAN: "Plan", MODE_PREP: "Prep", MODE_NUDGE: "Nudge"}
+# A summary starts by itself once the transcript is ready (the owner's Record + consent started the chain), or
+# from the owner's click on Summarise (a meeting written down before summaries existed, or one to try again).
+ORIGIN_AUTO, ORIGIN_SUMMARISE = "auto", "summarise"
+MODE_KINDS = {MODE_PLAN: frozenset({CALENDAR}), MODE_PREP: frozenset({REPLY}), MODE_NUDGE: frozenset({REPLY}),
+              MODE_MEETING: frozenset({EMAIL})}
+MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1, MODE_MEETING: 3}
+MODE_TASKS = {MODE_PLAN: live.TASK_PLAN, MODE_PREP: live.TASK_PREP, MODE_NUDGE: live.TASK_NUDGE,
+              MODE_MEETING: live.TASK_MEETING}
+MODE_USAGE = {MODE_PLAN: usage.KIND_PLAN_DAY, MODE_PREP: usage.KIND_PREP, MODE_NUDGE: usage.KIND_NUDGE,
+              MODE_MEETING: usage.KIND_PLAN}
+MODE_TITLES = {MODE_PLAN: "Plan", MODE_PREP: "Prep", MODE_NUDGE: "Nudge", MODE_MEETING: "Meeting"}
 FIXED_COMMANDS: dict[Any, str] = {
     MODE_PLAN: "Plan the day in <day> for the owner: propose time blocks inside <free> for what needs time in "
                "<todos> and <briefing>, as Calendar lines, or ask one question.",
@@ -81,6 +89,9 @@ FIXED_COMMANDS: dict[Any, str] = {
                              "<followup> says.",
     (MODE_NUDGE, "owed"): "Draft a short, polite follow-up from the owner in the thread in <mail>, about the "
                           "owner's last message, as <followup> says.",
+    MODE_MEETING: "Summarise the meeting in <transcript> for the owner: a title, the decisions, the action items "
+                  "(who and what), the open questions, follow-up drafts to guests in <guests> only where the "
+                  "meeting clearly calls for one, and facts worth keeping.",
 }
 OWNER_WORDS = "The owner's words: "
 OWNER_WORDS_CAP = 300
@@ -142,6 +153,9 @@ class ModeRequest:
     thread: ThreadTarget | None = None
     offer_id: int = 0
     typed_route: bool = False
+    # A meeting summary's job (ask.meeting_summary.MeetingJob: the meeting's id, its transcript file and the
+    # invite's facts); memory only, never logged.
+    payload: Any = field(default=None, repr=False, compare=False)
 
     def __repr__(self) -> str:
         return f"ModeRequest({self.mode}, {self.origin})"

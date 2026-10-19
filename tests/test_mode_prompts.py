@@ -44,7 +44,7 @@ def preamble_of(text: str) -> str:
 class ModePromptTests(unittest.TestCase):
     def test_mode_prompts_share_preamble(self) -> None:
         texts = {mode: path.read_text(encoding="ascii") for mode, path in cli.MODE_PROMPTS.items()}
-        self.assertEqual(set(texts), {"plan", "prep", "nudge"})
+        self.assertEqual(set(texts), {"plan", "prep", "nudge", "meeting"})
         for mode, text in texts.items():
             with self.subTest(mode=mode):
                 self.assertEqual(preamble_of(text), PREAMBLE)

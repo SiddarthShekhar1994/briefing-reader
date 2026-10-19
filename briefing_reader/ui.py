@@ -190,8 +190,8 @@ from .agenda import (
     merge_deadlines,
 )
 from .ask.dayplan import PART_DAY, hours_text
-from .ask.modes import (MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_BRIEF, ORIGIN_CHOICE, ORIGIN_LIST,
-                        ORIGIN_OFFER, ModeInputs, ModeRequest, block_line, todo_facts)
+from .ask.modes import (MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_BRIEF, ORIGIN_CHOICE,
+                        ORIGIN_LIST, ORIGIN_OFFER, ModeInputs, ModeRequest, block_line, todo_facts)
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import CONFIG_FILE_NAME, DEFAULT_ACCOUNT, PROJECT_ROOT, AgendaConfig, Config
@@ -1482,6 +1482,9 @@ class ReadingView(QWidget):
         self.followups_stage = followups_view.FollowupsStage()
         self._followups_slot.addWidget(self.followups_stage, 1)
         self.meetings_stage = meetings_view.MeetingsStage()      # [meetings] (meetings_ui fills it)
+        # Part 2: a meeting's summary lends its draft and Add block cards from NEEDS YOUR OK, like the brief.
+        self.meetings_stage.pageChanged.connect(self._schedule_moment_sync)
+        self.meetings_stage.summaryLinkClicked.connect(self.homeLink)
         self.home_screen = self._build_home()
         self._screens = _PageSwitch()
         for screen in (self.home_screen, self.briefing_screen, self.live_screen, self.memory_screen,
@@ -1531,6 +1534,7 @@ class ReadingView(QWidget):
             self.stage.context.dismiss()        # the context tiles go when the owner leaves Home
         self._screen = index
         self._sync_brief_cards()                # a brief's lent reply cards go back before another screen shows
+        self._sync_summary_cards()              # ... and a meeting summary's draft and block cards
         page = self._screens.widget(index)
         self._screens.setCurrentWidget(page)
         self.transition.play(page)              # the wipe and the panels assembling (never blocks a click)
@@ -1571,6 +1575,9 @@ class ReadingView(QWidget):
                     label = f"Prepare a brief for {offer.title}" if offer.title else "Prepare a brief"
                     items.append(find_view.FindItem(find_view.KIND_ACTION, offer.link_id, label, FIND_ACTION_HINT,
                                                     "prep"))
+                elif offer.kind == "record":   # the start card opens; only its Start records
+                    items.append(find_view.FindItem(find_view.KIND_ACTION, offer.link_id, offer.title,
+                                                    FIND_ACTION_HINT, "record"))
                 else:
                     items.append(find_view.FindItem(find_view.KIND_ACTION, offer.link_id, PLAN_OFFER_LINK,
                                                     FIND_ACTION_HINT, "plan"))
@@ -2031,6 +2038,30 @@ class ReadingView(QWidget):
                         self.fly_to_approvals(tile)
             self.plan_stage.sync_cards(self.approvals.card)
         self._sync_brief_cards()
+        self._sync_summary_cards()
+
+    def _sync_summary_cards(self) -> None:
+        """A meeting summary's follow-up drafts and Add block cards are NEEDS YOUR OK's own cards: lent while the
+        summary shows on the Meetings screen, back in their place otherwise (so Send, the NEW RECIPIENT tick on the
+        card, the own-address refusal, Sent with its hidden hold and Undo, Add and its Undo are the same
+        everywhere)."""
+        stage = getattr(self, "meetings_stage", None)
+        if stage is None or not shiboken6.isValid(stage):
+            return
+        view = stage.summary
+        wanted = self._screen == SCREEN_MEETINGS and bool(stage.showing_summary())
+        ids = view.card_ids() if wanted else ()
+        for card in view.held():
+            if card.action_id not in ids or self.approvals.card(card.action_id) is not card:
+                view.release(card)
+                self.approvals.take_back(card)
+        held = view.held()
+        blocks = set(view.block_ids())
+        for action_id in ids:
+            card = self.approvals.card(action_id)
+            if card is not None and card not in held:
+                self.approvals.lend(action_id)
+                view.hold(card, block=action_id in blocks)
 
     def _sync_brief_cards(self) -> None:
         """The brief's reply cards are NEEDS YOUR OK's own cards: lent while the brief shows on Home, back in
@@ -3649,6 +3680,16 @@ PREP_THIS_ONE_TEXT = "Prep this one"
 # Offers (the productivity bundle): "Plan my day" / "Prepare brief" links (an opaque counter), the Done
 # button's tooltip while a meeting with guests remains today (R34; DONE_TOOLTIP is the default: none).
 OFFER_LINK = "offer:"
+# Meetings part 2: the Transcript's "Open the summary" link (+ the meeting's id), the summary run's words in LIVE
+# (never a title), its entry and the Add block card's notes.
+MEETING_SUMMARY_LINK = "meeting-summary:"
+MEETING_SUMMARY_WORDS = "Summarise the recorded meeting"
+MEETING_READY_ENTRY = "Your meeting summary is ready on the Meetings screen."
+MEETING_OPEN_TEXT = "Open the summary"
+MEETING_BLOCK_NOTES = "From your meeting"
+MEETING_BLOCK_MINUTES = 30
+RECORD_OFFER_LINK = "Open the start card"      # the record offer's link (meetings_ui.RECORD_OFFER_LINK)
+RECORD_TILE_COMMIT = "Open card"               # ... and its commit on Home's tile (room for Not now)
 DONE_TOOLTIP = ""
 # Follow-ups (the productivity bundle, B5): the conversation's and the FOLLOW-UPS section's links (opaque
 # counters; the targets stay in memory), the row menu's words.
@@ -4362,7 +4403,9 @@ _MODE_ACTIVITY_WORDS = {MODE_PLAN: "a plan block", MODE_PREP: "a prep reply", MO
 def _activity_title(action: ProposedAction) -> str:
     """``action``'s title for an ACTIVITY row: cut to one line for key=value kinds (Calendar as before).
     A planner mode's card (the productivity bundle) is named by its kind only: ACTIVITY never holds a
-    block title or a subject from the bundle (spec 14)."""
+    block title or a subject from the bundle (spec 14), nor from a meeting summary."""
+    if action.mode == MODE_MEETING:
+        return "a block from a meeting" if action.kind == CALENDAR else "a meeting follow-up"
     if action.mode in _MODE_ACTIVITY_WORDS:
         return _MODE_ACTIVITY_WORDS[action.mode]
     return _short(action.title, _ACTIVITY_TITLE_CHARS) if action.structured else action.title
@@ -7975,6 +8018,9 @@ class AppController(QObject):
         """An Ask started (the briefing pauses; the orb shows PLANNING; Jarvis says "One moment,
         sir.") or ended."""
         self._ask_busy = bool(busy)
+        if busy and self.ask is not None and self.ask.running_mode == MODE_MEETING:
+            self._update_reading_controls()   # a meeting summary runs in the background: nothing pauses or is said
+            return
         if busy:
             self._voice_call("owner_acted")   # the Ask holds the briefing now: the voice never resumes it
             if self.state == STATE_READING and self.player.state in (PLAYING, WAITING):
@@ -7996,6 +8042,11 @@ class AppController(QObject):
         Live works on behind its Dock dot. [live] auto_open = "window" shows the pop-out; from another
         screen "tab" brings LIVE up (a "web:" request's WEB task as an Ask's), else Home comes up."""
         if self.state == STATE_QUITTING:
+            return
+        if self.ask is not None and self.ask.running_mode == MODE_MEETING:
+            # A meeting summary (by itself once the transcript is ready, or Summarise): no YOU entry, the screen
+            # stays where the owner is; LIVE has its steps.
+            self._ask_task_id = self.ask.task_id
             return
         self._you(text)
         self._ask_task_id = self.ask.task_id if self.ask is not None else 0
@@ -8022,6 +8073,10 @@ class AppController(QObject):
         if self._ask_task_id:
             self._snapshots_call("cancel_task", self._ask_task_id)   # its queued and running pictures stop
         if self.state == STATE_QUITTING:
+            return
+        meetings = getattr(self, "meetings", None)
+        if meetings is not None and meetings.summary_running():
+            meetings.on_summary_cancelled()      # Esc on a meeting summary: Summarise starts it again
             return
         self._voice_call("cancel_key", ASK_ACK_KEY)
         self._jarvis(ASK_CANCELLED_ENTRY, tone=hud.TONE_IDLE)
@@ -8122,6 +8177,9 @@ class AppController(QObject):
             return
         if getattr(outcome, "mode", "") == MODE_NUDGE:
             self._on_nudge_outcome(outcome)
+            return
+        if getattr(outcome, "mode", "") == MODE_MEETING:
+            self._on_meeting_outcome(outcome)
             return
         self._offer_running = 0
         self._converse_ask(outcome)
@@ -8550,8 +8608,328 @@ class AppController(QObject):
         reading = self.window.reading
         controller = meetings_ui.MeetingsController(self.config, reading, now=self._now, on_tray=self._update_tray,
                                                     show_screen=lambda: reading.set_tab(SCREEN_MEETINGS), parent=self)
-        controller.meeting_now = lambda: meetings_ui.meeting_now(self._agenda_events, self._now())
+        controller.meeting_now = self._meeting_now_info
+        # Part 2: summaries by the owner's own Claude Code (only while Ask Jarvis is on), the summary view's clicks,
+        # and the record offer (with the bundle's offers).
+        self._meeting_cards: dict[str, tuple[str, ...]] = {}       # meeting id -> its follow-up cards (in order)
+        self._meeting_blocks: dict[str, dict[int, str]] = {}       # meeting id -> action index -> block card ("": none)
+        self._meeting_notes: dict[str, list[int]] = {}             # meeting id -> its notes' suggestion ids
+        if self.ask is not None:
+            controller.summary_runner = self._start_meeting_summary
+            self.ask.busyChanged.connect(lambda busy: None if busy else QTimer.singleShot(0, self._pump_summaries))
+        controller.summaryOpened.connect(self._render_meeting_summary)
+        controller.summaryChanged.connect(self._on_meeting_summary_changed)
+        controller.meetingDeleted.connect(self._on_meeting_deleted)
+        controller.recordingChanged.connect(lambda on: self._prod_call("retire_record_offers") if on else None)
+        stage = reading.meetings_stage
+        stage.addBlockClicked.connect(self._on_meeting_add_block)
+        stage.keepNoteClicked.connect(self._on_meeting_keep_note)
+        stage.dismissNoteClicked.connect(self._on_meeting_dismiss_note)
+        if self.productivity is not None:
+            self.productivity.record_offer_on = lambda: self.meetings is not None and not self.meetings.is_recording()
         return controller
+
+    # ---- meeting summaries (meetings part 2) ---------------------------------------------------------------
+
+    def _meeting_now_info(self) -> Any:
+        """The meeting on now (or starting within 15 minutes) for the start card: from the bundle's day read when
+        there is one (the invite's guests come with it: a follow-up only ever goes to one of them), else from the
+        agenda (title and times only)."""
+        from . import meetings_ui
+        from .ask.offers import event_span
+
+        controller = getattr(self, "productivity", None)
+        now = self._now()
+        if controller is not None:
+            try:
+                day = controller.day_briefs()
+                own = controller._own()
+            except Exception:  # noqa: BLE001 - the agenda below
+                day, own = {}, frozenset()
+            found = None
+            for alias, briefs in day.items():
+                for brief in briefs:
+                    span = event_span(brief, now)
+                    if span is None or getattr(brief, "self_response", "") == "declined":
+                        continue
+                    start, end = span
+                    if start - timedelta(minutes=15) <= now < end and (found is None or start < found[0]):
+                        found = (start, alias, brief)
+            if found is not None:
+                return meetings_ui.meeting_info_of(found[1], found[2], own)
+        return meetings_ui.meeting_now(self._agenda_events, now)
+
+    def _start_meeting_summary(self, job: Any, origin: str) -> str:
+        """The meetings controller's summary runner: one planner mode run on the owner's own Claude Code (Ask's
+        engine: never an API key), in the background - no YOU entry, nothing paused or said. "busy" while another
+        request runs or a Google sign-in is open (it waits and starts when the Ask is free)."""
+        from .meetings_ui import SUMMARY_BUSY, SUMMARY_OFF, SUMMARY_STARTED
+
+        ask = self.ask
+        if ask is None or self.state == STATE_QUITTING:
+            return SUMMARY_OFF
+        if ask.busy or self._ask_blocked():
+            return SUMMARY_BUSY
+        request = ModeRequest(MODE_MEETING, origin, payload=job)
+        return SUMMARY_STARTED if ask.submit_mode(request, MEETING_SUMMARY_WORDS) else SUMMARY_BUSY
+
+    def _pump_summaries(self) -> None:
+        meetings = getattr(self, "meetings", None)
+        if meetings is not None and self.state != STATE_QUITTING:
+            meetings.pump_summaries()
+
+    def _on_meeting_outcome(self, outcome: Any) -> None:
+        """A summary run ended: the meetings controller keeps the summary (or the failure, Retry); its follow-up
+        drafts go under ASK as approval cards (nothing is sent without Send), its notes wait under MEMORY for
+        Keep (nothing is kept without it); one Transcript entry with Open the summary (never the title); one
+        ACTIVITY row of counts."""
+        meetings = getattr(self, "meetings", None)
+        meeting_id = str(getattr(outcome, "target", "") or "")
+        if meetings is None or not meeting_id:
+            return
+        summary = meetings.on_summary(outcome, self._ask_task_id)
+        if summary is not None:
+            self._take_ask_cards(list(outcome.cards))
+            self._meeting_cards[meeting_id] = tuple(card.id for card in outcome.cards)
+            self._meeting_blocks.pop(meeting_id, None)
+            self._meeting_notes[meeting_id] = [self._meeting_note_offer(text) for text in summary.memory]
+            drafts = sum(1 for card in outcome.cards if not card.error)
+            message = f"Meeting: summary ready, {_plural(drafts, 'follow-up draft')}"
+            if outcome.refused:
+                message += f" ({outcome.refused} refused)"
+            sub = [f"{outcome.duration_ms / 1000:.1f} s", _plural(outcome.runs, "planner run")]
+            self._activity(hud.TAG_ASK, message, f" {DOT} ".join(sub))
+            link = (MEETING_OPEN_TEXT, f"{MEETING_SUMMARY_LINK}{meeting_id}")
+            self._jarvis(MEETING_READY_ENTRY, tone=hud.TONE_DONE,
+                         sub=f"meeting summary {DOT} {_plural(drafts, 'follow-up draft')}" if drafts
+                         else "meeting summary", link=link)
+            logger.info("Meeting %s: %d card(s) shown under ASK (%d refused), %d note(s) offered", meeting_id,
+                        len(outcome.cards), outcome.refused, sum(1 for item in self._meeting_notes[meeting_id] if item))
+        elif outcome.kind not in ("busy",):
+            self._activity(hud.TAG_STOP, "Meeting: the summary was not written",
+                           _short(outcome.message or outcome.kind))
+        if meetings.stage.showing_summary() == meeting_id:
+            self._render_meeting_summary(meeting_id)
+        self._refresh_actions_ui()
+
+    def _on_meeting_summary_changed(self, meeting_id: str) -> None:
+        meetings = getattr(self, "meetings", None)
+        if meetings is not None and meetings.stage.showing_summary() == meeting_id:
+            self._render_meeting_summary(meeting_id)
+
+    def _on_meeting_deleted(self, meeting_id: str) -> None:
+        """Delete removes the meeting's audio, transcript and summary at once: its follow-up drafts and block cards
+        still waiting (not held, not on their way, not decided) leave NEEDS YOUR OK, and its notes still waiting
+        leave MEMORY's suggestions. A decided card keeps its result."""
+        ids = set(self._meeting_cards.pop(meeting_id, ()))
+        ids |= {card_id for card_id in self._meeting_blocks.pop(meeting_id, {}).values() if card_id}
+        hold = self._send_hold.action.id if self._send_hold is not None else ""
+        gone = {card_id for card_id in ids if card_id not in self._jobs and card_id != hold
+                and not self._store.is_decided(card_id)}
+        if gone:
+            self._set_source(SOURCE_ASK, [action for action in self._source_lists[SOURCE_ASK] if action.id not in gone])
+            self._refresh_actions_ui()
+        notes = {item for item in self._meeting_notes.pop(meeting_id, []) if item}
+        if notes and any(item.id in notes for item in self._memory_suggestions):
+            self._memory_suggestions = [item for item in self._memory_suggestions if item.id not in notes]
+            self._render_memory()
+        logger.info("Meeting %s: deleted with %d waiting card(s) and %d note(s)", meeting_id, len(gone), len(notes))
+
+    def _open_meeting_summary(self, meeting_id: str) -> None:
+        """The Transcript's Open the summary: the Meetings screen with that summary."""
+        meetings = getattr(self, "meetings", None)
+        if meetings is None or self.state == STATE_QUITTING:
+            return
+        self.window.reading.set_tab(SCREEN_MEETINGS)
+        meetings.open_summary(meeting_id)
+
+    def _meeting_card_ids(self, meeting_id: str, summary: Any, record: Any) -> list[str]:
+        """The follow-up drafts' card ids, one per follow-up in order: this session's, else made again from
+        summary.json (each line checked again against the invite: validate.to_cards with FollowupCheck); a card
+        not decided yet goes back under ASK."""
+        from .ask import meeting_summary as ms
+
+        known = self._meeting_cards.get(meeting_id, ())
+        if len(known) == len(summary.follow_ups):
+            return list(known)
+        alias = record.alias or DEFAULT_ACCOUNT
+        labels = ms.guest_labels(tuple(ms.MeetingGuest(name, address) for name, address in record.invite))
+        cards = ms.followup_cards(summary, labels, alias=alias, aliases=tuple(self.config.accounts),
+                                  can_send=alias in self._senders, now=self._now(),
+                                  link_hosts=self.config.actions.link_hosts).cards
+        fresh = [card for card in cards if self.window.reading.approvals.card(card.id) is None
+                 and not self._store.is_decided(card.id)]
+        if fresh:
+            self._take_ask_cards(fresh)
+            self._refresh_actions_ui()
+        ids = tuple(card.id for card in cards)
+        self._meeting_cards[meeting_id] = ids
+        return list(ids)
+
+    def _render_meeting_summary(self, meeting_id: str) -> None:
+        """The summary view with what the app knows: each draft's card (lent while it shows) or where it stands,
+        each of your items' block card, each note's state (Memory's Keep / Dismiss)."""
+        from . import meeting_summary_view as sv
+
+        meetings = getattr(self, "meetings", None)
+        if meetings is None or self.state == STATE_QUITTING:
+            return
+        record = meetings.store.load(meeting_id)
+        summary = meetings.summary_of(meeting_id) if record is not None else None
+        if record is None or summary is None:
+            return
+        approvals = self.window.reading.approvals
+        follow: list[tuple[str, str]] = []
+        for card_id in self._meeting_card_ids(meeting_id, summary, record):
+            if approvals.card(card_id) is not None:
+                follow.append(("", card_id))
+                continue
+            saved = self._store.get(card_id) or {}
+            words = {STATUS_SENT: "Sent", STATUS_DENIED: "Dismissed", STATUS_HELD: "Sending"}.get(
+                str(saved.get("status") or ""), "No longer listed")
+            follow.append((words, card_id))
+        blocks: dict[int, tuple[str, str]] = {}
+        for index, card_id in self._meeting_blocks.get(meeting_id, {}).items():
+            if not card_id:
+                blocks[index] = (sv.BLOCK_NO_TIME, "")
+            elif approvals.card(card_id) is not None:
+                blocks[index] = (sv.BLOCK_PROPOSED, card_id)
+        notes = self._meeting_note_states(meeting_id, summary)
+        meetings.render_summary(meeting_id, blocks=blocks, follow_ups=follow, notes=notes)
+        self.window.reading._schedule_moment_sync()   # the draft and block cards are lent to the view
+
+    def _meeting_note_states(self, meeting_id: str, summary: Any) -> list[str]:
+        """Each suggested note: pending (Keep / Dismiss under MEMORY too), kept, dismissed, or off (no Memory). A
+        note neither pending, kept nor dismissed (Jarvis restarted since) waits again, quietly."""
+        from . import meeting_summary_view as sv
+        from .memory import check_suggestion
+
+        store = self.memory_store
+        if store is None or store.read_only:
+            return [sv.NOTE_OFF for _text in summary.memory]
+        ids = list(self._meeting_notes.get(meeting_id, []))
+        ids += [0] * (len(summary.memory) - len(ids))
+        pending = {item.id for item in self._memory_suggestions}
+        states = []
+        for index, text in enumerate(summary.memory):
+            if ids[index] in pending:
+                states.append(sv.NOTE_PENDING)
+            elif store.duplicate_of(text) is not None:
+                states.append(sv.NOTE_KEPT)
+            elif check_suggestion(text, index=None, command="", titles=[text],
+                                  dismissed=tuple(store.dismissed())) == "dismissed":
+                states.append(sv.NOTE_DISMISSED)
+            else:
+                ids[index] = self._meeting_note_offer(text)
+                states.append(sv.NOTE_PENDING if ids[index] else sv.NOTE_DISMISSED)
+        self._meeting_notes[meeting_id] = ids
+        return states
+
+    def _meeting_note_offer(self, text: str) -> int:
+        """A summary's note as a suggestion waiting under MEMORY (quietly: no Transcript entry); the same note
+        already waiting (from an Ask, say) is that one. Its id (0: not offered - kept already, or refused)."""
+        folded = " ".join(text.casefold().split())
+        waiting = next((item.id for item in self._memory_suggestions
+                        if " ".join(item.text.casefold().split()) == folded), 0)
+        return waiting or self._offer_memory_suggestion(text, quiet=True)
+
+    def _meeting_note_id(self, meeting_id: str, index: int) -> int:
+        ids = self._meeting_notes.get(meeting_id, [])
+        return ids[index] if 0 <= index < len(ids) else 0
+
+    def _on_meeting_keep_note(self, meeting_id: str, index: int) -> None:
+        """Keep on a suggested note: Memory's own Keep (the note is kept only now, on this click)."""
+        suggestion_id = self._meeting_note_id(meeting_id, index)
+        if suggestion_id:
+            self._on_memory_suggestion_saved(suggestion_id)
+        self._render_meeting_summary(meeting_id)
+
+    def _on_meeting_dismiss_note(self, meeting_id: str, index: int) -> None:
+        """Dismiss on a suggested note: Memory's own Dismiss."""
+        suggestion_id = self._meeting_note_id(meeting_id, index)
+        if suggestion_id:
+            self._on_memory_suggestion_dismissed(suggestion_id)
+        self._render_meeting_summary(meeting_id)
+
+    def _on_meeting_add_block(self, meeting_id: str, index: int) -> None:
+        """Add block on one of the owner's action items: a Calendar card (MEETING . CALENDAR) for the first free
+        half hour Jarvis sees on the agenda, under ASK and under the item - nothing is added until that card's own
+        Add (and Undo takes it back). Nothing at all happens without this click."""
+        from .ask import meeting_summary as ms
+        from .ask.context import ContextIndex
+        from .ask.validate import to_cards
+
+        meetings = getattr(self, "meetings", None)
+        summary = meetings.summary_of(meeting_id) if meetings is not None else None
+        if summary is None or not 0 <= index < len(summary.actions) or not summary.actions[index].mine:
+            return
+        if self._meeting_blocks.get(meeting_id, {}).get(index):
+            return                                   # one block card per item (it shows below)
+        item = summary.actions[index]
+        now = self._now()
+        busy = [(event.start, event.end) for event in self._agenda_events or ()
+                if event.start is not None and event.end is not None]
+        productivity = self.config.productivity
+        slot = ms.free_block(busy, now, minutes=MEETING_BLOCK_MINUTES, day_start=productivity.day_start,
+                             day_end=productivity.day_end, due=item.due)
+        blocks = self._meeting_blocks.setdefault(meeting_id, {})
+        if slot is None:
+            blocks[index] = ""
+            logger.info("Meeting %s: no free half hour for a block", meeting_id)
+            self._render_meeting_summary(meeting_id)
+            return
+        title = ms.block_title(item.what)
+        line = f"Calendar: {title} | {slot[0]:%Y-%m-%d %H:%M}-{slot[1]:%H:%M} | | | {MEETING_BLOCK_NOTES}"
+        made = to_cards([line], ContextIndex(), now=now, link_hosts=self.config.actions.link_hosts,
+                        kinds=frozenset({CALENDAR}), mode=MODE_MEETING, max_cards=1)
+        card = made.cards[0] if made.cards else None
+        if card is None or card.error:
+            blocks[index] = ""
+            self._render_meeting_summary(meeting_id)
+            return
+        self._take_ask_cards([card])
+        blocks[index] = card.id
+        logger.info("Meeting %s: a block was proposed for one of your action items", meeting_id)
+        self._refresh_actions_ui()
+        self._render_meeting_summary(meeting_id)
+
+    def _record_offer_info(self, offer: Any, link_id: str, question: str, entry: int) -> offer_view.OfferInfo:
+        """Home's tile for a record offer (memory only): the meeting's time, title, account and guest count; its
+        commit only opens the start card."""
+        try:
+            minutes = math.ceil((offer.start - self._now()).total_seconds() / 60)
+        except TypeError:
+            minutes = 0
+        when = format_time(self._offer_wall(offer.start), hour24=self.config.display.hour24)
+        kicker = f"{when} {DOT} IN {minutes} MIN" if minutes > 0 else f"{when} {DOT} NOW"
+        guests = max(0, int(getattr(offer, "guests", 0) or 0))
+        alias = str(getattr(offer, "alias", "") or "")
+        who = f"{guests} guest{'' if guests == 1 else 's'}"
+        meta = (f"{alias.capitalize()} {DOT} {who}" if alias else who, "Nothing records until you tick and click "
+                "Start.")
+        title = f"Record {getattr(offer, 'event_title', '') or '(No title)'}?"
+        return offer_view.OfferInfo(int(offer.id), "record", link_id, kicker, title, RECORD_TILE_COMMIT, meta,
+                                    question, entry)
+
+    def _record_offer_link(self, offer: Any, state: str) -> None:
+        """The record offer's link: the start card for that meeting opens (unticked, every time); it never
+        records - only the card's Start does, after the owner's consent tick. An offer gone since says so."""
+        from .meetings_ui import meeting_info_of
+
+        meetings = getattr(self, "meetings", None)
+        controller = self.productivity
+        if state or meetings is None or controller is None:
+            logger.info("Record offer link: %s", state or "gone")
+            return
+        brief = getattr(offer, "brief", None)
+        try:
+            own = controller._own()
+        except Exception:  # noqa: BLE001
+            own = frozenset()
+        info = meeting_info_of(offer.alias, brief, own) if brief is not None else None
+        controller.record_used(offer.id)
+        meetings.open_start_card(info)
+        logger.info("Record offer link: the start card opened")
 
     def _create_productivity(self) -> Any:
         """Jarvis's own day read and his offers (productivity_ui.ProductivityController): only while
@@ -8713,6 +9091,12 @@ class AppController(QObject):
 
     def _offer_entry_text(self, offer: Any) -> str:
         address = self.config.assistant.address
+        if offer.kind == "record" and offer.start is not None:
+            from .meetings_ui import record_offer_text
+
+            minutes = int(round((offer.start - offer.posted_at).total_seconds() / 60))
+            return record_offer_text(offer.event_title, self._offer_wall(offer.start), offer.alias, minutes,
+                                     offer.guests, hour24=self.config.display.hour24)
         if offer.kind != "prep" or offer.start is None:
             return plan_offer_text(address)
         minutes = max(0, int(round((offer.start - offer.posted_at).total_seconds() / 60)))
@@ -8725,7 +9109,7 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return
         self._show_prod_hint()   # the one-time hint first, so the offer is the newest entry
-        link_text = PREP_OFFER_LINK if offer.kind == "prep" else PLAN_OFFER_LINK
+        link_text = {"prep": PREP_OFFER_LINK, "record": RECORD_OFFER_LINK}.get(offer.kind, PLAN_OFFER_LINK)
         entry = self._jarvis(self._offer_entry_text(offer), tone=hud.TONE_IDLE, sub=offer.sub,
                              link=(link_text, f"{OFFER_LINK}{offer.id}"))
         self._prod_call("set_entry", offer.id, entry)
@@ -8765,6 +9149,8 @@ class AppController(QObject):
         question = str(getattr(offer, "speech", "") or "")
         link_id = f"{OFFER_LINK}{offer_id}"
         start = getattr(offer, "start", None)
+        if getattr(offer, "kind", "") == "record" and start is not None:
+            return self._record_offer_info(offer, link_id, question, entry)
         if getattr(offer, "kind", "") != "prep" or start is None:
             return offer_view.OfferInfo(offer_id, "plan", link_id, offer_view.PLAN_KICKER, offer_view.PLAN_TITLE,
                                         PLAN_OFFER_LINK, (offer_view.PLAN_META,), question, entry)
@@ -8804,6 +9190,15 @@ class AppController(QObject):
         if self.state == STATE_QUITTING or not offer.entry_id:
             return
         hour24 = self.config.display.hour24
+        if offer.kind == "record":
+            from .meetings_ui import record_offer_gone_text, record_offer_used_text
+
+            text = (record_offer_used_text(self._offer_wall(offer.read_at), hour24) if how == "used" else
+                    record_offer_gone_text(offer.event_title, self._offer_wall(offer.start), hour24))
+            entry = self.window.reading.conversation.entry(offer.entry_id)
+            if entry is not None:
+                entry.set_content(text=text, sub="", link_text="", link_id="")
+            return
         if how == "planned":
             text = plan_offer_planned_text(self._offer_wall(None), hour24)
         elif how == "expired":
@@ -8848,6 +9243,9 @@ class AppController(QObject):
             logger.info("Offer link: gone")
             return
         offer, state = controller.link(number)
+        if offer is not None and offer.kind == "record":
+            self._record_offer_link(offer, state)
+            return
         if state == "ended":
             text = prep_no_run_text("ended", self.config.assistant.address)
             self._jarvis(text, tone=hud.TONE_WARN, sub="nothing was read")
@@ -9682,12 +10080,13 @@ class AppController(QObject):
 
     # ---- suggestions
 
-    def _offer_memory_suggestion(self, text: str) -> None:
+    def _offer_memory_suggestion(self, text: str, *, quiet: bool = False) -> int:
         """A note the planner suggested (already grounded and checked): a JARVIS entry with Remember
-        this and a row under MEMORY > JARVIS SUGGESTS. Never spoken; saved only on a click."""
+        this and a row under MEMORY > JARVIS SUGGESTS. Never spoken; saved only on a click. ``quiet`` (a
+        meeting summary's notes): the row under MEMORY only, no entry. The suggestion's id (0: not offered)."""
         store = self.memory_store
         if store is None or not text:
-            return
+            return 0
         self._memory_refresh()   # the notes as memory.json holds them now
         reason = ("read_only" if store.read_only else
                   "duplicate" if store.duplicate_of(text) is not None else
@@ -9697,12 +10096,14 @@ class AppController(QObject):
             logger.info("Memory: a suggestion was dropped (%s)", reason)
             self._live_memory(f"Suggestion not offered: {_MEMORY_DROP_WORDS[reason]}", text,
                               status=_live.STATUS_WARN)
-            return
+            return 0
         self._memory_suggestion_seq += 1
-        number, link = self._memory_link("save_suggestion", suggestion=self._memory_suggestion_seq)
-        entry_id = self._jarvis(memory_suggestion_text(text, self._address()), sub=MEMORY_SUGGESTION_SUB,
-                                link=(MEMORY_REMEMBER_TEXT, f"{MEMORY_SAVE_LINK}{number}"))
-        link.entry_id = entry_id
+        number, entry_id = 0, 0
+        if not quiet:
+            number, link = self._memory_link("save_suggestion", suggestion=self._memory_suggestion_seq)
+            entry_id = self._jarvis(memory_suggestion_text(text, self._address()), sub=MEMORY_SUGGESTION_SUB,
+                                    link=(MEMORY_REMEMBER_TEXT, f"{MEMORY_SAVE_LINK}{number}"))
+            link.entry_id = entry_id
         self._memory_suggestions.append(_MemorySuggestion(self._memory_suggestion_seq, text, entry_id, number))
         while len(self._memory_suggestions) > MAX_PENDING_SUGGESTIONS:
             old = self._memory_suggestions.pop(0)
@@ -9710,6 +10111,7 @@ class AppController(QObject):
             self._memory_entry(old.entry_id, MEMORY_PUSHED_TEXT)
         logger.info("Memory: a suggestion was offered")
         self._render_memory()                       # the Dock counts it ("Memory, 1 suggestion")
+        return self._memory_suggestion_seq
 
     def _memory_save_suggestion(self, suggestion: Any, *, from_conversation: bool) -> MemoryEntry | None:
         """Keep a pending suggestion (the owner's click: Remember this, or Keep on Memory's focal tile); the
@@ -10141,6 +10543,8 @@ class AppController(QObject):
             self._prep_choice_link(link_id[len(PREP_CHOICE_LINK):])
         elif link_id.startswith(OFFER_LINK):
             self._offer_link(link_id[len(OFFER_LINK):])
+        elif link_id.startswith(MEETING_SUMMARY_LINK):
+            self._open_meeting_summary(link_id[len(MEETING_SUMMARY_LINK):])
         elif link_id == FOLLOWUPS_SHOW:
             self.window.reading.set_tab(SCREEN_FOLLOWUPS)
             self.window.reading.followups_stage.reveal_followups()
