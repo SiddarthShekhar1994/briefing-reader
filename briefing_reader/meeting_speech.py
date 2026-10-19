@@ -67,6 +67,9 @@ CANCEL_WAIT_S = 5.0               # a stopped worker is waited for this long (it
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 CREATE_NO_WINDOW = 0x08000000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_GIT_SHA1_RE = re.compile(r"[0-9a-f]{40}")
+GIT_PREFIX = "git:"                # a small file's check: its git blob SHA-1 (Hugging Face's X-Linked-Etag)
+_IDENTITY = {"Accept-Encoding": "identity"}   # the files as stored: a gzip answer has another size
 
 ERR_NETWORK = "network"
 ERR_CHECK = "check_failed"
@@ -162,8 +165,9 @@ class ModelDownloader:
         return MODEL_URL.format(repo=self.repo, revision=self.revision, name=name)
 
     def _expected(self, name: str) -> tuple[int, str]:
-        """(size, sha256 or "") from the listing's headers (Hugging Face: X-Linked-Size / X-Linked-Etag for its
-        large files, Content-Length for the small ones)."""
+        """(size, check) from the listing's headers. Hugging Face: a large file answers with X-Linked-Size and
+        its SHA-256 as X-Linked-Etag; a small one redirects (its Content-Length is the redirect's own body), so
+        the size comes from following it uncompressed and the check is its git blob SHA-1 ("git:<sha1>")."""
         response = self._http().head(self._url(name), allow_redirects=False, timeout=TIMEOUT_S)
         status = int(getattr(response, "status_code", 0))
         if status >= 400:
@@ -172,10 +176,13 @@ class ModelDownloader:
         size = headers.get("x-linked-size") or headers.get("content-length") or "0"
         etag = (headers.get("x-linked-etag") or "").strip().strip('"').lower()
         if status in (301, 302, 303, 307, 308) and not headers.get("x-linked-size"):
-            follow = self._http().head(self._url(name), allow_redirects=True, timeout=TIMEOUT_S)
+            follow = self._http().head(self._url(name), allow_redirects=True, timeout=TIMEOUT_S,
+                                       headers=dict(_IDENTITY))
             size = str(dict(follow.headers).get("Content-Length") or dict(follow.headers).get("content-length")
                        or size)
-        return int(size), etag if _SHA256_RE.fullmatch(etag) else ""
+        if _SHA256_RE.fullmatch(etag):
+            return int(size), etag
+        return int(size), GIT_PREFIX + etag if _GIT_SHA1_RE.fullmatch(etag) else ""
 
     def run(self) -> str:
         """Fetch every file (continuing the ``.part`` files), check them, write the manifest. "" when the model
@@ -214,7 +221,8 @@ class ModelDownloader:
             done_before += size
         manifest = {"repo": self.repo, "revision": self.revision,
                     "files": {name: expected[name][0] for name in self.files},
-                    "sha256": {name: expected[name][1] for name in self.files if expected[name][1]}}
+                    "sha256": {name: expected[name][1] for name in self.files
+                               if expected[name][1] and not expected[name][1].startswith(GIT_PREFIX)}}
         try:
             mt._write_json(self.target / MANIFEST, manifest)
         except OSError:
@@ -232,7 +240,9 @@ class ModelDownloader:
             part.unlink()
             have = 0
         if have < size:
-            headers = {"Range": f"bytes={have}-"} if have else {}
+            headers = dict(_IDENTITY)
+            if have:
+                headers["Range"] = f"bytes={have}-"
             try:
                 response = self._http().get(self._url(name), headers=headers, stream=True, timeout=TIMEOUT_S)
                 status = int(getattr(response, "status_code", 0))
@@ -268,7 +278,8 @@ class ModelDownloader:
         if part.stat().st_size != size:
             return ERR_NETWORK if part.stat().st_size < size else ERR_CHECK
         if sha:
-            digest = _sha256(part, self._cancel)
+            digest = (GIT_PREFIX + _git_sha1(part, self._cancel) if sha.startswith(GIT_PREFIX)
+                      else _sha256(part, self._cancel))
             if self._cancel.is_set():
                 return ERR_CANCELLED             # stopped while checking: the whole .part stays (checked next time)
             if digest != sha:
@@ -276,6 +287,17 @@ class ModelDownloader:
                 return ERR_CHECK
         part.replace(final)
         return ""
+
+
+def _git_sha1(path: Path, cancel: Any) -> str:
+    """The file's git blob SHA-1 (what Hugging Face gives as the X-Linked-Etag of a small file)."""
+    digest = hashlib.sha1(b"blob %d\x00" % path.stat().st_size, usedforsecurity=False)
+    with open(path, "rb") as fh:
+        while chunk := fh.read(CHUNK):
+            if cancel.is_set():
+                return ""
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _sha256(path: Path, cancel: Any) -> str:

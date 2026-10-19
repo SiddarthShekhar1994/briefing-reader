@@ -350,6 +350,22 @@ class DownloadTests(Base):
         self.assertIn(("GET", "model.bin", "bytes=4000-"), session.requests)
         self.assertTrue(sp.model_ready(self.target()))
 
+    def test_small_files_that_redirect_and_come_gzipped_still_download_and_are_checked(self) -> None:
+        session = FakeSession(self.FILES, hf_small=True)
+        self.assertEqual(sp.ModelDownloader(self.target(), session=session).run(), "")
+        self.assertTrue(sp.model_ready(self.target()))
+        for name, body in self.FILES.items():
+            self.assertEqual((self.target() / name).read_bytes(), body)
+        again = FakeSession(self.FILES, hf_small=True)                 # already there: checked, not fetched
+        self.assertEqual(sp.ModelDownloader(self.target(), session=again).run(), "")
+        self.assertFalse([r for r in again.requests if r[0] == "GET"])
+
+    def test_a_small_file_with_the_wrong_git_hash_is_not_kept(self) -> None:
+        session = FakeSession(self.FILES, hf_small=True, bad_small=True)
+        self.assertEqual(sp.ModelDownloader(self.target(), session=session).run(), sp.ERR_CHECK)
+        self.assertFalse((self.target() / "config.json").exists())
+        self.assertFalse(sp.model_ready(self.target()))
+
     def test_a_file_that_fails_its_check_is_not_kept(self) -> None:
         session = FakeSession(self.FILES, bad_hash=True)
         self.assertEqual(sp.ModelDownloader(self.target(), session=session).run(), sp.ERR_CHECK)

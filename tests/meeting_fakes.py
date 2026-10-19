@@ -229,10 +229,13 @@ class FakeSession:
     """The model's files served from memory: HEAD gives the sizes (and SHA-256 for model.bin, like Hugging
     Face's X-Linked-Etag); GET honours Range. ``cut_after`` bytes into model.bin the first GET breaks off."""
 
-    def __init__(self, files: dict[str, bytes], *, cut_after: int = 0, bad_hash: bool = False) -> None:
+    def __init__(self, files: dict[str, bytes], *, cut_after: int = 0, bad_hash: bool = False,
+                 hf_small: bool = False, bad_small: bool = False) -> None:
         self.files = files
         self.cut_after = cut_after
         self.bad_hash = bad_hash
+        self.hf_small = hf_small          # the small files answer the way Hugging Face does now (307 + gzip)
+        self.bad_small = bad_small
         self.requests: list[tuple[str, str, str]] = []
         self.lock = threading.Lock()
 
@@ -240,14 +243,24 @@ class FakeSession:
     def _name(url: str) -> str:
         return url.rsplit("/", 1)[-1]
 
-    def head(self, url: str, allow_redirects: bool = False, timeout: float = 0) -> FakeResponse:
+    def head(self, url: str, allow_redirects: bool = False, timeout: float = 0,
+             headers: dict | None = None) -> FakeResponse:
         name = self._name(url)
         self.requests.append(("HEAD", name, ""))
         body = self.files[name]
         if name == "model.bin":
             sha = hashlib.sha256(body + (b"x" if self.bad_hash else b"")).hexdigest()
             return FakeResponse(302, {"X-Linked-Size": str(len(body)), "X-Linked-Etag": f'"{sha}"'})
-        return FakeResponse(200, {"Content-Length": str(len(body))})
+        if not self.hf_small:
+            return FakeResponse(200, {"Content-Length": str(len(body))})
+        # Like Hugging Face today: a small file redirects (the Content-Length is the redirect's own short body,
+        # the etag its git blob SHA-1); followed, it is gzip with no length unless asked for identity.
+        git = hashlib.sha1(b"blob %d\x00" % len(body) + body + (b"x" if self.bad_small else b"")).hexdigest()
+        if not allow_redirects:
+            return FakeResponse(307, {"Content-Length": "268", "X-Linked-Etag": f'"{git}"'})
+        if (headers or {}).get("Accept-Encoding") == "identity":
+            return FakeResponse(200, {"Content-Length": str(len(body))})
+        return FakeResponse(200, {"Content-Encoding": "gzip"})
 
     def get(self, url: str, headers: dict | None = None, stream: bool = True, timeout: float = 0) -> FakeResponse:
         name = self._name(url)
