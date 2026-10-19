@@ -93,7 +93,7 @@ UNDO_SECONDS_RANGE = (3, 30)
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
-                 "productivity", "ui")
+                 "productivity", "ui", "meetings")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -400,6 +400,15 @@ class ProductivityConfig:
 
 
 @dataclass(frozen=True)
+class MeetingsConfig:
+    """``[meetings]``: meeting recording (off by default; JARVIS_MEETINGS_ENABLED overrides ``enabled``).
+    Recording starts only from the owner's click after the consent tick; the devices are picked in
+    Settings > Meetings (the Windows defaults are followed otherwise)."""
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
     page_id: str                            # normalized 32-hex, no dashes; "" when missing or invalid
@@ -428,6 +437,7 @@ class Config:
     research: ResearchConfig = field(default_factory=ResearchConfig)
     productivity: ProductivityConfig = field(default_factory=ProductivityConfig)
     ui: UiConfig = field(default_factory=UiConfig)
+    meetings: MeetingsConfig = field(default_factory=MeetingsConfig)
 
     @property
     def notion_url(self) -> str:
@@ -552,6 +562,7 @@ def load_config(project_root: Path | None = None, *,
         research=_parse_research(doc, environ),
         productivity=_parse_productivity(doc, environ),
         ui=_parse_ui(doc),
+        meetings=_parse_meetings(doc, environ),
     )
 
 
@@ -1091,6 +1102,18 @@ def _parse_productivity(doc: Mapping[str, Any], environ: Mapping[str, str] | Non
                        numbers["prep_lookback_days"], numbers["scan_days"])
         numbers["prep_lookback_days"] = numbers["scan_days"]
     return ProductivityConfig(enabled=enabled, prep_skip_words=tuple(skip), **flags, **times, **numbers)
+
+
+MEETINGS_ENABLED_ENV = "JARVIS_MEETINGS_ENABLED"
+
+
+def _parse_meetings(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> MeetingsConfig:
+    """``[meetings]`` from config.toml; ``JARVIS_MEETINGS_ENABLED`` (e.g. in the gitignored ``.env``)
+    overrides ``enabled`` both ways, like JARVIS_PRODUCTIVITY_ENABLED."""
+    d = MeetingsConfig()
+    r = _TableReader(doc, "meetings", _field_names(MeetingsConfig))
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, MEETINGS_ENABLED_ENV, "meetings.enabled")
+    return MeetingsConfig(enabled=enabled)
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

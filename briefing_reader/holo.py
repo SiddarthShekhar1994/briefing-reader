@@ -855,6 +855,10 @@ ICONS: dict[str, tuple[str, ...]] = {
     "home": ("M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z",),
     "plan": ("M4 5h16v15H4z", "M4 10h16", "M8 3v4M16 3v4", "M8 14h4"),
     "prep": ("M6 4h12v16H6z", "M9 8h6M9 12h6M9 16h3"),
+    # Meetings (a microphone; a record dot).
+    "meetings": ("M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3z", "M6 11a6 6 0 0 0 12 0",
+                 "M12 17v3.5M8.5 20.5h7"),
+    "record": ("M12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12z",),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",

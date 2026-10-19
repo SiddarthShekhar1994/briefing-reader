@@ -14,6 +14,11 @@ Public API
     ``set_paths(config_path, data_dir)``). Accounts show only their names and whether they are connected
     (``set_connected({alias: True | False})``, from the app's own sign-in check; "Not checked yet" before it).
 
+``SettingsStage.add_group(key, title, note=, how=, rows=, extra=)``
+    A group a feature adds while it is on (Meetings, with [meetings] on): its rows come from ``rows()``, its
+    how-to line is ``how`` and ``extra`` (a widget of the feature's own, e.g. the device choice and Download)
+    shows under its rows. The six built-in groups stay read only.
+
 ``settings_rows(config, group, connected)``
     The (label, value) pairs a group shows (used by the panel and the tests).
 
@@ -23,7 +28,7 @@ path of a sign-in or e-mail address is ever shown (Accounts: the alias and conne
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
@@ -294,6 +299,8 @@ class SettingsStage(QWidget):
         self._config: Any = None
         self._connected: dict[str, bool] = {}
         self._group = GROUPS[0][0]
+        self._groups: list[tuple[str, str]] = list(GROUPS)
+        self._added: dict[str, tuple[str, str, Callable[[], list[tuple[str, str]]], QWidget | None]] = {}
         self.head = SectionHead("settings", SETTINGS_TITLE)
         self.group_buttons: dict[str, GroupButton] = {}
         side = QVBoxLayout()
@@ -307,6 +314,7 @@ class SettingsStage(QWidget):
             button.installEventFilter(self)
             self.group_buttons[key] = button
             side.addWidget(button)
+        self._side_layout = side
         side.addStretch(1)
         self._side = QWidget()
         self._side.setLayout(side)
@@ -345,6 +353,9 @@ class SettingsStage(QWidget):
         column.addWidget(self.note_label)
         column.addSpacing(14)
         column.addWidget(self._grid_box)
+        self._extra_box = QVBoxLayout()
+        self._extra_box.setContentsMargins(0, 12, 0, 0)
+        column.addLayout(self._extra_box)
         column.addSpacing(16)
         column.addWidget(Rule())
         column.addSpacing(12)
@@ -369,6 +380,28 @@ class SettingsStage(QWidget):
         self.select_group(self._group)
 
     # ---- API --------------------------------------------------------------------------------
+
+    def add_group(self, key: str, title: str, *, note: str, how: str, rows: Callable[[], list[tuple[str, str]]],
+                  extra: QWidget | None = None) -> None:
+        """A feature's own group (see the module docstring), listed after the built-in ones."""
+        if key in self.group_buttons:
+            return
+        button = GroupButton(key, title)
+        button.clicked.connect(lambda _checked=False, which=key: self.select_group(which))
+        button.installEventFilter(self)
+        self.group_buttons[key] = button
+        self._side_layout.insertWidget(self._side_layout.count() - 1, button)
+        self._groups.append((key, title))
+        self._added[key] = (note, how, rows, extra)
+        if extra is not None:
+            self._extra_box.addWidget(extra)
+            extra.hide()
+        if self._group == key:
+            self._fill()
+
+    def refresh(self) -> None:
+        """Show the open group again (a feature's rows changed)."""
+        self._fill()
 
     def set_paths(self, config_path: str, data_dir: str) -> None:
         self.config_path.setText(config_path)
@@ -401,6 +434,8 @@ class SettingsStage(QWidget):
 
     def rows(self) -> list[tuple[str, str]]:
         """What the open group shows now."""
+        if self._group in self._added:
+            return list(self._added[self._group][2]())
         return settings_rows(self._config, self._group, self._connected)
 
     def shown_texts(self) -> list[str]:
@@ -414,9 +449,13 @@ class SettingsStage(QWidget):
 
     def _fill(self) -> None:
         key = self._group
-        self.title_label.setText(dict(GROUPS)[key])
-        self.note_label.setText(GROUP_NOTES.get(key, ""))
-        self.text_label.setText(HOW_TEXT.format(tables=_tables(key)))
+        added = self._added.get(key)
+        self.title_label.setText(dict(self._groups)[key])
+        self.note_label.setText(added[0] if added else GROUP_NOTES.get(key, ""))
+        self.text_label.setText(added[1] if added else HOW_TEXT.format(tables=_tables(key)))
+        for other, (_note, _how, _rows, extra) in self._added.items():
+            if extra is not None:
+                extra.setVisible(other == key)
         while self._grid.count():
             item = self._grid.takeAt(0)
             widget = item.widget()
@@ -437,7 +476,7 @@ class SettingsStage(QWidget):
 
     def eventFilter(self, watched: Any, event: Any) -> bool:  # noqa: N802 - Qt override
         if isinstance(watched, GroupButton) and event.type() == event.Type.KeyPress:
-            keys = [key for key, _text in GROUPS]
+            keys = [key for key, _text in self._groups]
             step = {Qt.Key.Key_Down: 1, Qt.Key.Key_Up: -1}.get(event.key(), 0)
             if step:
                 index = (keys.index(watched.key) + step) % len(keys)

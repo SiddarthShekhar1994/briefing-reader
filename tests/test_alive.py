@@ -73,7 +73,8 @@ class LabelledDockTests(unittest.TestCase):
             rect = self.dock.slot_rect(key)
             self.assertEqual((rect.x(), rect.width(), rect.height()), (12, 176, 44))
         self.assertEqual([dock.LABELS[k] for k in dock.SLOTS],
-                         ["Home", "Briefing", "Approvals", "Live", "Memory", "Follow-ups", "Settings"])
+                         ["Home", "Briefing", "Approvals", "Live", "Memory", "Follow-ups", "Meetings",
+                          "Settings"])
         self.assertEqual(self.dock.slot_rect(dock.SETTINGS).bottom(), 640 - 16)          # Settings at the bottom
         self.assertFalse(self.window.grab().isNull())
 

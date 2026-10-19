@@ -1108,6 +1108,15 @@ class HoloHeader(QWidget):
         note.show()
         self._fit_notes()
 
+    def add_rec_badge(self, badge: QWidget) -> None:
+        """The meeting recorder's REC (meetings_view.RecBadge: the coral dot, the time and Stop), placed left of
+        the hold note: the header is over every screen, so while a meeting records it shows on every screen."""
+        layout = self.layout()
+        index = layout.indexOf(self.hold)
+        layout.insertWidget(index, badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.insertSpacing(index + 1, 12)
+        self._fit_notes()
+
     def set_hold(self, word: str = "") -> None:
         """A Send's or Cancel's hidden hold whose card is out of sight: "Sent" (``word``: "Sent" /
         "Cancelled") and an Undo link; "" hides both. Never a number."""

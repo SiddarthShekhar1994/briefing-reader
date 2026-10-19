@@ -1294,9 +1294,43 @@ class OrbWidget(_OrbBase):
         self._halo_look = _Fade((targets.halo_color, targets.halo_a, targets.halo_b))
         self._core_look = _Fade(targets.core)
         self._intro: tuple[float, bool] | None = None   # the start-up: (orb time it began, calm)
+        self._recording = False             # a meeting records: the coral recording ring (meetings_ui)
         self.set_orb_size(px)
 
     # ---- API --------------------------------------------------------------------
+
+    def set_recording(self, recording: bool) -> None:
+        """The recording look while a meeting records: a coral ring just outside the orb and a coral dot at its
+        top (still: it never blinks), and "recording" in the orb's accessible description."""
+        recording = bool(recording)
+        if recording != self._recording:
+            self._recording = recording
+            self._update_name()
+            self.update()
+
+    def is_recording(self) -> bool:
+        return self._recording
+
+    def _describe(self) -> str:
+        text = super()._describe()
+        return f"{text}, recording a meeting" if getattr(self, "_recording", False) else text
+
+    def _paint_recording(self, painter: QPainter) -> None:
+        rect = self.orb_rect()
+        pad = max(3.0, rect.width() * 0.02)
+        ring = rect.adjusted(-pad, -pad, pad, pad)
+        painter.resetTransform()
+        painter.setOpacity(1.0)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(holo.alpha(holo.ALERT, 0.75), max(1.5, rect.width() / 160))
+        pen.setDashPattern([6.0, 4.0])
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(ring)
+        dot = max(4.0, rect.width() / 40)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(holo.ALERT))
+        painter.drawEllipse(QPointF(ring.center().x(), ring.top()), dot, dot)
 
     def orb_size(self) -> int:
         return self._px
@@ -1719,6 +1753,8 @@ class OrbWidget(_OrbBase):
             self._paint(painter, frame)
             if self._dim < 1.0:
                 self._paint_dim(painter)
+            if self._recording:
+                self._paint_recording(painter)
         finally:
             painter.end()
         if self.is_animating():

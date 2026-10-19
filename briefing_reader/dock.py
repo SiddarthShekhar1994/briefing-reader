@@ -1,7 +1,7 @@
 """The Dock (HOLOGRAM_SPEC section 11.1, labelled as in the approved motion prototype): the window's left edge.
 
 Slots, top to bottom: Home (the live mini orb), a hairline, Briefing, Approvals, Live, Memory,
-Follow-ups, flexible space, Settings. Labelled (``set_labelled(True)``, 200 px: the app's window at its
+Follow-ups, Meetings, flexible space, Settings. Labelled (``set_labelled(True)``, 200 px: the app's window at its
 default size) every slot shows its glyph AND its name, its badge at the right end. Folded (64 px, the
 default, and the app's windows under about 1,000 px) it is glyphs only and the name shows as a tooltip
 right of the button (after 400 ms of hover, at once on keyboard focus) with the shortcut
@@ -21,18 +21,20 @@ Public API
 ==========
 
 Constants: slot keys ``HOME``, ``BRIEFING``, ``APPROVALS``, ``LIVE``, ``MEMORY``, ``FOLLOWUPS``,
-``SETTINGS`` (``SLOTS`` in order), ``LABELS``, ``SHORTCUTS`` (Ctrl+1 .. Ctrl+6, Ctrl+,), ``GLYPHS``;
+``MEETINGS``, ``SETTINGS`` (``SLOTS`` in order), ``LABELS``, ``SHORTCUTS`` (Ctrl+1 .. Ctrl+7, Ctrl+,), ``GLYPHS``;
 Live activity ``LIVE_IDLE``, ``LIVE_WORKING``, ``LIVE_HOLD``.
 
 ``Dock(parent=None, labelled=False)``
     ``set_labelled(bool)``, ``is_labelled()``, ``rail_rect()`` (where the rail is painted now).
     Signal ``slotActivated(str)``: a slot was clicked, opened with Enter / Space or its shortcut
     (screen slots become current first; Settings does not). ``set_current(key, animate=True)``,
-    ``current()``; ``set_slot_visible(key, bool)`` (Memory / Follow-ups when the bundle is off; a
+    ``current()``; ``set_slot_visible(key, bool)`` (Memory / Follow-ups when the bundle is off, Meetings while
+    [meetings] is off; a
     hidden current slot loses its highlight until ``set_current`` moves it), ``is_slot_visible``,
     ``visible_slots()``; signals: ``set_briefing_new(bool)``, ``set_approvals(n)``,
     ``set_live_activity(LIVE_*)``, ``set_memory_suggestions(n)`` (pending suggestions: "Memory, 1
-    suggestion"), ``set_memory_new(bool)`` (a note was saved: "Memory, new"), ``set_followups(n)``;
+    suggestion"), ``set_memory_new(bool)`` (a note was saved: "Memory, new"), ``set_followups(n)``,
+    ``set_recording(bool)`` (a coral dot on Meetings while a meeting records: "Meetings, recording");
     ``set_orb_look(base, muted=False, offline=False)`` for the Home slot's mini orb; ``button(key)``,
     ``mini_orb()``, ``accessible_name(key)``, ``signal_words(key)`` ("2 waiting", "new", ...; "" none),
     ``highlight_rect()``, ``tooltip()`` (the shared
@@ -58,14 +60,15 @@ APPROVALS = "approvals"
 LIVE = "live"
 MEMORY = "memory"
 FOLLOWUPS = "followups"
+MEETINGS = "meetings"
 SETTINGS = "settings"
-SLOTS = (HOME, BRIEFING, APPROVALS, LIVE, MEMORY, FOLLOWUPS, SETTINGS)
+SLOTS = (HOME, BRIEFING, APPROVALS, LIVE, MEMORY, FOLLOWUPS, MEETINGS, SETTINGS)
 LABELS = {HOME: "Home", BRIEFING: "Briefing", APPROVALS: "Approvals", LIVE: "Live", MEMORY: "Memory",
-          FOLLOWUPS: "Follow-ups", SETTINGS: "Settings"}
+          FOLLOWUPS: "Follow-ups", MEETINGS: "Meetings", SETTINGS: "Settings"}
 SHORTCUTS = {HOME: "Ctrl+1", BRIEFING: "Ctrl+2", APPROVALS: "Ctrl+3", LIVE: "Ctrl+4", MEMORY: "Ctrl+5",
-             FOLLOWUPS: "Ctrl+6", SETTINGS: "Ctrl+,"}
+             FOLLOWUPS: "Ctrl+6", MEETINGS: "Ctrl+7", SETTINGS: "Ctrl+,"}
 GLYPHS = {BRIEFING: "briefing", APPROVALS: "approvals", LIVE: "live", MEMORY: "memory", FOLLOWUPS: "followups",
-          SETTINGS: "settings"}
+          MEETINGS: "meetings", SETTINGS: "settings"}
 LIVE_IDLE = "idle"
 LIVE_WORKING = "working"
 LIVE_HOLD = "hold"         # a Send's / Cancel's hidden hold (no countdown, no blink)
@@ -293,7 +296,7 @@ class DockButton(QAbstractButton):
                 center = QPointF(right - holo.NEW_DOT / 2, self.height() / 2)
                 if self._ping >= 0.0:
                     holo.paint_ping(painter, center, self._ping)
-                holo.paint_new_dot(painter, center)
+                holo.paint_new_dot(painter, center, color=self._dot_color())
             return
         if self._count > 0:
             holo.paint_count_badge(painter, QPointF(BUTTON - 4, 4), self._count, scale=self._pop)
@@ -301,7 +304,10 @@ class DockButton(QAbstractButton):
             center = QPointF(BUTTON - 8 - holo.NEW_DOT / 2, 8 + holo.NEW_DOT / 2)
             if self._ping >= 0.0:
                 holo.paint_ping(painter, center, self._ping)
-            holo.paint_new_dot(painter, center)
+            holo.paint_new_dot(painter, center, color=self._dot_color())
+
+    def _dot_color(self) -> str:
+        return holo.ALERT if self._key == MEETINGS else holo.HOLO
 
 
 class DockTooltip(QWidget):
@@ -420,6 +426,7 @@ class Dock(QWidget):
         self._live = LIVE_IDLE
         self._memory = 0
         self._memory_new = False
+        self._recording = False
         self._tip: DockTooltip | None = None
         self._tip_for: DockButton | None = None
         self._buttons: dict[str, DockButton] = {}
@@ -609,6 +616,15 @@ class Dock(QWidget):
         self._buttons[MEMORY].set_dot(self._memory > 0 or self._memory_new)
         self._update_name(MEMORY)
 
+    def set_recording(self, recording: bool) -> None:
+        """A meeting records: a coral dot on Meetings (still; never a ping)."""
+        self._recording = bool(recording)
+        self._buttons[MEETINGS].set_dot(self._recording, ping=False)
+        self._update_name(MEETINGS)
+
+    def recording(self) -> bool:
+        return self._recording
+
     def set_live_activity(self, activity: str) -> None:
         self._live = activity if activity in (LIVE_IDLE, LIVE_WORKING, LIVE_HOLD) else LIVE_IDLE
         self._buttons[LIVE].set_dot(self._live != LIVE_IDLE, ping=False)
@@ -644,6 +660,8 @@ class Dock(QWidget):
             return "Jarvis is working"
         if key == LIVE and self._live == LIVE_HOLD:
             return "Jarvis is sending"
+        if key == MEETINGS and self._recording:
+            return "recording"
         return ""
 
     def accessible_name(self, key: str) -> str:
@@ -771,7 +789,7 @@ class Dock(QWidget):
     # ---- shortcuts -----------------------------------------------------------------------------
 
     def install_shortcuts(self, widget: QWidget) -> list[QShortcut]:
-        """Window-wide shortcuts (Ctrl+1 .. Ctrl+6, Ctrl+,) on ``widget`` that open visible slots."""
+        """Window-wide shortcuts (Ctrl+1 .. Ctrl+7, Ctrl+,) on ``widget`` that open visible slots."""
         shortcuts = []
         for key in SLOTS:
             shortcut = QShortcut(QKeySequence(SHORTCUTS[key]), widget)
@@ -783,7 +801,7 @@ class Dock(QWidget):
     # ---- Qt ------------------------------------------------------------------------------------
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(self._width(), 2 * PAD_Y + 8 * BUTTON)
+        return QSize(self._width(), 2 * PAD_Y + 9 * BUTTON)
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().hideEvent(event)

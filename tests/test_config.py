@@ -373,6 +373,7 @@ class ConfigFileTests(ProjectTestCase):
             "research": {f.name for f in dataclasses.fields(ResearchConfig)},
             "productivity": {f.name for f in dataclasses.fields(ProductivityConfig)},
             "ui": {f.name for f in dataclasses.fields(config.UiConfig)},
+            "meetings": {f.name for f in dataclasses.fields(config.MeetingsConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():

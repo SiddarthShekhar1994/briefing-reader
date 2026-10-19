@@ -646,6 +646,8 @@ class AppHarness:
         if getattr(c, "productivity", None) is not None:
             c.productivity.shutdown()   # its timer stops and its thread ends (R24)
             c.productivity.join(5)
+        if getattr(c, "meetings", None) is not None:
+            c.meetings.shutdown()       # a recording stops and is saved; the pill goes
         if c._snapshots is not None:
             c._snapshots.shutdown()   # a real snapshotter (a harness's) closes its hidden view
         for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._send_hold_timer, c._undo_timer,

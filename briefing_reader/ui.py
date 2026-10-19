@@ -123,7 +123,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import (alive, approvals_view, brief_view, briefing_view, context_view, find_view, followups_view, live_view,
-               memory_view, offer_view, plan_view, settings_view, states_view, transcript_view, voice_fx)
+               meetings_view, memory_view, offer_view, plan_view, settings_view, states_view, transcript_view,
+               voice_fx)
 from . import dock as dock_mod
 from . import holo, home, hud
 from . import live as _live
@@ -982,17 +983,21 @@ SCREEN_MEMORY = hud.TAB_MEMORY
 SCREEN_APPROVALS = 4
 SCREEN_FOLLOWUPS = 5
 SCREEN_SETTINGS = 6
+SCREEN_MEETINGS = 7                 # [meetings]: the recorded meetings and the start card
 SCREENS = (SCREEN_HOME, SCREEN_BRIEFING, SCREEN_LIVE, SCREEN_MEMORY, SCREEN_APPROVALS, SCREEN_FOLLOWUPS,
-           SCREEN_SETTINGS)
+           SCREEN_SETTINGS, SCREEN_MEETINGS)
 # The motion prototype: the Dock shows each screen's name from this reading-view width (a window of about
 # 1,036 px: the main column keeps the 824 px of the smallest window), and folds to glyphs below it.
 DOCK_LABELS_FROM = holo.DOCK_WIDTH_LABELLED + 824
 FIND_ACTION_HINT = "ACTION"
 FIND_ASK_HINT = "ENTER"
+FIND_RECORD_KEY = "meetings:record"     # the Find list's "Record a meeting": opens the start card, never records
+FIND_RECORD_LABEL = "Record a meeting"
 _FIND_ICONS = {dock_mod.HOME: "home", **dock_mod.GLYPHS}
 _SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING, SCREEN_LIVE: dock_mod.LIVE,
                  SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
-                 SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS}
+                 SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS,
+                 SCREEN_MEETINGS: dock_mod.MEETINGS}
 _SLOT_SCREENS = {slot: screen for screen, slot in _SCREEN_SLOTS.items()}
 _LIST_HEIGHT_MAX = 100_000          # ... whose cards take the screen's whole height
 # Statuses the Briefing screen's transport already says (its quiet line leaves them out).
@@ -1117,6 +1122,8 @@ class ReadingView(QWidget):
     openDataFolder = Signal()    # Settings: Open the data folder
     homeLink = Signal(str)       # an offer tile's commit, a moment's See every step: the Transcript's own link
     offerNotNow = Signal(int)    # an offer tile's Not now (Home only): the offer id
+    recordMeeting = Signal()     # the Find list's "Record a meeting": the start card opens (it never records)
+    stopRecording = Signal()     # Stop on the header's REC or Home's (the pill and Meetings have their own)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1343,8 +1350,17 @@ class ReadingView(QWidget):
         self.dock = dock_mod.Dock(labelled=READING_SIZE.width() >= DOCK_LABELS_FROM)
         self.dock.set_slot_visible(dock_mod.MEMORY, False)       # the productivity bundle shows them
         self.dock.set_slot_visible(dock_mod.FOLLOWUPS, False)
+        self.dock.set_slot_visible(dock_mod.MEETINGS, False)     # [meetings] shows it
         self.dock.slotActivated.connect(self._on_dock_slot)
         self.header = home.HoloHeader()
+        # A meeting records: REC, the time and Stop in the header (every screen) and on Home (meetings_ui).
+        self._meetings_on = False
+        self._recording = ""
+        self.rec_badge = meetings_view.RecBadge()
+        self.rec_badge.stopClicked.connect(self.stopRecording)
+        self.header.add_rec_badge(self.rec_badge)
+        self.home_rec = meetings_view.RecBadge(home=True)
+        self.home_rec.stopClicked.connect(self.stopRecording)
         self._close_tip = self.header.close_button.toolTip()
         self.header.clockClicked.connect(self.open_day_view)
         self.header.findClicked.connect(self.open_find)
@@ -1420,6 +1436,7 @@ class ReadingView(QWidget):
         rest.setSpacing(6)
         rest.addWidget(self.stage, 1)
         rest.addWidget(self.echo, 0, Qt.AlignmentFlag.AlignHCenter)
+        rest.addWidget(self.home_rec, 0, Qt.AlignmentFlag.AlignHCenter)
         rest.addWidget(self.captions)
         self._chip_row = QWidget()
         chips = QHBoxLayout(self._chip_row)
@@ -1464,10 +1481,11 @@ class ReadingView(QWidget):
         self._followups_slot.setContentsMargins(0, 0, 0, 0)
         self.followups_stage = followups_view.FollowupsStage()
         self._followups_slot.addWidget(self.followups_stage, 1)
+        self.meetings_stage = meetings_view.MeetingsStage()      # [meetings] (meetings_ui fills it)
         self.home_screen = self._build_home()
         self._screens = _PageSwitch()
         for screen in (self.home_screen, self.briefing_screen, self.live_screen, self.memory_screen,
-                       self.approvals_screen, self.followups_screen, self.settings_page):
+                       self.approvals_screen, self.followups_screen, self.settings_page, self.meetings_stage):
             self._screens.addWidget(screen)                   # in SCREENS order
         self._main = QWidget()
         column = QVBoxLayout(self._main)
@@ -1556,6 +1574,9 @@ class ReadingView(QWidget):
                 else:
                     items.append(find_view.FindItem(find_view.KIND_ACTION, offer.link_id, PLAN_OFFER_LINK,
                                                     FIND_ACTION_HINT, "plan"))
+        if self._meetings_on and not self._recording:
+            items.append(find_view.FindItem(find_view.KIND_ACTION, FIND_RECORD_KEY, FIND_RECORD_LABEL,
+                                            FIND_ACTION_HINT, "record"))
         text = " ".join(query.split())
         found = find_view.filter_items(items, text)
         if found or not text:
@@ -1572,6 +1593,10 @@ class ReadingView(QWidget):
         if item.kind == find_view.KIND_SCREEN:
             self.dock.activate(item.key)
         elif item.kind == find_view.KIND_ACTION:
+            if item.key == FIND_RECORD_KEY:
+                if self._meetings_on and not self._recording:
+                    self.recordMeeting.emit()       # the start card opens; only its Start records
+                return
             if self._find_actions and any(offer.link_id == item.key for offer in self._offer_infos):
                 self.homeLink.emit(item.key)
         elif item.kind == find_view.KIND_ASK:
@@ -2367,6 +2392,33 @@ class ReadingView(QWidget):
 
     def memory_available(self) -> bool:
         return self.dock.is_slot_visible(dock_mod.MEMORY)
+
+    def set_meetings_available(self, available: bool) -> None:
+        """[meetings] is on: the Dock's Meetings slot, its screen and the Find list's "Record a meeting"."""
+        self._meetings_on = bool(available)
+        self._set_slot_available(dock_mod.MEETINGS, SCREEN_MEETINGS, available)
+
+    def meetings_available(self) -> bool:
+        return self.dock.is_slot_visible(dock_mod.MEETINGS)
+
+    def set_recording(self, elapsed: str = "") -> None:
+        """A meeting records (``elapsed`` "12:04"; "" when none): REC with the time and Stop in the header over
+        every screen, Home's own Recording with Stop, the recording look on the orbs and the Dock's coral dot on
+        Meetings. Nothing here starts or stops a recording."""
+        self._recording = elapsed or ""
+        recording = bool(elapsed)
+        for badge in (self.rec_badge, self.home_rec):
+            badge.set_elapsed(elapsed or "0:00")
+            badge.setVisible(recording)
+        self.hero.set_recording(recording)
+        self.briefing_orb.set_recording(recording)
+        self.dock.set_recording(recording)
+        self.meetings_stage.set_recording(recording)
+        self.header._fit_notes()
+
+    def recording_text(self) -> str:
+        """What the header's REC says ("REC 12:04"; "" while nothing records)."""
+        return self.rec_badge.text() if self._recording else ""
 
     def set_followups_available(self, available: bool) -> None:
         """FOLLOW-UPS is on (the bundle): the Dock's Follow-ups slot and its screen."""
@@ -4702,6 +4754,7 @@ class AppController(QObject):
         self.ask: Any = self._create_ask(ask_factory)   # ask_ui.AskController, or None while [ask] is off
         self._create_memory()                           # the productivity bundle's memory (needs Ask)
         self.productivity: Any = self._create_productivity()   # the bundle's day read and offers (needs Ask)
+        self.meetings: Any = self._create_meetings()    # [meetings]: the meeting recorder, or None while it is off
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -5158,6 +5211,8 @@ class AppController(QObject):
         self._start_tts()
         self._start_voice()
         self._create_tray()
+        if self.meetings is not None:
+            self.meetings.start()   # a recording a crash left is saved; retention; nothing records by itself
         self._start_calendar()
         self._update_service_chips()
         if self.ask is not None:
@@ -5347,12 +5402,21 @@ class AppController(QObject):
         """The tray tooltip (``tooltip``, else the state's: waiting, "AM briefing ready to view"
         while one is NEW, else the app's name) and the menu's Quit / Dismiss."""
         if self.tray is not None:
-            self.tray.setToolTip(tooltip if tooltip is not None else self._tray_tooltip())
+            recording = self._recording_tooltip()
+            self.tray.setToolTip(recording or (tooltip if tooltip is not None else self._tray_tooltip()))
         if self._tray_quit_action is not None:
             quits = self.state in (STATE_READING, STATE_WAITING)
             self._tray_quit_action.setText("Quit" if quits else "Dismiss")
 
+    def _recording_tooltip(self) -> str:
+        """"Jarvis: Recording 12:04" while a meeting records (it wins over every other tooltip), else ""."""
+        meetings = getattr(self, "meetings", None)
+        return meetings.tray_text() if meetings is not None else ""
+
     def _tray_tooltip(self) -> str:
+        recording = self._recording_tooltip()
+        if recording:
+            return recording
         if self.state == STATE_WAITING:
             return f"Jarvis: waiting for the {self.expected_run or 'next'} briefing"
         if self._new_key() is not None:
@@ -8475,6 +8539,19 @@ class AppController(QObject):
             self._flash_note(DISABLED_MESSAGE)
 
     # ---- offers (the productivity bundle) ----------------------------------------------------------
+
+    def _create_meetings(self) -> Any:
+        """[meetings] on: meetings_ui.MeetingsController (the Meetings screen, the start card, REC and the pill);
+        off: None, and no Meetings surface shows anywhere."""
+        if not getattr(getattr(self.config, "meetings", None), "enabled", False):
+            return None
+        from . import meetings_ui
+
+        reading = self.window.reading
+        controller = meetings_ui.MeetingsController(self.config, reading, now=self._now, on_tray=self._update_tray,
+                                                    show_screen=lambda: reading.set_tab(SCREEN_MEETINGS), parent=self)
+        controller.meeting_now = lambda: meetings_ui.meeting_now(self._agenda_events, self._now())
+        return controller
 
     def _create_productivity(self) -> Any:
         """Jarvis's own day read and his offers (productivity_ui.ProductivityController): only while
@@ -11900,6 +11977,8 @@ class AppController(QObject):
         logger.info("Shutting down")
         self.live.set_listener(None)   # the LIVE view's feed hears nothing more
         self._live_feed.stop()
+        if getattr(self, "meetings", None) is not None:
+            self.meetings.shutdown()   # a recording stops and is saved; the pill goes
         if self._on_shutdown is not None:
             self._on_shutdown()
         flushed = self._flush_send_hold()   # before the worker stops: the owner already saw "Sent"

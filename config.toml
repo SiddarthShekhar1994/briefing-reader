@@ -326,3 +326,17 @@ quiet_from = "22:00"          # no spoken offers from ...
 quiet_until = "08:00"         # ... until (offers still appear as text)
 max_runs_per_day = 20         # plans, briefs and drafts (each is also an Ask run), 1..60
 reserve_ask_runs = 3          # Ask runs kept free each hour for your own requests, 0..10
+
+[meetings]
+# Meeting recording. Jarvis records a meeting on this PC ONLY when you click Start on the start card,
+# after you tick "Everyone in this meeting has agreed to be recorded" (every meeting; never remembered).
+# While it records, a red REC with the time shows in the header on every screen and in a small pill
+# that stays on top, also when Jarvis is minimised. The microphone is kept as "You" and the call audio
+# from your speakers or headset as "Others", in %LOCALAPPDATA%\briefing-reader\meetings only (never
+# uploaded): the audio for 7 days, the transcript and summary for 30 days; Delete removes one at once.
+# Speech to text runs on this PC (faster-whisper, model medium.en, about 1.5 GB, downloaded only when you
+# click Download). Pick the microphone and the call-audio device in Settings > Meetings (otherwise the
+# Windows defaults are followed). California and some other places need everyone's consent: the tick is
+# your confirmation, not legal advice. Off here; turn it on for this PC with JARVIS_MEETINGS_ENABLED=true
+# in .env.
+enabled = false

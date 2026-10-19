@@ -124,8 +124,8 @@ class DockTests(unittest.TestCase):
         QTest.keyClick(self.dock.button(dock.SETTINGS), Qt.Key.Key_Down)
         self.assertTrue(self.dock.button(dock.SETTINGS).hasFocus())          # no wrap
         QTest.keyClick(self.dock.button(dock.SETTINGS), Qt.Key.Key_Up)
-        self.assertTrue(self.dock.button(dock.FOLLOWUPS).hasFocus())
-        QTest.keyClick(self.dock.button(dock.FOLLOWUPS), Qt.Key.Key_Home)
+        self.assertTrue(self.dock.button(dock.MEETINGS).hasFocus())
+        QTest.keyClick(self.dock.button(dock.MEETINGS), Qt.Key.Key_Home)
         self.assertTrue(self.dock.button(dock.HOME).hasFocus())
         self.assertEqual(self.activated, [])
         tab = [key for key in dock.SLOTS if self.dock.button(key).focusPolicy() & Qt.FocusPolicy.TabFocus]
@@ -228,6 +228,7 @@ class DockTests(unittest.TestCase):
     def test_hidden_slots_leave_the_rail_and_the_keyboard_order(self) -> None:
         self.dock.set_slot_visible(dock.MEMORY, False)
         self.dock.set_slot_visible(dock.FOLLOWUPS, False)
+        self.dock.set_slot_visible(dock.MEETINGS, False)
         self.dock.set_slot_visible(dock.HOME, False)                        # Home cannot be hidden
         self.assertEqual(self.dock.visible_slots(),
                          [dock.HOME, dock.BRIEFING, dock.APPROVALS, dock.LIVE, dock.SETTINGS])
