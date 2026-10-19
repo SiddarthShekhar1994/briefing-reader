@@ -69,8 +69,8 @@ MODE_PLAN, MODE_PREP, MODE_NUDGE = "plan", "prep", "nudge"
 # Meetings part 2: a recorded meeting's summary (ask.meeting_summary). Not a bundle run: it counts as an Ask run.
 MODE_MEETING = "meeting"
 ORIGIN_OFFER, ORIGIN_TYPED, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_BRIEF = "offer", "typed", "choice", "list", "brief"
-# A summary starts by itself once the transcript is ready (the owner's Record + consent started the chain), or
-# from the owner's click on Summarise (a meeting written down before summaries existed, or one to try again).
+# A summary runs only when the owner asked for it: ORIGIN_AUTO - his own "summarise it" tick on that meeting's
+# start card (unticked every time), once the transcript is ready; ORIGIN_SUMMARISE - his click on Summarise.
 ORIGIN_AUTO, ORIGIN_SUMMARISE = "auto", "summarise"
 MODE_KINDS = {MODE_PLAN: frozenset({CALENDAR}), MODE_PREP: frozenset({REPLY}), MODE_NUDGE: frozenset({REPLY}),
               MODE_MEETING: frozenset({EMAIL})}

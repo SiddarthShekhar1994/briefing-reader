@@ -7,9 +7,11 @@ carries a slow flowing dash: the next meeting today, the oldest thread waiting o
 bundle), the nearest deadline and - amber, only when a decision waits - "N waiting for your OK". They show only
 data the app already loaded (memory only: never logged, never spoken); a source that is empty has no tile. A tile
 never acts: a click (or Enter / Space) only asks for its screen (``tileClicked(target)``: the Day view,
-Follow-ups or Approvals). They stay while the owner is on Home and idle, and fade out after ``HOLD_S`` or when he
-types, asks or leaves Home (``dismiss()``). Nothing is laid over the Ask bar or the caption (they are outside the
-stage) or over an offer / error side tile, the Transcript button or the orb: the tiles take the free places
+Follow-ups or Approvals). With meeting recording on (``ContextFacts.record``) the next-meeting tile has a Record
+button: it only asks for that meeting's start card (TARGET_RECORD) - unticked; only the card's Start records.
+They stay while the owner is on Home and idle, and fade out after ``HOLD_S`` or when he types, asks or leaves
+Home (``dismiss()``). Nothing is laid over the Ask bar or the caption (they are outside the stage) or over an
+offer / error side tile, the Transcript button or the orb: the tiles take the free places
 around the orb (two columns, a tile above and below its centre line) and skip what does not fit.
 
 Data
@@ -62,6 +64,9 @@ KIND_APPROVALS = "approvals"
 TARGET_DAY = "day"                 # the Day view (TODAY / DEADLINES)
 TARGET_FOLLOWUPS = "followups"
 TARGET_APPROVALS = "approvals"
+TARGET_RECORD = "record"           # the next-meeting tile's Record: that meeting's start card (it never records)
+RECORD_TEXT = "Record"
+RECORD_D = 28                      # the round Record button's diameter (the kicker's row has room for it)
 MEETING_KICKER = "NEXT MEETING"
 THREAD_KICKER = "WAITING ON YOU"
 DEADLINE_KICKER = "NEAREST DEADLINE"
@@ -101,10 +106,12 @@ class ContextFacts:
     deadline_at: datetime | None = field(default=None, repr=False)
     approvals: int = 0
     replies: int = 0
+    record: bool = False                 # meeting recording is on (and nothing records): the meeting tile's Record
 
     def __repr__(self) -> str:
         return (f"ContextFacts(meeting={self.meeting is not None}, thread={self.thread is not None}, "
-                f"deadline={self.deadline is not None}, approvals={self.approvals}, replies={self.replies})")
+                f"deadline={self.deadline is not None}, approvals={self.approvals}, replies={self.replies}, "
+                f"record={self.record})")
 
 
 @dataclass(frozen=True)
@@ -115,10 +122,12 @@ class TileInfo:
     meta: str = field(repr=False)
     target: str
     amber: bool = False
+    record: bool = False                 # a Record button (the next-meeting tile; it only opens the start card)
 
     def accessible_name(self) -> str:
         where = {TARGET_DAY: "the Day view", TARGET_FOLLOWUPS: "Follow-ups", TARGET_APPROVALS: "Approvals"}
-        return f"{self.kicker.capitalize()}: {self.title}, {self.meta}. Opens {where.get(self.target, 'it')}"
+        text = f"{self.kicker.capitalize()}: {self.title}, {self.meta}. Opens {where.get(self.target, 'it')}"
+        return text + (". Its Record button opens the start card" if self.record else "")
 
 
 def _one_line(text: str, limit: int = 80) -> str:
@@ -150,7 +159,7 @@ def context_tiles(facts: ContextFacts) -> list[TileInfo]:
     if facts.meeting is not None and _one_line(facts.meeting[1]):
         start, title = facts.meeting
         tiles.append(TileInfo(KIND_MEETING, MEETING_KICKER, _one_line(title), f"Today at {_clock(start)}",
-                              TARGET_DAY))
+                              TARGET_DAY, record=bool(facts.record)))
     if facts.thread is not None and (_one_line(facts.thread[0]) or _one_line(facts.thread[1])):
         who, subject = facts.thread
         name = _one_line(who, 40) or "Someone"
@@ -201,7 +210,8 @@ def spoken_context(facts: ContextFacts, address: str = "") -> str:
 # --------------------------------------------------------------------------
 
 class ContextTile(QAbstractButton):
-    """One context tile: never acts, a click only asks for its screen (``clicked``)."""
+    """One context tile: never acts, a click only asks for its screen (``clicked``); the next-meeting tile's Record
+    (``record_button``) only asks for that meeting's start card (``recordClicked``)."""
 
     def __init__(self, info: TileInfo, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -214,11 +224,36 @@ class ContextTile(QAbstractButton):
         self._lift = 0.0
         self._hover = False
         self.setFixedHeight(TILE_H)
+        self.record_button: holo.HoloButton | None = None
+        if info.record:               # a round Record button in the kicker's row: the title and time keep their room
+            self.record_button = holo.HoloButton(RECORD_TEXT, holo.ICON, icon="record", diameter=RECORD_D,
+                                                 parent=self)
+            self.record_button.setAccessibleName(f"Record {info.title}: opens the start card")
+            self.record_button.setToolTip("Record this meeting - opens the start card")
+            self._place_record()
+
+    def _place_record(self) -> None:
+        button = self.record_button
+        if button is None:
+            return
+        size = button.sizeHint()
+        _pad_v, pad_h = holo.TILE_PAD
+        button.setGeometry(max(0, self.width() - pad_h + 4 - size.width() + holo.HoloButton.MARGIN), 4, size.width(),
+                           size.height())
+
+    def _record_room(self) -> float:
+        return float(RECORD_D + 8) if self.record_button is not None else 0.0
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._place_record()
 
     def set_fade(self, fade: float, lift: float = 0.0) -> None:
         fade = max(0.0, min(1.0, fade))
         if (fade, lift) != (self._fade, self._lift):
             self._fade, self._lift = fade, lift
+            if self.record_button is not None:
+                self.record_button.setVisible(fade >= 0.99 and not lift)   # it leaves with the fading tile
             self.update()
 
     def fade(self) -> float:
@@ -251,20 +286,21 @@ class ContextTile(QAbstractButton):
         pad_v, pad_h = holo.TILE_PAD
         width = rect.width() - 2 * pad_h
         x, y = rect.left() + pad_h, rect.top() + pad_v
+        room = self._record_room()             # the round Record button sits in the kicker's row, top right
         painter.save()
         try:
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            for role, text, color, gap in (
-                    ("label", holo.role_text("label", info.kicker), style.kicker, 6),
-                    ("tile_title", info.title, style.title, 4),
-                    ("body_sm", info.meta, holo.AMBER_TX2 if info.amber else holo.INK_3, 0)):
+            for role, text, color, gap, cut in (
+                    ("label", holo.role_text("label", info.kicker), style.kicker, 6, room),
+                    ("tile_title", info.title, style.title, 4, 0.0),
+                    ("body_sm", info.meta, holo.AMBER_TX2 if info.amber else holo.INK_3, 0, 0.0)):
                 font = holo.font(role)
                 painter.setFont(font)
                 painter.setPen(QColor(color))
                 line = holo.line_height(role)
-                elided = QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideRight, width)
-                painter.drawText(QRectF(x, y, width, line), int(Qt.AlignmentFlag.AlignLeft
-                                                                 | Qt.AlignmentFlag.AlignVCenter), elided)
+                elided = QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideRight, max(0.0, width - cut))
+                painter.drawText(QRectF(x, y, width - cut, line), int(Qt.AlignmentFlag.AlignLeft
+                                                                       | Qt.AlignmentFlag.AlignVCenter), elided)
                 y += line + gap
         finally:
             painter.restore()
@@ -406,6 +442,8 @@ class ContextTiles:
         for index, info in enumerate(list(infos)[:MAX_TILES]):
             tile = ContextTile(info, self._stage)
             tile.clicked.connect(lambda _checked=False, target=info.target: self._clicked(target))
+            if tile.record_button is not None:
+                tile.record_button.clicked.connect(lambda _checked=False: self._clicked(TARGET_RECORD))
             tile.hide()
             self._entries.append(_Entry(info, tile, now + delay + index * stagger))
         self._shown_at = now

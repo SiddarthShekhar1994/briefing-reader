@@ -7,14 +7,21 @@ the card builds that request only while its consent tick is ticked.
 
 Public API
 ==========
-``ConsentTick``: the unticked box "Everyone in this meeting has agreed to be recorded" (the NEW RECIPIENT tick's
-    look). ``StartCard``: ``open_card(info, mic, call, problem="")`` always opens UNTICKED (never remembered); Start
-    stays disabled until the tick; ``startClicked(StartRequest)``, ``cancelled``; ``device_texts()``.
+``ConsentTick(text)``: an unticked box (the NEW RECIPIENT tick's look): "Everyone in this meeting has agreed to be
+    recorded", and the card's own "summarise it" box. ``StartCard``: ``open_card(info, mic, call, problem="",
+    choices=(), summaries=False)`` always opens UNTICKED (never remembered); Start stays disabled until the consent
+    tick, which counts for CONSENT_FRESH_S only (then it unticks: tick again) and goes whenever the card closes -
+    Cancel, Start, another screen, the window hidden or minimised. ``choices``: the meetings on now (the first is
+    shown); "Another meeting" switches to one of the others or to an unscheduled call (unticking). With
+    ``summaries`` (Ask Jarvis on) a second unticked box asks for the summary: only then does the transcript go to
+    the owner's Claude Code by itself once it is written down. ``startClicked(StartRequest)`` (``consent_at`` = when
+    the box was ticked), ``cancelled``; ``device_texts()``, ``meeting_choices()``, ``choose_meeting(index)``.
 ``RecBadge(home=False)``: the alert dot, "REC 12:04" and Stop (the header on every screen; Home's larger one).
-    ``set_elapsed(text)``; ``stopClicked``.
+    ``set_elapsed(text)``, ``set_warning(text)`` (coral: "No call audio" while it can't be recorded);
+    ``stopClicked``.
 ``RecPill``: Jarvis's own always-on-top pill "Recording 12:04" with Stop; a tool window that never takes the focus
-    (the toast's flags) and stays while Jarvis is minimised or hidden. ``show_recording(text)``, ``set_elapsed``,
-    ``dismiss()``, ``text()``; ``stopClicked``.
+    (the toast's flags) and stays while Jarvis is minimised or hidden. ``show_recording(text, warning="")``,
+    ``set_elapsed``, ``warning()``, ``dismiss()``, ``text()``; ``stopClicked``.
 ``MeetingRowInfo`` / ``MeetingsStage``: the Meetings screen - Record a meeting, what is missing (exact add-ons and
     the model, with Download), the start card, then the meetings (date, title, length, status: Recording /
     Writing it down 40% / Transcript ready / Writing the summary / Summary ready / Failed + Retry) with Delete
@@ -38,7 +45,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QHBoxLayout, QMenu, QScrollArea, QSizePolicy, QStackedWidget,
                                QVBoxLayout, QWidget)
@@ -63,8 +70,19 @@ SUMMARY_OFF_NOTE = "A summary needs Ask Jarvis (your Claude Code) to be on"
 DOWNLOAD_BUTTON = "Download"
 CANCEL_DOWNLOAD = "Stop the download"
 CARD_KICKER = "RECORD A MEETING"
-CARD_NOTE = ("Jarvis records only after you click Start. The audio stays on this PC: kept 7 days, the transcript "
-             "30 days.")
+CARD_NOTE = ("Jarvis records only after you click Start. The audio stays on this PC, never uploaded: kept 7 days, "
+             "the transcript 30 days.")
+SUMMARY_TICK_TEXT = ("When it is written down, summarise it with my Claude Code - the transcript and the guests' "
+                     "names go to Claude (Anthropic)")
+SUMMARY_NOTE = ("A summary is written only when you ask: this box, or Summarise on the meeting later. Without it "
+                "the transcript stays on this PC.")
+CONSENT_FRESH_S = 5 * 60          # the consent tick counts this long; then it unticks (tick it again)
+CONSENT_STALE_TEXT = "The tick is more than 5 minutes old - tick it again for this meeting."
+CHANGE_MEETING_TEXT = "Another meeting"
+UNSCHEDULED_CHOICE = "An unscheduled call (not on the calendar)"
+CALL_MISSING_TEXT = "No call audio"
+CALL_MISSING_ROW = ("No call audio: the call audio device could not be opened, so Others are not recorded - check "
+                    "Settings > Meetings")
 DELETE_ASK = "Delete the audio, transcript and summary of this meeting? This cannot be undone."
 EMPTY_TEXT = "No meetings recorded yet. Recording starts only when you click Start on the card."
 MISSING_KICKER = "MISSING"
@@ -99,14 +117,14 @@ def recording_text(elapsed: str) -> str:
 # --------------------------------------------------------------------------
 
 class ConsentTick(QAbstractButton):
-    """The consent box: unticked until the owner ticks it (a click, or Space with the focus on it)."""
+    """A tick box on the start card: unticked until the owner ticks it (a click, or Space with the focus on it)."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, text: str = mt.CONSENT_TEXT, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setCheckable(True)
         self.setChecked(False)
-        self.setText(mt.CONSENT_TEXT)
-        self.setAccessibleName(mt.CONSENT_TEXT)
+        self.setText(text)
+        self.setAccessibleName(text)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -163,40 +181,69 @@ class StartCard(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._info = mt.MeetingInfo()
+        self._choices: list[mt.MeetingInfo] = []
         self._devices = ("", "")
         self._problem = ""
+        self._summaries = False
+        self._ticked_at: datetime | None = None
+        self._summary_at: datetime | None = None
+        self._closing = False
+        self._watched: QObject | None = None
         self._now = datetime.now
+        self.menu: QMenu | None = None
         self.kicker = body_label(holo.role_text("label", CARD_KICKER), "label", holo.AMBER, wrap=False)
         self.title_label = body_label("", "tile_title", holo.INK_1, name="meetingCardTitle")
         self.meta_label = body_label("", "body_sm", holo.INK_3)
+        self.change_button = holo.HoloButton(CHANGE_MEETING_TEXT, holo.LINK_CYAN, size=holo.SIZE_SM)
+        self.change_button.setAccessibleName("Record another meeting instead")
+        self.change_button.clicked.connect(self._menu)
         self.mic_label = body_label("", "body_sm", holo.INK_2, name="meetingCardMic")
         self.call_label = body_label("", "body_sm", holo.INK_2, name="meetingCardCall")
         self.tick = ConsentTick()
-        self.tick.toggled.connect(self._sync)
+        self.tick.toggled.connect(self._on_tick)
+        self.summary_tick = ConsentTick(SUMMARY_TICK_TEXT)
+        self.summary_tick.toggled.connect(self._on_summary_tick)
         self.note_label = body_label(CARD_NOTE, "body_sm", holo.INK_3)
+        self.summary_note = body_label(SUMMARY_NOTE, "body_sm", holo.INK_3, name="meetingCardSummaryNote")
+        self.stale_label = body_label(CONSENT_STALE_TEXT, "body_sm", holo.AMBER_TX, name="meetingCardStale")
+        self.stale_label.hide()
         self.problem_label = body_label("", "body_sm", holo.ALERT_TX, name="meetingCardProblem")
         self.problem_label.hide()
         self.start_button = holo.HoloButton(START_TEXT, holo.AMBER_COMMIT)
         self.start_button.clicked.connect(self._on_start)
         self.cancel_button = holo.HoloButton(CANCEL_TEXT, holo.GHOST)
         self.cancel_button.clicked.connect(self._on_cancel)
+        self._fresh = QTimer(self)
+        self._fresh.setSingleShot(True)
+        self._fresh.setInterval(CONSENT_FRESH_S * 1000)
+        self._fresh.timeout.connect(self._expire_tick)
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(holo.BUTTON_GAP)
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.cancel_button)
         buttons.addStretch(1)
+        meta_row = QHBoxLayout()
+        meta_row.setContentsMargins(0, 0, 0, 0)
+        meta_row.setSpacing(8)
+        meta_row.addWidget(self.meta_label, 1)
+        meta_row.addWidget(self.change_button, 0, Qt.AlignmentFlag.AlignTop)
         column = QVBoxLayout(self)
         column.setContentsMargins(20, 16, 20, 16)
         column.setSpacing(6)
-        for widget in (self.kicker, self.title_label, self.meta_label):
-            column.addWidget(widget)
+        column.addWidget(self.kicker)
+        column.addWidget(self.title_label)
+        column.addLayout(meta_row)
         column.addSpacing(6)
         column.addWidget(self.mic_label)
         column.addWidget(self.call_label)
         column.addSpacing(8)
         column.addWidget(self.tick)
         column.addWidget(self.note_label)
+        column.addWidget(self.stale_label)
+        column.addSpacing(4)
+        column.addWidget(self.summary_tick)
+        column.addWidget(self.summary_note)
         column.addWidget(self.problem_label)
         column.addSpacing(6)
         column.addLayout(buttons)
@@ -208,13 +255,29 @@ class StartCard(QWidget):
         self._now = now
 
     def open_card(self, info: mt.MeetingInfo | None, mic: tuple[str, bool], call: tuple[str, bool], *,
-                  problem: str = "") -> None:
-        """Show the card for ``info`` (None: an unscheduled call) with the two devices it will use. The consent
-        tick is ALWAYS unticked here: it is never remembered from an earlier meeting."""
-        self._info = info or mt.MeetingInfo()
+                  problem: str = "", choices: Sequence[mt.MeetingInfo] = (), summaries: bool = False) -> None:
+        """Show the card for ``info`` (None: an unscheduled call) with the two devices it will use; ``choices``
+        the other meetings on now it may switch to; ``summaries``: the "summarise it" box shows (Ask Jarvis is
+        on). Both ticks are ALWAYS unticked here: never remembered from an earlier meeting."""
         self._devices = (mic[0], call[0])
         self._problem = problem
+        self._summaries = bool(summaries)
+        self._choices = [item for item in choices if isinstance(item, mt.MeetingInfo)]
+        self.mic_label.setText(f"You - microphone: {device_line(*mic)}")
+        self.call_label.setText(f"Others - call audio: {device_line(*call)}")
+        self.problem_label.setText(problem)
+        self.problem_label.setVisible(bool(problem))
+        self.summary_tick.setVisible(self._summaries)
+        self.summary_note.setVisible(self._summaries)
+        self._show_info(info or mt.MeetingInfo())
+        self.show()
+
+    def _show_info(self, info: mt.MeetingInfo) -> None:
+        """The card names ``info``; both ticks go back to unticked (a tick is for one meeting only)."""
+        self._info = info
         self.tick.setChecked(False)
+        self.summary_tick.setChecked(False)
+        self.stale_label.hide()
         self.title_label.setText(self._info.shown_title())
         meta = []
         if self._info.start is not None:
@@ -224,12 +287,8 @@ class StartCard(QWidget):
         if self._info.guests:
             meta.append(f"with {mt.merge_names(self._info.guests)}")
         self.meta_label.setText(" \u00b7 ".join(meta) if meta else "Not on your calendar; stop it yourself.")
-        self.mic_label.setText(f"You - microphone: {device_line(*mic)}")
-        self.call_label.setText(f"Others - call audio: {device_line(*call)}")
-        self.problem_label.setText(problem)
-        self.problem_label.setVisible(bool(problem))
+        self.change_button.setVisible(bool(self.meeting_choices()))
         self._sync()
-        self.show()
 
     def info(self) -> mt.MeetingInfo:
         return self._info
@@ -237,9 +296,77 @@ class StartCard(QWidget):
     def device_texts(self) -> tuple[str, str]:
         return self.mic_label.text(), self.call_label.text()
 
+    def meeting_choices(self) -> list[tuple[str, mt.MeetingInfo]]:
+        """What "Another meeting" offers: the other meetings on now, then an unscheduled call (when the card
+        shows a calendar meeting)."""
+        current = self._info
+        items: list[tuple[str, mt.MeetingInfo]] = []
+        for item in self._choices:
+            if (item.title, item.start, item.event_id) == (current.title, current.start, current.event_id):
+                continue
+            when = (f"{_clock(item.start)} to {_clock(item.end)}" if item.start is not None and item.end is not None
+                    else _clock(item.start))
+            items.append((f"{item.shown_title()} - {when}" if when else item.shown_title(), item))
+        if current.scheduled or current.title:
+            items.append((UNSCHEDULED_CHOICE, mt.MeetingInfo()))
+        return items
+
+    def choose_meeting(self, index: int) -> bool:
+        """Switch the card to the ``index``-th of ``meeting_choices()`` (unticked again)."""
+        items = self.meeting_choices()
+        if not 0 <= index < len(items):
+            return False
+        self._show_info(items[index][1])
+        return True
+
+    def _menu(self) -> None:
+        menu = QMenu(self)
+        for index, (text, _info) in enumerate(self.meeting_choices()):
+            action = menu.addAction(text)
+            action.triggered.connect(lambda _checked=False, i=index: self.choose_meeting(i))
+        self.menu = menu
+        menu.popup(self.change_button.mapToGlobal(self.change_button.rect().bottomLeft()))
+
     def close_card(self) -> None:
-        self.tick.setChecked(False)
-        self.hide()
+        """The card goes and both ticks with it (Cancel, Start, another screen, the window hidden)."""
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            self.tick.setChecked(False)
+            self.summary_tick.setChecked(False)
+            self.stale_label.hide()
+            self.hide()
+        finally:
+            self._closing = False
+
+    def _on_tick(self, on: bool) -> None:
+        if on:
+            self._ticked_at = self._now()
+            self.stale_label.hide()
+            self._fresh.start()
+        else:
+            self._ticked_at = None
+            self._fresh.stop()
+        self._sync()
+
+    def _on_summary_tick(self, on: bool) -> None:
+        self._summary_at = self._now() if on else None
+
+    def _expire_tick(self) -> None:
+        """The consent tick is CONSENT_FRESH_S old: it unticks (tick it again for the call starting now)."""
+        if self.tick.isChecked():
+            self.tick.setChecked(False)
+            self.stale_label.setVisible(self.isVisible())
+
+    def _fresh_tick(self) -> bool:
+        ticked = self._ticked_at
+        if ticked is None:
+            return False
+        now = self._now()
+        if (now.tzinfo is None) != (ticked.tzinfo is None):
+            now, ticked = now.replace(tzinfo=None), ticked.replace(tzinfo=None)
+        return 0 <= (now - ticked).total_seconds() <= CONSENT_FRESH_S
 
     def _sync(self, *_args: Any) -> None:
         ready = self.tick.isChecked() and not self._problem
@@ -249,13 +376,44 @@ class StartCard(QWidget):
     def _on_start(self) -> None:
         if not self.isVisible() or not self.tick.isChecked() or self._problem:
             return
-        request = mt.StartRequest(self._info, True, self._now(), self._devices[0], self._devices[1])
-        self.close_card()                     # the tick goes back to unticked: never remembered
+        if not self._fresh_tick():
+            self._expire_tick()
+            self.stale_label.show()
+            return
+        assert self._ticked_at is not None
+        summarise = self._summaries and self.summary_tick.isChecked()
+        request = mt.StartRequest(self._info, True, self._ticked_at, self._devices[0], self._devices[1],
+                                  summarise=summarise, summarise_at=self._summary_at if summarise else None)
+        self.close_card()                     # the ticks go back to unticked: never remembered
         self.startClicked.emit(request)
 
     def _on_cancel(self) -> None:
         self.close_card()
         self.cancelled.emit()
+
+    # ---- the card never outlives the screen or the window it was ticked on ------------------------------
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        window = self.window()
+        if window is not self and window is not self._watched:
+            if self._watched is not None:
+                self._watched.removeEventFilter(self)
+            window.installEventFilter(self)
+            self._watched = window
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().hideEvent(event)
+        self.close_card()                     # another screen, the summary page, the window hidden or minimised
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        if watched is self._watched and not self.isHidden():
+            kind = event.type()
+            minimized = (kind == QEvent.Type.WindowStateChange and isinstance(watched, QWidget)
+                         and watched.isMinimized())
+            if minimized or kind == QEvent.Type.Hide:
+                self.close_card()
+        return False
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
@@ -328,6 +486,8 @@ class RecBadge(QWidget):
     def __init__(self, *, home: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.mark = _RecMark("Recording" if home else "REC", "readout_lg" if home else "readout")
+        self.warn_label = body_label("", "body_sm", holo.ALERT_TX, wrap=False, name="recWarning")
+        self.warn_label.hide()
         self.stop_button = holo.HoloButton(STOP_TEXT, holo.DANGER_GHOST, size=holo.SIZE_SM)
         self.stop_button.setAccessibleName("Stop recording")
         self.stop_button.clicked.connect(self.stopClicked)
@@ -335,13 +495,31 @@ class RecBadge(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
         row.addWidget(self.mark, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.warn_label, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.stop_button, 0, Qt.AlignmentFlag.AlignVCenter)
         self.setAccessibleName("Recording")
+        self._elapsed = "0:00"
         self.hide()
 
     def set_elapsed(self, text: str) -> None:
+        self._elapsed = text
         self.mark.set_elapsed(text)
-        self.setAccessibleDescription(f"Jarvis is recording this meeting: {text}")
+        self._describe()
+
+    def set_warning(self, text: str) -> None:
+        """Coral words beside REC while something is wrong with the recording ("No call audio"); "" for none."""
+        if text != self.warn_label.text():
+            self.warn_label.setText(text)
+            self.warn_label.setVisible(bool(text))
+            self._describe()
+
+    def warning(self) -> str:
+        return self.warn_label.text()
+
+    def _describe(self) -> None:
+        warning = self.warn_label.text()
+        self.setAccessibleDescription(f"Jarvis is recording this meeting: {self._elapsed}"
+                                      + (f". {warning}" if warning else ""))
 
     def text(self) -> str:
         return self.mark.text()
@@ -361,6 +539,7 @@ class RecPill(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setFixedSize(PILL_SIZE)
         self._elapsed = "0:00"
+        self._warning = ""
         self.stop_button = holo.HoloButton(STOP_TEXT, holo.DANGER_GHOST, size=holo.SIZE_SM, parent=self)
         self.stop_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)       # a click never moves the focus here
         self.stop_button.setAccessibleName("Stop recording")
@@ -371,9 +550,23 @@ class RecPill(QWidget):
     def text(self) -> str:
         return recording_text(self._elapsed)
 
-    def show_recording(self, elapsed: str) -> None:
+    def warning(self) -> str:
+        return self._warning
+
+    def set_warning(self, warning: str) -> None:
+        """A second, coral line under "Recording 12:04" ("No call audio"); "" for none (the pill is taller with it)."""
+        if warning == self._warning:
+            return
+        self._warning = warning
+        self.setFixedSize(PILL_SIZE if not warning else QSize(PILL_SIZE.width(), PILL_SIZE.height() + 16))
+        self._place_children()
+        self.setAccessibleDescription(self.text() + (f". {warning}" if warning else ""))
+        self.update()
+
+    def show_recording(self, elapsed: str, warning: str = "") -> None:
         """Show (or keep showing) the pill, top centre of the primary screen's work area, never the focus."""
         self.set_elapsed(elapsed)
+        self.set_warning(warning)
         self.place()
         handle = self.windowHandle()
         if handle is not None:
@@ -384,7 +577,7 @@ class RecPill(QWidget):
     def set_elapsed(self, elapsed: str) -> None:
         if elapsed != self._elapsed:
             self._elapsed = elapsed
-            self.setAccessibleDescription(self.text())
+            self.setAccessibleDescription(self.text() + (f". {self._warning}" if self._warning else ""))
             self.update()
 
     def place(self) -> None:
@@ -416,8 +609,17 @@ class RecPill(QWidget):
             painter.setPen(QColor(holo.INK_1))
             left = 34.0
             right = self.stop_button.geometry().left() + holo.HoloButton.MARGIN - 6
-            painter.drawText(QRectF(left, 0, right - left, self.height()),
-                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.text())
+            if not self._warning:
+                painter.drawText(QRectF(left, 0, right - left, self.height()),
+                                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.text())
+            else:
+                half = self.height() / 2
+                painter.drawText(QRectF(left, 4, right - left, half - 4),
+                                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom), self.text())
+                painter.setFont(holo.font("body_sm"))
+                painter.setPen(QColor(holo.ALERT_TX))
+                painter.drawText(QRectF(left, half, right - left, half - 4),
+                                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop), self._warning)
         finally:
             painter.end()
 
@@ -440,22 +642,51 @@ class MeetingRowInfo:
     summary_failed: bool = False
 
 
+def device_note(changes: Sequence[Any]) -> str:
+    """What the meeting record's device changes mean, in words: "the call audio was not recorded (its device could
+    not be opened)", "... was recorded only once its device could be opened", "the microphone switched device during
+    the meeting", "the call audio stopped for a moment" ("" for none)."""
+    notes: list[str] = []
+    for channel in ("microphone", "call audio"):
+        kinds = [str(item.get("change") or "") for item in changes
+                 if isinstance(item, dict) and item.get("channel") == channel]
+        if not kinds:
+            continue
+        if "unavailable" in kinds:
+            later = kinds[kinds.index("unavailable") + 1:]
+            notes.append(f"the {channel} was recorded only once its device could be opened"
+                         if any(kind in ("opened", "switched", "reopened") for kind in later) else
+                         f"the {channel} was not recorded (its device could not be opened)")
+            kinds = later[1:] if later and later[0] == "opened" else later
+        if "switched" in kinds:
+            notes.append(f"the {channel} switched device during the meeting")
+        elif "reopened" in kinds:
+            notes.append(f"the {channel} stopped for a moment")
+    return " \u00b7 ".join(notes)
+
+
 def row_info(record: mt.MeetingRecord, *, elapsed: str = "", summaries: bool = True,
-             waiting: bool = False) -> MeetingRowInfo:
+             waiting: bool = False, call_missing: bool = False) -> MeetingRowInfo:
     """A meeting record as the list shows it (``elapsed`` for the one recording now; ``summaries``: Ask Jarvis is on,
-    so a transcript can be summarised; ``waiting``: its summary waits for Jarvis to finish another request)."""
+    so a transcript can be summarised; ``waiting``: its summary waits for Jarvis to finish another request;
+    ``call_missing``: it records, but the call audio can't be recorded right now)."""
     started = record.started_at
     when = f"{started:%a %d %b} {_clock(started)}" if started is not None else ""
     failed = record.status == mt.STATUS_TRANSCRIBED and bool(record.summary_error)
     tone = {mt.STATUS_RECORDING: TONE_RECORDING, mt.STATUS_TRANSCRIBING: TONE_WORKING,
             mt.STATUS_TRANSCRIBED: TONE_READY, mt.STATUS_SUMMARISING: TONE_WORKING,
-            mt.STATUS_SUMMARY_READY: TONE_READY, mt.STATUS_FAILED: TONE_FAILED}.get(record.status, TONE_QUIET)
+            mt.STATUS_SUMMARY_READY: TONE_READY, mt.STATUS_FAILED: TONE_FAILED,
+            mt.STATUS_DELETING: TONE_FAILED}.get(record.status, TONE_QUIET)
     if failed:
         tone = TONE_FAILED
     length = elapsed if record.status == mt.STATUS_RECORDING else mt.length_text(record.duration_s)
     note = mt.STOP_WORDS.get(record.stop_reason, "") if record.status != mt.STATUS_RECORDING else ""
-    if record.device_changes:
-        note = (note + " \u00b7 " if note else "") + "the call audio switched device during the meeting"
+    if record.status == mt.STATUS_RECORDING and call_missing:
+        note = CALL_MISSING_ROW
+    elif record.device_changes:
+        words = device_note(record.device_changes)
+        if words:
+            note = (note + " \u00b7 " if note else "") + words
     status_text = record.status_text()
     if record.status == mt.STATUS_TRANSCRIBED and waiting:
         status_text = "Summary waits for Jarvis to finish another request"
@@ -483,7 +714,8 @@ class MeetingRow(QWidget):
         self.length_label = body_label(info.length, "readout", holo.INK_3, wrap=False)
         self.status_label = body_label(info.status_text, "body_sm", _TONE_COLORS.get(info.tone, holo.INK_3),
                                        wrap=False, name="meetingStatus")
-        self.note_label = body_label(info.note, "body_sm", holo.INK_4)
+        self.note_label = body_label(info.note, "body_sm", holo.ALERT_TX if info.note == CALL_MISSING_ROW
+                                     else holo.INK_4, name="meetingNote")
         self.note_label.setVisible(bool(info.note))
         self.retry_button = holo.HoloButton(RETRY_TEXT, holo.GHOST, size=holo.SIZE_SM)
         self.retry_button.clicked.connect(lambda: self.retryClicked.emit(self.info.id))
@@ -544,6 +776,16 @@ class MeetingRow(QWidget):
 
     def asking(self) -> bool:
         return not self._ask_box.isHidden()
+
+    def set_call_missing(self, missing: bool) -> None:
+        """While it records: the coral note that the call audio is not recorded right now (each second)."""
+        if self.info.status != mt.STATUS_RECORDING:
+            return
+        text = CALL_MISSING_ROW if missing else ("" if self.info.note == CALL_MISSING_ROW else self.info.note)
+        if text != self.note_label.text():
+            self.note_label.setText(text)
+            hud.set_label_color(self.note_label, holo.ALERT_TX if missing else holo.INK_4)
+            self.note_label.setVisible(bool(text))
 
     def _ask(self) -> None:
         self._ask_box.show()

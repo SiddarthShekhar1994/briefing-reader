@@ -9,6 +9,11 @@ Devices (owner decision 4b): the call audio follows the Windows default output d
 default input, unless the owner picked one in Settings > Meetings. When a followed default changes mid-meeting
 (a headset unplugged), or a stream stops working, the recorder switches to the (new) default and notes it in
 the meeting record (``device_changes``: when and which channel; the device names stay in that file only).
+PyAudioWPatch (PortAudio) lists the devices and the defaults only when it starts (``SNAPSHOT_DEVICES``): the app
+makes a fresh one for each start card, Settings > Meetings and each start, and while recording a stream that
+stopped (its device went away: ``is_active()`` False, or a microphone that delivers nothing for
+``MIC_STALE_S``) makes the recorder close both streams, start the library again (``reset()``) and open both
+channels on the (new) defaults. soundcard asks Windows each time, so its defaults are followed live.
 
 Auto-stop (owner decision 4): the meeting's end time + ``END_GRACE_S`` (15 min), ``SILENCE_S`` (10 min) of
 silence on both channels, or the ``MAX_S`` (3 h) cap. The owner's Stop and closing Jarvis stop and save too.
@@ -27,9 +32,11 @@ has ``read_available() -> bytes`` (16 kHz mono int16, never blocking) and ``clos
 ``WavWriter(path)``: ``write(bytes)``, ``frames``, ``seconds``, ``sync()``, ``close()``.
 ``repair_wav(path)``, ``wav_seconds(path)``.
 ``Recorder(backend, store, record, mic_pick="", call_pick="", clock=, wall=, on_stop=, on_change=)``:
-``start()`` (opens both streams and files; raises ``RecorderError`` when the microphone cannot be opened),
-``run_thread()``, ``tick()`` (one step: read, write, follow the defaults, check the stop rules), ``stop(reason)``,
-``elapsed()``, ``is_recording()``, ``stop_reason``, ``device_names()``.
+``start()`` (opens both streams and files; raises ``RecorderError`` when the microphone cannot be opened, and
+any failure closes every stream and file it opened before it is raised), ``run_thread()``, ``tick()`` (one
+step: read, write, follow the defaults, check the stop rules), ``stop(reason)``, ``elapsed()``,
+``is_recording()``, ``stop_reason``, ``device_names()``, ``call_audio_missing()`` (the call audio is not being
+recorded right now: its device could not be opened).
 """
 
 from __future__ import annotations
@@ -64,6 +71,8 @@ SILENCE_PEAK = 600                # a chunk whose loudest sample stays under thi
 LAG_FILL_S = 1.0                  # a channel this far behind the clock is filled with silence ...
 LAG_KEEP_S = 0.2                  # ... up to this much behind (a late burst then still fits)
 AHEAD_DROP_S = 1.0                # a burst more than this ahead of the clock is cut
+MIC_STALE_S = 3.0                 # a PortAudio microphone that delivers nothing this long has stopped
+RESET_GAP_S = 5.0                 # the device library is started again at most this often
 PYAUDIO_MODULE = "pyaudiowpatch"
 SOUNDCARD_MODULE = "soundcard"
 ADDON_AUDIO = "PyAudioWPatch (or soundcard)"
@@ -273,12 +282,20 @@ def load_backend(prefer: str | None = None) -> tuple[AudioBackend | None, str]:
 
 
 class _QueueStream:
-    """A stream fed by the device library's callback or reader thread; ``read_available`` never blocks."""
+    """A stream fed by the device library's callback or reader thread; ``read_available`` never blocks. It
+    raises once the stream stopped: ``failed`` (the reader thread's error), ``alive()`` False (PortAudio's
+    stream ended: its device went away) or nothing at all for ``stale_s`` seconds (a microphone always
+    delivers; WASAPI loopback is quiet while nothing plays, so the call audio has no ``stale_s``)."""
 
-    def __init__(self, rate: int, channels: int, fmt: str) -> None:
+    def __init__(self, rate: int, channels: int, fmt: str, *, alive: Callable[[], bool] | None = None,
+                 stale_s: float = 0.0, clock: Callable[[], float] = time.monotonic) -> None:
         self.rate, self.channels, self.fmt = rate, channels, fmt
         self._queue: queue.Queue[bytes] = queue.Queue(maxsize=600)
         self.failed = False
+        self._alive = alive
+        self._stale_s = stale_s
+        self._clock = clock
+        self._last = clock()
 
     def push(self, data: bytes) -> None:
         try:
@@ -292,12 +309,26 @@ class _QueueStream:
     def read_available(self) -> bytes:
         if self.failed:
             raise OSError("the device stopped")
+        if self._alive is not None:
+            try:
+                alive = bool(self._alive())
+            except Exception:  # noqa: BLE001 - a stream PortAudio no longer knows
+                alive = False
+            if not alive:
+                self.failed = True
+                raise OSError("the stream stopped")
         chunks = []
         while True:
             try:
                 chunks.append(self._queue.get_nowait())
             except queue.Empty:
                 break
+        now = self._clock()
+        if chunks:
+            self._last = now
+        elif self._stale_s and now - self._last > self._stale_s:
+            self.failed = True
+            raise OSError("the device delivers nothing")
         return to_mono16k(b"".join(chunks), self.rate, self.channels, fmt=self.fmt) if chunks else b""
 
     def close(self) -> None:
@@ -306,11 +337,29 @@ class _QueueStream:
 
 class PyAudioWPatchBackend:
     """PyAudioWPatch (a PyAudio fork with WASAPI loopback): ``get_host_api_info_by_type(paWASAPI)`` for the
-    defaults, ``get_loopback_device_info_generator()`` for the speakers' loopback twins, callback streams."""
+    defaults, ``get_loopback_device_info_generator()`` for the speakers' loopback twins, callback streams.
 
-    def __init__(self, module: Any) -> None:
+    PortAudio lists the devices and the defaults once, when it starts (``SNAPSHOT_DEVICES``): ``reset()`` starts
+    it again (every stream of it closed first) and ``close()`` ends it. A stream reports that it stopped
+    (``is_active()`` False; a microphone that delivers nothing for MIC_STALE_S)."""
+
+    SNAPSHOT_DEVICES = True
+
+    def __init__(self, module: Any, *, clock: Callable[[], float] = time.monotonic) -> None:
         self.pa = module
+        self._clock = clock
         self._audio = module.PyAudio()
+
+    def reset(self) -> None:
+        """PortAudio started again: a fresh list of the devices and the Windows defaults."""
+        self.close()
+        self._audio = self.pa.PyAudio()
+
+    def close(self) -> None:
+        try:
+            self._audio.terminate()
+        except Exception:  # noqa: BLE001 - ending a library that already went
+            pass
 
     def _wasapi(self) -> dict:
         return self._audio.get_host_api_info_by_type(self.pa.paWASAPI)
@@ -346,10 +395,12 @@ class PyAudioWPatchBackend:
     def outputs(self) -> list[DeviceInfo]:
         return [DeviceInfo(str(i["index"]), str(i["name"])) for i in self._devices(inputs=False)]
 
-    def _open(self, info: dict) -> AudioStream:
+    def _open(self, info: dict, *, mic: bool) -> AudioStream:
         channels = max(1, min(2, int(info.get("maxInputChannels") or 1)))
         rate = int(info.get("defaultSampleRate") or 48_000)
-        stream = _QueueStream(rate, channels, "int16")
+        holder: list[Any] = []
+        stream = _QueueStream(rate, channels, "int16", alive=lambda: bool(holder) and bool(holder[0].is_active()),
+                              stale_s=MIC_STALE_S if mic else 0.0, clock=self._clock)
 
         def callback(data: bytes, _frames: int, _time: Any, _status: int) -> tuple[None, int]:
             stream.push(data)
@@ -358,6 +409,7 @@ class PyAudioWPatchBackend:
         handle = self._audio.open(format=self.pa.paInt16, channels=channels, rate=rate, input=True,
                                   frames_per_buffer=rate // 10, input_device_index=int(info["index"]),
                                   stream_callback=callback)
+        holder.append(handle)
         handle.start_stream()
 
         def close() -> None:
@@ -374,7 +426,7 @@ class PyAudioWPatchBackend:
         info = self._info(int(device.id))
         if info is None:
             raise OSError("no such microphone")
-        return self._open(info)
+        return self._open(info, mic=True)
 
     def open_loopback(self, device: DeviceInfo) -> AudioStream:
         speakers = self._info(int(device.id))
@@ -387,7 +439,7 @@ class PyAudioWPatchBackend:
                     break
             else:
                 raise OSError("no loopback for that output device")
-        return self._open(speakers)
+        return self._open(speakers, mic=False)
 
 
 class SoundcardBackend:
@@ -482,6 +534,7 @@ class Recorder:
         self._last_sound = 0.0
         self._last_sync = 0.0
         self._last_check = 0.0
+        self._last_reset = -RESET_GAP_S
         self._recording = False
         self.stop_reason = ""
         self._picks = {mt.MIC: mic_pick, mt.LOOPBACK: call_pick}
@@ -491,30 +544,51 @@ class Recorder:
 
     def start(self) -> None:
         """Open both devices and both files. A microphone that cannot be opened stops the start
-        (``RecorderError``); call audio that cannot be opened is recorded as silence and tried again."""
+        (``RecorderError``); call audio that cannot be opened is recorded as silence and tried again. Whatever
+        fails (the record can't be saved, say), every stream and file opened so far is closed before the error
+        goes up: no device stays open behind a start that did not happen."""
         meeting_id = self.record.id
-        for kind in mt.CHANNELS:
-            self._channels[kind] = _Channel(kind, WavWriter(self.store.audio_path(meeting_id, kind)))
-            self._channels[kind].picked = self._picks[kind]
         try:
-            self._open(self._channels[mt.MIC], first=True)
-        except Exception as exc:
-            for channel in self._channels.values():
-                channel.writer.close()
-            raise RecorderError("mic_unavailable", "the microphone could not be opened") from exc
-        try:
-            self._open(self._channels[mt.LOOPBACK], first=True)
-        except Exception as exc:  # noqa: BLE001 - the call audio is tried again every few seconds
-            logger.warning("Meeting %s: the call audio could not be opened yet (%s)", meeting_id, type(exc).__name__)
-            self._note_change(mt.LOOPBACK, "unavailable")
-        now = self._clock()
-        self._started = self._last_sound = self._last_sync = self._last_check = now
-        self._recording = True
-        self.record.devices = self.device_record()
-        self.store.save(self.record)
+            for kind in mt.CHANNELS:
+                self._channels[kind] = _Channel(kind, WavWriter(self.store.audio_path(meeting_id, kind)))
+                self._channels[kind].picked = self._picks[kind]
+            try:
+                self._open(self._channels[mt.MIC], first=True)
+            except Exception as exc:
+                raise RecorderError("mic_unavailable", "the microphone could not be opened") from exc
+            try:
+                self._open(self._channels[mt.LOOPBACK], first=True)
+            except Exception as exc:  # noqa: BLE001 - the call audio is tried again every few seconds
+                logger.warning("Meeting %s: the call audio could not be opened yet (%s)", meeting_id,
+                               type(exc).__name__)
+                self._note_change(mt.LOOPBACK, "unavailable")
+            now = self._clock()
+            self._started = self._last_sound = self._last_sync = self._last_check = now
+            self._recording = True
+            self.record.devices = self.device_record()
+            self.store.save(self.record)
+        except BaseException:
+            self._teardown()
+            raise
         logger.info("Meeting %s: recording (microphone follows the default: %s, call audio follows the default: "
                     "%s)", meeting_id, self._channels[mt.MIC].follows_default,
                     self._channels[mt.LOOPBACK].follows_default)
+
+    def _teardown(self) -> None:
+        """A start that failed: every stream and file it opened closed (nothing records, nothing stays open)."""
+        self._recording = False
+        self._started = 0.0
+        for channel in self._channels.values():
+            if channel.stream is not None:
+                try:
+                    channel.stream.close()
+                except Exception:  # noqa: BLE001 - a device that went away
+                    pass
+                channel.stream = None
+            try:
+                channel.writer.close()
+            except Exception:  # noqa: BLE001 - closing goes on
+                pass
 
     def _choose(self, channel: _Channel) -> tuple[DeviceInfo | None, bool]:
         if channel.kind == mt.MIC:
@@ -534,16 +608,58 @@ class Recorder:
                 channel.stream.close()
             except Exception:  # noqa: BLE001 - the old device may be gone
                 pass
+        previous = channel.device
         channel.stream, channel.device, channel.follows_default = stream, device, follows
         if not first:
-            self._note_change(channel.kind, "switched")
+            # "opened": a channel that could not be opened at the start; "reopened": the same device again after
+            # its stream stopped; "switched": another device (a new default, the picked one back).
+            if previous is None:
+                what = "opened"
+            else:
+                what = "reopened" if (previous.id, previous.name) == (device.id, device.name) else "switched"
+            self._note_change(channel.kind, what)
+
+    def _snapshot(self) -> bool:
+        """The device library lists the devices only when it starts (PortAudio)."""
+        return bool(getattr(self.backend, "SNAPSHOT_DEVICES", False)) and callable(getattr(self.backend, "reset",
+                                                                                           None))
+
+    def _reset_devices(self) -> None:
+        """A stream stopped with a library that lists the devices once (PyAudioWPatch): both streams closed, the
+        library started again (a fresh look at the devices and the Windows defaults) and both channels opened on
+        the (new) defaults - each change noted. At most every RESET_GAP_S; meanwhile the device check retries."""
+        now = self._clock()
+        if now - self._last_reset < RESET_GAP_S:
+            return
+        self._last_reset = now
+        for channel in self._channels.values():
+            if channel.stream is not None:
+                try:
+                    channel.stream.close()
+                except Exception:  # noqa: BLE001 - the device may be gone
+                    pass
+                channel.stream = None
+        try:
+            self.backend.reset()
+        except Exception as exc:  # noqa: BLE001 - tried again at the next stop of a stream
+            logger.warning("Meeting %s: the audio devices could not be looked at again (%s)", self.record.id,
+                           type(exc).__name__)
+            return
+        logger.info("Meeting %s: the audio devices were looked at again after a stream stopped", self.record.id)
+        for channel in self._channels.values():
+            self._retry(channel)
+
+    def call_audio_missing(self) -> bool:
+        """Recording, but the call audio ("Others") is not: its device could not be opened (yet)."""
+        channel = self._channels.get(mt.LOOPBACK)
+        return self._recording and channel is not None and channel.stream is None
 
     def _note_change(self, kind: str, what: str) -> None:
         channel = self._channels.get(kind)
         device = channel.device if channel is not None else None
         entry = {"at": self._wall().isoformat(timespec="seconds"),
                  "channel": "microphone" if kind == mt.MIC else "call audio", "change": what,
-                 "to": device.name if device is not None and what == "switched" else ""}
+                 "to": device.name if device is not None and what in ("switched", "opened") else ""}
         self.record.device_changes.append(entry)
         logger.info("Meeting %s: %s %s", self.record.id, entry["channel"], what)
 
@@ -594,6 +710,7 @@ class Recorder:
             elapsed = now - self._started
             target = int(elapsed * SAMPLE_RATE)
             loud = False
+            stopped = False
             for channel in self._channels.values():
                 data = b""
                 if channel.stream is not None:
@@ -601,8 +718,13 @@ class Recorder:
                         data = channel.stream.read_available()
                     except Exception as exc:  # noqa: BLE001 - a device that went away
                         logger.info("Meeting %s: a stream stopped (%s)", self.record.id, type(exc).__name__)
+                        try:
+                            channel.stream.close()
+                        except Exception:  # noqa: BLE001 - the device is gone
+                            pass
                         channel.stream = None
-                        if channel.kind == mt.MIC:
+                        stopped = True
+                        if channel.kind == mt.MIC and not self._snapshot():
                             self._retry(channel)
                 if data:
                     room = target + int(AHEAD_DROP_S * SAMPLE_RATE) - channel.writer.frames
@@ -616,6 +738,8 @@ class Recorder:
                 behind = target - channel.writer.frames
                 if behind > LAG_FILL_S * SAMPLE_RATE:
                     channel.writer.silence(behind - int(LAG_KEEP_S * SAMPLE_RATE))
+            if stopped and self._snapshot():
+                self._reset_devices()
             if loud:
                 self._last_sound = now
             if now - self._last_check >= DEVICE_CHECK_S:

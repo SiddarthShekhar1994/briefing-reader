@@ -1,6 +1,7 @@
 """Meetings part 2 in the app (offscreen; a fake Claude Code run, fake senders and calendars - nothing real is
-recorded, sent, added or asked): the summary runs by itself once a transcript is ready and on Summarise for a meeting
-written down before summaries existed, through the owner's own Claude Code as a planner mode run in the background;
+recorded, sent, added or asked): the summary runs only when the owner asked - his "summarise it" tick on the start
+card (then once the transcript is ready) or his click on Summarise - through his own Claude Code as a planner mode
+run in the background; without either the transcript never leaves the PC;
 the transcript goes in marked as data; a bad answer is refused whole (Retry); the summary view shows decisions, your
 action items first, open questions, the follow-up drafts as the very approval cards (the NEW RECIPIENT tick on the
 card, the sending account's own address refused, Sent with the hidden hold and Undo), Add block cards only on a
@@ -13,11 +14,12 @@ import threading
 import time
 import unittest
 from datetime import datetime, timedelta
+from unittest import mock
 
 from PySide6.QtWidgets import QApplication
 
 from briefing_reader import hud, live, meeting_summary_view as sv, meetings as mt, meetings_ui, ui
-from briefing_reader.actions import CALENDAR, EMAIL
+from briefing_reader.actions import CALENDAR, EMAIL, SOURCE_ASK, STATUS_CREATED, STATUS_SENT
 from briefing_reader.ask import meeting_summary as ms
 from briefing_reader.ask.modes import MODE_MEETING
 from briefing_reader.gcal import EventBrief, Guest
@@ -75,17 +77,18 @@ class SummaryAppCase(unittest.TestCase):
             self.m.speech_missing = lambda: ""
         return app
 
-    def meeting(self, *, status: str = mt.STATUS_TRANSCRIBED, invite=(("Ana Lima", ANA), ("Ben Ode", BEN))) -> str:
+    def meeting(self, *, status: str = mt.STATUS_TRANSCRIBED, invite=(("Ana Lima", ANA), ("Ben Ode", BEN)),
+                asked: bool = False) -> str:
         info = mt.MeetingInfo(TITLE, at(11), at(11, 45), "evt7", tuple(name for name, _ in invite), alias="work",
                               calendar_id="primary", invite=tuple(invite))
-        record = self.m.store.create(mt.StartRequest(info, True, at(11)))
+        record = self.m.store.create(mt.StartRequest(info, True, at(11), summarise=asked))
         self.m.store.update(record.id, status=status, duration_s=2712.0, ended_at=at(11, 46))
         mt._write_json(self.m.store.transcript_path(record.id), {"version": 1, "turns": TURNS})
         self.m.refresh()
         return record.id
 
     def finish_writing(self, meeting_id: str) -> None:
-        """The writing down ends as the worker reports it (the summary then starts by itself)."""
+        """The writing down ends as the worker reports it (the summary then starts only if the owner asked)."""
         self.m.store.update(meeting_id, status=mt.STATUS_TRANSCRIBING)
         self.m._finished.emit(meeting_id, "")
         settle()
@@ -112,9 +115,66 @@ class SummaryAppCase(unittest.TestCase):
 
 
 class AutoSummaryTests(SummaryAppCase):
-    def test_a_ready_transcript_is_summarised_by_itself_in_the_background(self) -> None:
+    def test_without_the_owners_ask_the_transcript_never_leaves_the_pc(self) -> None:
         app = self.make(plan_stream(SUMMARY))
-        meeting_id = self.meeting(status=mt.STATUS_RECORDED)
+        meeting_id = self.meeting(status=mt.STATUS_RECORDED)              # recorded without "summarise it"
+        self.finish_writing(meeting_id)
+        self.wait_done()
+        self.assertEqual(self.record(meeting_id).status, mt.STATUS_TRANSCRIBED)
+        self.assertEqual(app.factory.runner.started, [])                   # no Claude Code run, nothing sent
+        row = self.m.stage.row(meeting_id)
+        self.assertEqual(row.info.status_text, "Transcript ready")
+        self.assertTrue(row.summarise_button.isVisibleTo(row))             # only his click starts it
+        self.m.start()                                                     # a restart starts nothing either
+        settle()
+        self.assertEqual(app.factory.runner.started, [])
+
+    def test_the_start_card_asks_plainly_and_keeps_the_answer(self) -> None:
+        self.make()
+        card = self.m.stage.card
+        self.m.open_start_card()
+        settle()
+        self.assertTrue(card.summary_tick.isVisibleTo(card))
+        self.assertFalse(card.summary_tick.isChecked())                     # unticked every time
+        self.assertIn("go to Claude (Anthropic)", card.summary_tick.text())
+        self.assertIn("never uploaded", card.note_label.text())
+        self.assertIn("transcript stays on this PC", card.summary_note.text())
+        card.tick.click()
+        card.summary_tick.click()
+        card.start_button.click()
+        settle()
+        record = self.m.recorder.record
+        self.assertTrue(self.record(record.id).summary_asked)
+        self.m.stop()
+        settle()
+        self.m.open_start_card()
+        settle()
+        self.assertFalse(card.summary_tick.isChecked())                     # never remembered
+        settings = self.reading.settings_page
+        self.reading.set_tab(ui.SCREEN_SETTINGS)
+        settings.select_group("meetings")
+        settle()
+        rows = dict(settings.rows())
+        self.assertIn("Only when you ask", rows["Summary"])
+        self.assertIn("Anthropic", rows["Summary"])
+
+    def test_without_ask_jarvis_the_card_has_no_summary_box(self) -> None:
+        self.make(ask=False)
+        self.m.open_start_card()
+        settle()
+        card = self.m.stage.card
+        self.assertFalse(card.summary_tick.isVisibleTo(card))
+        card.tick.click()
+        card.start_button.click()
+        settle()
+        self.assertFalse(self.record(self.m.recorder.record.id).summary_asked)
+        self.m.stop()
+        settle()
+
+    def test_a_ready_transcript_is_summarised_by_itself_when_the_owner_asked(self) -> None:
+        gate = threading.Event()                                           # the run waits until it is looked at
+        app = self.make(GatedProcess(plan_stream(SUMMARY), gate))
+        meeting_id = self.meeting(status=mt.STATUS_RECORDED, asked=True)
         self.reading.set_tab(ui.SCREEN_MEMORY)
         settle()
         entries_before = len(self.reading.conversation.entry_widgets())
@@ -122,6 +182,7 @@ class AutoSummaryTests(SummaryAppCase):
             self.finish_writing(meeting_id)
             self.assertEqual(self.record(meeting_id).status, mt.STATUS_SUMMARISING)
             self.assertEqual(self.m.stage.row(meeting_id).info.status_text, "Writing the summary")
+            gate.set()
             self.wait_done()
         record = self.record(meeting_id)
         self.assertEqual((record.status, record.summary_error), (mt.STATUS_SUMMARY_READY, ""))
@@ -162,7 +223,7 @@ class AutoSummaryTests(SummaryAppCase):
     def test_a_bad_answer_is_refused_whole_and_can_be_tried_again(self) -> None:
         bad = dict(SUMMARY, action_items=[{"who": "you", "what": "x", "due": "next week"}])
         self.make(plan_stream(bad), plan_stream(SUMMARY))
-        meeting_id = self.meeting(status=mt.STATUS_RECORDED)
+        meeting_id = self.meeting(status=mt.STATUS_RECORDED, asked=True)
         self.finish_writing(meeting_id)
         self.wait_done()
         record = self.record(meeting_id)
@@ -396,6 +457,111 @@ class SummaryViewTests(SummaryAppCase):
         self.m.stage.summary.back_button.click()
         settle()
         self.assertEqual(self.m.stage.showing_summary(), "")
+
+
+class SummaryEdgeTests(SummaryAppCase):
+    def test_a_run_that_stops_before_naming_its_meeting_still_ends_that_summary(self) -> None:
+        self.make(plan_stream(SUMMARY), plan_stream(SUMMARY))
+        first, second = self.meeting(), self.meeting()
+        with mock.patch.object(ms, "check_summary", side_effect=RuntimeError("unexpected")):
+            self.assertTrue(self.m.summarise(first, "summarise"))
+            self.wait_done()
+        self.assertEqual(self.m.summary_running(), "")                    # not stuck "Writing the summary"
+        record = self.record(first)
+        self.assertEqual((record.status, record.summary_error), (mt.STATUS_TRANSCRIBED, "error"))
+        row = self.m.stage.row(first)
+        self.assertEqual(row.summarise_button.text(), meetings_ui.meetings_view.RETRY_TEXT)
+        self.assertTrue(row.summarise_button.isVisibleTo(row))
+        self.assertTrue(self.m.summarise(second, "summarise"))            # the next one starts, not queued
+        self.assertEqual(self.record(second).status, mt.STATUS_SUMMARISING)
+        self.wait_done()
+        self.assertEqual(self.record(second).status, mt.STATUS_SUMMARY_READY)
+
+    def test_the_owners_esc_on_an_ask_is_never_taken_for_a_stuck_summary(self) -> None:
+        self.make(plan_stream(SUMMARY))
+        meeting_id = self.meeting()
+        with mock.patch.object(ms, "check_summary", side_effect=RuntimeError("unexpected")):
+            self.m.summarise(meeting_id, "summarise")
+            self.wait_done()
+        entries = len(self.reading.conversation.entry_widgets())
+        self.c._on_ask_cancelled(0)
+        self.assertGreater(len(self.reading.conversation.entry_widgets()), entries)   # his cancel is answered
+        self.assertEqual(self.record(meeting_id).summary_error, "error")
+
+    def test_next_weeks_recap_with_the_same_subject_is_a_new_card(self) -> None:
+        self.make(plan_stream(SUMMARY), plan_stream(SUMMARY))
+        last_week, this_week = self.meeting(), self.meeting()
+        self.m.summarise(last_week, "summarise")
+        self.wait_done()
+        old, = self.meeting_cards()
+        self.c._store.set(old.id, STATUS_SENT)                             # last week's was sent
+        self.m.summarise(this_week, "summarise")
+        self.wait_done()
+        new = [card for card in self.meeting_cards() if card.id != old.id]
+        self.assertEqual(len(new), 1)                                      # its own card, not last week's id
+        self.assertEqual((new[0].mail_recipients(), new[0].title), (old.mail_recipients(), old.title))
+        self.assertFalse(self.c._store.is_decided(new[0].id))
+        card = self.reading.action_card(new[0].id)
+        self.assertNotEqual(card.status(), hud.CARD_SENT)                  # never shown as Sent
+        self.c._meeting_cards.pop(this_week)                               # made again from summary.json ...
+        self.assertEqual(self.c._meeting_card_ids(this_week, self.m.summary_of(this_week),
+                                                  self.record(this_week)), [new[0].id])   # the same id again
+
+    def test_a_meeting_retention_removes_takes_its_waiting_drafts_and_notes(self) -> None:
+        self.make(plan_stream(SUMMARY))
+        meeting_id = self.meeting()
+        self.m.summarise(meeting_id, "summarise")
+        self.wait_done()
+        self.assertEqual(len(self.meeting_cards()), 1)
+        self.assertEqual(len(self.c._memory_suggestions), 2)
+        self.m._now = lambda: at(11) + timedelta(days=31)                 # Jarvis ran on past the 30 days
+        self.m.cleanup()
+        settle()
+        self.assertFalse(self.m.store.folder(meeting_id).exists())
+        self.assertEqual(self.meeting_cards(), [])                         # its draft can't be sent any more
+        self.assertEqual(self.c._memory_suggestions, [])
+
+
+class BlockStateTests(SummaryAppCase):
+    def summarised(self) -> tuple[str, sv.SummaryView]:
+        self.make(plan_stream(SUMMARY))
+        meeting_id = self.meeting()
+        self.m.summarise(meeting_id, "summarise")
+        self.wait_done()
+        return meeting_id, self.open(meeting_id)
+
+    def test_a_dismissed_or_added_block_says_so_without_a_button(self) -> None:
+        meeting_id, view = self.summarised()
+        view.action_rows()[0].add_button.click()
+        settle()
+        block, = self.meeting_cards(CALENDAR)
+        self.c.deny_action(block.id)                                       # Dismiss on the block card
+        settle()
+        self.c._render_meeting_summary(meeting_id)
+        row = self.m.stage.summary.action_rows()[0]
+        self.assertEqual(row.action.block, sv.BLOCK_DISMISSED)
+        self.assertEqual(row.state_label.text(), sv.BLOCK_DISMISSED_TEXT)
+        self.assertFalse(row.add_button.isVisibleTo(row))
+        self.c._store.set(block.id, STATUS_CREATED)                        # ... or its own Add
+        self.c._render_meeting_summary(meeting_id)
+        row = self.m.stage.summary.action_rows()[0]
+        self.assertEqual((row.action.block, row.state_label.text()), (sv.BLOCK_ADDED, sv.BLOCK_ADDED_TEXT))
+        self.assertFalse(row.add_button.isVisibleTo(row))
+
+    def test_a_block_card_no_longer_listed_can_be_proposed_again(self) -> None:
+        meeting_id, view = self.summarised()
+        view.action_rows()[0].add_button.click()
+        settle()
+        block, = self.meeting_cards(CALENDAR)
+        self.c._set_source(SOURCE_ASK, [a for a in self.c._source_lists[SOURCE_ASK] if a.id != block.id])
+        self.c._refresh_actions_ui()                                       # pushed out by later Ask cards
+        self.c._render_meeting_summary(meeting_id)
+        row = self.m.stage.summary.action_rows()[0]
+        self.assertTrue(row.add_button.isVisibleTo(row))
+        row.add_button.click()                                             # the button works: a new proposal
+        settle()
+        self.assertEqual(len(self.meeting_cards(CALENDAR)), 1)
+        self.assertEqual(self.m.stage.summary.action_rows()[0].action.block, sv.BLOCK_PROPOSED)
 
 
 def guest_meeting(start: datetime) -> EventBrief:

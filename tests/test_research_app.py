@@ -485,9 +485,13 @@ class PagePictureTests(ResearchAppCase):
         self.assertIs(self.c._snapshots, snaps)
         self.assertIs(self.c.ask.planner.page_snapshots, snaps)
         self.submit()
-        task_id = self.c.ask.task_id
         self.finish()
         self.drained()
+        # The WEB task's id from LIVE (ask.task_id is 0 again once the run ended, which a fast run can do while
+        # submit() settles: reading it there raced the run).
+        web, = self.tasks(live.TASK_WEB)
+        task_id = web.id
+        self.assertTrue(task_id)
         # The page read, then (after the check) the cited source no page read pictured.
         self.assertEqual(snaps.requests, [(VISIT_URL, task_id), (HOURS_URL, task_id)])
         self.assertEqual(snaps.ended, [task_id])

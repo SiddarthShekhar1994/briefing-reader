@@ -2405,9 +2405,9 @@ class HeaderBar(QWidget):
         self._sync_chips_box()
 
     def _sync_chips_box(self) -> None:
-        """No chips shown (the LIVE pop-out's header): their row and its margins take no room, as
-        _required_width counts them."""
-        shown = bool(self._shown_chips())
+        """No chips shown (the LIVE pop-out's header), or a meeting's REC shows (it wins the room over the service
+        chips): their row and its margins take no room, as _required_width counts them."""
+        shown = bool(self._shown_chips()) and not self._rec_width()
         if self._chips_box.isHidden() == shown:
             self._chips_box.setVisible(shown)
 
@@ -2498,10 +2498,36 @@ class HeaderBar(QWidget):
 
     def _required_width(self, level: int) -> int:
         tight = level >= 3
-        chips = [chip.width_for(tight) for chip in self._shown_chips()]
+        chips = [chip.width_for(tight) for chip in self._shown_chips()] if not self._rec_width() else []
         chips_width = sum(chips) + 4 * max(0, len(chips) - 1) + (sum(self._chip_margins(level)) if chips else 0)
         return (self._brand.width_for(level == 0) + chips_width + self._clock.width_for(level <= 1)
-                + self._CLOSE_GAPS[level] + self._speaker_width() + self._buttons_width() + self._RIGHT_MARGIN)
+                + self._CLOSE_GAPS[level] + self._speaker_width() + self._buttons_width() + self._RIGHT_MARGIN
+                + self._rec_width())
+
+    _REC_GAP = 10            # between a meeting's REC (when shown) and the clock
+
+    def add_rec_badge(self, badge: QWidget) -> None:
+        """A meeting's REC (the dot, the time and Stop; meetings_view.RecBadge) left of the clock: it takes room
+        only while it shows (the bar compacts its other parts for it)."""
+        self._rec = badge
+        badge.setContentsMargins(0, 0, self._REC_GAP, 0)
+        layout = self.layout()
+        layout.insertWidget(layout.indexOf(self._clock), badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        badge.installEventFilter(self)
+        self.updateGeometry()
+        self._fit(force=True)
+
+    def _rec_width(self) -> int:
+        rec = getattr(self, "_rec", None)
+        return rec.sizeHint().width() if rec is not None and not rec.isHidden() else 0
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        if watched is getattr(self, "_rec", None) and event.type() in (QEvent.Type.Show, QEvent.Type.Hide,
+                                                                      QEvent.Type.LayoutRequest):
+            self._sync_chips_box()
+            self.updateGeometry()
+            self._fit(force=True)
+        return super().eventFilter(watched, event)
 
     def _speaker_width(self) -> int:
         """The speaker button and its gap to minimize while it is shown, else 0."""
@@ -3186,12 +3212,15 @@ URGENCY_COLORS = {URGENCY_HIGH: RED, URGENCY_MEDIUM: AMBER, URGENCY_LOW: DEADLIN
 
 @dataclass(frozen=True)
 class AgendaRowInfo:
-    """One agenda row: the time ("9:00 AM", "09:00", "ALL DAY"), title, meta and an AGENDA_* state."""
+    """One agenda row: the time ("9:00 AM", "09:00", "ALL DAY"), title, meta and an AGENDA_* state. ``record``: an
+    opaque key when the row has a Record button (meeting recording on: a meeting on now or later today) - its click
+    only opens that meeting's start card."""
 
     time: str
     title: str
     meta: str = ""
     state: str = AGENDA_UPCOMING
+    record: str = ""
 
 
 @dataclass(frozen=True)
@@ -3231,6 +3260,9 @@ class AgendaRow(QWidget):
     TIME_WIDTH = 44
     _PAD = 8
     _GAP = 10
+    RECORD_TEXT = "Record"
+
+    recordClicked = Signal(str)          # the row's Record: its key (the start card opens; it never records)
 
     def __init__(self, info: AgendaRowInfo, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3243,7 +3275,42 @@ class AgendaRow(QWidget):
         self._meta_font = mono_font(11)
         self._info = info
         self._two_line_times = False
+        self._record_button: QWidget | None = None
         self.set_info(info)
+
+    def record_button(self) -> QWidget | None:
+        """The Record button while the row has one (else None)."""
+        button = self._record_button
+        return button if button is not None and not button.isHidden() else None
+
+    def _sync_record(self) -> None:
+        key = self._info.record
+        if key and self._record_button is None:
+            from . import holo   # the hologram's buttons (holo never imports hud)
+
+            button = holo.HoloButton(self.RECORD_TEXT, holo.GHOST, size=holo.SIZE_SM, parent=self)
+            button.clicked.connect(lambda: self.recordClicked.emit(self._info.record))
+            self._record_button = button
+        if self._record_button is not None:
+            self._record_button.setVisible(bool(key))
+            self._record_button.setAccessibleName(f"Record {self._info.title}: opens the start card" if key else "")
+            self._place_record()
+
+    def _place_record(self) -> None:
+        button = self._record_button
+        if button is None:
+            return
+        size = button.sizeHint()
+        button.setGeometry(max(0, self.width() - size.width()), (self.height() - size.height()) // 2, size.width(),
+                           size.height())
+
+    def _record_room(self) -> int:
+        button = self.record_button()
+        return button.sizeHint().width() + 4 if button is not None else 0
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._place_record()
 
     def info(self) -> AgendaRowInfo:
         return self._info
@@ -3263,6 +3330,7 @@ class AgendaRow(QWidget):
         self.setAccessibleName(f"{text}, {info.state}")
         # An event's title is anyone's text (an invitation), so it is never read as HTML.
         self.setToolTip(plain_tooltip(info.title + (f"\n{info.meta}" if info.meta else "")))
+        self._sync_record()
         self.update()
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
@@ -3327,7 +3395,7 @@ class AgendaRow(QWidget):
 
     def _paint_texts(self, painter: QPainter, rect: QRectF, title_color: str, meta_color: str) -> None:
         left = self.text_left()
-        width = rect.width() - left - 6
+        width = rect.width() - left - 6 - self._record_room()
         title_metrics = QFontMetricsF(self._title_font)
         meta_metrics = QFontMetricsF(self._meta_font)
         top = self._text_top(rect, bool(self._info.meta) or self._two_line())
@@ -3491,6 +3559,7 @@ class AgendaPanel(ChamferPanel):
     """
 
     linkClicked = Signal()
+    recordClicked = Signal(str)          # a meeting row's Record (its key): the start card opens, nothing records
     EVENT_GAP = 4
 
     def __init__(self, title: str = "Today", parent: QWidget | None = None) -> None:
@@ -3612,6 +3681,9 @@ class AgendaPanel(ChamferPanel):
         two_line = any(_split_meridiem(row.time)[1] for row in rows)
         for row in self._event_rows:
             row.set_two_line_times(two_line)
+            if not getattr(row, "_record_wired", False):
+                row.recordClicked.connect(self.recordClicked)
+                row._record_wired = True
         self._message_box.hide()
 
     def set_message(self, text: str, color: str | QColor = TEXT_SOFT, *, link: str = "",

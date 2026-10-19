@@ -7,10 +7,13 @@ Owner decisions (2026-10-18, binding; SPEC "Meeting summaries"):
   without that tick, and the record keeps that he confirmed it and when (``consent_at``).
 * Everything stays under ``%LOCALAPPDATA%\\briefing-reader\\meetings\\<id>\\`` (``meetings_root(config)``; a
   root inside a synced folder - OneDrive, Dropbox, Google Drive, iCloud, Downloads - is refused). Audio: two
-  16 kHz mono WAV files, ``mic.wav`` ("You") and ``loopback.wav`` ("Others"). Never uploaded anywhere.
-* Retention (``MeetingStore.cleanup``, at start-up and daily): audio after ``AUDIO_DAYS`` (7) days, the
-  transcript and summary - the whole folder - after ``TEXT_DAYS`` (30) days. ``delete(id)`` removes one
-  meeting at once (audio, text and summary).
+  16 kHz mono WAV files, ``mic.wav`` ("You") and ``loopback.wav`` ("Others"). The audio is never uploaded
+  anywhere; the transcript leaves this PC only for a summary the owner asked for (the start card's own tick, or
+  Summarise), and the record keeps that he asked and when (``summary_asked`` / ``summary_asked_at``).
+* Retention (``MeetingStore.cleanup``, at start-up and daily - also while [meetings] is off: ``sweep(root)``):
+  audio after ``AUDIO_DAYS`` (7) days, the transcript and summary - the whole folder - after ``TEXT_DAYS`` (30)
+  days. ``delete(id)`` removes one meeting at once (audio, text and summary); a file a dying worker still holds
+  keeps the meeting listed as STATUS_DELETING ("Delete again") instead of vanishing with its audio left behind.
 * Logs carry ids, kinds, counts, durations and statuses only - never a title, a name, a device name or text.
 
 Public API
@@ -21,16 +24,20 @@ Public API
     recording belongs to (or an unscheduled call: ``MeetingInfo()``); ``invite`` the guests' (name, address) from
     the calendar invite (part 2: a follow-up draft only ever goes to one of them). ``repr`` carries no title or
     name.
-``StartRequest(info, consent, consent_at, mic, call_audio)``: what the start card hands over; ``consent`` must
-    be True (``ConsentMissing`` otherwise).
+``StartRequest(info, consent, consent_at, mic, call_audio, summarise, summarise_at)``: what the start card hands
+    over; ``consent`` must be True (``ConsentMissing`` otherwise) and ``consent_at`` is when the box was ticked;
+    ``summarise`` is the card's own unticked-by-default "summarise it" tick.
 ``MeetingRecord``: one meeting's ``meeting.json`` (``status`` one of STATUS_*; ``status_text()``).
 ``MeetingStore(root, now=)``: ``create(request, devices)``, ``load(id)``, ``save(record)``, ``list()`` (newest
-    first), ``delete(id)``, ``cleanup(now)`` -> (audio removed, meetings removed), ``recover(active=())``
-    (meetings left "recording" by a crash become RECORDED, their WAV headers repaired), ``folder(id)``,
+    first), ``delete(id)``, ``cleanup(now, on_removed=)`` -> (audio removed, meetings removed),
+    ``recover(active=())`` (meetings left "recording" by a crash become RECORDED, their WAV headers repaired; a
+    Delete left half done is tried again), ``folder(id)``,
     ``audio_path(id, channel)``; part 2: ``summary_path(id)``, ``save_summary(id, data)``, ``load_summary(id)``
     (summary.json in the meeting's folder: it goes with the folder at 30 days or on Delete).
 ``DevicePrefs(root)``: the devices picked in Settings > Meetings (``microphone``, ``call_audio``; "" follows
     the Windows default), saved in ``meetings\\devices.json``.
+``sweep(root, now, on_removed=)``: recovery and retention on a meetings folder with no recorder behind it
+    ([meetings] off): nothing is made when the folder is not there.
 """
 
 from __future__ import annotations
@@ -54,7 +61,7 @@ MEETINGS_DIR = "meetings"
 MODELS_DIR = "models"
 RECORD_FILE = "meeting.json"
 TRANSCRIPT_FILE = "transcript.json"
-SUMMARY_FILE = "summary.json"     # part 2: the summary (the meeting's folder only; never uploaded or logged)
+SUMMARY_FILE = "summary.json"     # part 2: the summary (the meeting's folder only; never logged)
 DEVICES_FILE = "devices.json"
 MIC = "mic"                       # the microphone: "You"
 LOOPBACK = "loopback"             # the call audio from the speakers / headset: "Others"
@@ -75,8 +82,10 @@ STATUS_TRANSCRIBED = "transcribed"        # the transcript is ready (no summary 
 STATUS_SUMMARISING = "summarising"        # part 2: the owner's Claude Code writes the summary
 STATUS_SUMMARY_READY = "summary_ready"    # part 2: the summary is in summary.json
 STATUS_FAILED = "failed"
+STATUS_DELETING = "deleting"              # the owner's Delete left a file behind (held open): Delete again
 STATUSES = (STATUS_RECORDING, STATUS_RECORDED, STATUS_TRANSCRIBING, STATUS_TRANSCRIBED, STATUS_SUMMARISING,
-            STATUS_SUMMARY_READY, STATUS_FAILED)
+            STATUS_SUMMARY_READY, STATUS_FAILED, STATUS_DELETING)
+DELETE_LEFT_TEXT = "Some files could not be deleted yet - Delete again"
 
 STOP_BUTTON = "button"            # Stop on the pill, the header, Home or the Meetings screen
 STOP_END_TIME = "end_time"        # the meeting's end time + 15 minutes
@@ -168,17 +177,24 @@ class MeetingInfo:
 
 @dataclass(frozen=True)
 class StartRequest:
-    """The start card's Start: the meeting, the owner's consent tick (required) and the devices it showed."""
+    """The start card's Start: the meeting, the owner's consent tick (required; ``consent_at`` is when he ticked
+    it), the devices it showed, and its own "summarise it" tick (``summarise``: only then does the transcript go
+    to his Claude Code by itself once it is written down; unticked, a summary waits for Summarise)."""
 
     info: MeetingInfo
     consent: bool
     consent_at: datetime
     mic: str = field(default="", repr=False)          # the device names the card showed
     call_audio: str = field(default="", repr=False)
+    summarise: bool = False
+    summarise_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.consent is not True:
             raise ConsentMissing("the consent tick is required to record")
+        if self.summarise is not True:
+            object.__setattr__(self, "summarise", False)
+            object.__setattr__(self, "summarise_at", None)
 
 
 def clean_invite(items: Any) -> tuple[tuple[str, str], ...]:
@@ -245,6 +261,8 @@ class MeetingRecord:
     calendar_id: str = field(default="", repr=False)
     invite: tuple[tuple[str, str], ...] = field(default=(), repr=False)   # part 2: (name, address) per guest
     summary_error: str = ""              # part 2: why the last summary run failed (a short code)
+    summary_asked: bool = False          # the owner ticked "summarise it" on the start card (only then by itself)
+    summary_asked_at: datetime | None = None
 
     def shown_title(self) -> str:
         return self.title or UNSCHEDULED_TITLE
@@ -266,6 +284,8 @@ class MeetingRecord:
             return "Summary ready"
         if self.status == STATUS_FAILED:
             return "Failed"
+        if self.status == STATUS_DELETING:
+            return DELETE_LEFT_TEXT
         if self.audio_deleted_at is not None:
             return "Audio deleted after 7 days"
         return "Waiting to be written down"
@@ -282,11 +302,13 @@ class MeetingRecord:
                 "audio": dict(AUDIO_FILES), "audio_deleted_at": _iso(self.audio_deleted_at),
                 "alias": self.alias, "calendar_id": self.calendar_id,
                 "invite": [{"name": name, "email": address} for name, address in self.invite],
-                "summary_error": self.summary_error}
+                "summary_error": self.summary_error,
+                "summary_request": {"asked": bool(self.summary_asked), "at": _iso(self.summary_asked_at)}}
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> MeetingRecord:
         consent = data.get("consent") if isinstance(data.get("consent"), Mapping) else {}
+        asked = data.get("summary_request") if isinstance(data.get("summary_request"), Mapping) else {}
         status = data.get("status") if data.get("status") in STATUSES else STATUS_RECORDED
         guests = data.get("guests") if isinstance(data.get("guests"), list) else []
         devices = data.get("devices") if isinstance(data.get("devices"), Mapping) else {}
@@ -311,7 +333,9 @@ class MeetingRecord:
                    audio_deleted_at=_parse(data.get("audio_deleted_at")),
                    alias=str(data.get("alias") or "")[:40], calendar_id=str(data.get("calendar_id") or "")[:300],
                    invite=clean_invite(data.get("invite") if isinstance(data.get("invite"), list) else ()),
-                   summary_error=str(data.get("summary_error") or "")[:40])
+                   summary_error=str(data.get("summary_error") or "")[:40],
+                   summary_asked=asked.get("asked") is True,
+                   summary_asked_at=_parse(asked.get("at")) if asked.get("asked") is True else None)
 
 
 # --------------------------------------------------------------------------
@@ -385,10 +409,12 @@ class MeetingStore:
                                scheduled_start=info.start, scheduled_end=info.end, consent_confirmed=True,
                                consent_at=request.consent_at, started_at=now, status=STATUS_RECORDING,
                                devices=dict(devices or {}), alias=info.alias, calendar_id=info.calendar_id,
-                               invite=info.invite)
+                               invite=info.invite, summary_asked=request.summarise is True,
+                               summary_asked_at=(request.summarise_at or now) if request.summarise is True else None)
         self.folder(meeting_id).mkdir(parents=True, exist_ok=False)
         self.save(record)
-        logger.info("Meeting %s: created (scheduled: %s, guests: %d)", meeting_id, info.scheduled, len(info.guests))
+        logger.info("Meeting %s: created (scheduled: %s, guests: %d, summary asked: %s)", meeting_id,
+                    info.scheduled, len(info.guests), record.summary_asked)
         return record
 
     def save(self, record: MeetingRecord) -> None:
@@ -417,29 +443,46 @@ class MeetingStore:
         return [record for record in records if record is not None]
 
     def update(self, meeting_id: str, **changes: Any) -> MeetingRecord | None:
+        """The record with ``changes`` saved; None (nothing saved) when there is none or the owner's Delete of it
+        is under way (STATUS_DELETING: only a Delete changes it again)."""
         record = self.load(meeting_id)
-        if record is None:
+        if record is None or record.status == STATUS_DELETING:
             return None
         record = replace(record, **changes)
         self.save(record)
         return record
 
     def delete(self, meeting_id: str) -> bool:
-        """The owner's Delete: the meeting's folder - audio, transcript and summary - at once."""
+        """The owner's Delete: the meeting's folder - audio, transcript and summary - at once. The record goes
+        last: while a file stays (held open by a writing down that is being stopped) the meeting keeps its
+        meeting.json as STATUS_DELETING, so it stays listed ("Delete again") instead of vanishing with audio left
+        on disk; the next Delete or the next start tries again. True when the whole folder went."""
         try:
             folder = self.folder(meeting_id)
         except ValueError:
             return False
         if not folder.exists():
             return False
-        shutil.rmtree(folder, ignore_errors=True)
+        record = self.load(meeting_id)
+        if record is not None and record.status != STATUS_DELETING:
+            record.status = STATUS_DELETING
+            try:
+                self.save(record)
+            except OSError:
+                pass
+        left = _remove_all_but_record(folder)
+        if not left:
+            shutil.rmtree(folder, ignore_errors=True)
         gone = not folder.exists()
-        logger.info("Meeting %s: deleted by the owner (%s)", meeting_id, "done" if gone else "some files stayed")
+        logger.info("Meeting %s: deleted by the owner (%s)", meeting_id,
+                    "done" if gone else f"{left or 1} file(s) stayed; listed to delete again")
         return gone
 
-    def cleanup(self, now: datetime | None = None, *, active: Iterable[str] = ()) -> tuple[int, int]:
+    def cleanup(self, now: datetime | None = None, *, active: Iterable[str] = (),
+                on_removed: Callable[[str], Any] | None = None) -> tuple[int, int]:
         """Retention: audio older than AUDIO_DAYS goes, a meeting older than TEXT_DAYS goes entirely. A meeting
-        recording now (``active``) is never touched. Returns (audio files removed, meetings removed)."""
+        recording now (``active``) is never touched. ``on_removed(id)`` for each meeting that went entirely (the
+        app then withdraws its waiting drafts and notes). Returns (audio files removed, meetings removed)."""
         now = now or self._now()
         busy = set(active)
         audio_removed = meetings_removed = 0
@@ -455,6 +498,8 @@ class MeetingStore:
                 shutil.rmtree(self.root / meeting_id, ignore_errors=True)
                 if not (self.root / meeting_id).exists():
                     meetings_removed += 1
+                    if on_removed is not None:
+                        on_removed(meeting_id)
                 continue
             if age >= timedelta(days=AUDIO_DAYS):
                 removed = 0
@@ -488,7 +533,8 @@ class MeetingStore:
         """Meetings still marked RECORDING (Jarvis ended without closing) that are not ``active``: their WAV
         headers are repaired and they become RECORDED (stop reason STOP_INTERRUPTED). Returns their ids.
         Meetings left TRANSCRIBING go back to RECORDED (their worker is gone); meetings left SUMMARISING go back to
-        TRANSCRIBED (their run is gone; Summarise starts it again on the owner's click)."""
+        TRANSCRIBED (their run is gone; Summarise starts it again on the owner's click); a Delete left half done
+        (STATUS_DELETING) is tried again."""
         from .meeting_audio import repair_wav, wav_seconds
 
         busy = set(active)
@@ -496,7 +542,9 @@ class MeetingStore:
         for record in self.list():
             if record.id in busy:
                 continue
-            if record.status == STATUS_RECORDING:
+            if record.status == STATUS_DELETING:
+                self.delete(record.id)
+            elif record.status == STATUS_RECORDING:
                 seconds = 0.0
                 for channel in CHANNELS:
                     path = self.audio_path(record.id, channel)
@@ -517,6 +565,47 @@ class MeetingStore:
                 record.status = STATUS_TRANSCRIBED
                 self.save(record)
         return recovered
+
+
+def _remove_all_but_record(folder: Path) -> int:
+    """Every file and folder in ``folder`` but meeting.json removed; how many could not be (held open)."""
+    left = 0
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return 1
+    for entry in entries:
+        if entry.name == RECORD_FILE:
+            continue
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except OSError:
+            left += 1
+    return left
+
+
+def sweep(root: Path, now: datetime | None = None, *,
+          on_removed: Callable[[str], Any] | None = None) -> tuple[int, int]:
+    """Recovery and retention for a meetings folder with no recorder behind it ([meetings] off - turned off after
+    meetings were recorded): a meeting a crash left is closed, a half-done Delete is tried again, audio goes after
+    7 days and everything after 30. Nothing is made when the folder is not there. (audio removed, meetings
+    removed)."""
+    root = Path(root)
+    if not root.is_dir():
+        return 0, 0
+    store = MeetingStore(root)
+    try:
+        store.recover()
+    except OSError as exc:
+        logger.warning("Meetings: recovery failed (%s)", type(exc).__name__)
+    try:
+        return store.cleanup(now, on_removed=on_removed)
+    except OSError as exc:
+        logger.warning("Meetings retention failed (%s)", type(exc).__name__)
+        return 0, 0
 
 
 def _age(now: datetime, then: datetime) -> timedelta:

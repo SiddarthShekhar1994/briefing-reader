@@ -74,11 +74,12 @@ R3); a thread the planner marks as waiting on them, where Jarvis's own headers a
 wrote last, becomes a "Draft a nudge" target of the brief (PrepBrief.nudges, R32).
 
 The meeting summary (ask.modes.MODE_MEETING, meetings part 2): the transcript of a meeting the owner
-recorded (his click on Record and the consent tick started the chain) is summarised once it is ready, or on
-his click on Summarise. The Ask caps and Claude Code ready (no bundle cap: it counts as an Ask run); the
-transcript read on this thread from the meeting's folder (ModeRequest.payload, an ask.meeting_summary.
-MeetingJob); one run with its own prompt and schema, the transcript marked as text written by other people
-(data, never instructions) and the invite's guests by name only. The answer is checked strictly
+recorded is summarised only when he asked - his own "summarise it" tick on that meeting's start card (once
+the transcript is ready), or his click on Summarise. The Ask caps and Claude Code ready (no bundle cap: it
+counts as an Ask run); the transcript read on this thread from the meeting's folder (ModeRequest.payload,
+an ask.meeting_summary.MeetingJob); one run with its own prompt and schema, the transcript marked as text
+written by other people (data, never instructions) and the invite's guests by name only. The answer is checked
+strictly
 (meeting_summary.summary_from: the whole answer refused when it does not fit), then Jarvis's own checks
 (meeting_summary.check_summary): action items only for "you" or an invited guest, follow-ups only to an
 invited guest (the invite's address, never one from the run) as Email cards through validate.to_cards with
@@ -1218,7 +1219,7 @@ class AskPlanner:
         task = live or NO_TASK
         if not self._busy.acquire(blocking=False):
             task.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=BUSY_MESSAGE)
-            return AskOutcome(False, "busy", BUSY_MESSAGE, mode=request.mode)
+            return AskOutcome(False, "busy", BUSY_MESSAGE, mode=request.mode, target=_mode_target(request))
         started = self._monotonic()
         self._reads.calendar = None
         try:
@@ -1240,7 +1241,7 @@ class AskPlanner:
             self._busy.release()
         read, self._reads.calendar = getattr(self._reads, "calendar", None), None
         outcome = replace(outcome, mode=request.mode, duration_ms=int((self._monotonic() - started) * 1000),
-                          caps=self.usage.check(), calendar_read=read)
+                          caps=self.usage.check(), calendar_read=read, target=outcome.target or _mode_target(request))
         logger.info("Ask: %s", outcome.summary())
         return outcome
 
@@ -1455,7 +1456,8 @@ class AskPlanner:
         index = meeting_summary.followup_index(labels, aliases, own)
         cards = meeting_summary.followup_cards(summary, labels, alias=alias, aliases=aliases, own=own,
                                                can_send=bool(account is not None and account.send_mail), now=now,
-                                               link_hosts=self.config.actions.link_hosts, page_ids=page_ids)
+                                               link_hosts=self.config.actions.link_hosts, page_ids=page_ids,
+                                               meeting_id=job.meeting_id)
         notes, notes_dropped = self._meeting_notes(summary, index, job)
         summary = replace(summary, memory=notes)
         _meeting_validated(live, answer, summary, cards, notes_dropped, self._hour24())
@@ -3108,6 +3110,13 @@ def _meeting_validated(live: LiveTask, answer: Any, summary: Any, cards: Cards, 
     step.done(STATUS_WARN if problems else STATUS_OK,
               summary=f"summary: {_count_words(counts['actions'], 'action')}; "
                       f"{_count_words(drafts, 'follow-up draft')}")
+
+
+def _mode_target(request: ModeRequest) -> Any:
+    """A meeting summary's outcome always names its meeting (its id), also when the run stopped before it read
+    the transcript (busy, an unexpected error): the app then ends that summary there (Retry). None otherwise."""
+    job = request.payload if request.mode == MODE_MEETING else None
+    return job.meeting_id if isinstance(job, meeting_summary.MeetingJob) else None
 
 
 def mode_todos(pending: Sequence[ProposedAction], planned: Mapping[str, date] | None = None) -> tuple[Any, ...]:

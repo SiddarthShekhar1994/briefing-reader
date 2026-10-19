@@ -56,12 +56,13 @@ class FakeStream:
 class FakeBackend:
     """Two inputs and two outputs; the defaults can change; every opened stream is kept in ``streams``."""
 
-    def __init__(self, *, mic_fails: bool = False) -> None:
+    def __init__(self, *, mic_fails: bool = False, loop_fails: bool = False) -> None:
         self.ins = [MIC_A, MIC_B]
         self.outs = [OUT_A, OUT_B]
         self.default_in: DeviceInfo | None = MIC_A
         self.default_out: DeviceInfo | None = OUT_A
         self.mic_fails = mic_fails
+        self.loop_fails = loop_fails             # the call audio's loopback can't be opened (busy, no loopback)
         self.streams: list[FakeStream] = []
         self.opened: list[tuple[str, str]] = []
 
@@ -89,11 +90,95 @@ class FakeBackend:
         return self._open(device, mt.MIC)
 
     def open_loopback(self, device: DeviceInfo) -> FakeStream:
+        if self.loop_fails:
+            raise OSError("no loopback for that output device")
         return self._open(device, mt.LOOPBACK)
 
     def live(self, kind: str) -> FakeStream:
         """The newest open stream of ``kind``."""
         return [s for s in self.streams if s.kind == kind and not s.closed][-1]
+
+
+class FakePortAudio:
+    """A pyaudiowpatch stand-in that behaves like PortAudio: ``PyAudio()`` takes a snapshot of the devices and the
+    Windows defaults (only a new one - after ``terminate`` - sees a change); a stream's device can go away (its
+    callback stops and ``is_active()`` turns False). Nothing touches a real device."""
+
+    paWASAPI = 13
+    paInt16 = 8
+    paContinue = 0
+
+    def __init__(self) -> None:
+        self.devices: dict[int, dict] = {}
+        self.default_in = self.default_out = -1
+        self.instances: list[_FakePyAudio] = []
+        self.handles: list[_FakeHandle] = []
+
+    def add(self, index: int, name: str, *, mic: bool = False, loopback: bool = False) -> None:
+        self.devices[index] = {"index": index, "name": name, "hostApi": 0, "defaultSampleRate": 16000,
+                               "maxInputChannels": 1 if mic else 2 if loopback else 0,
+                               "maxOutputChannels": 0 if (mic or loopback) else 2, "isLoopbackDevice": loopback}
+
+    def unplug(self, *indexes: int) -> None:
+        for index in indexes:
+            self.devices.pop(index, None)
+
+    def PyAudio(self) -> _FakePyAudio:  # noqa: N802 - the add-on's name
+        instance = _FakePyAudio(self)
+        self.instances.append(instance)
+        return instance
+
+    def deliver(self, data: bytes) -> None:
+        """Every open microphone stream whose device is still there gets ``data`` (its callback)."""
+        for handle in self.handles:
+            if handle.is_active() and self.devices[handle.index]["maxInputChannels"] == 1:
+                handle.callback(data, len(data) // 2, None, 0)
+
+
+class _FakePyAudio:
+    def __init__(self, module: FakePortAudio) -> None:
+        self.module = module
+        self.devices = {index: dict(info) for index, info in module.devices.items()}   # the snapshot
+        self.default_in, self.default_out = module.default_in, module.default_out
+        self.terminated = False
+
+    def get_host_api_info_by_type(self, _api: int) -> dict:
+        return {"index": 0, "defaultInputDevice": self.default_in, "defaultOutputDevice": self.default_out}
+
+    def get_device_count(self) -> int:
+        return max(self.devices, default=-1) + 1
+
+    def get_device_info_by_index(self, index: int) -> dict:
+        return dict(self.devices[index])
+
+    def get_loopback_device_info_generator(self):  # noqa: ANN201 - the add-on's generator
+        return (dict(info) for info in self.devices.values() if info["isLoopbackDevice"])
+
+    def open(self, *, input_device_index: int, stream_callback, **_kwargs) -> _FakeHandle:  # noqa: ANN001
+        handle = _FakeHandle(self.module, int(input_device_index), stream_callback)
+        self.module.handles.append(handle)
+        return handle
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+
+class _FakeHandle:
+    def __init__(self, module: FakePortAudio, index: int, callback) -> None:  # noqa: ANN001
+        self.module, self.index, self.callback = module, index, callback
+        self.closed = False
+
+    def start_stream(self) -> None:
+        pass
+
+    def stop_stream(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+    def is_active(self) -> bool:
+        return not self.closed and self.index in self.module.devices
 
 
 class Clock:

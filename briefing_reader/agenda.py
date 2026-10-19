@@ -194,8 +194,12 @@ def event_rows(events: Iterable[CalendarEvent], now: datetime, *,
     (up to an hour ahead) joined with the location; else the location. A
     location that is only a link is left out.
     """
-    ordered = sorted(events, key=lambda event: _event_key(event, now))
-    return [_event_row(event, now, hour24) for event in ordered]
+    return [_event_row(event, now, hour24) for event in ordered_events(events, now)]
+
+
+def ordered_events(events: Iterable[CalendarEvent], now: datetime) -> list[CalendarEvent]:
+    """``events`` in the order event_rows shows them (all-day events first on their day, then by start)."""
+    return sorted(events, key=lambda event: _event_key(event, now))
 
 
 def _event_key(event: CalendarEvent, now: datetime) -> tuple[datetime, int, str]:

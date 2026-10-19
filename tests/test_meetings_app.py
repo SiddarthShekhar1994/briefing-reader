@@ -15,10 +15,11 @@ from unittest import mock
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import dock, find_view, meeting_audio as ma, meeting_speech as sp, meetings as mt
-from briefing_reader import meetings_view, ui
+from briefing_reader import context_view, dock, find_view, meeting_audio as ma, meeting_speech as sp, meetings as mt
+from briefing_reader import meetings_ui, meetings_view, ui
+from briefing_reader.gcal import CalendarEvent
 from tests.meeting_fakes import MIC_A, MIC_B, OUT_A, OUT_B, Clock, FakeBackend, FakeSession, FakeTranscriber, tone
-from tests.ui_fakes import NOW, AppHarness, fonts, settle
+from tests.ui_fakes import NOW, AppHarness, fonts, settle, wait_for
 
 _app: QApplication | None = None
 MEETINGS_ON = "\n[meetings]\nenabled = true\n"
@@ -502,8 +503,35 @@ class SwitchOffTests(MeetingsApp):
         reading._on_find_pick(find_view.FindItem(find_view.KIND_ACTION, ui.FIND_RECORD_KEY, "Record a meeting"))
         self.assertNotEqual(reading.current_tab(), ui.SCREEN_MEETINGS)
         self.assertFalse(reading.rec_badge.isVisible())
+        self.c._sweep_meetings()                                        # the start-up's retention: nothing is made
         self.assertFalse((self.c.config.data_dir / "meetings").exists())
         self.assertNotIn("Recording", self.c._tray_tooltip())
+        self.c._agenda_status, self.c._agenda_events = ui._AGENDA_OK, [
+            CalendarEvent(TITLE, NOW + timedelta(minutes=30), NOW + timedelta(minutes=60))]
+        self.assertFalse(self.c._context_facts().record)               # no Record on Home's tile ...
+        self.c._agenda_range = (NOW - timedelta(days=1), NOW + timedelta(days=2))
+        self.c._render_agenda()
+        self.assertEqual([row.info().record for row in reading.agenda_panel.event_rows()], [""])   # ... or a row
+
+    def test_meetings_recorded_before_it_was_turned_off_still_go_by_retention(self) -> None:
+        self.make(enabled=False)
+        root = self.c.config.data_dir / "meetings"
+        made = {}
+        for days in (8, 31):
+            store = mt.MeetingStore(root, now=lambda d=days: NOW - timedelta(days=d))
+            record = store.create(mt.StartRequest(mt.MeetingInfo(), True, NOW - timedelta(days=days)))
+            for channel in mt.CHANNELS:
+                store.audio_path(record.id, channel).write_bytes(b"RIFF")
+            store.update(record.id, status=mt.STATUS_TRANSCRIBED)
+            made[days] = record.id
+        self.c._sweep_meetings()
+        store = mt.MeetingStore(root)
+        self.assertFalse(store.audio_path(made[8], mt.MIC).exists())   # audio after 7 days
+        self.assertTrue(store.folder(made[8]).exists())
+        self.assertFalse(store.folder(made[31]).exists())               # everything after 30 days
+        self.assertIsNotNone(self.c._meetings_sweep_timer)             # and daily while Jarvis runs
+        self.assertTrue(self.c._meetings_sweep_timer.isActive())
+        self.assertIsNone(self.c.meetings)                              # still no Meetings surface
 
 
 class PrivacyTests(MeetingsApp):
@@ -525,6 +553,333 @@ class PrivacyTests(MeetingsApp):
                        "budget"):
             self.assertNotIn(secret, text)
         self.assertIn(record.id, text)
+
+
+class ConsentFreshnessTests(MeetingsApp):
+    def ticked(self) -> meetings_view.StartCard:
+        card = self.open_card()
+        card.tick.click()
+        self.assertTrue(card.start_button.isEnabled())
+        return card
+
+    def test_another_screen_closes_the_card_and_its_tick(self) -> None:
+        self.make()
+        card = self.ticked()
+        self.reading.set_tab(ui.SCREEN_HOME)                            # the owner is pulled away
+        settle()
+        self.assertFalse(card.isVisible())
+        self.assertFalse(card.tick.isChecked())
+        self.clock.advance(6 * 3600)
+        self.reading.dock.activate(dock.MEETINGS)                       # hours later, Ctrl+7 / the Dock
+        settle()
+        self.assertEqual(self.reading.current_tab(), ui.SCREEN_MEETINGS)
+        self.assertFalse(card.isVisible())                              # no old card waiting with its tick
+        card.start_button.click()
+        settle()
+        self.assertFalse(self.m.is_recording())
+        card = self.open_card()
+        self.assertFalse(card.tick.isChecked())
+
+    def test_hiding_or_minimising_the_window_closes_the_card(self) -> None:
+        self.make()
+        card = self.ticked()
+        self.c.window.hide()
+        settle()
+        self.assertFalse(card.tick.isChecked())
+        self.c.window.show()
+        settle()
+        self.assertFalse(card.isVisible())
+        card = self.ticked()
+        self.c.window.showMinimized()
+        settle()
+        self.assertFalse(card.tick.isChecked())
+        self.c.window.showNormal()
+        settle()
+        self.assertFalse(card.isVisible())
+        self.assertFalse(self.m.is_recording())
+
+    def test_a_tick_counts_five_minutes_and_the_record_keeps_when_it_was_given(self) -> None:
+        self.make()
+        card = self.ticked()
+        self.clock.advance(meetings_view.CONSENT_FRESH_S + 1)
+        card.start_button.click()
+        settle()
+        self.assertFalse(self.m.is_recording())                         # too old: tick again
+        self.assertFalse(card.tick.isChecked())
+        self.assertTrue(card.stale_label.isVisible())
+        card.tick.click()
+        ticked_at = self.clock.wall()
+        self.clock.advance(40)                                          # Start a little later
+        card.start_button.click()
+        settle()
+        self.assertTrue(self.m.is_recording())
+        record = self.m.store.load(self.m.recorder.record.id)
+        self.assertEqual(record.consent_at, ticked_at.replace(microsecond=0))   # when the box was ticked
+        self.m.stop()
+        settle()
+
+
+class FrameHeaderRecTests(MeetingsApp):
+    def test_rec_shows_over_the_prompt_view_too(self) -> None:
+        self.make()
+        self.record()
+        self.tick(5)
+        window = self.c.window
+        window.show_prompt_view()                                       # "Hear it now?" while it records
+        settle()
+        self.assertFalse(window.is_reading_view())
+        self.assertTrue(window.header.isVisible())
+        self.assertTrue(window.frame_rec.isVisible())
+        self.assertEqual(window.frame_rec.text(), "REC 0:05")
+        self.assertGreaterEqual(window.header.width(), window.header.minimumSizeHint().width() - 1)
+        window.frame_rec.stop_button.click()                            # its Stop is the header's Stop
+        settle()
+        self.assertFalse(self.m.is_recording())
+        self.assertFalse(window.frame_rec.isVisible())
+        window.show_reading_view()
+        settle()
+
+
+class MeetingChoiceTests(MeetingsApp):
+    def test_the_next_meeting_wins_over_the_one_ending_and_the_card_can_switch(self) -> None:
+        self.make()
+        ending = CalendarEvent("Zq7 Internal sync", NOW - timedelta(minutes=52), NOW + timedelta(minutes=8))
+        starting = CalendarEvent("Zq7 Client call", NOW + timedelta(minutes=8), NOW + timedelta(minutes=38))
+        found = meetings_ui.meetings_now([ending, starting], NOW)
+        self.assertEqual([info.title for info in found], ["Zq7 Client call", "Zq7 Internal sync"])
+        self.c._agenda_events = [ending, starting]
+        card = self.open_card()                                          # Record a meeting on the Meetings screen
+        self.assertEqual(card.title_label.text(), "Zq7 Client call")
+        self.assertEqual(card.info().end, starting.end)                 # its own end drives the auto-stop
+        choices = card.meeting_choices()
+        self.assertEqual([info.title for _text, info in choices], ["Zq7 Internal sync", ""])
+        self.assertTrue(card.change_button.isVisibleTo(card))
+        card.tick.click()
+        self.assertTrue(card.choose_meeting(0))                         # Another meeting: the ending one
+        self.assertEqual(card.title_label.text(), "Zq7 Internal sync")
+        self.assertFalse(card.tick.isChecked())                         # a tick is for one meeting only
+        card.choose_meeting(len(card.meeting_choices()) - 1)            # ... or an unscheduled call
+        self.assertEqual(card.title_label.text(), mt.UNSCHEDULED_TITLE)
+        self.assertIsNone(card.info().end)
+
+    def test_a_block_of_time_gives_way_to_a_real_meeting(self) -> None:
+        now = NOW
+        focus = meetings_ui.meeting_rank(now - timedelta(minutes=2), now, block=True)
+        call = meetings_ui.meeting_rank(now + timedelta(minutes=2), now, guests=2)
+        self.assertLess(call, focus)
+        solo = meetings_ui.meeting_rank(now + timedelta(minutes=2), now)
+        self.assertLess(call, solo)                                     # same start: the one with guests first
+
+
+class StartFailureAppTests(MeetingsApp):
+    def test_a_start_whose_record_cannot_be_saved_leaves_no_device_open(self) -> None:
+        self.make()
+        real_save = self.m.store.save
+        calls = []
+
+        def save(record: mt.MeetingRecord) -> None:
+            calls.append(record.id)
+            if len(calls) == 2:                                          # the recorder's own save fails
+                raise PermissionError("meeting.json locked")
+            real_save(record)
+
+        card = self.open_card()
+        card.tick.click()
+        with mock.patch.object(self.m.store, "save", save):
+            card.start_button.click()
+            settle()
+        self.assertFalse(self.m.is_recording())
+        self.assertIsNone(self.m.pill)
+        self.assertTrue(self.backend.streams and all(stream.closed for stream in self.backend.streams))
+        self.assertEqual(self.m.store.list(), [])
+        self.assertFalse(any(self.m.store.root.glob("*/*.wav")))         # every file closed and removed
+        self.assertIn("could not be written", card.problem_label.text())
+
+
+class DeleteLeftoverAppTests(MeetingsApp):
+    def test_a_file_the_worker_still_holds_keeps_the_row_with_delete_again(self) -> None:
+        self.make(model=True)
+        record = self.record()
+        self.tick(3)
+        self.m.stop()
+        settle()
+        job = FakeJob.jobs[-1]
+        real_unlink = Path.unlink
+
+        def held(path: Path, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202 - Path.unlink's own
+            if path.name == "loopback.wav":
+                raise PermissionError("in use")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", held), mock.patch.object(meetings_ui, "DELETE_RETRY_S", 0.0):
+            self.assertFalse(self.m.delete(record.id))
+        settle()
+        self.assertTrue(job.cancelled)
+        row = self.m.stage.row(record.id)
+        self.assertIsNotNone(row)                                       # still listed, not silently gone
+        self.assertEqual(row.info.status_text, mt.DELETE_LEFT_TEXT)
+        self.assertTrue(row.delete_button.isVisibleTo(row))
+        self.assertTrue(self.m.delete(record.id))                       # Delete again
+        settle()
+        self.assertIsNone(self.m.stage.row(record.id))
+        self.assertFalse(self.m.store.folder(record.id).exists())
+
+
+class CallAudioAppTests(MeetingsApp):
+    def test_no_call_audio_is_said_on_rec_the_pill_the_row_and_the_tray(self) -> None:
+        self.make()
+        self.backend.loop_fails = True
+        record = self.record()
+        self.tick(3)
+        self.assertEqual(self.reading.rec_badge.warning(), meetings_view.CALL_MISSING_TEXT)
+        self.assertEqual(self.reading.home_rec.warning(), meetings_view.CALL_MISSING_TEXT)
+        self.assertEqual(self.m.pill.warning(), meetings_view.CALL_MISSING_TEXT)
+        row = self.m.stage.row(record.id)
+        self.assertEqual(row.note_label.text(), meetings_view.CALL_MISSING_ROW)
+        self.assertEqual(self.c._tray_tooltip(), "Jarvis: Recording 0:03 (no call audio)")
+        self.backend.loop_fails = False                                  # it can be opened now
+        self.tick(3)
+        self.assertEqual(self.reading.rec_badge.warning(), "")
+        self.assertEqual(self.m.pill.warning(), "")
+        self.assertNotEqual(self.m.stage.row(record.id).note_label.text(), meetings_view.CALL_MISSING_ROW)
+        self.m.stop()
+        settle()
+        note = self.m.stage.row(record.id).info.note
+        self.assertIn("the call audio was recorded only once its device could be opened", note)
+        self.assertNotIn("switched", note)
+
+    def test_the_row_note_says_what_happened(self) -> None:
+        words = meetings_view.device_note
+        self.assertEqual(words([{"channel": "microphone", "change": "switched"}]),
+                         "the microphone switched device during the meeting")
+        self.assertEqual(words([{"channel": "call audio", "change": "unavailable"}]),
+                         "the call audio was not recorded (its device could not be opened)")
+        self.assertEqual(words([{"channel": "call audio", "change": "reopened"}]),
+                         "the call audio stopped for a moment")
+        self.assertEqual(words([]), "")
+
+
+class QuietWhileRecordingTests(MeetingsApp):
+    def test_jarvis_keeps_quiet_while_a_meeting_records(self) -> None:
+        self.make()
+        voice = self.app.voice
+        said_before = list(voice.texts())
+        self.record()
+        self.assertFalse(self.c._say("notice", "One moment, sir."))      # shown, never spoken
+        self.assertTrue(self.c._announce())                              # the briefing's announcement ...
+        self.assertEqual(voice.texts(), said_before)                     # ... waits: nothing heard by the others
+        self.assertIsNotNone(self.c._held_key)
+        self.assertFalse(self.c._prod_facts().speak_ok)                  # offers stay text only
+        self.m.stop()
+        settle()
+        self.assertTrue(wait_for(lambda: len(voice.texts()) > len(said_before), 5))
+        self.assertIn("ready to view", voice.texts()[-1])                # said once it stopped
+        self.assertTrue(self.c._say("notice", "One moment, sir."))
+
+
+class DownloadNeverStuckTests(MeetingsApp):
+    def test_a_download_that_breaks_always_ends_with_its_words(self) -> None:
+        self.make()
+
+        class Broken:
+            def run(self) -> str:
+                raise OSError("a scanner holds the file")
+
+        self.m.downloader_factory = lambda target, progress, cancel: Broken()
+        self.m.threaded = True
+        self.assertTrue(self.m.download_model())
+        self.assertTrue(wait_for(lambda: not self.m.downloading(), 5))
+        settle()
+        stage = self.m.stage
+        self.assertIn("The download stopped (the file could not be saved)", stage.download_label.text())
+        self.assertTrue(stage.download_button.isVisibleTo(stage))       # Download is there again
+        self.m.threaded = False
+
+
+class FreshDevicesTests(MeetingsApp):
+    def test_each_card_and_settings_look_at_the_devices_again_never_while_recording(self) -> None:
+        self.make()
+        made: list[FakeBackend] = []
+
+        def factory() -> tuple[FakeBackend, str]:
+            backend = FakeBackend()
+            if made:
+                backend.default_out = OUT_B                              # a headset plugged in since
+            made.append(backend)
+            self.backend = backend
+            return backend, ""
+
+        self.m.backend_factory = factory
+        self.m._backend = None
+        card = self.open_card()
+        self.assertIn(OUT_A.name, card.device_texts()[1])
+        card = self.open_card()
+        self.assertIn(OUT_B.name, card.device_texts()[1])                # the second card sees the headset
+        card.tick.click()
+        card.start_button.click()
+        settle()
+        self.assertTrue(self.m.is_recording())
+        count = len(made)
+        self.m.refresh_settings()
+        self.assertEqual(len(made), count)                               # never remade under a recording
+        self.m.stop()
+        settle()
+
+
+class StartPointTests(MeetingsApp):
+    def agenda(self) -> tuple[CalendarEvent, CalendarEvent]:
+        past = CalendarEvent("Zq7 Morning standup", NOW - timedelta(hours=3), NOW - timedelta(hours=2))
+        later = CalendarEvent(TITLE, NOW + timedelta(minutes=40), NOW + timedelta(minutes=70))
+        self.c._agenda_status = ui._AGENDA_OK
+        self.c._agenda_events = [past, later]
+        self.c._agenda_range = (NOW - timedelta(days=1), NOW + timedelta(days=2))
+        return past, later
+
+    def test_record_on_homes_next_meeting_tile_only_opens_its_card(self) -> None:
+        self.make()
+        _past, later = self.agenda()
+        facts = self.c._context_facts()
+        self.assertTrue(facts.record)
+        tiles = context_view.context_tiles(facts)
+        self.assertTrue(tiles[0].record)
+        self.reading.set_tab(ui.SCREEN_HOME)
+        settle()
+        self.assertGreater(self.reading.show_context(tiles), 0)
+        tile = next(t for t in self.reading.stage.context.tiles() if t.info.kind == context_view.KIND_MEETING)
+        self.assertIsNotNone(tile.record_button)
+        tile.record_button.click()
+        settle()
+        card = self.m.stage.card
+        self.assertEqual(self.reading.current_tab(), ui.SCREEN_MEETINGS)
+        self.assertTrue(card.isVisible())
+        self.assertEqual((card.title_label.text(), card.info().start), (TITLE, later.start))
+        self.assertFalse(card.tick.isChecked())
+        self.assertFalse(card.start_button.isEnabled())
+        self.assertFalse(self.m.is_recording())                          # it only opened the card
+
+    def test_record_on_a_day_view_row_only_opens_its_card_and_goes_while_recording(self) -> None:
+        self.make()
+        _past, later = self.agenda()
+        self.c._render_agenda()
+        rows = self.reading.agenda_panel.event_rows()
+        self.assertEqual([row.record_button() is not None for row in rows], [False, True])   # not for a past one
+        rows[1].record_button().click()
+        settle()
+        card = self.m.stage.card
+        self.assertTrue(card.isVisible())
+        self.assertEqual((card.title_label.text(), card.info().end), (TITLE, later.end))
+        self.assertFalse(card.tick.isChecked())
+        self.assertFalse(self.m.is_recording())
+        card.tick.click()
+        card.start_button.click()
+        settle()
+        self.assertTrue(self.m.is_recording())
+        rows = self.reading.agenda_panel.event_rows()
+        self.assertEqual([row.record_button() for row in rows], [None, None])   # one recording at a time
+        self.assertFalse(self.c._context_facts().record)
+        self.m.stop()
+        settle()
+        self.assertIsNotNone(self.reading.agenda_panel.event_rows()[1].record_button())
 
 
 if __name__ == "__main__":

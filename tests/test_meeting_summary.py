@@ -245,6 +245,22 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(card.field("subject"), "Q3 numbers")
         self.assertEqual(card.body, "Hi Ana,\nI'll send them Thursday.\nBest")
 
+    def test_each_meeting_has_its_own_follow_up_cards(self) -> None:
+        """The same guest and subject next week is a new card: a decision on last week's never stands for it."""
+        labels = self.labels()
+        summary = ms.check_summary(ms.summary_from(GOOD), job(), labels, own=OWN)
+
+        def made(meeting_id: str) -> object:
+            return ms.followup_cards(summary, labels, alias="work", aliases=("work",), own=OWN, now=NOW,
+                                     meeting_id=meeting_id)
+
+        week1, week2 = made("20261012-140000-aaaa"), made("20261019-140000-bbbb")
+        self.assertNotEqual(week1.cards[0].id, week2.cards[0].id)
+        self.assertEqual(made("20261012-140000-aaaa").cards[0].id, week1.cards[0].id)   # stable for one meeting
+        self.assertEqual(week1.report[0].card_id, week1.cards[0].id)       # LIVE's report names the same card
+        plain = ms.followup_cards(summary, labels, alias="work", aliases=("work",), own=OWN, now=NOW).cards[0]
+        self.assertEqual(week1.cards[0].id, ms.meeting_card_id("20261012-140000-aaaa", plain.id))
+
     def test_the_follow_up_check(self) -> None:
         labels = self.labels()
         summary = ms.check_summary(ms.summary_from(GOOD), job(), labels, own=OWN)

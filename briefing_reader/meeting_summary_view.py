@@ -10,7 +10,9 @@ Public API
 ==========
 ``SummaryAction(who, what, due, mine, block, card_id)``: one action item; for the owner's own (``mine``) ``block`` is
     BLOCK_NONE (an Add block button: a click proposes a block card - nothing is added until that card's own Add),
-    BLOCK_PROPOSED (its card shows under ACTION ITEMS) or BLOCK_NO_TIME (no free half hour was found).
+    BLOCK_PROPOSED (its card shows under ACTION ITEMS), BLOCK_ADDED / BLOCK_DISMISSED (that card was decided: its
+    own Add, or Dismiss; no button - the card keeps its Undo while it is listed) or BLOCK_NO_TIME (no free half hour
+    was found).
 ``SummaryFollowUp(to, subject, state, card_id)``: one follow-up draft and where its card stands.
 ``SummaryNote(text, state)``: a suggested note: NOTE_PENDING (Keep / Dismiss: Memory's own), NOTE_KEPT,
     NOTE_DISMISSED, NOTE_OFF (Memory can't keep notes now).
@@ -44,6 +46,8 @@ NOTES_TITLE = "WORTH REMEMBERING?"
 NONE_TEXT = "None noted."
 ADD_BLOCK_TEXT = "Add block"
 BLOCK_PROPOSED_TEXT = "A block is proposed below - add it there"
+BLOCK_ADDED_TEXT = "Block added to your calendar"
+BLOCK_DISMISSED_TEXT = "Block dismissed"
 BLOCK_NO_TIME_TEXT = "No free half hour found in the next days"
 DRAFTS_NOTE = "Drafts only: nothing is sent until you click Send on a card."
 NO_DRAFTS_TEXT = "No follow-up drafts."
@@ -58,6 +62,8 @@ FOOT_TEXT = ("Written by your Claude Code from the transcript on this PC. Check 
 DOT = "\u00b7"
 
 BLOCK_NONE, BLOCK_PROPOSED, BLOCK_NO_TIME = "none", "proposed", "no_time"
+BLOCK_ADDED, BLOCK_DISMISSED = "added", "dismissed"
+_BLOCK_CARDS = (BLOCK_PROPOSED, BLOCK_ADDED, BLOCK_DISMISSED)     # states whose card the view may hold
 NOTE_PENDING, NOTE_KEPT, NOTE_DISMISSED, NOTE_OFF = "pending", "kept", "dismissed", "off"
 
 
@@ -137,7 +143,8 @@ class _ActionRow(QWidget):
         self.add_button.setAccessibleName(f"{ADD_BLOCK_TEXT}: {action.what}")
         self.add_button.clicked.connect(lambda: self.addClicked.emit(self.index))
         self.add_button.setVisible(action.mine and action.block == BLOCK_NONE)
-        state = {BLOCK_PROPOSED: BLOCK_PROPOSED_TEXT, BLOCK_NO_TIME: BLOCK_NO_TIME_TEXT}.get(action.block, "")
+        state = {BLOCK_PROPOSED: BLOCK_PROPOSED_TEXT, BLOCK_NO_TIME: BLOCK_NO_TIME_TEXT, BLOCK_ADDED: BLOCK_ADDED_TEXT,
+                 BLOCK_DISMISSED: BLOCK_DISMISSED_TEXT}.get(action.block, "")
         self.state_label = _label(state, "body_sm", holo.INK_3)
         self.state_label.setVisible(action.mine and bool(state))
         row = QHBoxLayout()
@@ -328,7 +335,7 @@ class SummaryView(QScrollArea):
         if info is None:
             return ()
         ids = [item.card_id for item in info.follow_ups if item.card_id and not item.state]
-        ids += [item.card_id for item in info.actions if item.card_id and item.block == BLOCK_PROPOSED]
+        ids += [item.card_id for item in info.actions if item.card_id and item.block in _BLOCK_CARDS]
         return tuple(ids)
 
     def sections(self) -> list[str]:
@@ -372,7 +379,7 @@ class SummaryView(QScrollArea):
         info = self._info
         if info is None:
             return ()
-        return tuple(item.card_id for item in info.actions if item.card_id and item.block == BLOCK_PROPOSED)
+        return tuple(item.card_id for item in info.actions if item.card_id and item.block in _BLOCK_CARDS)
 
     def release(self, card: QWidget) -> None:
         if card in self._held:

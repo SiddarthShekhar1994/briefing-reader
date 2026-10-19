@@ -518,11 +518,16 @@ class FollowupCheck:
 
 def followup_cards(summary: MeetingSummary, labels: Mapping[str, MeetingGuest], *, alias: str,
                    aliases: Collection[str], own: Collection[str] = (), can_send: bool = True,
-                   now: datetime, link_hosts: Sequence[str] = (), page_ids: Collection[str] = ()) -> Any:
+                   now: datetime, link_hosts: Sequence[str] = (), page_ids: Collection[str] = (),
+                   meeting_id: str = "") -> Any:
     """The follow-ups as approval cards (validate.Cards), one per follow-up in its order (each line checked on its
     own, so the i-th card is the i-th follow-up's): validate.to_cards with the invite's guests as the only known
     addresses, kinds Email only, mode MODE_MEETING and FollowupCheck. A recipient is NEW until its tick on the
-    card (nobody typed it), unless Jarvis sent to it before."""
+    card (nobody typed it), unless Jarvis sent to it before. With ``meeting_id`` each card's id is that meeting's
+    own (``meeting_card_id``): next week's recap to the same guest with the same subject is a new card, never
+    last week's decided one shown as Sent."""
+    from dataclasses import replace
+
     from .validate import Cards, to_cards
 
     index = followup_index(labels, aliases, own)
@@ -532,9 +537,22 @@ def followup_cards(summary: MeetingSummary, labels: Mapping[str, MeetingGuest], 
     for line in followup_lines(summary, alias)[:FOLLOWUPS_MAX]:
         made = to_cards([line], index, now=now, link_hosts=link_hosts, page_ids=page_ids, max_cards=1,
                         kinds=frozenset({EMAIL}), mode=MODE_MEETING, extra=check)
+        if meeting_id:
+            ids = {card.id: meeting_card_id(meeting_id, card.id) for card in made.cards}
+            cards += [replace(card, id=ids[card.id]) for card in made.cards]
+            report += [replace(entry, card_id=ids.get(entry.card_id, entry.card_id)) for entry in made.report]
+            continue
         cards += made.cards
         report += made.report
     return Cards(tuple(cards), 0, sum(1 for card in cards if card.error), tuple(report))
+
+
+def meeting_card_id(meeting_id: str, card_id: str) -> str:
+    """A follow-up card's id for one meeting: the card's own id (its account, recipients and subject) joined with
+    the meeting's, so a decision on one meeting's draft never stands for another meeting's."""
+    import hashlib
+
+    return hashlib.sha1(f"meeting\x1f{meeting_id}\x1f{card_id}".encode("utf-8")).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------------

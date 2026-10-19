@@ -526,7 +526,7 @@ class AskModeTests(unittest.TestCase):
 
     def test_ask_mode_opens_the_bar_without_playing_or_settling(self) -> None:
         app = AppHarness(self, ask_mode=True, run_state=None)
-        state = RunState(app.root / "runstate.json")
+        state = RunState(app.root / "runstate.json", clock=lambda: NOW)   # the slot's day, whatever today is
         c = app.c
         c.run_state = state
         c.slots = {"AM": "13:40"}

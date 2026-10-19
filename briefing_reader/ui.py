@@ -188,6 +188,7 @@ from .agenda import (
     events_in_window,
     extract_deadlines,
     merge_deadlines,
+    ordered_events,
 )
 from .ask.dayplan import PART_DAY, hours_text
 from .ask.modes import (MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_BRIEF, ORIGIN_CHOICE,
@@ -1124,6 +1125,8 @@ class ReadingView(QWidget):
     offerNotNow = Signal(int)    # an offer tile's Not now (Home only): the offer id
     recordMeeting = Signal()     # the Find list's "Record a meeting": the start card opens (it never records)
     stopRecording = Signal()     # Stop on the header's REC or Home's (the pill and Meetings have their own)
+    recordNextMeeting = Signal()  # Record on Home's next-meeting tile: that meeting's start card opens (only)
+    recordAgendaRow = Signal(str)  # Record on a Day view meeting row (its key): that meeting's start card (only)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1195,6 +1198,7 @@ class ReadingView(QWidget):
         self.status_panel.hide()
         self.agenda_panel = hud.AgendaPanel("Today")
         self.agenda_panel.linkClicked.connect(self.connectCalendar)
+        self.agenda_panel.recordClicked.connect(self._on_agenda_record)
 
     def _make_sections_popover(self) -> None:
         """SECTIONS: a button before the Briefing screen's section track and the list it opens (rows keep
@@ -1356,6 +1360,7 @@ class ReadingView(QWidget):
         # A meeting records: REC, the time and Stop in the header (every screen) and on Home (meetings_ui).
         self._meetings_on = False
         self._recording = ""
+        self._rec_badges: list[QWidget] = []      # REC in other headers (the frame's, over the prompt view)
         self.rec_badge = meetings_view.RecBadge()
         self.rec_badge.stopClicked.connect(self.stopRecording)
         self.header.add_rec_badge(self.rec_badge)
@@ -2149,6 +2154,11 @@ class ReadingView(QWidget):
     def dismiss_context(self) -> None:
         self.stage.context.dismiss()
 
+    def _on_agenda_record(self, key: str) -> None:
+        """Record on a Day view meeting row: that meeting's start card opens (unticked); it never records."""
+        if self._meetings_on and not self._recording and key:
+            self.recordAgendaRow.emit(key)
+
     def _on_context_clicked(self, target: str) -> None:
         """A context tile never acts: it only opens its screen (the Day view, Follow-ups, Approvals)."""
         self.stage.context.dismiss()
@@ -2158,6 +2168,8 @@ class ReadingView(QWidget):
             self.set_tab(SCREEN_FOLLOWUPS)
         elif target == context_view.TARGET_DAY:
             self.open_day_view()
+        elif target == context_view.TARGET_RECORD and self._meetings_on and not self._recording:
+            self.recordNextMeeting.emit()       # that meeting's start card opens; only its Start records
 
     def approvals_target(self) -> QRectF:
         """The Dock's Approvals item on this view (where a leaving card flies)."""
@@ -2432,14 +2444,24 @@ class ReadingView(QWidget):
     def meetings_available(self) -> bool:
         return self.dock.is_slot_visible(dock_mod.MEETINGS)
 
-    def set_recording(self, elapsed: str = "") -> None:
+    def add_rec_badge(self, badge: QWidget) -> None:
+        """Another header's REC (the frame header over the prompt view): shown, timed and warned with this view's;
+        its Stop is the header's Stop."""
+        self._rec_badges.append(badge)
+        badge.stopClicked.connect(self.stopRecording)
+        badge.set_elapsed(self._recording or "0:00")
+        badge.setVisible(bool(self._recording))
+
+    def set_recording(self, elapsed: str = "", *, warning: str = "") -> None:
         """A meeting records (``elapsed`` "12:04"; "" when none): REC with the time and Stop in the header over
-        every screen, Home's own Recording with Stop, the recording look on the orbs and the Dock's coral dot on
-        Meetings. Nothing here starts or stops a recording."""
+        every screen (also the frame header over the prompt view), Home's own Recording with Stop, the recording
+        look on the orbs and the Dock's coral dot on Meetings; ``warning`` beside each REC ("No call audio").
+        Nothing here starts or stops a recording."""
         self._recording = elapsed or ""
         recording = bool(elapsed)
-        for badge in (self.rec_badge, self.home_rec):
+        for badge in (self.rec_badge, self.home_rec, *self._rec_badges):
             badge.set_elapsed(elapsed or "0:00")
+            badge.set_warning(warning if recording else "")
             badge.setVisible(recording)
         self.hero.set_recording(recording)
         self.briefing_orb.set_recording(recording)
@@ -3070,6 +3092,10 @@ class BriefingWindow(hud.HudWindowFrame):
             self.header.set_service(name, hud.STATUS_OFF)
         self.prompt = PromptView(short_minutes, long_minutes)
         self.reading = ReadingView()
+        # REC over the prompt view too ("Hear it now?" while a meeting records): the frame header's own.
+        self.frame_rec = meetings_view.RecBadge()
+        self.header.add_rec_badge(self.frame_rec)
+        self.reading.add_rec_badge(self.frame_rec)
         self.ground = holo.GroundCache()
         self.reading.hero.set_ground(orb_mod.ground_painter(self.ground))
         self.reading.briefing_orb.set_ground(orb_mod.ground_painter(self.ground))
@@ -4292,9 +4318,21 @@ def _agenda_fetch_range(now: datetime, agenda: AgendaConfig) -> tuple[datetime, 
 
 
 def _agenda_rows(events: Sequence[CalendarEvent], now: datetime, start: datetime,
-                 end: datetime, hour24: bool = False) -> list[hud.AgendaRowInfo]:
-    return [hud.AgendaRowInfo(row.time_text, row.title, row.meta, row.state)
-            for row in event_rows(events_in_window(events, start, end), now, hour24=hour24)]
+                 end: datetime, hour24: bool = False, *,
+                 records: dict[str, Any] | None = None) -> list[hud.AgendaRowInfo]:
+    """The Day view's rows. With ``records`` (meeting recording on, nothing recording) a timed meeting on now or later
+    gets a Record button: its key goes into ``records`` with the event (the click opens that meeting's start card)."""
+    rows = []
+    for index, event in enumerate(ordered_events(events_in_window(events, start, end), now)):
+        row = event_rows([event], now, hour24=hour24)[0]
+        key = ""
+        if records is not None and event.start is not None and row.state != hud.AGENDA_PAST:
+            wall = event.start.astimezone(now.tzinfo) if now.tzinfo is not None else event.start
+            if row.state == hud.AGENDA_NOW or wall.date() == now.date():      # today's meetings only
+                key = f"row{index}"
+                records[key] = event
+        rows.append(hud.AgendaRowInfo(row.time_text, row.title, row.meta, row.state, record=key))
+    return rows
 
 
 def _deadline_rows(deadlines: Sequence[Deadline], now: datetime) -> list[hud.DeadlineRowInfo]:
@@ -5256,6 +5294,8 @@ class AppController(QObject):
         self._create_tray()
         if self.meetings is not None:
             self.meetings.start()   # a recording a crash left is saved; retention; nothing records by itself
+        else:
+            self._sweep_meetings()  # [meetings] off: meetings kept from before still go at 7 / 30 days
         self._start_calendar()
         self._update_service_chips()
         if self.ask is not None:
@@ -7796,7 +7836,11 @@ class AppController(QObject):
             # Google's error text and sign-in messages: never read as HTML.
             panel.set_message(text, color, link=link, tooltip=hud.plain_tooltip(tip))
         else:
-            self._show_agenda_rows(panel, _agenda_rows(events, now, start, end, self.config.display.hour24))
+            records: dict[str, Any] = {}
+            rows = _agenda_rows(events, now, start, end, self.config.display.hour24,
+                                records=records if self._record_buttons_on() else None)
+            self._agenda_record = records
+            self._show_agenda_rows(panel, rows)
         self._show_deadlines(panel, now)
 
     def _agenda_line(self) -> tuple[str, str, str, str]:
@@ -8044,8 +8088,8 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return
         if self.ask is not None and self.ask.running_mode == MODE_MEETING:
-            # A meeting summary (by itself once the transcript is ready, or Summarise): no YOU entry, the screen
-            # stays where the owner is; LIVE has its steps.
+            # A meeting summary the owner asked for (the start card's tick, or Summarise): no YOU entry, the
+            # screen stays where the owner is; LIVE has its steps.
             self._ask_task_id = self.ask.task_id
             return
         self._you(text)
@@ -8600,15 +8644,25 @@ class AppController(QObject):
 
     def _create_meetings(self) -> Any:
         """[meetings] on: meetings_ui.MeetingsController (the Meetings screen, the start card, REC and the pill);
-        off: None, and no Meetings surface shows anywhere."""
+        off: None, and no Meetings surface shows anywhere - but meetings recorded before it was turned off still go
+        by the owner's retention (``_sweep_meetings`` at start-up and daily)."""
+        self._meetings_sweep_timer: QTimer | None = None
+        self._agenda_record: dict[str, Any] = {}        # a Day view row's Record key -> its calendar event
+        self._next_meeting_event: Any = None            # the event Home's next-meeting tile names
         if not getattr(getattr(self.config, "meetings", None), "enabled", False):
             return None
         from . import meetings_ui
 
         reading = self.window.reading
         controller = meetings_ui.MeetingsController(self.config, reading, now=self._now, on_tray=self._update_tray,
-                                                    show_screen=lambda: reading.set_tab(SCREEN_MEETINGS), parent=self)
-        controller.meeting_now = self._meeting_now_info
+                                                    show_screen=lambda: reading.set_tab(SCREEN_MEETINGS),
+                                                    on_screen=lambda: reading.current_tab() == SCREEN_MEETINGS,
+                                                    parent=self)
+        controller.meetings_now = self._meetings_now_infos
+        self.window.visibilityChanged.connect(self._on_window_visibility_for_meetings)
+        reading.recordNextMeeting.connect(self._record_next_meeting)
+        reading.recordAgendaRow.connect(self._record_agenda_row)
+        controller.recordingChanged.connect(self._on_recording_changed)
         # Part 2: summaries by the owner's own Claude Code (only while Ask Jarvis is on), the summary view's clicks,
         # and the record offer (with the bundle's offers).
         self._meeting_cards: dict[str, tuple[str, ...]] = {}       # meeting id -> its follow-up cards (in order)
@@ -8629,14 +8683,56 @@ class AppController(QObject):
             self.productivity.record_offer_on = lambda: self.meetings is not None and not self.meetings.is_recording()
         return controller
 
+    def _sweep_meetings(self) -> None:
+        """[meetings] off: meetings recorded while it was on still go by the owner's retention (audio after 7 days,
+        text and summary after 30) and a crash or a half-done Delete is tidied - at start-up and daily. Nothing is
+        made when there is no meetings folder; no Meetings surface shows."""
+        from . import meetings as mt
+
+        if self.meetings is not None or self.state == STATE_QUITTING:
+            return
+        mt.sweep(mt.meetings_root(self.config), self._now())
+        if self._meetings_sweep_timer is None:
+            self._meetings_sweep_timer = self._make_timer(self._sweep_meetings, single_shot=False,
+                                                          interval_ms=24 * 3600 * 1000)
+            self._meetings_sweep_timer.start()
+
+    def _on_window_visibility_for_meetings(self) -> None:
+        """The window was hidden or minimised: the start card closes (a consent tick is never carried over)."""
+        meetings = getattr(self, "meetings", None)
+        window = self.window
+        if meetings is not None and (not window.isVisible() or window.isMinimized()):
+            meetings.window_hidden()
+
+    def _on_recording_changed(self, recording: bool) -> None:
+        """A recording started or stopped: the Day view's Record buttons go or come back; an announcement held while
+        it recorded (Jarvis keeps quiet then) is said now."""
+        self._render_agenda()
+        if not recording and self._held_key is not None:
+            self._held_timer.start(0)
+
+    def _meeting_recording(self) -> bool:
+        """A meeting records now: Jarvis's own voice keeps quiet (text and captions only; announcements wait)."""
+        meetings = getattr(self, "meetings", None)
+        try:
+            return meetings is not None and bool(meetings.is_recording())
+        except Exception:  # noqa: BLE001 - unknown: not recording
+            return False
+
+    def _record_buttons_on(self) -> bool:
+        """Record on Home's next-meeting tile and the Day view's meeting rows: [meetings] on, nothing records."""
+        return getattr(self, "meetings", None) is not None and not self._meeting_recording()
+
     # ---- meeting summaries (meetings part 2) ---------------------------------------------------------------
 
-    def _meeting_now_info(self) -> Any:
-        """The meeting on now (or starting within 15 minutes) for the start card: from the bundle's day read when
-        there is one (the invite's guests come with it: a follow-up only ever goes to one of them), else from the
-        agenda (title and times only)."""
+    def _meetings_now_infos(self) -> list[Any]:
+        """The meetings a start card may be for, the likeliest first (meetings_ui.meeting_rank: a real meeting
+        before a block of time, then the start closest to now, so at 2:52 the 3:00 call wins over the 2:00-3:00
+        meeting that is ending): from the bundle's day read when there is one (the invite's guests come with it: a
+        follow-up only ever goes to one of them), else from the agenda (title and times only)."""
         from . import meetings_ui
         from .ask.offers import event_span
+        from .ask.prep import other_guests
 
         controller = getattr(self, "productivity", None)
         now = self._now()
@@ -8646,18 +8742,61 @@ class AppController(QObject):
                 own = controller._own()
             except Exception:  # noqa: BLE001 - the agenda below
                 day, own = {}, frozenset()
-            found = None
+            found = []
             for alias, briefs in day.items():
                 for brief in briefs:
                     span = event_span(brief, now)
                     if span is None or getattr(brief, "self_response", "") == "declined":
                         continue
                     start, end = span
-                    if start - timedelta(minutes=15) <= now < end and (found is None or start < found[0]):
-                        found = (start, alias, brief)
-            if found is not None:
-                return meetings_ui.meeting_info_of(found[1], found[2], own)
-        return meetings_ui.meeting_now(self._agenda_events, now)
+                    if start - meetings_ui.START_LEAD <= now < end:
+                        block = bool(getattr(brief, "free", False)) or getattr(brief, "event_type", "") in (
+                            "focusTime", "outOfOffice")
+                        rank = meetings_ui.meeting_rank(start, now, block=block, guests=other_guests(brief, own))
+                        found.append((rank, meetings_ui.meeting_info_of(alias, brief, own)))
+            if found:
+                return [info for _rank, info in sorted(found, key=lambda item: item[0])]
+        return meetings_ui.meetings_now(self._agenda_events, now)
+
+    def _meeting_info_for_event(self, event: Any) -> Any:
+        """A calendar event of the agenda (Home's next-meeting tile, a Day view row) as the start card's MeetingInfo:
+        with its invite from the bundle's day read when that has the same event (title and start), else its title
+        and times only."""
+        from . import meetings as mt
+        from . import meetings_ui
+
+        controller = getattr(self, "productivity", None)
+        if controller is not None:
+            try:
+                day = controller.day_briefs()
+                own = controller._own()
+            except Exception:  # noqa: BLE001 - title and times only
+                day, own = {}, frozenset()
+            title = " ".join(str(getattr(event, "title", "") or "").split()).casefold()
+            for alias, briefs in day.items():
+                for brief in briefs:
+                    same = brief.start is not None and event.start is not None and brief.start == event.start
+                    if same and " ".join(str(brief.title or "").split()).casefold() == title:
+                        return meetings_ui.meeting_info_of(alias, brief, own)
+        return mt.MeetingInfo(getattr(event, "title", ""), getattr(event, "start", None), getattr(event, "end", None))
+
+    def _record_next_meeting(self) -> None:
+        """Record on Home's next-meeting tile: that meeting's start card opens (unticked); it never records."""
+        meetings = getattr(self, "meetings", None)
+        event = self._next_meeting_event
+        if meetings is None or event is None or self.state == STATE_QUITTING:
+            return
+        meetings.open_start_card(self._meeting_info_for_event(event))
+        logger.info("Home's next-meeting tile: the start card opened")
+
+    def _record_agenda_row(self, key: str) -> None:
+        """Record on a Day view meeting row: that meeting's start card opens (unticked); it never records."""
+        meetings = getattr(self, "meetings", None)
+        event = self._agenda_record.get(key)
+        if meetings is None or event is None or self.state == STATE_QUITTING:
+            return
+        meetings.open_start_card(self._meeting_info_for_event(event))
+        logger.info("Day view: the start card opened from a meeting row")
 
     def _start_meeting_summary(self, job: Any, origin: str) -> str:
         """The meetings controller's summary runner: one planner mode run on the owner's own Claude Code (Ask's
@@ -8684,10 +8823,14 @@ class AppController(QObject):
         Keep (nothing is kept without it); one Transcript entry with Open the summary (never the title); one
         ACTIVITY row of counts."""
         meetings = getattr(self, "meetings", None)
-        meeting_id = str(getattr(outcome, "target", "") or "")
-        if meetings is None or not meeting_id:
+        if meetings is None:
             return
-        summary = meetings.on_summary(outcome, self._ask_task_id)
+        # A run that stopped before it named its meeting (an unexpected error, the planner busy) is the running
+        # summary's: it always ends there, so the meeting gets Retry and the next summary can start.
+        meeting_id = str(getattr(outcome, "target", "") or meetings.summary_running() or "")
+        if not meeting_id:
+            return
+        summary = meetings.on_summary(outcome, self._ask_task_id, meeting_id=meeting_id)
         if summary is not None:
             self._take_ask_cards(list(outcome.cards))
             self._meeting_cards[meeting_id] = tuple(card.id for card in outcome.cards)
@@ -8756,7 +8899,7 @@ class AppController(QObject):
         labels = ms.guest_labels(tuple(ms.MeetingGuest(name, address) for name, address in record.invite))
         cards = ms.followup_cards(summary, labels, alias=alias, aliases=tuple(self.config.accounts),
                                   can_send=alias in self._senders, now=self._now(),
-                                  link_hosts=self.config.actions.link_hosts).cards
+                                  link_hosts=self.config.actions.link_hosts, meeting_id=meeting_id).cards
         fresh = [card for card in cards if self.window.reading.approvals.card(card.id) is None
                  and not self._store.is_decided(card.id)]
         if fresh:
@@ -8790,10 +8933,18 @@ class AppController(QObject):
             follow.append((words, card_id))
         blocks: dict[int, tuple[str, str]] = {}
         for index, card_id in self._meeting_blocks.get(meeting_id, {}).items():
+            saved = str((self._store.get(card_id) or {}).get("status") or "") if card_id else ""
+            listed = bool(card_id) and approvals.card(card_id) is not None
             if not card_id:
                 blocks[index] = (sv.BLOCK_NO_TIME, "")
-            elif approvals.card(card_id) is not None:
+            elif saved in (STATUS_CREATED, STATUS_EXISTS) or (saved in (STATUS_RUNNING, STATUS_UNKNOWN)
+                                                             and not listed):
+                blocks[index] = (sv.BLOCK_ADDED, card_id)        # its card's own Add (the card keeps its Undo)
+            elif saved == STATUS_DENIED:
+                blocks[index] = (sv.BLOCK_DISMISSED, card_id)
+            elif listed:
                 blocks[index] = (sv.BLOCK_PROPOSED, card_id)
+            # an undecided card no longer listed (pushed out by later Ask cards): Add block proposes a new one
         notes = self._meeting_note_states(meeting_id, summary)
         meetings.render_summary(meeting_id, blocks=blocks, follow_ups=follow, notes=notes)
         self.window.reading._schedule_moment_sync()   # the draft and block cards are lent to the view
@@ -8863,8 +9014,10 @@ class AppController(QObject):
         summary = meetings.summary_of(meeting_id) if meetings is not None else None
         if summary is None or not 0 <= index < len(summary.actions) or not summary.actions[index].mine:
             return
-        if self._meeting_blocks.get(meeting_id, {}).get(index):
-            return                                   # one block card per item (it shows below)
+        earlier = self._meeting_blocks.get(meeting_id, {}).get(index)
+        if earlier and (self.window.reading.approvals.card(earlier) is not None
+                        or str((self._store.get(earlier) or {}).get("status") or "") not in ("", STATUS_FAILED)):
+            return                                   # one block card per item (it shows below, or it was decided)
         item = summary.actions[index]
         now = self._now()
         busy = [(event.start, event.end) for event in self._agenda_events or ()
@@ -9050,7 +9203,8 @@ class AppController(QObject):
         playing = self.state == STATE_READING and self.player.state in (PLAYING, WAITING)
         busy = bool(self.ask is not None and self.ask.busy) or speaking or bool(self._utterance)
         return QuietFacts(activity=self._prod_activity(), locked=self._locked_now(),
-                          speak_ok=bool(assistant.speak and assistant.speak_replies) and not muted, playing=playing,
+                          speak_ok=bool(assistant.speak and assistant.speak_replies) and not muted
+                          and not self._meeting_recording(), playing=playing,
                           card_busy=self._send_hold is not None or bool(self._jobs), busy=busy)
 
     def _prod_ask_state(self) -> tuple[bool, bool, float]:
@@ -10361,23 +10515,27 @@ class AppController(QObject):
         return self.window.reading.conversation.add(hud.ROLE_YOU, text, when=self._now())
 
     def _say(self, kind: str, text: str, *, key: str = "") -> bool:
-        """Hand ``text`` to Jarvis's voice; False when it will not be spoken (muted, off, failed, or
-        the app is closing)."""
+        """Hand ``text`` to Jarvis's voice; False when it will not be spoken (muted, off, failed, the app is
+        closing, or a meeting records: his voice would be heard by the others and land in the recording - he
+        keeps to captions and text until it stops)."""
         if self.state == STATE_QUITTING:
             return False
-        try:
-            said = bool(self.voice.say(kind, text, key=key))
-        except Exception as exc:  # noqa: BLE001 - his words are on screen either way
-            logger.warning("Jarvis's voice failed (%s); shown only", type(exc).__name__)
+        if self._meeting_recording():
             said = False
+        else:
+            try:
+                said = bool(self.voice.say(kind, text, key=key))
+            except Exception as exc:  # noqa: BLE001 - his words are on screen either way
+                logger.warning("Jarvis's voice failed (%s); shown only", type(exc).__name__)
+                said = False
         if not said and text and self.state == STATE_READING and self._voice_silent():
             # Muted (or no voice): the same words as Home's caption, text only (HOLOGRAM_SPEC 14.7).
             self.window.reading.say_caption(scrub_for_speech(text), spoken=False)
         return said
 
     def _voice_silent(self) -> bool:
-        """Jarvis's voice is muted or off: what he would say shows as a caption only."""
-        if not self.config.assistant.speak:
+        """Jarvis's voice is muted or off, or a meeting records: what he would say shows as a caption only."""
+        if not self.config.assistant.speak or self._meeting_recording():
             return True
         try:
             return bool(self.voice.muted)
@@ -10968,7 +11126,7 @@ class AppController(QObject):
         if key is None and self._script is None and not self.startup_error:
             self._announce_when_shown = True   # announced on its own once it is shown
         fold = (key is not None and not self._is_announced(key) and key != self._held_key
-                and not self._locked_now())
+                and not self._hold_speech_now())
         if line is None:
             if key is not None:
                 self._announce()
@@ -11006,6 +11164,7 @@ class AppController(QObject):
         thread waiting on the owner (the bundle's follow-ups), the nearest deadline and the waiting proposals."""
         now = self._now()
         meeting = None
+        self._next_meeting_event = None
         if self._agenda_status == _AGENDA_OK and self._agenda_events:
             today = []
             for event in self._agenda_events:
@@ -11013,10 +11172,11 @@ class AppController(QObject):
                     continue
                 start = event.start.astimezone(now.tzinfo) if now.tzinfo is not None else event.start
                 if now < event.start and start.date() == now.date():
-                    today.append((event.start, start, event.title))
+                    today.append((event.start, start, event.title, event))
             if today:
-                _key, start, title = min(today, key=lambda item: item[0])
+                _key, start, title, event = min(today, key=lambda item: item[0])
                 meeting = (start, title)
+                self._next_meeting_event = event        # Record on the tile opens this meeting's start card
         thread, replies = None, 0
         controller = getattr(self, "productivity", None)
         if controller is not None and self._followups_section_on():
@@ -11038,9 +11198,11 @@ class AppController(QObject):
                 if due.date() == now.date():
                     deadline_at = due
             break
+        meetings = getattr(self, "meetings", None)        # Record on the tile: [meetings] on, nothing recording
+        record = meetings is not None and not meetings.is_recording()
         return context_view.ContextFacts(meeting=meeting, thread=thread, deadline=deadline,
                                          deadline_at=deadline_at, approvals=len(self._pending_actions()),
-                                         replies=replies)
+                                         replies=replies, record=record)
 
     def _queue_context_tiles(self, spoken: bool) -> None:
         """The greeting or the announcement was said: Home's context tiles fly out as the line starts (at once
@@ -11073,6 +11235,11 @@ class AppController(QObject):
         except Exception:  # noqa: BLE001 - unknown: not locked
             return False
 
+    def _hold_speech_now(self) -> bool:
+        """An announcement waits instead of being said: the session is locked, or a meeting records (said once it
+        stops, if the briefing is still new)."""
+        return self._locked_now() or self._meeting_recording()
+
     def _announce(self, *, greeting: bool = False) -> bool:
         """"Sir, your AM briefing is ready to view." once per briefing: a conversation entry with a
         View briefing link and one utterance (with a greeting before it when ``greeting``). Never
@@ -11098,10 +11265,11 @@ class AppController(QObject):
         self._jarvis(text, link=(VIEW_BRIEFING_TEXT, VIEW_BRIEFING_LINK))
         if line is not None:
             logger.info("Greeting %s with the announcement", line.id)
-        if self._locked_now():
+        if self._hold_speech_now():
             self._held_key, self._held_text, self._held_kind = key, text, kind
             self._held_timer.start(_LOCK_RECHECK_MS)
-            logger.info("Announced the %s briefing (held: session locked)", key)
+            logger.info("Announced the %s briefing (held: %s)", key,
+                        "a meeting records" if self._meeting_recording() else "session locked")
             return True
         spoken = self._say(kind, text, key=f"announce:{key}")
         self._set_announced(key, spoken)
@@ -11131,7 +11299,7 @@ class AppController(QObject):
         key = self._held_key
         if key is None or self.state == STATE_QUITTING:
             return
-        if self._locked_now():
+        if self._hold_speech_now():
             self._held_timer.start(_LOCK_RECHECK_MS)
             return
         self._held_key = None
@@ -11720,6 +11888,9 @@ class AppController(QObject):
         logger.info("Reading the briefing: %d section(s)%s%s", len(script.section_indices(False)),
                     ", with a stale note" if script.stale else "", "" if self._autoplay else " (waiting for Play)")
         self._render_reading()
+        if self._autoplay and self._meeting_recording():
+            self._autoplay = False                # a meeting records: the briefing waits for Play (never aloud)
+            logger.info("A meeting records: the briefing waits for Play")
         if self._autoplay:
             self._start_playback(script.section_indices(False))
         self._after_briefing_shown()

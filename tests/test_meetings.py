@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import logging
 import struct
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -19,7 +21,8 @@ from briefing_reader import meeting_speech as sp
 from briefing_reader import meetings as mt
 from briefing_reader.config import MeetingsConfig, load_config
 
-from .meeting_fakes import MIC_A, MIC_B, OUT_A, OUT_B, Clock, FakeBackend, FakeSession, FakeTranscriber, tone
+from .meeting_fakes import (MIC_A, MIC_B, OUT_A, OUT_B, Clock, FakeBackend, FakePortAudio, FakeSession,
+                            FakeTranscriber, tone)
 
 NOW = datetime(2026, 10, 19, 14, 0)
 TITLE = "Secret Project Sync"
@@ -417,6 +420,258 @@ class TranscriptionTests(Base):
         expected = sp.ERR_ADDON if sp.speech_missing() else sp.ERR_MODEL
         self.assertEqual(result, [expected])
         self.assertFalse(process.running())
+
+
+class SummaryAskedTests(Base):
+    def test_the_summary_tick_is_kept_with_its_time_and_off_by_default(self) -> None:
+        plain = self.store.create(request())
+        self.assertFalse(plain.summary_asked)
+        self.assertEqual(json.loads((self.store.folder(plain.id) / mt.RECORD_FILE).read_text(encoding="utf-8"))
+                         ["summary_request"], {"asked": False, "at": None})
+        asked_at = NOW + timedelta(seconds=40)
+        info = mt.MeetingInfo(TITLE, NOW, NOW + timedelta(minutes=30))
+        asked = self.store.create(mt.StartRequest(info, True, NOW, summarise=True, summarise_at=asked_at))
+        loaded = self.store.load(asked.id)
+        self.assertEqual((loaded.summary_asked, loaded.summary_asked_at), (True, asked_at))
+        self.assertEqual((loaded.consent_at, loaded.consent_confirmed), (NOW, True))
+        self.assertFalse(mt.StartRequest(info, True, NOW, summarise="yes").summarise)   # only True counts
+
+
+class DeleteLeftoverTests(Base):
+    def make(self) -> str:
+        record = self.store.create(request())
+        for channel in mt.CHANNELS:
+            self.store.audio_path(record.id, channel).write_bytes(b"RIFF")
+        self.store.transcript_path(record.id).write_text("{}", encoding="utf-8")
+        self.store.update(record.id, status=mt.STATUS_TRANSCRIBING, progress=50)
+        return record.id
+
+    def test_a_file_still_held_keeps_the_meeting_listed_to_delete_again(self) -> None:
+        meeting_id = self.make()
+        real_unlink = Path.unlink
+
+        def held(path: Path, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202 - Path.unlink's own
+            if path.name == "loopback.wav":
+                raise PermissionError("in use by the worker")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", held):
+            self.assertFalse(self.store.delete(meeting_id))
+        record = self.store.load(meeting_id)                         # still listed: never a vanished row
+        self.assertEqual(record.status, mt.STATUS_DELETING)
+        self.assertEqual(record.status_text(), mt.DELETE_LEFT_TEXT)
+        self.assertEqual([r.id for r in self.store.list()], [meeting_id])
+        self.assertFalse(self.store.audio_path(meeting_id, mt.MIC).exists())
+        self.assertFalse(self.store.transcript_path(meeting_id).exists())
+        self.assertTrue(self.store.audio_path(meeting_id, mt.LOOPBACK).exists())
+        self.assertIsNone(self.store.update(meeting_id, status=mt.STATUS_TRANSCRIBED))   # nothing revives it
+        self.assertEqual(self.store.load(meeting_id).status, mt.STATUS_DELETING)
+        self.store.recover()                                           # the next start tries again
+        self.assertFalse(self.store.folder(meeting_id).exists())
+
+    def test_delete_after_a_stopped_worker_removes_everything(self) -> None:
+        """A real child process holds loopback.wav open the way the worker does; cancel() kills it and waits, so
+        the Delete right after removes every file (none left on disk behind a vanished row)."""
+        meeting_id = self.make()
+        held = self.store.audio_path(meeting_id, mt.LOOPBACK)
+        code = ("import sys, time\nfh = open(sys.argv[1], 'rb')\nprint('ready', flush=True)\ntime.sleep(60)\n")
+        child = subprocess.Popen([sys.executable, "-B", "-c", code, str(held)], stdout=subprocess.PIPE,
+                                 stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        self.assertEqual(child.stdout.readline().strip(), b"ready")
+        process = sp.TranscriptionProcess(self.store.folder(meeting_id), self.tmp / "models",
+                                          on_progress=lambda _p: None, on_done=lambda _e: None)
+        process._proc = child
+        self.assertTrue(process.cancel())
+        self.assertIsNotNone(child.poll())                              # it has ended: its handle is gone
+        child.stdout.close()
+        self.assertTrue(self.store.delete(meeting_id))
+        self.assertFalse(self.store.folder(meeting_id).exists())
+
+    def test_cancel_kills_and_waits_and_says_when_it_could_not(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        process = sp.TranscriptionProcess(self.tmp, self.tmp, on_progress=lambda _p: None, on_done=lambda _e: None)
+        process._proc = proc
+        self.assertTrue(process.cancel())
+        proc.kill.assert_called_once_with()
+        proc.wait.assert_called_once_with(timeout=sp.CANCEL_WAIT_S)
+        proc.wait.side_effect = subprocess.TimeoutExpired("worker", sp.CANCEL_WAIT_S)
+        self.assertFalse(process.cancel())
+
+
+class RetentionSweepTests(Base):
+    def make(self, days_ago: float, status: str = mt.STATUS_TRANSCRIBED) -> str:
+        self.clock.start = NOW - timedelta(days=days_ago)
+        record = self.store.create(request())
+        for channel in mt.CHANNELS:
+            self.store.audio_path(record.id, channel).write_bytes(b"RIFF" + bytes(64))
+        self.store.update(record.id, status=status)
+        self.clock.start = NOW
+        return record.id
+
+    def test_cleanup_names_each_meeting_it_removed(self) -> None:
+        week, month = self.make(8), self.make(31)
+        removed: list[str] = []
+        self.assertEqual(self.store.cleanup(NOW, on_removed=removed.append), (2, 1))
+        self.assertEqual(removed, [month])
+        self.assertTrue(self.store.folder(week).exists())
+
+    def test_the_sweep_with_meetings_off_keeps_the_owners_retention(self) -> None:
+        nothing = self.tmp / "local" / "briefing-reader" / "elsewhere"
+        self.assertEqual(mt.sweep(nothing, NOW), (0, 0))
+        self.assertFalse(nothing.exists())                             # nothing is made
+        week, month = self.make(8), self.make(31)
+        crashed = self.make(1, mt.STATUS_RECORDING)
+        self.assertEqual(mt.sweep(self.root, NOW), (2, 1))
+        self.assertFalse(self.store.audio_path(week, mt.MIC).exists())
+        self.assertFalse(self.store.folder(month).exists())
+        self.assertEqual(self.store.load(crashed).status, mt.STATUS_RECORDED)
+
+
+class StartFailureTests(Base):
+    def test_a_start_that_fails_after_opening_closes_every_stream_and_file(self) -> None:
+        backend = FakeBackend()
+        record = self.store.create(request())
+        rec = ma.Recorder(backend, self.store, record, clock=self.clock.mono, wall=self.clock.wall)
+        with mock.patch.object(self.store, "save", side_effect=PermissionError("meeting.json locked")):
+            with self.assertRaises(PermissionError):
+                rec.start()
+        self.assertFalse(rec.is_recording())
+        self.assertEqual(len(backend.streams), 2)
+        self.assertTrue(all(stream.closed for stream in backend.streams))   # no device left open
+        self.assertTrue(all(channel.writer._fh is None for channel in rec._channels.values()))
+        self.assertTrue(self.store.delete(record.id))                         # no file held: it all goes
+        self.assertFalse(self.store.folder(record.id).exists())
+
+
+class CallAudioTests(Base):
+    def test_call_audio_that_cannot_be_opened_is_said_and_noted(self) -> None:
+        backend = FakeBackend(loop_fails=True)
+        record = self.store.create(request())
+        rec = ma.Recorder(backend, self.store, record, clock=self.clock.mono, wall=self.clock.wall)
+        rec.start()
+        self.addCleanup(rec.stop)
+        self.assertTrue(rec.is_recording())
+        self.assertTrue(rec.call_audio_missing())
+        backend.loop_fails = False                                      # the device can be opened now
+        for _ in range(3):
+            self.clock.advance(1.0)
+            backend.live(mt.MIC).feed(tone(1.0, 3000))
+            rec.tick()
+        self.assertFalse(rec.call_audio_missing())
+        self.assertEqual([(c["channel"], c["change"]) for c in rec.record.device_changes],
+                         [("call audio", "unavailable"), ("call audio", "opened")])
+
+
+class PortAudioTests(Base):
+    """PyAudioWPatch's adapter over a fake PortAudio (its device list is a snapshot taken when it starts)."""
+
+    def portaudio(self) -> FakePortAudio:
+        module = FakePortAudio()
+        module.add(0, "Laptop Mic", mic=True)
+        module.add(1, "Laptop Speakers")
+        module.add(2, "Laptop Speakers [Loopback]", loopback=True)
+        module.default_in, module.default_out = 0, 1
+        return module
+
+    def plug_headset(self, module: FakePortAudio) -> None:
+        module.add(3, "Headset Mic", mic=True)
+        module.add(4, "Headset Earphones")
+        module.add(5, "Headset Earphones [Loopback]", loopback=True)
+        module.default_in, module.default_out = 3, 4
+
+    def test_a_fresh_start_sees_a_device_plugged_in_since(self) -> None:
+        module = self.portaudio()
+        backend = ma.PyAudioWPatchBackend(module)
+        self.plug_headset(module)
+        self.assertEqual(backend.default_output().name, "Laptop Speakers")   # PortAudio's snapshot
+        backend.reset()
+        self.assertTrue(module.instances[0].terminated)
+        self.assertEqual((backend.default_input().name, backend.default_output().name),
+                         ("Headset Mic", "Headset Earphones"))
+        self.assertIn("Headset Earphones", [device.name for device in backend.outputs()])
+
+    def recorder(self, module: FakePortAudio) -> ma.Recorder:
+        backend = ma.PyAudioWPatchBackend(module, clock=self.clock.mono)
+        record = self.store.create(request())
+        rec = ma.Recorder(backend, self.store, record, clock=self.clock.mono, wall=self.clock.wall)
+        rec.start()
+        self.addCleanup(rec.stop)
+        return rec
+
+    def run_for(self, rec: ma.Recorder, module: FakePortAudio, seconds: int, *, feed: bool = True) -> None:
+        for _ in range(seconds):
+            self.clock.advance(1.0)
+            if feed:
+                module.deliver(tone(1.0, 3000))
+            rec.tick()
+
+    def test_an_unplugged_headset_switches_both_channels_to_the_new_defaults(self) -> None:
+        module = self.portaudio()
+        self.plug_headset(module)
+        rec = self.recorder(module)
+        self.assertEqual(rec.device_names(), ("Headset Mic", "Headset Earphones"))
+        self.run_for(rec, module, 5)
+        module.unplug(3, 4, 5)                                          # Windows moves to the laptop
+        module.default_in, module.default_out = 0, 1
+        self.run_for(rec, module, 5)
+        self.assertTrue(rec.is_recording())
+        self.assertEqual(rec.device_names(), ("Laptop Mic", "Laptop Speakers"))
+        self.assertEqual(sorted((c["channel"], c["change"]) for c in rec.record.device_changes),
+                         [("call audio", "switched"), ("microphone", "switched")])
+        self.assertTrue(module.instances[0].terminated)                 # PortAudio started again for a fresh look
+        self.assertFalse(rec.call_audio_missing())
+        loud_before = rec._last_sound
+        self.run_for(rec, module, 3)
+        self.assertGreater(rec._last_sound, loud_before)                # the laptop microphone is heard now
+
+    def test_a_microphone_that_goes_quiet_is_opened_again(self) -> None:
+        module = self.portaudio()
+        rec = self.recorder(module)
+        self.run_for(rec, module, 2)
+        self.run_for(rec, module, int(ma.MIC_STALE_S) + 2, feed=False)  # no callback at all: the stream stopped
+        self.assertTrue(rec.is_recording())
+        self.assertIn(("microphone", "reopened"), [(c["channel"], c["change"]) for c in rec.record.device_changes])
+        self.assertEqual(len(module.instances), 2)
+        self.assertEqual(rec.device_names(), ("Laptop Mic", "Laptop Speakers"))
+
+
+class DownloadEdgeTests(Base):
+    FILES = DownloadTests.FILES
+
+    def target(self) -> Path:
+        return self.tmp / "local" / "briefing-reader" / "models" / sp.MODEL_FOLDER
+
+    def test_stopping_during_the_check_keeps_the_whole_file(self) -> None:
+        cancel = threading.Event()
+        real = sp._sha256
+
+        def checking(path: Path, flag) -> str:  # noqa: ANN001 - the cancel Event
+            cancel.set()                                                # Stop the download (or Jarvis closes)
+            return real(path, flag)
+
+        with mock.patch.object(sp, "_sha256", checking):
+            code = sp.ModelDownloader(self.target(), session=FakeSession(self.FILES), cancel=cancel).run()
+        self.assertEqual(code, sp.ERR_CANCELLED)
+        part = self.target() / "model.bin.part"
+        self.assertEqual(part.stat().st_size, len(self.FILES["model.bin"]))   # kept: "continues where it stopped"
+        again = FakeSession(self.FILES)
+        self.assertEqual(sp.ModelDownloader(self.target(), session=again).run(), "")
+        self.assertEqual([r for r in again.requests if r[:2] == ("GET", "model.bin")], [])   # not fetched again
+        self.assertTrue(sp.model_ready(self.target()))
+
+    def test_a_file_error_is_a_code_never_an_exception(self) -> None:
+        real_replace = Path.replace
+
+        def locked(path: Path, target):  # noqa: ANN001, ANN202 - Path.replace's own
+            if path.name == "model.bin.part":
+                raise PermissionError("a scanner holds the new file")
+            return real_replace(path, target)
+
+        with mock.patch.object(Path, "replace", locked):
+            code = sp.ModelDownloader(self.target(), session=FakeSession(self.FILES)).run()
+        self.assertEqual(code, sp.ERR_DISK)
 
 
 if __name__ == "__main__":

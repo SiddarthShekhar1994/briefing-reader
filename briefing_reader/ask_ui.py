@@ -921,7 +921,7 @@ def _mode_task(live: LiveStream | None, request: ModeRequest, words: str, *, kin
         return NO_TASK
     fields = [("You typed" if request.typed_route else "You clicked", words or title)]
     if request.mode == MODE_MEETING:   # a meeting summary: what started it, and that it gets no notes or mail
-        started = ("the transcript being ready (you clicked Record and ticked the consent box)"
+        started = ("your tick \"summarise it\" on the meeting's start card (it ran once the transcript was ready)"
                    if request.origin == ORIGIN_AUTO else "your click on Summarise")
         fields = [("Started by", started), ("Given", "the transcript and the invite's guest names only")]
     if memory is not None:

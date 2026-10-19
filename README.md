@@ -2016,39 +2016,54 @@ there is no Meetings screen, no Record anywhere and no record offer.
 call is recorded. Before every recording, the start card has an unticked box
 "Everyone in this meeting has agreed to be recorded"; Start stays disabled
 until you tick it, every meeting (it is never remembered), and the meeting
-keeps that you confirmed it and when. The tick is your confirmation, not legal
-advice: ask everyone first.
+keeps that you confirmed it and when you ticked it. A tick counts for 5
+minutes and goes as soon as the card closes - Cancel, another screen, Jarvis
+hidden or minimised - so it is never carried over to another call. The tick is
+your confirmation, not legal advice: ask everyone first.
 
 - **Recording** starts only from your click on Start on that card: never by
-  itself, never by voice, never from an offer. Record a meeting is on the
-  Meetings screen and in the Find list (Ctrl+K). Jarvis records your microphone
-  as "You" and the call audio from your speakers or headset (Windows loopback)
-  as "Others"; pick the devices in Settings > Meetings, otherwise the Windows
-  defaults are followed.
+  itself, never by voice, never from an offer. Record opens the card: on Home's
+  NEXT MEETING tile and on a meeting's row in the Day view (for that meeting),
+  and Record a meeting on the Meetings screen and in the Find list (Ctrl+K) for
+  the meeting on now - the one starting within 15 minutes before one that is
+  ending - or an unscheduled call. The card names the meeting; **Another
+  meeting** switches to another one on now or to an unscheduled call. Jarvis
+  records your microphone as "You" and the call audio from your speakers or
+  headset (Windows loopback) as "Others"; pick the devices in Settings >
+  Meetings, otherwise the Windows defaults are followed (looked at again for
+  each card and each start, and mid-meeting when a headset is unplugged).
 - **Visible the whole time**: a red REC with the time in the header on every
-  screen, the orb's recording look, a small pill on top of every window (also
-  while Jarvis is minimised) with Stop, and "Recording" in the tray tooltip.
+  screen (also over the "Hear it now?" prompt), the orb's recording look, a
+  small pill on top of every window (also while Jarvis is minimised) with Stop,
+  and "Recording" in the tray tooltip. When the call audio can't be recorded
+  (its device could not be opened), REC, the pill and the meeting's row say
+  "No call audio". While a meeting records Jarvis keeps quiet: what he would
+  say shows as text, and a briefing's announcement waits until it stops.
 - **Stop** on the pill, the header, Home or the Meetings screen. It also stops
   by itself 15 minutes after the meeting's end, after 10 minutes of silence on
   both channels, or at 3 hours, and closing Jarvis stops and saves.
-- **On this PC only**: everything is kept in
+- **Kept on this PC**: everything is kept in
   `%LOCALAPPDATA%\briefing-reader\meetings\<id>\` (never a folder that syncs);
   the audio is deleted after 7 days, the transcript and the summary after 30
-  days, and **Delete** on a meeting removes all of it at once. Nothing is
-  uploaded.
+  days (also after you turn meetings off), and **Delete** on a meeting removes
+  all of it at once (a file still in use keeps the meeting listed with "Delete
+  again"). The audio is never uploaded; the transcript leaves this PC only for
+  a summary you ask for (below).
 - **Written down on this PC** with faster-whisper (model medium.en, about
   1.5 GB, downloaded from Hugging Face only when you click **Download** in
   Settings > Meetings or on the Meetings screen). The Python add-ons
   (faster-whisper; PyAudioWPatch or soundcard) are installed with your OK, never
   by Jarvis; the Meetings screen says exactly what is missing.
 
-**The summary.** Once a meeting is written down, your own Claude Code (the
-same signed-in [Ask Jarvis](#ask-jarvis-optional) run as Plan my day and the
-meeting brief: no API key, no paid API) writes its summary by itself - your
-click on Record and the consent tick started the chain. A meeting written down
-before summaries existed, or one whose summary failed or was cancelled (Esc on
-the command bar), has **Summarise** on the Meetings screen. Without Ask Jarvis
-there is no summary, and the list says so.
+**The summary.** Only when you ask: tick "When it is written down, summarise
+it with my Claude Code" on the start card (a second box, unticked every time;
+the meeting keeps that you asked and when), or click **Summarise** on the
+meeting later. Then your own Claude Code (the same signed-in
+[Ask Jarvis](#ask-jarvis-optional) run as Plan my day and the meeting brief: no
+API key, no paid API) writes it, and **the transcript and the guests' names go
+to Claude (Anthropic)** that way. Without your ask the transcript stays on this
+PC. A summary that failed or was cancelled (Esc on the command bar) has
+**Retry**. Without Ask Jarvis there is no summary, and the list says so.
 
 - **What Claude gets**: the transcript, marked as text written by other people
   (data, never instructions - a request said in the meeting is never followed),
@@ -2073,7 +2088,8 @@ there is no summary, and the list says so.
 - **Add block** on one of your action items proposes a calendar card for the
   next free half hour Jarvis sees on your agenda (by its due date when it has
   one): only on your click, and nothing is added until that card's own **Add**
-  (with **Undo**).
+  (with **Undo**). The item then says the block was added or dismissed; a
+  proposal no longer listed can be proposed again.
 - **Notes** the summary suggests wait for **Keep** or **Dismiss** - Memory's
   own, also under MEMORY > JARVIS SUGGESTS. Nothing is kept without Keep; the
   same rules as other suggestions apply (no address, link, number or secret).

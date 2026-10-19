@@ -332,11 +332,13 @@ reserve_ask_runs = 3          # Ask runs kept free each hour for your own reques
 # after you tick "Everyone in this meeting has agreed to be recorded" (every meeting; never remembered).
 # While it records, a red REC with the time shows in the header on every screen and in a small pill
 # that stays on top, also when Jarvis is minimised. The microphone is kept as "You" and the call audio
-# from your speakers or headset as "Others", in %LOCALAPPDATA%\briefing-reader\meetings only (never
-# uploaded): the audio for 7 days, the transcript and summary for 30 days; Delete removes one at once.
-# Speech to text runs on this PC (faster-whisper, model medium.en, about 1.5 GB, downloaded only when you
-# click Download). Pick the microphone and the call-audio device in Settings > Meetings (otherwise the
-# Windows defaults are followed). California and some other places need everyone's consent: the tick is
-# your confirmation, not legal advice. Off here; turn it on for this PC with JARVIS_MEETINGS_ENABLED=true
-# in .env.
+# from your speakers or headset as "Others", in %LOCALAPPDATA%\briefing-reader\meetings only (the audio
+# is never uploaded): the audio for 7 days, the transcript and summary for 30 days (also after you turn
+# this off); Delete removes one at once. Speech to text runs on this PC (faster-whisper, model medium.en,
+# about 1.5 GB, downloaded only when you click Download). A summary is written only when you ask for it
+# (a second tick on the start card, or Summarise on the meeting): then the transcript and the guests'
+# names go to Claude (Anthropic) through your own Claude Code (Ask Jarvis). Pick the microphone and the
+# call-audio device in Settings > Meetings (otherwise the Windows defaults are followed). California and
+# some other places need everyone's consent: the tick is your confirmation, not legal advice. Off here;
+# turn it on for this PC with JARVIS_MEETINGS_ENABLED=true in .env.
 enabled = false

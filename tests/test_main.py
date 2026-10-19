@@ -267,6 +267,11 @@ class CatchUpDecisionTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.now = datetime(2026, 10, 5, 0, 30).astimezone()
 
+    def state(self) -> RunState:
+        """The run state as the test's own day writes it: its clock is the frozen one, so keeping 14 days never
+        forgets the 2026-10-04 slots whatever the real date is."""
+        return RunState(self.data_dir / RUNSTATE_FILE, clock=lambda: self.now)
+
     def decide(self) -> tuple[str | None, str]:
         with self.assertLogs(LOGGER, level="INFO") as captured:
             run = entry._catch_up_run(SLOTS, self.data_dir, "briefing-reader-test")
@@ -289,14 +294,14 @@ class CatchUpDecisionTests(unittest.TestCase):
         self.claim.assert_not_called()
 
     def test_answered_slot_is_not_asked_again(self) -> None:
-        RunState(self.data_dir / RUNSTATE_FILE).mark_handled("2026-10-04 PM", "dismissed")
+        self.state().mark_handled("2026-10-04 PM", "dismissed")
         run, line = self.decide()
         self.assertIsNone(run)
         self.assertIn("already answered (dismissed)", line)
         self.claim.assert_not_called()
 
     def test_announced_or_viewed_slot_is_left_alone(self) -> None:
-        state = RunState(self.data_dir / RUNSTATE_FILE)
+        state = self.state()
         state.mark_announced("2026-10-04 PM")
         run, line = self.decide()
         self.assertIsNone(run)
@@ -308,7 +313,7 @@ class CatchUpDecisionTests(unittest.TestCase):
         self.claim.assert_not_called()
 
     def test_shown_but_unanswered_slot_is_asked_again(self) -> None:
-        RunState(self.data_dir / RUNSTATE_FILE).mark_shown("2026-10-04 PM")
+        self.state().mark_shown("2026-10-04 PM")
         self.assertEqual(self.decide()[0], "PM")
 
     def test_running_app_is_left_alone(self) -> None:

@@ -22,7 +22,8 @@ Public API
 ``ModelDownloader(target, session=None, progress=None, cancel=None)``: ``run()`` -> "" or a short error code.
 ``Segment(start, end, text)``, ``merge_turns(mic, loopback, gap=)``, ``transcribe_meeting(...)``.
 ``FasterWhisperTranscriber(model_dir)`` (the add-on behind a small adapter, imported only when used).
-``TranscriptionProcess(meeting_dir, model_dir, on_progress, on_done)``: ``start()``, ``cancel()``, ``running()``.
+``TranscriptionProcess(meeting_dir, model_dir, on_progress, on_done)``: ``start()``, ``cancel()`` (kills the worker
+and waits until it ended), ``running()``.
 """
 
 from __future__ import annotations
@@ -62,6 +63,7 @@ ADDON_SPEECH = "faster-whisper"
 CHUNK = 1 << 20
 TIMEOUT_S = 30
 MERGE_GAP_S = 1.5
+CANCEL_WAIT_S = 5.0               # a stopped worker is waited for this long (its files are free after)
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 CREATE_NO_WINDOW = 0x08000000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -177,7 +179,18 @@ class ModelDownloader:
 
     def run(self) -> str:
         """Fetch every file (continuing the ``.part`` files), check them, write the manifest. "" when the model
-        is ready, else a short error code (ERR_*)."""
+        is ready, else a short error code (ERR_*). Never raises: a file error (a scanner holding the new file,
+        say) is ERR_DISK, so the app always hears that the download ended."""
+        try:
+            return self._run()
+        except OSError as exc:
+            logger.info("Speech model: a file could not be written (%s)", type(exc).__name__)
+            return ERR_DISK
+        except Exception as exc:  # noqa: BLE001 - a download never dies silently
+            logger.info("Speech model: the download stopped (%s)", type(exc).__name__)
+            return ERR_NETWORK
+
+    def _run(self) -> str:
         try:
             self.target.mkdir(parents=True, exist_ok=True)
             expected = {name: self._expected(name) for name in self.files}
@@ -254,9 +267,13 @@ class ModelDownloader:
                         self._progress(done_before + have, total)
         if part.stat().st_size != size:
             return ERR_NETWORK if part.stat().st_size < size else ERR_CHECK
-        if sha and _sha256(part, self._cancel) != sha:
-            part.unlink(missing_ok=True)
-            return ERR_CANCELLED if self._cancel.is_set() else ERR_CHECK
+        if sha:
+            digest = _sha256(part, self._cancel)
+            if self._cancel.is_set():
+                return ERR_CANCELLED             # stopped while checking: the whole .part stays (checked next time)
+            if digest != sha:
+                part.unlink(missing_ok=True)
+                return ERR_CHECK
         part.replace(final)
         return ""
 
@@ -406,11 +423,23 @@ class TranscriptionProcess:
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def cancel(self) -> None:
+    def cancel(self, wait_s: float = CANCEL_WAIT_S) -> bool:
+        """Stop the worker and wait (up to ``wait_s``) until it has ended, so the files it held are free (a
+        Delete right after removes them all). True when no worker is left running."""
         self._cancelled = True
-        if self.running():
-            assert self._proc is not None
-            self._proc.kill()
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return True
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=wait_s)
+        except subprocess.TimeoutExpired:
+            logger.info("Meetings: the writing down did not end within %.0f s", wait_s)
+            return False
+        return True
 
 
 def _emit(message: dict) -> None:
