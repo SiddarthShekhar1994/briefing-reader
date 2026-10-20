@@ -244,6 +244,9 @@ ROLES: dict[str, TypeRole] = {
     "dock_label": TypeRole(_B, 14, 18, 500, 0.0),                 # a screen's name in the labelled Dock
     "find_item": TypeRole(_B, 14, 18, 400, 0.0),                  # a row of the Find list
     "kbd": TypeRole(_M, 10, 12, 500, 0.08, caps=True),            # a key hint chip (CTRL K)
+    "dock_tag": TypeRole(_M, 9, 12, 500, 0.14, caps=True),        # the Dock's Desktop: its HUD tag
+    "dock_key": TypeRole(_M, 9, 12, 500, 0.06),                   # ... the HUD key's keycaps under it
+    "dock_hint": TypeRole(_M, 10, 14, 400, 0.0),                  # ... and "switches"
 }
 _FONT_MAKERS: dict[str, Callable[[int, int, float], QFont]] = {
     _D: hud.display_font, _B: hud.body_font, _M: hud.mono_font,
@@ -859,6 +862,9 @@ ICONS: dict[str, tuple[str, ...]] = {
     "meetings": ("M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3z", "M6 11a6 6 0 0 0 12 0",
                  "M12 17v3.5M8.5 20.5h7"),
     "record": ("M12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12z",),
+    # Desktop (the Switch prototype's monitor: the Dock's switch to the HUD).
+    "desktop": ("M4.5 4.5h15a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5V6"
+                "a1.5 1.5 0 0 1 1.5-1.5z", "M8.5 20h7M12 16v4"),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",

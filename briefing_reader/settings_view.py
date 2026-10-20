@@ -22,6 +22,10 @@ Public API
 ``settings_rows(config, group, connected)``
     The (label, value) pairs a group shows (used by the panel and the tests).
 
+``desktop_rows(config, turned_on=False)``, ``DESKTOP_GROUP`` / ``DESKTOP_TITLE`` / ``DESKTOP_NOTE`` / ``DESKTOP_HOW``
+    Settings > Desktop, added (``add_group``) only while [desktop] is on: its values and whether the owner turned it
+    on on its first-run card ("Not turned on yet" until then).
+
 Read only by design: nothing here writes config.toml or .env, and no secret, token, client id, page id, file
 path of a sign-in or e-mail address is ever shown (Accounts: the alias and connected yes / no only).
 """
@@ -68,6 +72,15 @@ _MOTION_WORDS = {holo.MOTION_LIVELY: "Lively - screens sweep and assemble, the o
                  holo.MOTION_CALM: "Calm - slower, gentle fades only",
                  holo.MOTION_OFF: "Off - no entrance or transition effects"}
 MOTION_WINDOWS_OFF = "Off - Windows' animations are turned off"
+DESKTOP_GROUP = "desktop"
+DESKTOP_TITLE = "Desktop"
+DESKTOP_NOTE = "Jarvis works on your desktop only when you ask, in the folders and apps you allow."
+DESKTOP_HOW = ("Jarvis on your desktop is turned on or off with [desktop] in config.toml (or JARVIS_DESKTOP_ENABLED "
+               "in .env), then a restart. Nothing on this screen changes a setting.")
+NOT_TURNED_ON = "Not turned on yet"
+TURNED_ON = "Turned on - you clicked Turn on"
+_DESKTOP_FOLDERS = {"desktop": "Desktop", "documents": "Documents", "downloads": "Downloads", "pictures": "Pictures",
+                    "music": "Music", "videos": "Videos"}
 
 
 def motion_words(config: Any) -> str:
@@ -209,6 +222,35 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
                      else "Off"))
         return rows
     return []
+
+
+def _and(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def desktop_rows(config: Any, turned_on: bool = False) -> list[tuple[str, str]]:
+    """Settings > Desktop: [desktop] as loaded, in plain words, and whether the owner turned it on (its first-run
+    card). Read only, like every group."""
+    desktop = getattr(config, "desktop", None)
+    if desktop is None:
+        return []
+    folders = [_DESKTOP_FOLDERS.get(str(name), str(name)) for name in getattr(desktop, "folders", ())]
+    extra = len(getattr(desktop, "extra_folders", ()) or ())
+    parts = [_and(folders)] if folders else []
+    if extra:
+        parts.append(f"{extra} {'folder' if extra == 1 else 'folders'} of your own")
+    where = ", plus ".join(parts) or "None"
+    hud_key = str(getattr(desktop, "hud_key", "") or "")
+    days = int(getattr(desktop, "undo_days", 7) or 7)
+    shots = str(getattr(desktop, "screenshots_dir", "") or "")
+    return [("Your OK", TURNED_ON if turned_on else NOT_TURNED_ON),
+            ("Folders Jarvis may look in", where),
+            ("HUD key", f"{_combo(hud_key)} - switches between the window and the HUD" if hud_key
+             else "None - the Dock's Desktop switches"),
+            ("Left out of screenshots and screen sharing", _yes(getattr(desktop, "hide_from_capture", True))),
+            ("Screenshots go to", shots or "Jarvis\\Screenshots in your user folder"),
+            ("Undo", f"Offered for {days} {'day' if days == 1 else 'days'}"),
+            ("Work inside apps", "On - only in the apps you allow" if getattr(desktop, "apps", False) else "Off")]
 
 
 def _tables(group: str) -> str:

@@ -45,6 +45,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from . import APP_NAME
+from .desktop.backend import ROOT_FOLDERS as DESKTOP_FOLDERS
 from .hotkey import DEFAULT_COMBO, normalize_combo
 from .runstate import DEFAULT_SLOTS, parse_time_of_day
 
@@ -93,7 +94,7 @@ UNDO_SECONDS_RANGE = (3, 30)
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
-                 "productivity", "ui", "meetings")
+                 "productivity", "ui", "meetings", "desktop")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -408,6 +409,32 @@ class MeetingsConfig:
     enabled: bool = False
 
 
+DEFAULT_HUD_KEY = "ctrl+alt+h"     # owner decision D1: the HUD key, separate from the window key ([hotkey] combo)
+UNDO_DAYS_RANGE = (1, 30)
+
+
+@dataclass(frozen=True)
+class DesktopConfig:
+    """``[desktop]``: Jarvis on your desktop (off by default; JARVIS_DESKTOP_ENABLED overrides ``enabled``). Off means
+    no Desktop slot, no HUD, no hooks and no new key; on, nothing works until the owner accepts the first-run card.
+    ``hud_key`` is never the window key ([hotkey] combo): that combo is refused at load with a warning."""
+
+    enabled: bool = False
+    folders: tuple[str, ...] = DESKTOP_FOLDERS     # the known folders Jarvis may look in (owner decision D2)
+    extra_folders: tuple[str, ...] = field(default=(), repr=False)   # absolute folders under your user folder
+    hide_from_capture: bool = True                 # the HUD is left out of screenshots and screen sharing (D7)
+    screenshots_dir: str = field(default="", repr=False)   # "" = Jarvis\Screenshots in your user folder (D8)
+    undo_days: int = 7                             # how long Undo is offered, 1..30 days (D9)
+    hud_key: str = DEFAULT_HUD_KEY                 # canonical spelling; "" = no HUD key (the Dock still switches)
+    apps: bool = False                             # work inside apps (Phase 3)
+
+    def __post_init__(self) -> None:
+        for name in ("folders", "extra_folders"):
+            value = getattr(self, name)
+            if not isinstance(value, tuple):
+                object.__setattr__(self, name, tuple(value))
+
+
 @dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
@@ -438,6 +465,7 @@ class Config:
     productivity: ProductivityConfig = field(default_factory=ProductivityConfig)
     ui: UiConfig = field(default_factory=UiConfig)
     meetings: MeetingsConfig = field(default_factory=MeetingsConfig)
+    desktop: DesktopConfig = field(default_factory=DesktopConfig)
 
     @property
     def notion_url(self) -> str:
@@ -536,6 +564,7 @@ def load_config(project_root: Path | None = None, *,
             logger.warning("config.toml: unknown setting %r ignored", name)
 
     data_dir = _data_dir_from(environ)
+    hotkey = _parse_hotkey(doc)
     return Config(
         notion_token=token,
         page_id=_page_id_from_env(environ.get("BRIEFING_PAGE_ID"), root / ENV_FILE_NAME),
@@ -553,7 +582,7 @@ def load_config(project_root: Path | None = None, *,
         actions=_parse_actions(doc),
         accounts=_parse_accounts(doc),
         schedule=_parse_schedule(doc),
-        hotkey=_parse_hotkey(doc),
+        hotkey=hotkey,
         agenda=_parse_agenda(doc),
         display=_parse_display(doc),
         ask=_parse_ask(doc, environ),
@@ -563,6 +592,7 @@ def load_config(project_root: Path | None = None, *,
         productivity=_parse_productivity(doc, environ),
         ui=_parse_ui(doc),
         meetings=_parse_meetings(doc, environ),
+        desktop=_parse_desktop(doc, environ, hotkey.combo),
     )
 
 
@@ -1114,6 +1144,57 @@ def _parse_meetings(doc: Mapping[str, Any], environ: Mapping[str, str] | None = 
     r = _TableReader(doc, "meetings", _field_names(MeetingsConfig))
     enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, MEETINGS_ENABLED_ENV, "meetings.enabled")
     return MeetingsConfig(enabled=enabled)
+
+
+DESKTOP_ENABLED_ENV = "JARVIS_DESKTOP_ENABLED"
+
+
+def _absolute_folder(text: str) -> bool:
+    """A drive-rooted folder such as C:\\Users\\you\\Uni (never a network or relative path)."""
+    return (len(text) >= 3 and text[0].isascii() and text[0].isalpha() and text[1] == ":" and text[2] in "\\/"
+            and not any(ord(char) < 0x20 for char in text))
+
+
+def _parse_desktop(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None,
+                   window_combo: str = DEFAULT_COMBO) -> DesktopConfig:
+    """``[desktop]`` from config.toml; ``JARVIS_DESKTOP_ENABLED`` (e.g. in the gitignored ``.env``) overrides
+    ``enabled`` both ways, like JARVIS_MEETINGS_ENABLED. A folder name Jarvis does not know, an extra folder that is
+    not an absolute local folder and a HUD key that is the window key (``window_combo``) are refused with a warning;
+    the warnings name an extra folder by its number only. Whether an extra folder lies under your user folder is
+    checked when the desktop feature starts (desktop.paths)."""
+    d = DesktopConfig()
+    r = _TableReader(doc, "desktop", _field_names(DesktopConfig))
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, DESKTOP_ENABLED_ENV, "desktop.enabled")
+    folders: list[str] = []
+    for name in r.names("folders", d.folders):
+        folded = name.casefold()
+        if folded not in DESKTOP_FOLDERS:
+            logger.warning("config.toml: desktop.folders entry %s is not one of %s; skipped", _short_repr(name),
+                           ", ".join(DESKTOP_FOLDERS))
+        elif folded not in folders:
+            folders.append(folded)
+    extra: list[str] = []
+    for index, path in enumerate(r.names("extra_folders", d.extra_folders), 1):
+        if not _absolute_folder(path):
+            logger.warning("config.toml: desktop.extra_folders entry %d is not a full folder path such as "
+                           "C:\\Users\\you\\Uni; skipped", index)
+        elif path.casefold() not in (seen.casefold() for seen in extra):
+            extra.append(path)
+    screenshots = r.string("screenshots_dir", d.screenshots_dir, allow_empty=True)
+    if screenshots and not _absolute_folder(screenshots):
+        logger.warning("config.toml: desktop.screenshots_dir is not a full folder path; using the default "
+                       "(Jarvis\\Screenshots in your user folder)")
+        screenshots = d.screenshots_dir
+    hud_key = r.combo("hud_key", d.hud_key)
+    if hud_key == window_combo:
+        fallback = d.hud_key if d.hud_key != window_combo else ""
+        logger.warning("config.toml: desktop.hud_key %s is the window key ([hotkey] combo); %s", hud_key,
+                       f"using {fallback}" if fallback else "no HUD key (the Dock's Desktop still switches)")
+        hud_key = fallback
+    return DesktopConfig(enabled=enabled, folders=tuple(folders), extra_folders=tuple(extra),
+                         hide_from_capture=r.boolean("hide_from_capture", d.hide_from_capture),
+                         screenshots_dir=screenshots, undo_days=r.integer("undo_days", d.undo_days, *UNDO_DAYS_RANGE),
+                         hud_key=hud_key, apps=r.boolean("apps", d.apps))
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

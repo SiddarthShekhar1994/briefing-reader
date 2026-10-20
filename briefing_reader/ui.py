@@ -251,6 +251,7 @@ from .google_auth import (
     PROBLEM_TIMEOUT,
     logged_alias,
 )
+from .hotkey import describe_combo
 from .memory import (
     MAX_PENDING_SUGGESTIONS,
     MEMORY_FILE,
@@ -994,6 +995,7 @@ FIND_ACTION_HINT = "ACTION"
 FIND_ASK_HINT = "ENTER"
 FIND_RECORD_KEY = "meetings:record"     # the Find list's "Record a meeting": opens the start card, never records
 FIND_RECORD_LABEL = "Record a meeting"
+FIND_DESKTOP_KEY = "desktop:switch"     # the Find list's "Desktop": exactly the Dock's Desktop (the HUD switch)
 _FIND_ICONS = {dock_mod.HOME: "home", **dock_mod.GLYPHS}
 _SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING, SCREEN_LIVE: dock_mod.LIVE,
                  SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
@@ -1071,6 +1073,8 @@ class ReadingView(QWidget):
     for the bundle) and Settings (``settings_page``, a settings_view.SettingsStage: the groups, read only). The
     agenda panel lives in the Day view's drawer (TODAY / DEADLINES; its Connect link emits ``connectCalendar``).
     ``tabChanged(index)`` when the current screen changes (the Dock, Ctrl+1..6, Ctrl+,, ``set_tab``).
+    Desktop ([desktop] on: ``set_desktop_available``) is the Dock's switch to the HUD, not a screen: its click,
+    Ctrl+8 and the Find list's "Desktop" emit ``desktopRequested`` and change nothing else.
 
     Alive (the approved motion prototype; ``[ui] motion`` through holo.motion_level): the Dock is labelled
     (each screen's glyph and name, 200 px) from ``DOCK_LABELS_FROM`` px wide and folds to glyphs below;
@@ -1127,6 +1131,7 @@ class ReadingView(QWidget):
     stopRecording = Signal()     # Stop on the header's REC or Home's (the pill and Meetings have their own)
     recordNextMeeting = Signal()  # Record on Home's next-meeting tile: that meeting's start card opens (only)
     recordAgendaRow = Signal(str)  # Record on a Day view meeting row (its key): that meeting's start card (only)
+    desktopRequested = Signal()  # the Dock's Desktop, Ctrl+8 or the Find list's Desktop: switch to the HUD (only)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1355,6 +1360,8 @@ class ReadingView(QWidget):
         self.dock.set_slot_visible(dock_mod.MEMORY, False)       # the productivity bundle shows them
         self.dock.set_slot_visible(dock_mod.FOLLOWUPS, False)
         self.dock.set_slot_visible(dock_mod.MEETINGS, False)     # [meetings] shows it
+        self.dock.set_slot_visible(dock_mod.DESKTOP, False)      # [desktop] shows it (set_desktop_available)
+        self._desktop_on = False
         self.dock.slotActivated.connect(self._on_dock_slot)
         self.header = home.HoloHeader()
         # A meeting records: REC, the time and Stop in the header (every screen) and on Home (meetings_ui).
@@ -1524,6 +1531,10 @@ class ReadingView(QWidget):
     # ---- screens and the Dock (HOLOGRAM_SPEC 11.1) ----------------------------------------------------
 
     def _on_dock_slot(self, key: str) -> None:
+        if key == dock_mod.DESKTOP:             # the switch to the HUD: no screen of its own, nothing else changes
+            if self._desktop_on:
+                self.desktopRequested.emit()
+            return
         screen = _SLOT_SCREENS.get(key, SCREEN_HOME)
         if screen == SCREEN_HOME and self._screen == SCREEN_HOME:
             self.close_moment()                 # Home on Home: back to the orb
@@ -1564,14 +1575,21 @@ class ReadingView(QWidget):
 
     def find_items(self, query: str = "") -> list[find_view.FindItem]:
         """What the Find list offers for ``query``: every screen the Dock shows (its shortcut, what waits on it
-        in words), the links that exist right now (an open offer's Plan my day / Prepare brief, with the bundle)
-        and, for text that matches nothing, "Ask Jarvis: <text>" while the command bar is on and idle."""
+        in words), "Desktop" while [desktop] is on (the Dock's switch to the HUD), the links that exist right now
+        (an open offer's Plan my day / Prepare brief, with the bundle) and, for text that matches nothing,
+        "Ask Jarvis: <text>" while the command bar is on and idle."""
         items = []
         for key in self.dock.visible_slots():
+            if key == dock_mod.DESKTOP:
+                continue                        # not a screen: its action follows the screens
             words = self.dock.signal_words(key)
             label = f"{dock_mod.LABELS[key]} - {words}" if words else dock_mod.LABELS[key]
             items.append(find_view.FindItem(find_view.KIND_SCREEN, key, label, dock_mod.SHORTCUTS[key].upper(),
                                             _FIND_ICONS.get(key, "")))
+        if self._desktop_on:
+            items.append(find_view.FindItem(find_view.KIND_ACTION, FIND_DESKTOP_KEY, dock_mod.LABELS[dock_mod.DESKTOP],
+                                            dock_mod.SHORTCUTS[dock_mod.DESKTOP].upper(),
+                                            _FIND_ICONS.get(dock_mod.DESKTOP, "")))
         if self._find_actions:
             for offer in self._offer_infos:
                 if any(item.key == offer.link_id for item in items):
@@ -1605,6 +1623,10 @@ class ReadingView(QWidget):
         if item.kind == find_view.KIND_SCREEN:
             self.dock.activate(item.key)
         elif item.kind == find_view.KIND_ACTION:
+            if item.key == FIND_DESKTOP_KEY:
+                if self._desktop_on:
+                    self.dock.activate(dock_mod.DESKTOP)   # exactly the Dock's Desktop
+                return
             if item.key == FIND_RECORD_KEY:
                 if self._meetings_on and not self._recording:
                     self.recordMeeting.emit()       # the start card opens; only its Start records
@@ -2443,6 +2465,17 @@ class ReadingView(QWidget):
 
     def meetings_available(self) -> bool:
         return self.dock.is_slot_visible(dock_mod.MEETINGS)
+
+    def set_desktop_available(self, available: bool, hud_key: str = "") -> None:
+        """[desktop] is on: the Dock's Desktop (the switch to the HUD; ``hud_key`` as people write it, "Ctrl+Alt+H",
+        for its "<key> switches" line) and the Find list's "Desktop". There is no Desktop screen: nothing is switched
+        away from when it goes."""
+        self._desktop_on = bool(available)
+        self.dock.set_hud_key(hud_key if available else "")
+        self.dock.set_slot_visible(dock_mod.DESKTOP, self._desktop_on)
+
+    def desktop_available(self) -> bool:
+        return self.dock.is_slot_visible(dock_mod.DESKTOP)
 
     def add_rec_badge(self, badge: QWidget) -> None:
         """Another header's REC (the frame header over the prompt view): shown, timed and warned with this view's;
@@ -4836,6 +4869,7 @@ class AppController(QObject):
         self._create_memory()                           # the productivity bundle's memory (needs Ask)
         self.productivity: Any = self._create_productivity()   # the bundle's day read and offers (needs Ask)
         self.meetings: Any = self._create_meetings()    # [meetings]: the meeting recorder, or None while it is off
+        self._init_desktop()                            # [desktop]: the Dock's Desktop and Settings > Desktop
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -8639,6 +8673,23 @@ class AppController(QObject):
             from .ask.planner import DISABLED_MESSAGE
 
             self._flash_note(DISABLED_MESSAGE)
+
+    # ---- Jarvis on your desktop ([desktop]) -------------------------------------------------------------
+
+    def _init_desktop(self) -> None:
+        """[desktop] on: the Dock's Desktop with the HUD key's "<key> switches" line, the Find list's Desktop and
+        Settings > Desktop (read only; "Not turned on yet" until the first-run card exists). Off: no Desktop surface
+        anywhere and nothing changes. The HUD itself (entering and leaving it) is built in a later part: until then
+        ``desktopRequested`` is connected to nothing, so a click on Desktop changes nothing."""
+        desktop = getattr(self.config, "desktop", None)
+        if not getattr(desktop, "enabled", False):
+            return
+        reading = self.window.reading
+        hud_key = str(getattr(desktop, "hud_key", "") or "")
+        reading.set_desktop_available(True, describe_combo(hud_key) if hud_key else "")
+        reading.settings_page.add_group(settings_view.DESKTOP_GROUP, settings_view.DESKTOP_TITLE,
+                                        note=settings_view.DESKTOP_NOTE, how=settings_view.DESKTOP_HOW,
+                                        rows=lambda: settings_view.desktop_rows(self.config))
 
     # ---- offers (the productivity bundle) ----------------------------------------------------------
 

@@ -374,6 +374,7 @@ class ConfigFileTests(ProjectTestCase):
             "productivity": {f.name for f in dataclasses.fields(ProductivityConfig)},
             "ui": {f.name for f in dataclasses.fields(config.UiConfig)},
             "meetings": {f.name for f in dataclasses.fields(config.MeetingsConfig)},
+            "desktop": {f.name for f in dataclasses.fields(config.DesktopConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():
@@ -431,6 +432,13 @@ class ConfigFileTests(ProjectTestCase):
         productivity_part = raw.decode("ascii").split("[productivity]", 1)[1]
         self.assertNotIn("@", productivity_part)
         self.assertIn("JARVIS_PRODUCTIVITY_ENABLED=true", productivity_part)
+        # Jarvis on your desktop ships off, with every default (switched on per PC from .env); no path in it.
+        self.assertEqual(cfg.desktop, config.DesktopConfig())
+        self.assertFalse(cfg.desktop.enabled)
+        desktop_part = raw.decode("ascii").split("[desktop]", 1)[1]
+        self.assertIn("JARVIS_DESKTOP_ENABLED=true", desktop_part)
+        self.assertIn("\nenabled = false\n", desktop_part)
+        self.assertNotIn(":\\", desktop_part)
 
     def test_client_secret_is_gitignored(self) -> None:
         lines = (config.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
@@ -1680,6 +1688,87 @@ class ProductivityConfigTests(ProjectTestCase):
         lines = [line.strip() for line in (config.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()]
         for name in ("/memory.json", "/followups.json", "/prep_series.json"):
             self.assertIn(name, lines)
+
+
+class DesktopConfigTests(ProjectTestCase):
+    """[desktop]: Jarvis on your desktop, off by default; JARVIS_DESKTOP_ENABLED overrides enabled; the HUD key is
+    never the window key."""
+
+    def test_defaults(self) -> None:
+        d = self.load_quietly().desktop
+        self.assertEqual(d, config.DesktopConfig())
+        self.assertFalse(d.enabled)
+        self.assertEqual(d.folders, ("desktop", "documents", "downloads", "pictures", "music", "videos"))
+        self.assertEqual((d.extra_folders, d.hide_from_capture, d.screenshots_dir, d.undo_days, d.hud_key, d.apps),
+                         ((), True, "", 7, "ctrl+alt+h", False))
+        self.assertIn("desktop", config._KNOWN_TABLES)
+
+    def test_a_whole_table(self) -> None:
+        self.write_config(
+            "[desktop]\nenabled = true\nfolders = [\"Documents\", \"downloads\"]\n"
+            "extra_folders = ['C:\\Users\\Owner\\Uni', 'D:/Coursework']\nhide_from_capture = false\n"
+            "screenshots_dir = 'C:\\Users\\Owner\\Shots'\nundo_days = 14\nhud_key = \"Alt + Ctrl + D\"\napps = true\n")
+        d = self.load_quietly().desktop
+        self.assertEqual(d, config.DesktopConfig(
+            enabled=True, folders=("documents", "downloads"),
+            extra_folders=("C:\\Users\\Owner\\Uni", "D:/Coursework"), hide_from_capture=False,
+            screenshots_dir="C:\\Users\\Owner\\Shots", undo_days=14, hud_key="ctrl+alt+d", apps=True))
+
+    def test_bad_values_fall_back_and_the_warnings_name_no_folder(self) -> None:
+        self.write_config(
+            "[desktop]\nenabled = \"yes\"\nfolders = [\"documents\", \"AppData\", \"documents\", 3]\n"
+            "extra_folders = ['Uni', '\\\\server\\share\\Owner', 'C:Secret', 'C:\\Users\\Owner\\Uni']\n"
+            "screenshots_dir = 'Shots'\nundo_days = 99\nhud_key = \"j\"\napps = 1\n")
+        with self.assertLogs(CONFIG_LOGGER, level="WARNING") as captured:
+            d = self.load().desktop
+        text = "\n".join(captured.output)
+        for fragment in ("desktop.enabled", "desktop.folders entry 'AppData'", "desktop.extra_folders entry 1",
+                         "desktop.extra_folders entry 2", "desktop.extra_folders entry 3", "desktop.screenshots_dir",
+                         "desktop.undo_days", "desktop.hud_key", "desktop.apps"):
+            self.assertIn(fragment, text)
+        for private in ("Owner", "server", "Secret", "Shots"):          # folders are named by their number only
+            self.assertNotIn(private, text)
+        self.assertEqual(d, config.DesktopConfig(folders=("documents",), extra_folders=("C:\\Users\\Owner\\Uni",),
+                                                 undo_days=30))
+        self.write_config("[desktop]\nundo_days = 0\n")
+        self.assertEqual(self.load_warning("desktop.undo_days").desktop.undo_days, 1)
+        self.write_config("[desktop]\nfolders = []\n")
+        self.assertEqual(self.load_quietly().desktop.folders, ())
+
+    def test_the_hud_key_is_never_the_window_key(self) -> None:
+        self.write_config('[desktop]\nhud_key = "ctrl+alt+j"\n')               # the [hotkey] default
+        self.assertEqual(self.load_warning("desktop.hud_key", "window key").desktop.hud_key, "ctrl+alt+h")
+        self.write_config('[hotkey]\ncombo = "ctrl+alt+h"\n')                 # the window key took H: no HUD key
+        cfg = self.load_warning("desktop.hud_key", "the Dock's Desktop still switches")
+        self.assertEqual((cfg.hotkey.combo, cfg.desktop.hud_key), ("ctrl+alt+h", ""))
+        self.write_config('[hotkey]\ncombo = "Ctrl+Shift+F9"\n[desktop]\nhud_key = "shift + ctrl + F9"\n')
+        cfg = self.load_warning("desktop.hud_key")
+        self.assertEqual(cfg.desktop.hud_key, "ctrl+alt+h")
+        self.write_config('[hotkey]\ncombo = "ctrl+alt+k"\n[desktop]\nhud_key = "ctrl+alt+j"\n')
+        self.assertEqual(self.load_quietly().desktop.hud_key, "ctrl+alt+j")    # J is free once the window key moved
+
+    def test_env_override_both_ways(self) -> None:
+        self.write_config("[desktop]\nenabled = false\n")
+        for value in ("true", "1", "yes", "on", " TRUE "):
+            with self.subTest(value=value):
+                self.assertTrue(self.load_quietly(JARVIS_DESKTOP_ENABLED=value).desktop.enabled)
+        self.write_config("[desktop]\nenabled = true\n")
+        for value in ("false", "0", "no", "off"):
+            with self.subTest(value=value):
+                self.assertFalse(self.load_quietly(JARVIS_DESKTOP_ENABLED=value).desktop.enabled)
+        self.assertTrue(self.load_quietly(JARVIS_DESKTOP_ENABLED="").desktop.enabled)
+        self.assertTrue(self.load_warning("JARVIS_DESKTOP_ENABLED", JARVIS_DESKTOP_ENABLED="maybe").desktop.enabled)
+        self.assertEqual(config.DESKTOP_ENABLED_ENV, "JARVIS_DESKTOP_ENABLED")
+
+    def test_its_repr_names_no_folder(self) -> None:
+        d = config.DesktopConfig(extra_folders=("C:\\Users\\Owner\\Uni",), screenshots_dir="C:\\Users\\Owner\\Shots")
+        self.assertNotIn("Owner", repr(d))
+
+    def test_the_folders_are_the_desktop_roots(self) -> None:
+        from briefing_reader.desktop import backend
+
+        self.assertEqual(config.DesktopConfig().folders, backend.ROOT_FOLDERS)
+        self.assertTrue(set(backend.ROOT_FOLDERS) <= set(backend.KNOWN_FOLDERS))
 
 
 if __name__ == "__main__":

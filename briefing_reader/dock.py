@@ -1,7 +1,10 @@
 """The Dock (HOLOGRAM_SPEC section 11.1, labelled as in the approved motion prototype): the window's left edge.
 
 Slots, top to bottom: Home (the live mini orb), a hairline, Briefing, Approvals, Live, Memory,
-Follow-ups, Meetings, flexible space, Settings. Labelled (``set_labelled(True)``, 200 px: the app's window at its
+Follow-ups, Meetings, a second hairline and Desktop (only while [desktop] is on), flexible space, Settings. Desktop is
+not a screen but the switch to the HUD over the desktop (the approved Switch prototype): a dashed outline, and
+labelled a small HUD tag and "<HUD key> switches" under it; it never becomes current (like Settings).
+Labelled (``set_labelled(True)``, 200 px: the app's window at its
 default size) every slot shows its glyph AND its name, its badge at the right end. Folded (64 px, the
 default, and the app's windows under about 1,000 px) it is glyphs only and the name shows as a tooltip
 right of the button (after 400 ms of hover, at once on keyboard focus) with the shortcut
@@ -21,20 +24,22 @@ Public API
 ==========
 
 Constants: slot keys ``HOME``, ``BRIEFING``, ``APPROVALS``, ``LIVE``, ``MEMORY``, ``FOLLOWUPS``,
-``MEETINGS``, ``SETTINGS`` (``SLOTS`` in order), ``LABELS``, ``SHORTCUTS`` (Ctrl+1 .. Ctrl+7, Ctrl+,), ``GLYPHS``;
-Live activity ``LIVE_IDLE``, ``LIVE_WORKING``, ``LIVE_HOLD``.
+``MEETINGS``, ``DESKTOP``, ``SETTINGS`` (``SLOTS`` in order), ``LABELS``, ``SHORTCUTS`` (Ctrl+1 .. Ctrl+8, Ctrl+,),
+``GLYPHS``; Live activity ``LIVE_IDLE``, ``LIVE_WORKING``, ``LIVE_HOLD``.
 
 ``Dock(parent=None, labelled=False)``
     ``set_labelled(bool)``, ``is_labelled()``, ``rail_rect()`` (where the rail is painted now).
     Signal ``slotActivated(str)``: a slot was clicked, opened with Enter / Space or its shortcut
-    (screen slots become current first; Settings does not). ``set_current(key, animate=True)``,
+    (screen slots become current first; Settings and Desktop do not). ``set_current(key, animate=True)``,
     ``current()``; ``set_slot_visible(key, bool)`` (Memory / Follow-ups when the bundle is off, Meetings while
-    [meetings] is off; a
+    [meetings] is off; Desktop starts hidden and shows only while [desktop] is on; a
     hidden current slot loses its highlight until ``set_current`` moves it), ``is_slot_visible``,
     ``visible_slots()``; signals: ``set_briefing_new(bool)``, ``set_approvals(n)``,
     ``set_live_activity(LIVE_*)``, ``set_memory_suggestions(n)`` (pending suggestions: "Memory, 1
     suggestion"), ``set_memory_new(bool)`` (a note was saved: "Memory, new"), ``set_followups(n)``,
     ``set_recording(bool)`` (a coral dot on Meetings while a meeting records: "Meetings, recording");
+    ``set_hud_key(label)`` (the HUD key as people write it, "Ctrl+Alt+H": the labelled Desktop's hint and its
+    description; "" none), ``hud_key()``, ``desktop_hint()`` (the hint row under Desktop);
     ``set_orb_look(base, muted=False, offline=False)`` for the Home slot's mini orb; ``button(key)``,
     ``mini_orb()``, ``accessible_name(key)``, ``signal_words(key)`` ("2 waiting", "new", ...; "" none),
     ``highlight_rect()``, ``tooltip()`` (the shared
@@ -61,14 +66,19 @@ LIVE = "live"
 MEMORY = "memory"
 FOLLOWUPS = "followups"
 MEETINGS = "meetings"
+DESKTOP = "desktop"        # not a screen: the switch to the HUD over the desktop ([desktop])
 SETTINGS = "settings"
-SLOTS = (HOME, BRIEFING, APPROVALS, LIVE, MEMORY, FOLLOWUPS, MEETINGS, SETTINGS)
+SLOTS = (HOME, BRIEFING, APPROVALS, LIVE, MEMORY, FOLLOWUPS, MEETINGS, DESKTOP, SETTINGS)
 LABELS = {HOME: "Home", BRIEFING: "Briefing", APPROVALS: "Approvals", LIVE: "Live", MEMORY: "Memory",
-          FOLLOWUPS: "Follow-ups", MEETINGS: "Meetings", SETTINGS: "Settings"}
+          FOLLOWUPS: "Follow-ups", MEETINGS: "Meetings", DESKTOP: "Desktop", SETTINGS: "Settings"}
 SHORTCUTS = {HOME: "Ctrl+1", BRIEFING: "Ctrl+2", APPROVALS: "Ctrl+3", LIVE: "Ctrl+4", MEMORY: "Ctrl+5",
-             FOLLOWUPS: "Ctrl+6", MEETINGS: "Ctrl+7", SETTINGS: "Ctrl+,"}
+             FOLLOWUPS: "Ctrl+6", MEETINGS: "Ctrl+7", DESKTOP: "Ctrl+8", SETTINGS: "Ctrl+,"}
 GLYPHS = {BRIEFING: "briefing", APPROVALS: "approvals", LIVE: "live", MEMORY: "memory", FOLLOWUPS: "followups",
-          MEETINGS: "meetings", SETTINGS: "settings"}
+          MEETINGS: "meetings", DESKTOP: "desktop", SETTINGS: "settings"}
+DESKTOP_TAG = "HUD"
+DESKTOP_HINT = "switches"
+DESKTOP_DESCRIPTION = "Switches Jarvis to the HUD over your desktop"
+NOT_CURRENT = (SETTINGS, DESKTOP)   # slots that open something without becoming the current screen
 LIVE_IDLE = "idle"
 LIVE_WORKING = "working"
 LIVE_HOLD = "hold"         # a Send's / Cancel's hidden hold (no countdown, no blink)
@@ -243,12 +253,16 @@ class DockButton(QAbstractButton):
     # ---- painting ------------------------------------------------------------------
 
     def glyph_color(self) -> QColor:
+        if self._key == DESKTOP:                     # the switch is brighter than the screens (the prototype)
+            return holo.mix(holo.INK_2, holo.INK_1, self._hover)
         rest = holo.mix(holo.INK_4, holo.HOLO, self._current_mix)
         return holo.mix(rest, holo.INK_1, self._hover)
 
     def label_color(self) -> QColor:
-        """The name: ``ink-3`` at rest, ``ink-1`` when current or under the pointer (the prototype)."""
-        return holo.mix(holo.INK_3, holo.INK_1, max(self._current_mix, self._hover))
+        """The name: ``ink-3`` at rest, ``ink-1`` when current or under the pointer (the prototype); Desktop rests
+        at ``ink-2``."""
+        rest = holo.INK_2 if self._key == DESKTOP else holo.INK_3
+        return holo.mix(rest, holo.INK_1, max(self._current_mix, self._hover))
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
@@ -257,8 +271,10 @@ class DockButton(QAbstractButton):
             rect = QRectF(self.rect())
             if self._hover > 0.0:
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(holo.alpha(holo.HOLO, 0.06 * self._hover))
+                painter.setBrush(holo.alpha(holo.HOLO, (0.08 if self._key == DESKTOP else 0.06) * self._hover))
                 painter.drawRoundedRect(rect, holo.RADIUS_DOCK_BUTTON, holo.RADIUS_DOCK_BUTTON)
+            if self._key == DESKTOP:
+                self._paint_dashed(painter, rect)
             glyph = GLYPHS.get(self._key)
             if glyph:
                 box = QRectF(0, 0, GLYPH, GLYPH)
@@ -273,7 +289,25 @@ class DockButton(QAbstractButton):
         finally:
             painter.end()
 
+    def _paint_dashed(self, painter: QPainter, rect: QRectF) -> None:
+        """Desktop's outline: 1 px dashed holo @ .30, holo under the pointer (the prototype's ``.di.desk``)."""
+        pen = QPen(holo.mix(holo.alpha(holo.HOLO, 0.30), holo.HOLO, self._hover), 1.0)
+        pen.setDashPattern([3.0, 3.0])
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), holo.RADIUS_DOCK_BUTTON, holo.RADIUS_DOCK_BUTTON)
+
+    def tag_rect(self) -> QRectF | None:
+        """Where the labelled Desktop's HUD tag is painted (None for every other slot, and folded)."""
+        if self._key != DESKTOP or not self._labelled:
+            return None
+        width = QFontMetricsF(holo.font("dock_tag")).horizontalAdvance(DESKTOP_TAG) + 10
+        return QRectF(self.width() - LABELLED_PAD_X - width, (self.height() - 16) / 2, width, 16)
+
     def _badge_room(self) -> float:
+        tag = self.tag_rect()
+        if tag is not None:
+            return tag.width() + 8
         if self._count > 0:
             return holo.count_badge_rect(QPointF(0, 0), self._count).width() + 8
         return holo.NEW_DOT + 8 if self._dot else 0.0
@@ -287,6 +321,15 @@ class DockButton(QAbstractButton):
         painter.drawText(room, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
 
     def _paint_badges(self, painter: QPainter) -> None:
+        tag = self.tag_rect()
+        if tag is not None:                          # Desktop has no badge: its HUD tag sits there
+            painter.setPen(QPen(holo.alpha(holo.HOLO, 0.35), 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(tag.adjusted(0.5, 0.5, -0.5, -0.5), holo.RADIUS_BUTTON_SM, holo.RADIUS_BUTTON_SM)
+            painter.setFont(holo.font("dock_tag"))
+            painter.setPen(QColor(holo.HOLO_HI))
+            painter.drawText(tag, int(Qt.AlignmentFlag.AlignCenter), DESKTOP_TAG)
+            return
         if self._labelled:                           # at the right end of the row, centred on it
             right = self.width() - LABELLED_PAD_X
             if self._count > 0:
@@ -407,6 +450,66 @@ class _Hairline(QWidget):
         painter.end()
 
 
+class DesktopHint(QWidget):
+    """The labelled Dock's line under Desktop: the HUD key as keycaps and "switches" (the prototype's ``.dhint``)."""
+
+    HEIGHT = 16
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedSize(LABELLED_BUTTON, self.HEIGHT)
+        self._keys: list[str] = []
+
+    def set_key(self, label: str) -> None:
+        """"Ctrl+Alt+H" -> the keycaps Ctrl, Alt and H."""
+        self._keys = [part for part in str(label or "").split("+") if part]
+        self.setAccessibleName(f"{label} {DESKTOP_HINT}" if self._keys else "")
+        self.update()
+
+    def keys(self) -> list[str]:
+        return list(self._keys)
+
+    def text(self) -> str:
+        return f"{'+'.join(self._keys)} {DESKTOP_HINT}" if self._keys else ""
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        if not self._keys:
+            return
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            key_font, hint_font = holo.font("dock_key"), holo.font("dock_hint")
+            align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            x = float(LABELLED_PAD_X)
+            for index, key in enumerate(self._keys):
+                if index:
+                    painter.setFont(hint_font)
+                    painter.setPen(QColor(holo.INK_4))
+                    plus = QFontMetricsF(hint_font).horizontalAdvance("+")
+                    painter.drawText(QRectF(x + 3, 0, plus + 2, self.height()), align, "+")
+                    x += plus + 6
+                width = QFontMetricsF(key_font).horizontalAdvance(key) + 8
+                cap = QRectF(x, 1, width, 13)
+                painter.setPen(QPen(holo.alpha(holo.HOLO, 0.28), 1.0))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(cap.adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
+                painter.fillRect(QRectF(cap.left() + 3, cap.bottom() - 1, cap.width() - 6, 1),
+                                 holo.alpha(holo.HOLO, 0.28))         # the keycap's 2 px bottom edge
+                painter.setFont(key_font)
+                painter.setPen(QColor(holo.INK_3))
+                painter.drawText(cap, int(Qt.AlignmentFlag.AlignCenter), key)
+                x += width
+            room = QRectF(x + 6, 0, max(0.0, self.width() - x - 6), self.height())
+            text = QFontMetricsF(hint_font).elidedText(DESKTOP_HINT, Qt.TextElideMode.ElideRight, room.width())
+            painter.setFont(hint_font)
+            painter.setPen(QColor(holo.INK_4))
+            painter.drawText(room, align, text)
+        finally:
+            painter.end()
+
+
 class Dock(QWidget):
     """The glyph rail; see the module docstring."""
 
@@ -427,6 +530,7 @@ class Dock(QWidget):
         self._memory = 0
         self._memory_new = False
         self._recording = False
+        self._hud_key = ""
         self._tip: DockTooltip | None = None
         self._tip_for: DockButton | None = None
         self._buttons: dict[str, DockButton] = {}
@@ -434,15 +538,24 @@ class Dock(QWidget):
         layout.setContentsMargins(PAD_X, PAD_Y, PAD_X, PAD_Y)
         layout.setSpacing(holo.DOCK_GAP)
         self._hairline = _Hairline(self)
+        self._desktop_hairline = _Hairline(self)          # Desktop's own hairline above it (the prototype)
+        self._desktop_hint = DesktopHint(self)
         for key in SLOTS:
             if key == SETTINGS:
                 layout.addStretch(1)
+            if key == DESKTOP:
+                layout.addWidget(self._desktop_hairline, 0, Qt.AlignmentFlag.AlignHCenter)
             button = DockButton(key, self)
             button.clicked.connect(lambda _checked=False, k=key: self._activate(k))
             self._buttons[key] = button
             layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
             if key == HOME:
                 layout.addWidget(self._hairline, 0, Qt.AlignmentFlag.AlignHCenter)
+            elif key == DESKTOP:
+                layout.addWidget(self._desktop_hint, 0, Qt.AlignmentFlag.AlignHCenter)
+        # Desktop shows only while [desktop] is on (set_slot_visible): hidden, the rail is exactly as before it.
+        self._buttons[DESKTOP].hide()
+        self._sync_desktop_rows()
         self._slide_anim = QVariantAnimation(self)
         self._slide_anim.setStartValue(0.0)
         self._slide_anim.setEndValue(1.0)
@@ -475,6 +588,8 @@ class Dock(QWidget):
         for button in self._buttons.values():
             button.set_labelled(labelled)
         self._hairline.set_width(LABELLED_BUTTON if labelled else BUTTON)
+        self._desktop_hairline.set_width(LABELLED_BUTTON if labelled else BUTTON)
+        self._sync_desktop_rows()
         if labelled:
             self._hover_timer.stop()
             self._hide_tip()             # the names are on the rail now
@@ -487,6 +602,29 @@ class Dock(QWidget):
 
     def _width(self) -> int:
         return holo.DOCK_WIDTH_LABELLED if self._labelled else holo.DOCK_WIDTH
+
+    def _sync_desktop_rows(self) -> None:
+        """Desktop's hairline shows with it; its hint only labelled and with a HUD key."""
+        shown = not self._buttons[DESKTOP].isHidden()
+        self._desktop_hairline.setVisible(shown)
+        self._desktop_hint.setVisible(shown and self._labelled and bool(self._hud_key))
+
+    # ---- the HUD key (Desktop's hint) ---------------------------------------------------------
+
+    def set_hud_key(self, label: str) -> None:
+        """The HUD key as people write it ("Ctrl+Alt+H"; "" none): the labelled Desktop's "<key> switches" and its
+        description."""
+        self._hud_key = str(label or "")
+        self._desktop_hint.set_key(self._hud_key)
+        self._sync_desktop_rows()
+        self._update_name(DESKTOP)
+        self.updateGeometry()
+
+    def hud_key(self) -> str:
+        return self._hud_key
+
+    def desktop_hint(self) -> DesktopHint:
+        return self._desktop_hint
 
     # ---- slots and current -------------------------------------------------------------
 
@@ -547,6 +685,9 @@ class Dock(QWidget):
             return                      # Home is always there; nothing changes
         focused = button.hasFocus()
         button.setVisible(visible)
+        if key == DESKTOP:
+            self._sync_desktop_rows()
+            self.updateGeometry()
         if not visible:
             if self._tip_for is button:
                 self._hide_tip()
@@ -676,6 +817,10 @@ class Dock(QWidget):
             parts.append("Current screen")
         if key == HOME and button.mini is not None:
             parts.append(button.mini.accessibleDescription())
+        if key == DESKTOP:
+            parts.append(DESKTOP_DESCRIPTION)
+            if self._hud_key:
+                parts.append(f"{self._hud_key} {DESKTOP_HINT}")
         parts.append(f"Shortcut {SHORTCUTS[key]}")
         button.setAccessibleDescription(". ".join(parts))
 
@@ -684,7 +829,7 @@ class Dock(QWidget):
     def _activate(self, key: str) -> None:
         if not self.is_slot_visible(key):
             return
-        if key != SETTINGS:
+        if key not in NOT_CURRENT:          # Settings opens over the screens; Desktop switches to the HUD
             self.set_current(key)
         self.slotActivated.emit(key)
 
@@ -789,7 +934,7 @@ class Dock(QWidget):
     # ---- shortcuts -----------------------------------------------------------------------------
 
     def install_shortcuts(self, widget: QWidget) -> list[QShortcut]:
-        """Window-wide shortcuts (Ctrl+1 .. Ctrl+7, Ctrl+,) on ``widget`` that open visible slots."""
+        """Window-wide shortcuts (Ctrl+1 .. Ctrl+8, Ctrl+,) on ``widget`` that open visible slots."""
         shortcuts = []
         for key in SLOTS:
             shortcut = QShortcut(QKeySequence(SHORTCUTS[key]), widget)
@@ -801,7 +946,8 @@ class Dock(QWidget):
     # ---- Qt ------------------------------------------------------------------------------------
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(self._width(), 2 * PAD_Y + 9 * BUTTON)
+        rows = 10 if self.is_slot_visible(DESKTOP) else 9      # 9 slots with Desktop (its hairline and hint)
+        return QSize(self._width(), 2 * PAD_Y + rows * BUTTON)
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().hideEvent(event)

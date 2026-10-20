@@ -683,9 +683,10 @@ class ReadingViewScreenTests(unittest.TestCase):
         reading.set_meetings_available(True)
         seen: list[int] = []
         reading.tabChanged.connect(seen.append)
+        screen_slots = [slot for slot in dock.SLOTS if slot != dock.DESKTOP]    # Desktop is the HUD switch
         for size in ((900, 600), (1120, 700)):
             window.resize(*size)
-            for slot in dock.SLOTS:
+            for slot in screen_slots:
                 with self.subTest(size=size, slot=slot):
                     reading.dock.button(slot).click()
                     settle(4)
@@ -697,8 +698,9 @@ class ReadingViewScreenTests(unittest.TestCase):
                     self.assert_inside(page, window)
                     self.assertTrue(reading.dock.button(slot).isVisible())
                     self.assert_inside(reading.dock.button(slot), window)
-        self.assertEqual(seen[:len(dock.SLOTS)], [ui._SLOT_SCREENS[slot] for slot in dock.SLOTS][1:] + [
+        self.assertEqual(seen[:len(screen_slots)], [ui._SLOT_SCREENS[slot] for slot in screen_slots][1:] + [
             ui.SCREEN_HOME])
+        self.assertNotIn(dock.DESKTOP, ui._SLOT_SCREENS)                         # no Desktop screen
         # Round 2: every screen has its own stage (no transcript panel anywhere); the agenda lives in the
         # Day view's drawer.
         reading.set_tab(hud.TAB_MEMORY)
@@ -833,6 +835,55 @@ class ReadingViewScreenTests(unittest.TestCase):
         QTest.keyClick(window, Qt.Key.Key_4, Qt.KeyboardModifier.ControlModifier)
         settle()
         self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
+        window.hide()
+
+    def test_desktop_only_asks_for_the_hud_and_changes_nothing_else(self) -> None:
+        window = self.window(False)
+        reading = window.reading
+        asked: list[bool] = []
+        screens: list[int] = []
+        reading.desktopRequested.connect(lambda: asked.append(True))
+        reading.tabChanged.connect(screens.append)
+        self.assertFalse(reading.desktop_available())                 # [desktop] off: no slot
+        self.assertFalse(reading.dock.button(dock.DESKTOP).isVisible())
+        reading.dock.activate(dock.DESKTOP)
+        window.activateWindow()
+        settle()
+        QTest.keyClick(window, Qt.Key.Key_8, Qt.KeyboardModifier.ControlModifier)
+        reading._on_dock_slot(dock.DESKTOP)                            # even a stray slot signal does nothing
+        settle()
+        self.assertEqual(asked, [])
+        reading.set_desktop_available(True, "Ctrl+Alt+H")
+        settle()
+        self.assertTrue(reading.desktop_available())
+        self.assertTrue(reading.dock.button(dock.DESKTOP).isVisible())
+        self.assert_inside(reading.dock.button(dock.DESKTOP), window)
+        self.assertEqual(reading.dock.hud_key(), "Ctrl+Alt+H")
+        for screen in (ui.SCREEN_HOME, ui.SCREEN_APPROVALS, ui.SCREEN_SETTINGS):
+            reading.set_tab(screen)
+            settle()
+            screens.clear()
+            before = (reading.current_tab(), reading.dock.current())
+            reading.dock.button(dock.DESKTOP).click()                  # the Dock
+            QTest.keyClick(window, Qt.Key.Key_8, Qt.KeyboardModifier.ControlModifier)   # Ctrl+8
+            settle()
+            self.assertEqual((reading.current_tab(), reading.dock.current()), before)
+            self.assertEqual(screens, [])
+        self.assertEqual(len(asked), 6)
+        # The Find list's Desktop does exactly the Dock's click.
+        items = [item for item in reading.find_items("desk")]
+        self.assertEqual([(item.kind, item.key, item.label, item.hint) for item in items],
+                         [("action", ui.FIND_DESKTOP_KEY, "Desktop", "CTRL+8")])
+        self.assertNotIn(dock.DESKTOP, [item.key for item in reading.find_items("")])   # not a screen row
+        reading._on_find_pick(items[0])
+        self.assertEqual(len(asked), 7)
+        reading.set_desktop_available(False)
+        settle()
+        self.assertFalse(reading.dock.button(dock.DESKTOP).isVisible())
+        self.assertNotIn(ui.FIND_DESKTOP_KEY, [item.key for item in reading.find_items("")])
+        reading._on_find_pick(items[0])
+        reading.dock.activate(dock.DESKTOP)
+        self.assertEqual(len(asked), 7)
         window.hide()
 
     def test_ctrl_1_to_6_and_ctrl_comma(self) -> None:

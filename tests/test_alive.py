@@ -67,16 +67,33 @@ class LabelledDockTests(unittest.TestCase):
     def test_every_slot_shows_its_glyph_and_its_name_about_200_px_wide(self) -> None:
         self.assertTrue(self.dock.is_labelled())
         self.assertEqual(self.dock.width(), holo.DOCK_WIDTH_LABELLED)
+        self.dock.set_hud_key("Ctrl+Alt+H")
+        self.dock.set_slot_visible(dock.DESKTOP, True)               # [desktop] on: the Switch prototype's Dock
+        settle()
         for key in dock.SLOTS:
             button = self.dock.button(key)
             self.assertEqual(button.label_text(), dock.LABELS[key])
             rect = self.dock.slot_rect(key)
             self.assertEqual((rect.x(), rect.width(), rect.height()), (12, 176, 44))
         self.assertEqual([dock.LABELS[k] for k in dock.SLOTS],
-                         ["Home", "Briefing", "Approvals", "Live", "Memory", "Follow-ups", "Meetings",
+                         ["Home", "Briefing", "Approvals", "Live", "Memory", "Follow-ups", "Meetings", "Desktop",
                           "Settings"])
         self.assertEqual(self.dock.slot_rect(dock.SETTINGS).bottom(), 640 - 16)          # Settings at the bottom
+        # Desktop: the HUD tag at the row's end, "Ctrl+Alt+H switches" right under it.
+        tag = self.dock.button(dock.DESKTOP).tag_rect()
+        self.assertIsNotNone(tag)
+        self.assertEqual(tag.right(), 176 - 12)
+        hint = self.dock.desktop_hint()
+        self.assertTrue(hint.isVisible())
+        self.assertEqual((hint.keys(), hint.text()), (["Ctrl", "Alt", "H"], "Ctrl+Alt+H switches"))
+        self.assertEqual(hint.geometry().top() - self.dock.slot_rect(dock.DESKTOP).bottom(), 1 + 6 - 1)
         self.assertFalse(self.window.grab().isNull())
+        self.dock.set_labelled(False)                                # folded: glyphs only, no hint
+        self.assertFalse(hint.isVisible())
+        self.assertIsNone(self.dock.button(dock.DESKTOP).tag_rect())
+        self.dock.set_labelled(True)
+        self.dock.set_hud_key("")                                    # no HUD key: no hint
+        self.assertFalse(hint.isVisible())
 
     def test_badges_the_new_dot_and_names_stay(self) -> None:
         self.dock.set_approvals(2)

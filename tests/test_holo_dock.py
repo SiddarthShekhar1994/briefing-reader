@@ -1,5 +1,6 @@
 """Tests for the Hologram Dock (briefing_reader.dock): slots, the sliding highlight, keyboard (one tab stop,
-Up / Down / Home / End, Enter / Space), badges and their accessible names, hidden slots, tooltips, shortcuts.
+Up / Down / Home / End, Enter / Space), badges and their accessible names, hidden slots, tooltips, shortcuts and the
+Desktop slot (the switch to the HUD: hidden until [desktop] shows it, never current).
 
 Qt runs offscreen in this process and shows nothing.
 """
@@ -65,9 +66,11 @@ class DockTests(unittest.TestCase):
     # ---- layout -------------------------------------------------------------
 
     def test_slots_and_layout(self) -> None:
-        self.assertEqual(self.dock.visible_slots(), list(dock.SLOTS))
+        # Desktop starts hidden ([desktop] shows it): the rail is the eight slots it always had.
+        screens = [key for key in dock.SLOTS if key != dock.DESKTOP]
+        self.assertEqual(self.dock.visible_slots(), screens)
         self.assertEqual(self.dock.width(), 64)
-        rects = {key: self.dock.slot_rect(key) for key in dock.SLOTS}
+        rects = {key: self.dock.slot_rect(key) for key in screens}
         for rect in rects.values():
             self.assertEqual((rect.width(), rect.height(), rect.x()), (44, 44, 10))
         self.assertEqual(rects[dock.HOME].y(), 16)
@@ -91,6 +94,46 @@ class DockTests(unittest.TestCase):
         self.assertEqual(self.dock.highlight_rect(), self.dock.slot_rect(dock.APPROVALS))
         self.assertIn("Current screen", self.dock.button(dock.APPROVALS).accessibleDescription())
         self.assertNotIn("Current screen", self.dock.button(dock.HOME).accessibleDescription())
+
+    def test_desktop_slot_is_the_hud_switch(self) -> None:
+        before = {key: self.dock.slot_rect(key) for key in self.dock.visible_slots()}
+        self.assertEqual(self.dock.sizeHint().height(), 2 * dock.PAD_Y + 9 * dock.BUTTON)
+        self.assertFalse(self.dock.desktop_hint().isVisible())
+        self.dock.set_hud_key("Ctrl+Alt+H")
+        self.dock.set_slot_visible(dock.DESKTOP, True)
+        settle()
+        self.assertEqual(self.dock.visible_slots(), list(dock.SLOTS))           # after Meetings, before Settings
+        self.assertEqual(self.dock.sizeHint().height(), 2 * dock.PAD_Y + 10 * dock.BUTTON)
+        desktop, meetings = self.dock.slot_rect(dock.DESKTOP), self.dock.slot_rect(dock.MEETINGS)
+        self.assertEqual((desktop.width(), desktop.height(), desktop.x()), (44, 44, 10))
+        self.assertEqual(desktop.y() - meetings.bottom(), 1 + 6 + 9 + 6 - 1)   # its own hairline above it
+        self.assertEqual(self.dock.slot_rect(dock.SETTINGS).bottom(), 640 - 16)
+        self.assertFalse(self.dock.desktop_hint().isVisible())                 # folded: no hint, no tag
+        self.assertIsNone(self.dock.button(dock.DESKTOP).tag_rect())
+        self.assertEqual((dock.LABELS[dock.DESKTOP], dock.SHORTCUTS[dock.DESKTOP]), ("Desktop", "Ctrl+8"))
+        self.assertEqual(dock.GLYPHS[dock.DESKTOP], "desktop")
+        self.assertIn("desktop", holo.ICONS)
+        description = self.dock.button(dock.DESKTOP).accessibleDescription()
+        self.assertIn("HUD", description)
+        self.assertIn("Ctrl+Alt+H switches", description)
+        self.assertIn("Shortcut Ctrl+8", description)
+        self.assertEqual(self.dock.accessible_name(dock.DESKTOP), "Desktop")
+        # A click, Enter or Ctrl+8 asks for the switch; Desktop never becomes the current screen.
+        QTest.mouseClick(self.dock.button(dock.DESKTOP), Qt.MouseButton.LeftButton)
+        self.focus(dock.DESKTOP)
+        QTest.keyClick(self.dock.button(dock.DESKTOP), Qt.Key.Key_Return)
+        shortcuts = self.dock.install_shortcuts(self.window)
+        shortcuts[dock.SLOTS.index(dock.DESKTOP)].activated.emit()
+        self.assertEqual(self.activated, [dock.DESKTOP] * 3)
+        self.assertEqual(self.dock.current(), dock.HOME)
+        self.assertNotIn("Current screen", self.dock.button(dock.DESKTOP).accessibleDescription())
+        self.assertFalse(self.window.grab().isNull())
+        # Hidden again: the rail is exactly as it was, and Ctrl+8 does nothing.
+        self.dock.set_slot_visible(dock.DESKTOP, False)
+        settle()
+        self.assertEqual({key: self.dock.slot_rect(key) for key in self.dock.visible_slots()}, before)
+        shortcuts[dock.SLOTS.index(dock.DESKTOP)].activated.emit()
+        self.assertEqual(self.activated, [dock.DESKTOP] * 3)
 
     def test_settings_opens_without_becoming_current(self) -> None:
         QTest.mouseClick(self.dock.button(dock.SETTINGS), Qt.MouseButton.LeftButton)

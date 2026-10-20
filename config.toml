@@ -342,3 +342,24 @@ reserve_ask_runs = 3          # Ask runs kept free each hour for your own reques
 # some other places need everyone's consent: the tick is your confirmation, not legal advice. Off here;
 # turn it on for this PC with JARVIS_MEETINGS_ENABLED=true in .env.
 enabled = false
+
+[desktop]
+# Jarvis on your desktop: he opens the files, apps, folders and sites you name, and (in later versions) tidies
+# files, sets the volume, music, timers and screenshots, and fills forms in the apps you allow. The Dock's Desktop
+# item (Ctrl+8) and the HUD key below switch his window into a small HUD over your desktop; the [hotkey] combo still
+# opens the window as before. He never deletes anything for good (only the Recycle Bin, with Undo), never types a
+# password, never pays and never presses Submit, Send, Pay or Delete in another app. To plan, only file names and
+# window labels go to your Claude plan, never what is inside them, and logs never hold them. Off here; turn it on
+# for this PC with JARVIS_DESKTOP_ENABLED=true in .env. Even then nothing works until you click Turn on on the
+# "Jarvis on your desktop" card.
+enabled = false
+# The folders he may look in: any of "desktop", "documents", "downloads", "pictures", "music" and "videos"
+# (Windows' own folders, wherever OneDrive keeps them). Code folders, AppData, the Recycle Bin and files that look
+# like keys or passwords are always left out.
+folders = ["desktop", "documents", "downloads", "pictures", "music", "videos"]
+extra_folders = []            # more folders, each a full path under your user folder
+hide_from_capture = true      # leave the HUD out of screenshots and screen sharing
+screenshots_dir = ""          # where screenshots go; "" = the Jarvis\Screenshots folder in your user folder
+undo_days = 7                 # how long Undo is offered, in days (1..30)
+hud_key = "ctrl+alt+h"        # switches between the window and the HUD; never the [hotkey] combo
+apps = false                  # work inside the apps you allow (filling forms): a later version, and off until then
