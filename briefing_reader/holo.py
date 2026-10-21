@@ -547,6 +547,8 @@ TILE_STEEL = "steel"                      # denied: nothing was sent
 BRACKETS_DIAGONAL = "diagonal"     # top-left + bottom-right
 BRACKETS_ALL = "all"               # the "viewfinder"
 BRACKETS_NONE = "none"
+BRACKETS_RIGHT = "right"           # top-right + bottom-right (the desktop HUD's bar: the orb is at its left end)
+_BRACKET_CORNERS = {BRACKETS_DIAGONAL: ("tl", "br"), BRACKETS_RIGHT: ("tr", "br")}
 
 
 @dataclass(frozen=True)
@@ -634,7 +636,7 @@ def paint_brackets(painter: QPainter, rect: QRectF, color: str | QColor, *, leg:
     """The hologram corner brackets (1.5 px L strokes whose corner follows the tile's radius)."""
     if corners == BRACKETS_NONE:
         return
-    names = ("tl", "br") if corners == BRACKETS_DIAGONAL else ("tl", "tr", "br", "bl")
+    names = _BRACKET_CORNERS.get(corners, ("tl", "tr", "br", "bl"))
     pen = QPen(QColor(color), width)
     pen.setCapStyle(Qt.PenCapStyle.FlatCap)
     painter.save()
@@ -865,6 +867,9 @@ ICONS: dict[str, tuple[str, ...]] = {
     # Desktop (the Switch prototype's monitor: the Dock's switch to the HUD).
     "desktop": ("M4.5 4.5h15a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5V6"
                 "a1.5 1.5 0 0 1 1.5-1.5z", "M8.5 20h7M12 16v4"),
+    # The HUD's "Bring Jarvis back" (Switch.dc.html: a window with its title bar).
+    "window": ("M5.5 4.5h13a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2z", "M3.5 9h17",
+               "M6.5 6.8h.01M9 6.8h.01"),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",

@@ -7445,6 +7445,8 @@ class _CommandField(QWidget):
     HEIGHT = 36
     HOLO_HEIGHT = 60              # the hologram pill (52) with room for its 4 px focus ring
     HOLO_GLYPH = 40
+    HUD_HEIGHT = 44               # the desktop HUD's input row (Switch.dc.html .qrow)
+    HUD_GLYPH = 16
     _CUT = 8
 
     def __init__(self, line_edit: _CommandInput, parent: QWidget | None = None) -> None:
@@ -7455,6 +7457,7 @@ class _CommandField(QWidget):
         self.setCursor(Qt.CursorShape.IBeamCursor)
         self._glyph = make_label(_PROMPT_GLYPH, mono_font(15, 600), ACCENT)
         self._holo = False
+        self._hud = False
         self._listening = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 10, 0)
@@ -7483,6 +7486,23 @@ class _CommandField(QWidget):
         self.line_edit.setPalette(palette)
         self.line_edit._holo = True
         self.line_edit._fit_placeholder()
+        self.update()
+
+    def set_hud(self, send_button: QWidget, trailing: QWidget | None) -> None:
+        """The desktop HUD's flat row (after ``set_holo``): the chevron painted at the left, the input in the body
+        type, then ``trailing`` and ``send_button``; no pill (the HUD window paints the panel around it)."""
+        from . import holo
+
+        self._hud = True
+        self.setFixedHeight(self.HUD_HEIGHT)
+        layout = self.layout()
+        layout.removeWidget(send_button)
+        layout.setContentsMargins(self.HUD_GLYPH + 10, 0, 0, 0)
+        layout.setSpacing(10)
+        if trailing is not None:
+            layout.addWidget(trailing, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(send_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.line_edit.setFont(holo.font("body"))
         self.update()
 
     def set_listening(self, listening: bool) -> None:
@@ -7529,6 +7549,12 @@ class _CommandField(QWidget):
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            if self._hud:
+                from . import holo
+
+                box = QRectF(0, (self.height() - self.HUD_GLYPH) / 2, self.HUD_GLYPH, self.HUD_GLYPH)
+                holo.paint_icon(painter, box, "chevron", QColor(holo.HOLO), stroke=2.0)
+                return
             if self._holo:
                 self._paint_holo(painter)
                 return
@@ -7676,6 +7702,8 @@ class CommandBar(QWidget):
         self._keep_link = False      # the status asks for the link beside it (compact)
         self._hint = False           # the status is only the idle hint: it may fold away
         self._holo = False           # the hologram pill (set_holo): no meta line, only what needs the owner
+        self._hud = False            # the desktop HUD's row (set_hud): no status line either
+        self._hud_trailing: QWidget | None = None
         self._typing = False
         self.input = _CommandInput()
         self.field = _CommandField(self.input)
@@ -7759,10 +7787,37 @@ class CommandBar(QWidget):
     def is_holo(self) -> bool:
         return self._holo
 
+    def set_hud(self, trailing: QWidget | None = None) -> None:
+        """The desktop HUD's bar (SPEC 8.1; Switch.dc.html .qrow): the hologram behaviour (``set_holo``) in one flat
+        44 px row - no pill (the HUD window paints the panel), the chevron, the input in the body type, then
+        ``trailing`` (the HUD key's keycaps) while the field is empty and nothing runs, else the send arrow (the
+        stop glyph while a request runs). The status, meta and link lines never show: the HUD's caption line says
+        what ``statusChanged`` says. Nothing in the row takes the keyboard by itself: the input only on a click
+        (or when the HUD gives it the keyboard), the send arrow and the link never."""
+        if self._hud:
+            return
+        self.set_holo(True)
+        self._hud = True
+        self._hud_trailing = trailing
+        self.field.set_hud(self.send_button, trailing)
+        self.input.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        for widget in (self.send_button, self.link_button, self.button):
+            widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._sync_send()
+        self._show_link()
+
+    def is_hud(self) -> bool:
+        return self._hud
+
     def _sync_send(self) -> None:
         self.send_button.set_look(bool(self.text()), self._running)
         self.send_button.setToolTip("Stop planning; nothing is proposed (Esc)" if self._running
                                     else "Plan this request (Enter)")
+        if self._hud:
+            busy = bool(self.input.text()) or self._running
+            self.send_button.setVisible(busy)
+            if self._hud_trailing is not None:
+                self._hud_trailing.setVisible(not busy)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
         if watched is self.input and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
@@ -7803,7 +7858,7 @@ class CommandBar(QWidget):
     def _show_link(self) -> None:
         # Never while a request runs; compact: beside the status, only while nothing else is said
         # there (an answer keeps the width) or the status asks for it.
-        shown = (bool(self.link_button.text()) and not self._running
+        shown = (bool(self.link_button.text()) and not self._running and not self._hud
                  and (not self._compact or self._tone == TONE_IDLE or self._keep_link or self._holo))
         self.link_button.setVisible(shown)
         self._fold()
@@ -7812,7 +7867,13 @@ class CommandBar(QWidget):
         """The status and meta lines fold away while the status is only the hint and no link shows.
         Unfolded and not compact, a hidden link keeps its room in the meta line, so the bar's
         height does not change when the link comes and goes (while a request runs, say). The
-        hologram bar shows its status line only for an answer, a question or a problem (or a link)."""
+        hologram bar shows its status line only for an answer, a question or a problem (or a link); the HUD's
+        row never (its caption line shows the status)."""
+        if self._hud:
+            self.status_label.setVisible(False)
+            self.meta_label.setVisible(False)
+            self.updateGeometry()
+            return
         if self._holo:
             needs = self._tone in (TONE_DONE, TONE_WARN, TONE_ERROR) and not self._hint and bool(self._status_text)
             self.status_label.setVisible(needs or not self.link_button.isHidden())
