@@ -45,14 +45,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..actions import web_link_problem
+from ..format_chars import format_char
 
 # --------------------------------------------------------------------------
 # Words
 # --------------------------------------------------------------------------
 
-# Hidden characters, by Unicode category: every format character (Cf: bidi controls, zero-width spaces and joiners,
+# Hidden characters: every format character (format_chars, Unicode Cf: bidi controls, zero-width spaces and joiners,
 # the BOM, the tag characters U+E0001 and U+E0020-E007F ...) and the line and paragraph separators (Zl, Zp).
-_HIDDEN_CATEGORIES = ("Cf", "Zl", "Zp")
+_SEPARATOR_CATEGORIES = ("Zl", "Zp")
 _CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _NON_WORD_RE = re.compile(r"[^0-9a-z]+")
 
@@ -60,7 +61,7 @@ _NON_WORD_RE = re.compile(r"[^0-9a-z]+")
 def hidden_char(char: str) -> bool:
     """``char`` (one character) is hidden: a bidi or other format control, a zero-width or tag character, or a line
     or paragraph separator (Unicode categories Cf, Zl and Zp)."""
-    return unicodedata.category(char) in _HIDDEN_CATEGORIES
+    return format_char(char) or unicodedata.category(char) in _SEPARATOR_CATEGORIES
 
 
 def strip_hidden(text: str) -> str:

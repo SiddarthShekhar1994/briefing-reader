@@ -18,13 +18,15 @@ hook). It keeps the owner's rules:
   ask ``is_hud()``.
 * The chips mirror the window's: "Briefing ready" while a briefing is NEW, "N need your OK" with the approvals' count
   and REC with the meeting's time and warning, live while the HUD shows (ReadingView.glanceChanged); the orb takes
-  the window's look. "Briefing ready" goes back to Briefing, "N need your OK" to Approvals and REC to Meetings
-  (``chip_screens``).
+  the window's look, its recording ring too. "Briefing ready" goes back to Briefing, "N need your OK" to Approvals
+  and REC to Meetings (``chip_screens``).
 * The meetings RecPill (top centre, where the bar is) and the toast are handed to the HUD (``set_rec_pill``,
   ``set_toast``; the pill also when a recording starts while the HUD shows): the pill is held hidden meanwhile -
   REC is a chip - and nothing of Jarvis's is stacked over the bar.
 * A close of the HUD's own window (none can come from Jarvis) brings the window back instead: Jarvis is never left
-  with nothing on screen.
+  with nothing on screen. Not while the application quits (``set_quitting``: Windows ends the session - the app's
+  aboutToQuit): Qt's quit then closes every visible window and is refused while one will not close, so the HUD's
+  close goes through and from then on nothing switches or comes forward.
 * ``shutdown()`` (Jarvis closing, next to the meetings') hides and deletes the HUD's windows.
 
 Logs: statuses and screen numbers only.
@@ -81,6 +83,7 @@ class DesktopController(QObject):
         self._hud = False
         self._switching = False
         self._shut = False
+        self._quitting = False                               # the application quits: nothing switches any more
         self._return_screen: int | None = None               # asked for by an automatic set_tab on the HUD
         self._toast: Any = None
         self._rec_pill: Any = None
@@ -102,6 +105,17 @@ class DesktopController(QObject):
         the HUD, else Home."""
         return self._home if self._return_screen is None else self._return_screen
 
+    def set_quitting(self) -> None:
+        """The application quits (Windows ends the session: the app's aboutToQuit, which Qt emits before its quit):
+        from now on a close of the HUD's window goes through - never refused, never a bring-back - so Qt's quit is
+        not cancelled, and nothing switches or comes forward any more."""
+        if not self._quitting:
+            self._quitting = True
+            logger.info("Desktop: the application quits")
+
+    def quitting(self) -> bool:
+        return self._quitting
+
     # ---- THE CONSENT GATE (P1.9 plugs in here) -----------------------------------------------------
 
     def consent_given(self) -> bool:
@@ -121,9 +135,9 @@ class DesktopController(QObject):
     def enter_hud(self) -> bool:
         """The owner's Desktop (the Dock's or the Find list's): the window is hidden - never closed - and the HUD
         shows on the screen it was on, with the chips as the window has them. False when nothing changed: already
-        on the HUD, during a switch, shut down, the assistant screen not up (or a dialog open), or the consent
-        gate said no."""
-        if self._shut or self._hud or self._switching:
+        on the HUD, during a switch, shut down or quitting, the assistant screen not up (or a dialog open), or the
+        consent gate said no."""
+        if self._shut or self._quitting or self._hud or self._switching:
             return False
         try:
             allowed = bool(self._may_enter())
@@ -160,9 +174,10 @@ class DesktopController(QObject):
         """Back to the window - Bring Jarvis back, a chip, the tray's item, the toast's click, the window key (SPEC 9's
         HUD row; the rest of that table is P1.6): the HUD hides and the window comes back on ``screen`` (a chip's),
         else on the screen an automatic change asked for while on the HUD, else Home - brought forward on that
-        click, never with a synthetic Alt. Not a restore: no greeting, no start-up. False when not on the HUD or
-        during a switch. (Phase 3: never while Jarvis is in control - Stop first.)"""
-        if self._shut or not self._hud or self._switching:
+        click, never with a synthetic Alt. Not a restore: no greeting, no start-up. False when not on the HUD,
+        during a switch, or while the application quits (nothing comes forward then). (Phase 3: never while Jarvis
+        is in control - Stop first.)"""
+        if self._shut or self._quitting or not self._hud or self._switching:
             return False
         target = self.return_screen() if screen is None else int(screen)
         self._switching = True
@@ -196,8 +211,9 @@ class DesktopController(QObject):
             self.leave_hud(screen)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
-        """A close of the HUD's window (nothing of Jarvis's asks for one) brings the window back instead."""
-        if event.type() == QEvent.Type.Close and not self._shut:
+        """A close of the HUD's window (nothing of Jarvis's asks for one) brings the window back instead - unless the
+        application quits or the HUD is shut: then the close goes through and nothing is brought back."""
+        if event.type() == QEvent.Type.Close and not (self._shut or self._quitting):
             event.ignore()
             QTimer.singleShot(0, self._on_bring_back)
             return True
@@ -207,7 +223,8 @@ class DesktopController(QObject):
 
     def sync_glance(self) -> None:
         """While the HUD shows (and as it opens): its chips and orb as the window has them - "Briefing ready" while
-        a briefing is NEW, "N need your OK", REC with the time and its warning, and the orb's look."""
+        a briefing is NEW, "N need your OK", REC with the time and its warning, and the orb's look with the window's
+        recording ring while a meeting records (still: no loop of its own)."""
         if self._shut or not self._hud:
             return
         reading, win = self.reading, self.overlay.hud
@@ -217,6 +234,7 @@ class DesktopController(QObject):
         win.set_pending(reading.pending_count())
         elapsed, warning = reading.recording_state()
         win.set_recording(elapsed, warning)
+        win.orb.set_recording(bool(elapsed))
         base, muted, offline = reading.look()
         win.set_look(base, muted=muted, offline=offline)
 

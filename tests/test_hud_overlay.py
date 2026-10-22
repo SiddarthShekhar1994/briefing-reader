@@ -1,8 +1,12 @@
 """Tests for the desktop HUD's windows (hud_overlay; SPEC 8.1, P1.3): every window a frameless tool window on top
 that never takes the focus (no taskbar button), no focus taken while it shows, capture exclusion only through the
-HudNative seam and only while [desktop] hide_from_capture is on, the layout at 1x and 1.5x with no word cut, the HUD
-key's keycaps (none while no key can work), the chips' words, the orb with no ground, the result card's place, the
-decor layers, the stacking order with the meetings RecPill and the Toast, and the feature off: no HUD window at all.
+HudNative seam and only while [desktop] hide_from_capture is on, the layout at 1x and 1.5x (and a 1280 x 720 screen
+at 150 %) with no word cut, the caption wrapping to three lines with the bar growing (cut only past that, whole in a
+tooltip that shows on a window that is never active), the HUD key's keycaps as the prototypes space them (none while
+no key can work), the send control in DesktopB's mic-slot style on the HUD only, the chips' words (REC's width held
+while the seconds tick; no repaint when nothing changed), the orb with no ground, the result card's place, the decor
+layers with the prototypes' shadows and glows under the interactive windows (repainted only when a shape changes),
+the stacking order with the meetings RecPill and the Toast, and the feature off: no HUD window at all.
 
 Qt runs offscreen in this process (and in one child at 1.5x) and shows nothing. No OS call is made: a fake seam
 records what would be asked, and the real one refuses while the tests run.
@@ -11,6 +15,7 @@ records what would be asked, and the real one refuses while the tests run.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -18,8 +23,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QPoint, QRect, QSize, Qt, QTimer
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer
+from PySide6.QtGui import QFontMetricsF, QGuiApplication, QImage, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
 
@@ -82,10 +87,39 @@ def rect_list(rect: QRect) -> list[int]:
     return [rect.x(), rect.y(), rect.width(), rect.height()]
 
 
+class PaintCounter(QObject):
+    """Counts the paint events of the widgets it watches (and the rects they repaint)."""
+
+    def __init__(self, *widgets: QWidget) -> None:
+        super().__init__()
+        self.counts: dict[int, int] = {}
+        self.rects: list[QRect] = []
+        for widget in widgets:
+            self.counts[id(widget)] = 0
+            widget.installEventFilter(self)
+
+    def count(self, widget: QWidget) -> int:
+        return self.counts.get(id(widget), 0)
+
+    def reset(self) -> None:
+        self.counts = dict.fromkeys(self.counts, 0)
+        self.rects = []
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        if event.type() == QEvent.Type.Paint and id(watched) in self.counts:
+            self.counts[id(watched)] += 1
+            self.rects.append(QRect(event.rect()))
+        return False
+
+
+LONG_CAPTION = "You have three meetings today. Your project sync with Ana is at 2 PM, and the review moved, sir."
+
+
 def layout_report() -> dict:
-    """The HUD with every chip and the open result's card, built as the app builds them, on a 1280 x 760 work area
-    and on an 800 x 600 one: their geometry (logical px) and every word they cut. Run here at 1x and in a child
-    process at 1.5x."""
+    """The HUD with every chip and the open result's card, built as the app builds them, on a 1280 x 760 work area,
+    an 800 x 600 one and a 1280 x 720 screen at 150 % (853 x 432 above its taskbar): their geometry (logical px),
+    the lines a long caption takes (wrapped, the bar grown with it) and every word they cut. Run here at 1x and in a
+    child process at 1.5x."""
     fonts()
     overlay = hud_overlay.HudOverlay(hud_key="ctrl+alt+h", native=FakeNative())
     try:
@@ -95,7 +129,9 @@ def layout_report() -> dict:
         win.set_pending(2)
         win.set_recording("12:04", warning=meetings_view.CALL_MISSING_TEXT)
         report: dict = {"dpr": 0.0, "cut": [], "areas": {}}
-        for name, area in (("wide", QRect(0, 0, 1280, 760)), ("small", QRect(1280, 0, 800, 600))):
+        for name, area in (("wide", QRect(0, 0, 1280, 760)), ("small", QRect(1280, 0, 800, 600)),
+                           ("tiny", QRect(2080, 0, 853, 432))):
+            win.set_caption(CAPTION)
             win.place_in(area)
             win.show()
             settle()
@@ -107,6 +143,11 @@ def layout_report() -> dict:
                 "row": rect_list(win.bar.geometry()), "caption": rect_list(win.caption.geometry()),
                 "back": rect_list(win.back_button.geometry()),
                 "chips": [rect_list(chip.geometry()) for chip in win.chips.values() if not chip.isHidden()]}
+            win.set_caption(LONG_CAPTION)
+            settle()
+            report["cut"] += [f"{name} long: {text}" for text in win.cut_texts()]
+            report["areas"][name]["long"] = {"lines": win.caption_lines(), "bar": rect_list(win.bar_rect()),
+                                             "inside": area.contains(win.geometry())}
         card = overlay.new_card()
         card.set_content(OPEN_RESULT)
         report["cut"] += [f"card: {text}" for text in card.cut_texts()]
@@ -270,7 +311,8 @@ class CaptureTests(_OverlayTest):
         card = self.card(overlay)
         overlay.show_on(None)
         settle()
-        self.assertEqual(self.native.excluded, [int(overlay.hud.winId())])
+        layer = overlay.layer_for(QGuiApplication.primaryScreen())          # the HUD's shadows show with it
+        self.assertEqual(sorted(self.native.excluded), sorted(int(window.winId()) for window in (overlay.hud, layer)))
         overlay.show_card(card, QRect(80, 300, 200, 120))
         overlay.set_decor([Bracket(QRect(80, 300, 200, 120))])
         settle()
@@ -300,7 +342,9 @@ class CaptureTests(_OverlayTest):
             self.addCleanup(close, overlay)
             overlay.show_on(None)
             settle()
-            self.assertEqual(native.excluded, [int(overlay.hud.winId())] if wanted else [])
+            shown = sorted(int(window.winId()) for window in overlay.windows() if window.isVisible())
+            self.assertEqual(len(shown), 2)                                 # the HUD and the layer of its shadows
+            self.assertEqual(sorted(native.excluded), shown if wanted else [])
 
     def test_a_refusal_is_asked_again_at_the_next_show(self) -> None:
         overlay = self.overlay(native=FakeNative(agree=False))
@@ -308,8 +352,9 @@ class CaptureTests(_OverlayTest):
         overlay.hide()
         overlay.show_on(None)
         settle()
-        self.assertEqual(len(self.native.excluded), 2)
+        self.assertEqual(len(self.native.excluded), 4)               # the HUD and its layer, at each show
         self.assertFalse(overlay.hud.excluded_from_capture())
+        self.assertFalse(any(layer.excluded_from_capture() for layer in overlay.layers()))
 
     def test_no_os_call_while_the_tests_run(self) -> None:
         self.assertTrue(desktop_backend.real_backend_blocked())
@@ -375,6 +420,51 @@ class KeyCapsTests(_OverlayTest):
         self.assertEqual(overlay.hud.keycaps.keys(), ["CTRL", "SHIFT", "SPACE"])
         self.assertEqual(hud_overlay.hud_key_caps(""), [])
 
+    def test_the_keycaps_are_spaced_as_in_the_prototypes(self) -> None:
+        # Switch / DesktopB .qrow gap 10 px; .kbd 6 px padding and a 1 px border each side, a 2 px bottom edge.
+        overlay = self.overlay()
+        overlay.show_on(None)
+        settle()
+        caps = overlay.hud.keycaps
+        metrics = QFontMetricsF(caps._font)
+        widths = [caps._cap_width(key) - metrics.horizontalAdvance(key) for key in caps.keys()]
+        self.assertEqual(widths, [14.0, 14.0, 14.0])
+        self.assertEqual((caps.GAP, caps.HEIGHT, caps.height()), (10, 19, 19))
+        wanted = sum(caps._cap_width(key) for key in caps.keys()) + 2 * 10
+        self.assertEqual(caps.width(), math.ceil(wanted))
+        self.assertEqual(overlay.hud.cut_texts(), [])
+
+    def test_the_send_control_is_drawn_in_the_mic_slot_style_only_on_the_hud(self) -> None:
+        # DesktopB.dc.html's mic slot: an 18 px cyan outline glyph (stroke 1.8), no filled disc; the click area 28 px.
+        overlay = self.overlay()
+        win = overlay.hud
+        overlay.show_on(None)
+        win.bar.set_text("open my essay")
+        settle()
+        send = win.bar.send_button
+        self.assertTrue(send.is_hud())
+        self.assertEqual(send.size(), QSize(28, 28))
+        window_bar = hud.CommandBar()                                  # the window's own bar: its disc as before
+        self.addCleanup(window_bar.deleteLater)
+        window_bar.set_holo(True)
+        window_bar.set_text("open my essay")
+        self.assertFalse(window_bar.send_button.is_hud())
+        for button, disc in ((send, False), (window_bar.send_button, True)):
+            for running in (False, True):                             # the arrow, then the stop square
+                button.set_look(True, running)
+                dpr = button.devicePixelRatioF()
+                image = QImage(round(button.width() * dpr), round(button.height() * dpr),
+                               QImage.Format.Format_ARGB32_Premultiplied)
+                image.setDevicePixelRatio(dpr)
+                image.fill(Qt.GlobalColor.transparent)
+                button.render(image, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)   # its own paint only
+                edge = image.pixelColor(round(5 * dpr), round(button.height() / 2 * dpr))    # beside the glyph
+                self.assertEqual(edge.alpha() > 128, disc, (button.is_hud(), running))
+                inked = [image.pixelColor(x, y) for x in range(image.width()) for y in range(image.height())]
+                cyan = [c for c in inked if c.alpha() > 128 and c.blue() > 200 and c.green() > 170 and c.red() < 120]
+                self.assertTrue(cyan, (button.is_hud(), running))      # the cyan outline (or the cyan disc)
+        self.assertEqual(win.cut_texts(), [])
+
 
 class ChipTests(_OverlayTest):
     def test_the_chips_say_the_app_words_in_order(self) -> None:
@@ -428,6 +518,48 @@ class ChipTests(_OverlayTest):
             settle()
         self.assertIs(win.background(), panel)                           # the panel is painted once, not per tick
 
+    def test_the_rec_chip_keeps_its_width_while_the_seconds_tick(self) -> None:
+        overlay = self.overlay()
+        win = overlay.hud
+        overlay.show_on(None)
+        chip = win.chips[hud_overlay.CHIP_REC]
+        widths = set()
+        for second in range(4, 20):                                     # 12:04 .. 12:19, as each second ticks
+            win.set_recording(f"12:{second:02d}")
+            settle()
+            widths.add(chip.width())
+        self.assertEqual(len(widths), 1, sorted(widths))                # tabular figures: it never twitches
+        self.assertEqual(chip.shown_text(), "REC 12:19")
+        self.assertEqual(win.cut_texts(), [])
+
+    def test_a_chip_whose_words_did_not_change_is_not_repainted(self) -> None:
+        overlay = self.overlay()
+        win = overlay.hud
+        win.set_briefing_ready(True)
+        win.set_pending(2)
+        win.set_recording("12:04")
+        overlay.show_on(None)
+        settle()
+        briefing, approvals, rec = (win.chips[key] for key in hud_overlay.CHIP_KEYS)
+        counter = PaintCounter(briefing, approvals, rec)
+        for second in range(5, 11):                                     # six REC ticks; the count unchanged
+            win.set_recording(f"12:{second:02d}")
+            win.set_pending(2)
+            win.set_briefing_ready(True)
+            settle()
+        self.assertEqual((counter.count(briefing), counter.count(approvals)), (0, 0))
+        self.assertGreaterEqual(counter.count(rec), 6)                   # only REC, whose time changed
+        counter.reset()
+        for _ in range(10):                                             # glances that change nothing
+            win.set_pending(2)
+            win.set_recording("12:10")
+            settle()
+        self.assertEqual([counter.count(chip) for chip in (briefing, approvals, rec)], [0, 0, 0])
+        win.set_pending(3)
+        settle()
+        self.assertGreaterEqual(counter.count(approvals), 1)             # a real change still repaints
+        self.assertEqual(approvals.text(), ui.needs_ok_chip(3))
+
 
 class OrbTests(_OverlayTest):
     def test_the_orb_is_the_compact_one_with_no_ground_never_resized(self) -> None:
@@ -478,14 +610,49 @@ class CaptionTests(_OverlayTest):
         win.bar.set_hint("Ask Jarvis")
         self.assertEqual(win.caption_text(), CAPTION)                          # a hint is not news
 
-    def test_a_long_caption_is_cut_and_whole_in_its_tooltip(self) -> None:
+    def test_a_long_caption_wraps_to_three_lines_and_the_bar_grows_with_it(self) -> None:
+        # Switch.dc.html .bcap: the caption wraps (font 300 14px/1.4) and .crow grows with it.
+        overlay = self.overlay()
+        win = overlay.hud
+        win.set_briefing_ready(True)
+        overlay.show_on(None)
+        win.place_in(QRect(0, 0, 1280, 760))
+        settle()
+        chip = win.chips[hud_overlay.CHIP_BRIEFING]
+        one = (win.bar_rect_local().height(), win.height(), chip.geometry().top())
+        self.assertEqual(one[0], hud_overlay.BAR_HEIGHT)
+        sentence = "You have three meetings today. Your project sync with Ana is at 2 PM, and the review moved, sir."
+        for lines, text in ((2, sentence), (3, f"{sentence} Shall I open the agenda for you?")):
+            win.set_caption(text)
+            settle()
+            self.assertEqual(win.caption_lines(), lines, text)
+            self.assertEqual(win.caption.shown_text(), text)                      # whole: nothing cut
+            self.assertEqual(win.cut_texts(), [])
+            grown = 20 * (lines - 1)                                              # a 20 px line each
+            self.assertEqual((win.bar_rect_local().height(), win.height(), chip.geometry().top()),
+                             (one[0] + grown, one[1] + grown, one[2] + grown))
+            self.assertEqual(win.caption.height(), hud_overlay.caption_height(lines) - 1)
+            self.assertFalse(chip.geometry().intersects(win.bar_rect_local()))   # the chips move down with it
+        win.set_caption("On your desktop, sir.")
+        settle()
+        self.assertEqual((win.caption_lines(), win.bar_rect_local().height(), win.height()), (1, one[0], one[1]))
+
+    def test_a_longer_caption_is_cut_after_three_lines_and_whole_in_its_tooltip(self) -> None:
         win = self.overlay().hud
         win.place_in(QRect(0, 0, 1280, 760))
-        long = " ".join(["Your essay draft is open in Word, and two other files of that name are in Documents."] * 3)
+        long = " ".join(["Your essay draft is open in Word, and two other files of that name are in Documents."] * 4)
         win.set_caption(long)
-        self.assertTrue(win.caption.shown_text().endswith("\u2026"))
+        self.assertEqual(win.caption_lines(), hud_overlay.CAPTION_LINES)
+        lines = win.caption.lines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[-1].endswith("\u2026"))                         # cut only past the third line
+        self.assertFalse(any(line.endswith("\u2026") for line in lines[:-1]))
         self.assertIn("two other files", win.caption.toolTip())
+        self.assertEqual(win.caption.toolTip().count("two other files"), 4)     # the whole text
         self.assertEqual(win.cut_texts(), ["caption"])
+        # Never the active window (WindowDoesNotAcceptFocus): Qt shows a tooltip only for the active window or one
+        # that always shows them.
+        self.assertTrue(win.testAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips))
 
 
 class LayoutTests(_OverlayTest):
@@ -565,11 +732,16 @@ class LayoutTests(_OverlayTest):
         there = json.loads(lines[-1][len("REPORT "):])
         self.assertEqual(there["dpr"], 1.5)
         self.assertEqual(there["cut"], [])
-        for name in ("wide", "small"):
+        for name in ("wide", "small", "tiny"):
             for key in ("bar", "orb"):
                 self.assertEqual(there["areas"][name][key], here["areas"][name][key], (name, key))
             self.assertEqual(there["areas"][name]["window"][:2], here["areas"][name]["window"][:2])
             self.assertEqual(len(there["areas"][name]["chips"]), 3)
+            for report in (here, there):                              # the long caption wraps, never cut
+                long = report["areas"][name]["long"]
+                self.assertIn(long["lines"], (2, 3), (name, long))
+                self.assertEqual(long["bar"][3], 81 + 20 * (long["lines"] - 1), (name, long))
+                self.assertTrue(long["inside"], (name, long))
 
 
 class CardTests(_OverlayTest):
@@ -666,13 +838,17 @@ class DecorTests(_OverlayTest):
         self.assertFalse(layer.has_decor())
 
     def test_layers_show_only_with_something_to_draw_and_stay_under_the_rest(self) -> None:
+        layer = hud_overlay.DecorLayer(QGuiApplication.primaryScreen(), native=FakeNative())
+        self.addCleanup(layer.deleteLater)
+        self.assertFalse(layer.has_decor())                                   # nothing to draw: it never shows
         overlay = self.overlay()
         card = self.card(overlay)
         overlay.show_on(None)
         overlay.show_card(card, QRect(80, 300, 200, 120))
         settle()
-        self.assertFalse(any(layer.isVisible() for layer in overlay.layers()))     # nothing drawn: none shows
         primary = overlay.layer_for(QGuiApplication.primaryScreen())
+        self.assertTrue(primary.isVisible())                                  # the shadows under the bar and card
+        self.assertEqual(primary.brackets(), ())
         overlay.set_decor([Bracket(QRect(80, 300, 200, 120))], [Tether((QPoint(180, 300), QPoint(300, 260)))])
         settle()
         self.assertTrue(primary.isVisible())
@@ -681,10 +857,92 @@ class DecorTests(_OverlayTest):
         self.assertEqual(self.native.stacks[-1], [int(window.winId()) for window in order])
         overlay.set_decor()
         settle()
-        self.assertFalse(primary.isVisible())
+        self.assertTrue(primary.isVisible() and primary.glows())               # the shadows stay with the HUD
         overlay.hide()
         self.assertFalse(any(window.isVisible() for window in overlay.windows()))
+        self.assertEqual(primary.glows(), ())                                 # none while the HUD is away
         self.assertEqual(overlay.stack_order(), [])
+
+    def test_the_shadows_and_glows_live_in_the_layer_under_the_hud_and_its_cards(self) -> None:
+        # Switch.dc.html .bar, .hchip (.amb) and .glass box-shadows, painted under the interactive windows by the
+        # click-through layer - never by those windows (any alpha above 0 there would catch clicks).
+        overlay = self.overlay()
+        win = overlay.hud
+        win.set_caption(CAPTION)
+        win.set_briefing_ready(True)
+        win.set_pending(2)
+        win.set_recording("12:04")
+        card = self.card(overlay)
+        overlay.show_on(None)
+        area = overlay.hud.area()
+        target = QRect(area.left() + 80, area.top() + 360, 200, 120)
+        overlay.show_card(card, target)
+        settle()
+        layer = overlay.layer_for(QGuiApplication.primaryScreen())
+        self.assertTrue(layer.isVisible())
+        self.assertTrue(layer.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+        self.assertTrue(has(layer.windowFlags(), Qt.WindowType.WindowTransparentForInput))
+        looks = [(glow.look, glow.tone) for glow in layer.glows()]
+        self.assertEqual(looks, [(hud_overlay.GLOW_BAR, hud_overlay.TONE_CYAN),
+                                 (hud_overlay.GLOW_CHIP, hud_overlay.TONE_CYAN),
+                                 (hud_overlay.GLOW_CHIP, hud_overlay.TONE_AMBER),
+                                 (hud_overlay.GLOW_CHIP, hud_overlay.TONE_CYAN),
+                                 (hud_overlay.GLOW_CARD, hud_overlay.TONE_CYAN)])
+        self.assertEqual(layer.glows()[0].rect, win.bar_rect())
+        self.assertEqual(layer.glows()[-1].rect, card.geometry())
+        self.assertEqual(overlay.stack_order(), [layer, card, win])          # under every interactive window
+        image = layer.grab().toImage()
+        dpr = image.devicePixelRatio()
+
+        def alpha(point: QPoint) -> int:
+            local = point - layer.geometry().topLeft()
+            return image.pixelColor(round(local.x() * dpr), round(local.y() * dpr)).alpha()
+
+        bar = win.bar_rect()
+        chip = win.chips[hud_overlay.CHIP_APPROVALS]
+        chip_rect = QRect(chip.mapToGlobal(QPoint(0, 0)), chip.size())
+        for point in (QPoint(bar.center().x(), bar.bottom() + 12), QPoint(bar.right() + 6, bar.center().y()),
+                      QPoint(chip_rect.center().x(), chip_rect.bottom() + 6),
+                      QPoint(card.geometry().center().x(), card.geometry().bottom() + 14)):
+            self.assertGreater(alpha(point), 10, point)                      # a soft shadow beside each
+        self.assertEqual(alpha(QPoint(bar.center().x(), bar.bottom() + 120)), 0)  # and nothing far from them
+        panel = win.background().toImage()                                    # the HUD window itself: clear margins
+        self.assertEqual(panel.pixelColor(panel.width() - 1, 2).alpha(), 0)
+        self.assertFalse(has(win.windowFlags(), Qt.WindowType.WindowTransparentForInput))
+        self.assertEqual(card.cut_texts(), [])
+
+    def test_the_layer_repaints_only_when_a_shape_changes(self) -> None:
+        overlay = self.overlay()
+        win = overlay.hud
+        win.set_caption(CAPTION)
+        win.set_pending(2)
+        win.set_recording("12:04")
+        overlay.show_on(None)
+        settle()
+        layer = overlay.layer_for(QGuiApplication.primaryScreen())
+        counter = PaintCounter(layer)
+        for second in range(5, 11):                                         # REC's tick: same width (tabular)
+            win.set_recording(f"12:{second:02d}")
+            win.set_pending(2)                                               # a glance that changes nothing
+            win.set_look(orb_mod.SPEAKING if second % 2 else orb_mod.IDLE)   # the orb's look: still no shape
+            settle()
+        self.assertEqual(counter.count(layer), 0)
+        win.set_caption(LONG_CAPTION)                                        # the caption grows: the bar grows
+        settle()
+        self.assertGreaterEqual(counter.count(layer), 1)
+        self.assertTrue(all(rect.width() < layer.width() for rect in counter.rects))   # only where it changed
+        self.assertEqual(layer.glows()[0].rect, win.bar_rect())
+        counter.reset()
+        card = self.card(overlay)
+        overlay.show_card(card, QRect(80, 300, 200, 120))                     # a card placed: its shadow
+        settle()
+        self.assertGreaterEqual(counter.count(layer), 1)
+        self.assertEqual(layer.glows()[-1].rect, card.geometry())
+        overlay.hide()
+        self.assertFalse(layer.isVisible())
+        overlay.shutdown()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.assertEqual(overlay.layers(), [])
 
 
 class NeighbourTests(_OverlayTest):
@@ -713,7 +971,8 @@ class NeighbourTests(_OverlayTest):
         self.assertTrue(toast.isVisible())
         self.assertFalse(toast.geometry().intersects(win.occupied_rect()))   # bottom right: never near the bar
         order = overlay.stack_order()
-        self.assertEqual(order, [card, toast, win])                         # nothing of Jarvis's over the bar
+        layer = overlay.layer_for(QGuiApplication.primaryScreen())           # the shadows, under everything
+        self.assertEqual(order, [layer, card, toast, win])                  # nothing of Jarvis's over the bar
         self.assertEqual(self.native.stacks[-1], [int(window.winId()) for window in order])
         overlay.hide()
         self.assertFalse(pill.is_held())
@@ -747,7 +1006,8 @@ class NeighbourTests(_OverlayTest):
         self.assertFalse(other.isVisible())
         other.show()
         overlay.restack()
-        self.assertEqual(overlay.stack_order(), [other, overlay.hud])
+        layer = overlay.layer_for(QGuiApplication.primaryScreen())
+        self.assertEqual(overlay.stack_order(), [layer, other, overlay.hud])
 
 
 if __name__ == "__main__":

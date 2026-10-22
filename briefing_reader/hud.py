@@ -7504,6 +7504,8 @@ class _CommandField(QWidget):
         if trailing is not None:
             layout.addWidget(trailing, 0, Qt.AlignmentFlag.AlignVCenter)
         send_button.setFixedSize(self.HUD_SEND, self.HUD_SEND)
+        if isinstance(send_button, _SendButton):
+            send_button.set_hud(True)                  # DesktopB's mic-slot look: an outline glyph, no disc
         layout.addWidget(send_button, 0, Qt.AlignmentFlag.AlignVCenter)
         self.line_edit.setFont(holo.font("body"))
         self.update()
@@ -7577,14 +7579,18 @@ class _CommandField(QWidget):
 class _SendButton(QAbstractButton):
     """The hologram bar's 40 px round send arrow: ``field``-tinted until there is text, then the cyan
     go; while a request runs, a stop glyph (a filled 10 px square). The desktop HUD's row makes it 28 px
-    (smaller glyphs)."""
+    and draws it in DesktopB's mic-slot style (``set_hud``): an 18 px cyan outline glyph - the arrow,
+    or the stop square while a request runs - with no disc; the click area stays 28 px."""
 
     SIZE = 40
+    HUD_GLYPH = 18                # DesktopB.dc.html's mic slot: an 18 px svg, stroke 1.8, no fill
+    HUD_STROKE = 1.8
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._ready = False
         self._stop = False
+        self._hud = False
         self._focus_ring = False
         self.setFixedSize(self.SIZE, self.SIZE)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -7599,6 +7605,16 @@ class _SendButton(QAbstractButton):
 
     def look(self) -> str:
         return "stop" if self._stop else ("ready" if self._ready else "idle")
+
+    def set_hud(self, hud: bool) -> None:
+        """The desktop HUD's row: the outline glyph with no disc (only that bar's button; the window's keeps its
+        disc)."""
+        if bool(hud) != self._hud:
+            self._hud = bool(hud)
+            self.update()
+
+    def is_hud(self) -> bool:
+        return self._hud
 
     def focusInEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         from . import holo
@@ -7626,6 +7642,9 @@ class _SendButton(QAbstractButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
             hot = self._ready or self._stop
+            if self._hud:
+                self._paint_hud(painter, rect, hot)
+                return
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(holo.HOLO) if hot else holo.alpha(holo.HOLO, 0.10))
             if not self.isEnabled():
@@ -7647,6 +7666,21 @@ class _SendButton(QAbstractButton):
                 holo.paint_focus_ring(painter, rect.adjusted(2, 2, -2, -2), (rect.height() - 4) / 2)
         finally:
             painter.end()
+
+    def _paint_hud(self, painter: QPainter, rect: QRectF, hot: bool) -> None:
+        """DesktopB's mic slot: the 18 px glyph in a cyan outline (stroke 1.8), no disc - the send arrow while there
+        is text, the stop square while a request runs."""
+        from . import holo
+
+        if not self.isEnabled():
+            painter.setOpacity(0.45)
+        box = QRectF(0, 0, self.HUD_GLYPH, self.HUD_GLYPH)
+        box.moveCenter(rect.center())
+        holo.paint_icon(painter, box, "stop" if self._stop else "send_arrow",
+                        QColor(holo.HOLO) if hot else QColor(holo.INK_4), stroke=self.HUD_STROKE)
+        if self._focus_ring and self.hasFocus():
+            painter.setOpacity(1.0)
+            holo.paint_focus_ring(painter, rect.adjusted(2, 2, -2, -2), (rect.height() - 4) / 2)
 
 
 _READOUT_GROUP = re.compile(r"\s*\(([^()]*)\)")
@@ -7795,10 +7829,10 @@ class CommandBar(QWidget):
         """The desktop HUD's bar (SPEC 8.1; Switch.dc.html .qrow): the hologram behaviour (``set_holo``) in one flat
         44 px row - no pill (the HUD window paints the panel), the chevron, the input in the body type, then
         ``trailing`` (the HUD key's keycaps; DesktopB keeps them while typing) and, while there is text or a request
-        runs, a 28 px send arrow where DesktopB has its mic (the stop glyph while a request runs). The status, meta
-        and link lines never show: the HUD's caption line says what ``statusChanged`` says. Nothing in the row
-        takes the keyboard by itself: the input only on a click (or when the HUD gives it the keyboard), the send
-        arrow and the link never."""
+        runs, the send arrow where DesktopB has its mic and in its style - an 18 px cyan outline glyph with no disc,
+        a 28 px click area (the stop square while a request runs). The status, meta and link lines never show: the
+        HUD's caption line says what ``statusChanged`` says. Nothing in the row takes the keyboard by itself: the
+        input only on a click (or when the HUD gives it the keyboard), the send arrow and the link never."""
         if self._hud:
             return
         self.set_holo(True)

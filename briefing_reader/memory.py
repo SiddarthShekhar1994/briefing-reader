@@ -58,6 +58,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .format_chars import drop_format
+
 if TYPE_CHECKING:   # typing only: the index of a planner run (ask.context)
     from .ask.context import ContextIndex
 
@@ -96,7 +98,6 @@ _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 _SUGGESTION_DIGITS_RE = re.compile(r"\d{6,}")
 _URL_RE = re.compile(r"https?|://|www\.", re.IGNORECASE)     # as ask.mail's
 _CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
-_CF_RE = re.compile("[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]")
 _TOKEN_RE = re.compile(r"[^\W_]+")
 _WORD_RE = re.compile(r"[^\W\d_]+(?:['\u2019-][^\W\d_]+)*")
 _ID_RE = re.compile(r"m[0-9a-f]{11}")
@@ -129,10 +130,11 @@ class MemoryEntry:
 # --------------------------------------------------------------------------
 
 def clean_note(text: Any) -> str:
-    """One line: control and invisible format characters removed, spaces collapsed."""
+    """One line: control and invisible format characters (format_chars: every Unicode Cf) removed, spaces
+    collapsed."""
     if not isinstance(text, str):
         return ""
-    return " ".join(_CONTROL_RE.sub(" ", _CF_RE.sub("", text)).split())
+    return " ".join(_CONTROL_RE.sub(" ", drop_format(text)).split())
 
 
 def memory_refusal(text: Any) -> str:

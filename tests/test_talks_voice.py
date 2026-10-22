@@ -43,7 +43,7 @@ from briefing_reader.gcal import CalendarUnknownOutcome, NotAllowed
 from briefing_reader.gmail import GmailUnknownOutcome
 from briefing_reader.models import LAUNCH_OPEN, SectionAudio
 from briefing_reader.notion_client import FixtureSession, NotionClient
-from tests.ask_fakes import FakeClock, FakeProcess, stream
+from tests.ask_fakes import FakeClock, FakeProcess, GatedProcess, stream
 from tests.ui_fakes import (
     B_CALENDAR,
     COMMAND,
@@ -433,13 +433,15 @@ class AskConversationTests(unittest.TestCase):
         settle()
 
     def test_request_answer_and_speech(self) -> None:
-        app = self.make(plan())
+        gate = threading.Event()                                # the answer waits until the request is checked
+        app = self.make(GatedProcess(plan(), gate))
         c, reading = app.c, app.c.window.reading
         reading.set_tab(hud.TAB_BRIEFING)
         with self.assertLogs("briefing_reader", level="DEBUG") as logs:
             self.submit(c)
             self.assertEqual(reading.current_tab(), hud.TAB_LIVE)   # [live] auto_open = "tab" (the default)
             self.assertEqual(reading.conversation.entries()[-1][0::2], ("you", COMMAND))
+            gate.set()
             self.assertTrue(wait_for(lambda: not c.ask.busy, 10))
             settle()
         role, _stamp, text, sub = reading.conversation.entries()[-1]
@@ -460,12 +462,14 @@ class AskConversationTests(unittest.TestCase):
             self.assertNotIn(secret, text)
 
     def test_request_brings_up_jarvis_with_auto_open_off(self) -> None:
-        app = self.make(plan(), config_extra='\n[live]\nauto_open = "off"\n')
+        gate = threading.Event()                                # the answer waits until the request is checked
+        app = self.make(GatedProcess(plan(), gate), config_extra='\n[live]\nauto_open = "off"\n')
         c, reading = app.c, app.c.window.reading
         reading.set_tab(hud.TAB_BRIEFING)
         self.submit(c)
         self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
         self.assertEqual(reading.conversation.entries()[-1][0::2], ("you", COMMAND))
+        gate.set()
         self.assertTrue(wait_for(lambda: not c.ask.busy, 10))
         settle()
         self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)

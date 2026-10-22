@@ -40,6 +40,7 @@ from email.utils import getaddresses
 from typing import Any
 
 from ..actions import REPLY, ProposedAction, email_address
+from ..format_chars import drop_format, has_format
 
 MAX_THREADS = 3
 MAX_MAIL_CHARS = 16000
@@ -96,7 +97,6 @@ no noreply reply do not donotreply notifications notification notify news newsle
 hello hi contact admin office inbox www""".split())
 _URL_RE = re.compile(r"https?|://|www\.", re.IGNORECASE)
 
-_CF_RE = re.compile("[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]")
 _CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
 _ON_WROTE_RE = re.compile(r"^On .{4,200}\bwrote:\s*$", re.IGNORECASE)
 _ON_START_RE = re.compile(r"^On (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|\d)", re.IGNORECASE)
@@ -250,7 +250,7 @@ def check_query(query: Any, grounding: SearchGrounding | None = None) -> str:
         raise QueryRefused("The search is empty")
     if len(text) > MAX_QUERY_CHARS:
         raise QueryRefused(f"The search is too long ({len(text)} characters, at most {MAX_QUERY_CHARS})")
-    if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in query) or _CF_RE.search(query) \
+    if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in query) or has_format(query) \
             or any(char in "<>|\\`;[]*=" for char in text):
         raise QueryRefused("The search has characters Jarvis does not allow")
     if _URL_RE.search(text):
@@ -543,7 +543,7 @@ def strip_quoted(text: str) -> str:
     """``text`` up to the quoted history ("On <date>, <name> wrote:", "-----Original Message-----",
     an Outlook "From: ... Sent: ..." block) or the signature ("-- "), without ">" lines, invisible
     characters or runs of blank lines."""
-    lines = _CF_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n")).replace("\t", " ").split("\n")
+    lines = drop_format(text.replace("\r\n", "\n").replace("\r", "\n")).replace("\t", " ").split("\n")
     kept: list[str] = []
     for index, line in enumerate(lines):
         stripped = line.strip()
@@ -572,7 +572,7 @@ def clean_line(text: Any, cap: int) -> str:
     """One line of header text: invisible and control characters removed, spaces collapsed, cut."""
     if not isinstance(text, str):
         return ""
-    text = " ".join(_CONTROL_RE.sub(" ", _CF_RE.sub("", text)).split())
+    text = " ".join(_CONTROL_RE.sub(" ", drop_format(text)).split())
     return text if len(text) <= cap else text[:cap - 3] + "..."
 
 

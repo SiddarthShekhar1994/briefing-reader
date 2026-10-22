@@ -482,14 +482,17 @@ def bring_forward_on_click(widget: QWidget) -> None:
     """Show, raise and activate ``widget`` on the owner's own click (Bring Jarvis back, a HUD chip, the tray, the
     toast): that click is the latest input Windows saw, so Jarvis may come forward - attached to the foreground
     window's input as force_foreground's first step is, but NEVER with its synthetic Alt press (SPEC hard rule 13:
-    never in HUD mode). Leaving the desktop HUD uses this, never force_foreground."""
+    never in HUD mode). Leaving the desktop HUD uses this, never force_foreground. While the desktop test guard is
+    on (the tests and harnesses) it never reaches user32, whatever the platform."""
+    from .desktop import backend as desktop_backend
+
     if widget.isMinimized():
         widget.showNormal()
     else:
         widget.show()
     widget.raise_()
     widget.activateWindow()
-    if not _native_windows():
+    if not _native_windows() or desktop_backend.real_backend_blocked():
         return
     try:
         user32 = _user32()
@@ -5118,6 +5121,8 @@ class AppController(QObject):
         self._account_dialog: hud.AccountDialog | None = None
         self._confirm_card = ""
         self._confirm_action: ProposedAction | None = None
+        # That question when it came up on the desktop HUD: (alias, card id, action), asked once the window is back.
+        self._account_ask_later: tuple[str, str, ProposedAction | None] | None = None
         # Reply / Email id -> _review_digest of the subject and message the Edit dialog showed whole
         # (this run, memory only): Send skips the review only while the card still says exactly that.
         self._reviewed: dict[str, str] = {}
@@ -7676,11 +7681,24 @@ class AppController(QObject):
     def _ask_account(self, alias: str, *, card_id: str = "", action: ProposedAction | None = None) -> bool:
         """Ask "Signed in as X for "alias" - is that right?" while ``alias``'s binding is not
         confirmed (hud.AccountDialog): True when there is something to confirm (the dialog is open
-        now), False when there is not. Nothing is sent or changed for the alias until Yes."""
+        now, or waits for the window), False when there is not. Nothing is sent or changed for the
+        alias until Yes. On the desktop HUD the dialog never opens over the hidden window (nothing
+        comes forward by itself there): the card says what it waits for and the question is asked
+        once the window is back (``_ask_account_later``), once."""
         address = self._pending_account(alias)
         if not address or self.state == STATE_QUITTING:
             return False
         if self._account_dialog is not None or self._dialog is not None:
+            return True
+        if self._hud_active():
+            if self._account_ask_later is None:
+                self._account_ask_later = (alias, card_id, action)
+                if card_id:
+                    self._hints[card_id] = ACCOUNT_CONFIRM_NOTE.format(alias=alias)
+                    self._show_card_state(card_id)   # a Calendar event's or Todo's card too
+                self._refresh_editable_cards()
+                logger.info("The %s account's Google account question waits for the window (on the desktop HUD)",
+                            logged_alias(alias))
             return True
         dialog = hud.AccountDialog(alias, address, sends_mail=self._sends_mail(alias), parent=self.window)
         dialog.answered.connect(self._on_account_answered)
@@ -7740,6 +7758,20 @@ class AppController(QObject):
         self._refresh_editable_cards()
         self._update_service_chips()
         self._render_agenda()
+
+    def _ask_account_later(self) -> None:
+        """The account question that came up on the desktop HUD, now that the window is back: asked once (back on
+        the HUD meanwhile, it waits again). With nothing left to confirm, the card's waiting note goes."""
+        if self._account_ask_later is None or self.state == STATE_QUITTING:
+            return
+        alias, card_id, action = self._account_ask_later
+        self._account_ask_later = None
+        if self._ask_account(alias, card_id=card_id, action=action):
+            return
+        if card_id and self._hints.get(card_id) == ACCOUNT_CONFIRM_NOTE.format(alias=alias):
+            self._hints.pop(card_id, None)
+            self._show_card_state(card_id)
+            self._refresh_editable_cards()
 
     def _on_account_dialog_closed(self, _result: int = 0) -> None:
         dialog, self._account_dialog = self._account_dialog, None
@@ -8786,7 +8818,9 @@ class AppController(QObject):
         """[desktop] on: the Dock's Desktop with the HUD key's "<key> switches" line (none while [hotkey] is off: no
         key can be registered then), the Find list's Desktop, Settings > Desktop (read only; "Not turned on yet"
         until the first-run card exists) and the HUD (``desktop``: desktop_ui.DesktopController; the Dock's Desktop
-        and the Find list's go onto it). Off: ``desktop`` is None - no Desktop surface, no HUD window, no hook."""
+        and the Find list's go onto it). Off: ``desktop`` is None - no Desktop surface, no HUD window, no hook.
+        With the HUD, the application's aboutToQuit is heard (``_on_about_to_quit``: Windows ending the session
+        while on the HUD)."""
         self.desktop: Any = None
         desktop = getattr(self.config, "desktop", None)
         if not getattr(desktop, "enabled", False):
@@ -8798,6 +8832,9 @@ class AppController(QObject):
                                         note=settings_view.DESKTOP_NOTE, how=settings_view.DESKTOP_HOW,
                                         rows=lambda: settings_view.desktop_rows(self.config))
         self.desktop = self._create_desktop(factory)
+        app = QCoreApplication.instance()
+        if self.desktop is not None and app is not None:
+            app.aboutToQuit.connect(self._on_about_to_quit)
 
     def _create_desktop(self, factory: Callable[[Any], Any] | None) -> Any:
         """desktop_ui.DesktopController over the HUD's windows (``factory(config)``, else hud_overlay.create): the
@@ -8837,12 +8874,35 @@ class AppController(QObject):
     def _on_hud_changed(self, entered: bool) -> None:
         """Jarvis went onto the desktop HUD (``entered``) or came back to the window: the tray's Bring Jarvis back,
         the agenda's and the offers' timers follow (the HUD counts as present; its offers take the toast path); a
-        newer run that waited for the window (the classic prompt) is asked about now it is back."""
+        newer run that waited for the window (the classic prompt) and an account question that came up on the HUD
+        are asked about now it is back."""
         self._update_tray()
         self._sync_agenda_timer()
         self._prod_sync()
         if not entered and self._pending_run:
             QTimer.singleShot(0, self._offer_pending_run)
+        if not entered and self._account_ask_later is not None:
+            QTimer.singleShot(0, self._ask_account_later)
+
+    def _on_about_to_quit(self) -> None:
+        """The application quits while Jarvis may be on the desktop HUD: Windows ends the session (sign-out, shut
+        down, restart, an installer's restart manager) and Qt emits aboutToQuit before its quit, which closes every
+        visible window and is cancelled while one will not close. On the HUD the hidden window is not closed by
+        Qt and the HUD's own close would bring the window back, so Jarvis takes the hidden window's outside-close
+        path itself: the HUD lets its close through from now on, "done" is recorded and Jarvis quits (shutdown: a
+        Send in its hold goes, a recording is saved, the HUD's windows go) - nothing comes forward. In the window
+        nothing changes: the window's own close does it, as before."""
+        if self._shut_down or self.state == STATE_QUITTING or not self._hud_active():
+            return
+        logger.info("The application quits while on the desktop HUD (Windows ends the session)")
+        self.desktop.set_quitting()
+        self._quit_from_hud()
+
+    def _quit_from_hud(self) -> None:
+        """Jarvis closes while on the desktop HUD (Windows closed the hidden window, or ends the session): as the
+        tray's Quit - "done" recorded, then quit - never back to the prompt over the HUD."""
+        self._record_done()
+        self.quit()
 
     # ---- offers (the productivity bundle) ----------------------------------------------------------
 
@@ -9468,7 +9528,8 @@ class AppController(QObject):
 
     def _on_offer_posted(self, offer: Any) -> None:
         """An offer: one JARVIS entry with its one link and its cost (never raised, restored or
-        focused); a minimized prep offer flashes the taskbar button. Nothing is read or run."""
+        focused); a minimized prep offer flashes the taskbar button - never on the desktop HUD, where
+        the window is hidden and the toast carries the offer. Nothing is read or run."""
         if self.state == STATE_QUITTING:
             return
         self._show_prod_hint()   # the one-time hint first, so the offer is the newest entry
@@ -9483,10 +9544,11 @@ class AppController(QObject):
             # Back-to-back meetings offered together: read from the first one (R51).
             self.window.reading.conversation.follow_from(self._offer_entries[offer.group[0]])
         if offer.flash:
-            try:
-                QApplication.alert(self.window, 0)   # the taskbar button flashes; the window stays where it is
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("No taskbar flash (%s)", type(exc).__name__)
+            if not self._hud_active():   # on the desktop HUD nothing of the hidden window's flashes: the toast says it
+                try:
+                    QApplication.alert(self.window, 0)   # the taskbar button flashes; the window stays where it is
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("No taskbar flash (%s)", type(exc).__name__)
             if offer.kind == "prep" and offer.start is not None:
                 # The toast's Prepare brief only opens Home with the offer's tile: its own click prepares.
                 minutes = max(0, int(round((offer.start - offer.posted_at).total_seconds() / 60)))
@@ -11873,8 +11935,7 @@ class AppController(QObject):
             # Jarvis never closes the window it hid for the desktop HUD; a close from outside (Windows) quits as the
             # tray's Quit does - never back to the prompt over the HUD.
             logger.info("Window closed while on the desktop HUD")
-            self._record_done()
-            self.quit()
+            self._quit_from_hud()
         elif self.state == STATE_READING:
             logger.info("Window closed on the reading screen")
             self.done()
@@ -12609,12 +12670,18 @@ class AppController(QObject):
         minimized window is restored with a greeting (unless one was said in the last 2 minutes);
         a visible one just comes forward, its tab unchanged. A NEW briefing is announced once. On the
         desktop HUD (the window key; SPEC 9's HUD row - the rest of that table is P1.6) the window
-        comes back on the screen it would have had, else Home: leaving the HUD is not a restore, so
-        there is no greeting."""
+        comes back on the screen it would have had, else Home - with ``ask`` (--ask) on Home with the
+        command bar focused, or the note that Ask is off, as open_assistant does: leaving the HUD is
+        not a restore, so there is no greeting."""
         window = self.window
         if self._hud_active():
-            if self.desktop.leave_hud() and ask:
-                self.window.reading.focus_command_bar()   # --ask: Home with the bar focused (Ask on)
+            if self.desktop.leave_hud(SCREEN_HOME if ask else None) and ask:
+                if self.ask is not None:
+                    self.window.reading.command_bar.focus_input()   # --ask: Home with the bar focused
+                else:
+                    from .ask.planner import DISABLED_MESSAGE
+
+                    self._flash_note(DISABLED_MESSAGE)
             self._announce()
             return
         restored = self.state != STATE_READING or not window.isVisible() or window.isMinimized()
@@ -12796,6 +12863,12 @@ class AppController(QObject):
             self.meetings.shutdown()   # a recording stops and is saved; the pill goes
         if getattr(self, "desktop", None) is not None:
             self.desktop.shutdown()    # the HUD's windows go (the window itself is hidden below, never closed)
+            app = QCoreApplication.instance()
+            try:
+                if app is not None:
+                    app.aboutToQuit.disconnect(self._on_about_to_quit)
+            except (RuntimeError, TypeError):   # never connected (no application then)
+                pass
         if self._on_shutdown is not None:
             self._on_shutdown()
         flushed = self._flush_send_hold()   # before the worker stops: the owner already saw "Sent"

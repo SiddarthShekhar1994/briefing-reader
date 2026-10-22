@@ -34,13 +34,13 @@ Pure: nothing here talks to Google or Claude, and nothing is logged.
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from ..actions import CALENDAR, REPLY, ProposedAction, email_address
+from ..format_chars import drop_format
 from ..gcal import EventBrief
 from .mail import MailMessage, MailPerson, MailThread, SearchGrounding, address_words, search_words
 
@@ -193,20 +193,13 @@ class ContextIndex:
 # Sanitizing
 # --------------------------------------------------------------------------
 
-def _drop_format(text: str) -> str:
-    """``text`` without its invisible format characters: every character of Unicode category Cf (bidi controls,
-    zero-width characters, the BOM, tag characters ...). The line and paragraph separators (Zl, Zp) are line breaks:
-    _CONTROL_RE turns them into spaces."""
-    if text.isascii():
-        return text
-    return "".join(char for char in text if unicodedata.category(char) != "Cf")
-
-
 def data(text: Any, cap: int = 0) -> str:
-    """One field of data: no way to open or close a block or split a row, one line, capped."""
+    """One field of data: no way to open or close a block or split a row, one line, capped. Its invisible format
+    characters go (format_chars: every Unicode Cf - bidi controls, zero-width characters, the BOM, tag characters
+    ...); the line and paragraph separators (Zl, Zp) are line breaks, which _CONTROL_RE turns into spaces."""
     if not isinstance(text, str):
         return ""
-    text = _drop_format(text)
+    text = drop_format(text)
     text = _CONTROL_RE.sub(" ", text).replace("<", "\u2039").replace(">", "\u203a").replace("|", "/")
     text = " ".join(text.split())
     if cap and len(text) > cap:
@@ -218,7 +211,7 @@ def _keep_bars(text: Any, cap: int) -> str:
     """A whole proposal or command line: like data() but "|" stays (it separates the fields)."""
     if not isinstance(text, str):
         return ""
-    text = _CONTROL_RE.sub(" ", _drop_format(text)).replace("<", "\u2039").replace(">", "\u203a")
+    text = _CONTROL_RE.sub(" ", drop_format(text)).replace("<", "\u2039").replace(">", "\u203a")
     text = " ".join(text.split())
     return text if len(text) <= cap else text[:cap - 3].rstrip() + "..."
 

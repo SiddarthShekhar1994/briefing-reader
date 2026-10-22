@@ -6,7 +6,8 @@ partly click-through window; each is ``Tool | FramelessWindowHint | WindowStaysO
 with ``WA_TranslucentBackground`` and ``WA_ShowWithoutActivating`` (states_view.TOAST_FLAGS): no taskbar button,
 never the focus. Their margins are fully transparent, so clicks there reach the desktop (no setMask); every fill is
 opaque (``field`` / ``tile``, never a blur), and no window that takes clicks paints a glow or a shadow (any alpha
-above 0 catches clicks): the glows live in the DecorLayer.
+above 0 catches clicks): the glows live in the DecorLayer - the prototypes' outer shadows and cyan glows of the bar,
+the chips and the cards (``Glow``) as well as the brackets and tethers.
 
 ``HudWindow``
     The orb (``OrbWidget(ORB_PX)``: the compact level of detail in a 104 px widget, no ground, never resized per
@@ -14,15 +15,20 @@ above 0 catches clicks): the glows live in the DecorLayer.
     (Switch.dc.html ``.hud``): the 44 px input row (a second ``hud.CommandBar`` in its HUD look: the chevron, "Ask
     Jarvis", the HUD key's keycaps - none while no key can work), Jarvis's caption line with the orb's state word, a
     hairline and "Bring Jarvis back"; under the bar the chips: "Briefing ready" (cyan), "N need your OK" (amber;
-    ui.needs_ok_chip's words) and REC with a coral dot and the time. ``place_on(screen)`` / ``place_in(area)``,
-    ``area()``; ``set_caption(text)``; ``set_look(base, muted=, offline=)`` (the orb and the state word);
-    ``set_briefing_ready(bool)``, ``set_pending(count)``, ``set_recording(elapsed, warning="")``; ``chip_texts()``;
-    ``bar_rect()``, ``orb_center()``, ``occupied_rect()`` (global); ``cut_texts()`` (words cut or crowded: none at
-    the sizes it is built for). Signals ``bringBackClicked()`` and ``chipClicked(key)`` (``CHIP_BRIEFING``,
-    ``CHIP_APPROVALS``, ``CHIP_REC``); the bar's own signals are on ``bar``. The bar's status (an answer, a question,
-    a problem, what Jarvis is doing) shows in the caption line without its technical readouts. While idle the window
-    keeps ``WindowDoesNotAcceptFocus``: the input takes the keyboard only after the HUD key or a click (a later part).
-    Its paint is one cached pixmap (the panel, the hairlines, the orb's dark disc): an orb frame repaints 104 px of it.
+    ui.needs_ok_chip's words) and REC with a coral dot and the time (tabular figures: its width holds while the
+    seconds tick). The caption wraps as the prototype's ``.bcap`` does, to at most ``CAPTION_LINES`` lines - the bar
+    and the window grow with it, the chips move down - and only past that it is cut with an ellipsis, its whole text
+    the tooltip (``WA_AlwaysShowToolTips``: the HUD is never the active window). ``place_on(screen)`` /
+    ``place_in(area)``, ``area()``; ``set_caption(text)``; ``set_look(base, muted=, offline=)`` (the orb and the
+    state word); ``set_briefing_ready(bool)``, ``set_pending(count)``, ``set_recording(elapsed, warning="")`` (a chip
+    whose words did not change is not repainted); ``chip_texts()``; ``bar_rect()``, ``orb_center()``,
+    ``occupied_rect()`` (global); ``glows()`` (the bar's and the chips' ``Glow``, global); ``cut_texts()`` (words
+    cut or crowded: none at the sizes it is built for). Signals ``bringBackClicked()``, ``chipClicked(key)``
+    (``CHIP_BRIEFING``, ``CHIP_APPROVALS``, ``CHIP_REC``) and ``shapeChanged()`` (the window, the bar or a chip moved
+    or changed size); the bar's own signals are on ``bar``. The bar's status (an answer, a question, a problem, what
+    Jarvis is doing) shows in the caption line without its technical readouts. While idle the window keeps
+    ``WindowDoesNotAcceptFocus``: the input takes the keyboard only after the HUD key or a click (a later part). Its
+    paint is one cached pixmap (the panel, the hairlines, the orb's dark disc): an orb frame repaints 104 px of it.
 
 ``ResultCard``
     A result floating beside the thing it is about (DesktopB ``.glass``): the kicker with its dot, the title, a meta
@@ -30,13 +36,17 @@ above 0 catches clicks): the glows live in the DecorLayer.
     MATCHES") and a note. ``set_content(CardContent)``; tones ``TONE_CYAN`` (Jarvis points at something),
     ``TONE_AMBER`` (a decision waits), ``TONE_DONE``. ``place_beside(target, area=None, avoid=())`` puts it beside a
     global rect, never over it and clear of ``avoid`` (the HUD), kept inside the work area (ui._keep_on_screen's
-    rule); ``cut_texts()``.
+    rule); ``cut_texts()``; ``glow()`` (its ``Glow``, global); ``shapeChanged()`` when it moves, changes size or
+    tone.
 
 ``DecorLayer``
-    One per QScreen, sized to its geometry, also ``WindowTransparentForInput``: the cyan or amber brackets (all four
-    corners, a tag on the top edge), tethers (a dashed line with a dot at each end and a mono label) and the amber
-    in-control edge glow, from global ``Bracket`` / ``Tether`` items (a bracket over two screens is drawn on each).
-    Static: it repaints only when its items change and has no timer; with nothing to draw it stays hidden.
+    One per QScreen, sized to its geometry, also ``WindowTransparentForInput``: the outer shadows and glows under the
+    interactive windows (``Glow``: Switch.dc.html's box-shadows of the bar, the chips and the cards - painted once per
+    size into a cached sprite), the cyan or amber brackets (all four corners, a tag on the top edge), tethers (a
+    dashed line with a dot at each end and a mono label) and the amber in-control edge glow, from global ``Glow`` /
+    ``Bracket`` / ``Tether`` items (an item over two screens is drawn on each). Static: it repaints only when its
+    items change - only where a shadow moved, when only shadows did - and has no timer; with nothing to draw it stays
+    hidden.
 
 ``HudOverlay``
     The set: the HUD window, the cards and one DecorLayer per screen (screens coming and going follow; a work area
@@ -45,9 +55,11 @@ above 0 catches clicks): the glows live in the DecorLayer.
     bar and the chips), ``remove_card(card)``, ``cards()``; ``set_decor(brackets, tethers, glow=False)``;
     ``layers()``; ``windows()``; ``set_neighbours(toast=, rec_pill=)`` and ``restack()``: bottom to top the
     DecorLayers, the RecPill, the cards, the Toast, the HUD window - nothing of Jarvis's is ever over the bar; while
-    the HUD shows, the meetings RecPill (top centre, where the bar is) is held hidden (``RecPill.set_held``: REC is
-    a chip here) and it comes back when the HUD hides; ``stack_order()``; ``shutdown()``. ``create(config,
-    native=None)`` is None while [desktop] is off: no HUD window then exists at all.
+    the HUD shows, the layer under it shows its shadows and glows (they follow the bar, the chips and the cards: a
+    caption growing, a chip coming or going, a card placed) and the meetings RecPill (top centre, where the bar is)
+    is held hidden (``RecPill.set_held``: REC is a chip here) and it comes back when the HUD hides;
+    ``stack_order()``; ``shutdown()``. ``create(config, native=None)`` is None while [desktop] is off: no HUD window
+    then exists at all.
 
 Capture and stacking go through a small seam, ``HudNative`` (``exclude_from_capture(hwnd)``: SetWindowDisplayAffinity
 WDA_EXCLUDEFROMCAPTURE on every HUD window when [desktop] hide_from_capture is on, once per native window;
@@ -69,14 +81,17 @@ import shiboken6
 from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QFont,
     QFontMetricsF,
     QGuiApplication,
+    QImage,
     QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
     QPixmap,
     QRadialGradient,
+    QRegion,
     QScreen,
 )
 from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QWidget
@@ -98,8 +113,11 @@ MIN_BAR_WIDTH = 480            # ... narrower on a small screen, never below thi
 BAR_TOP = 16                   # from the top of the work area
 BAR_RADIUS = 16
 ROW_HEIGHT = 44                # the input row
-CAPTION_HEIGHT = 35            # the caption line: a hairline, 7 px, one 20 px line, 7 px
-BAR_HEIGHT = 1 + ROW_HEIGHT + CAPTION_HEIGHT + 1
+CAPTION_LINE = 20              # one line of the caption (.bcap: Sora 14 light, line-height 1.4)
+CAPTION_LINES = 3              # it wraps to at most this many lines (the bar grows with it), cut only past that
+CAPTION_PAD = 7                # above and below the caption's lines
+CAPTION_HEIGHT = 1 + CAPTION_PAD + CAPTION_LINE + CAPTION_PAD      # one line: a hairline, 7 px, 20 px, 7 px
+BAR_HEIGHT = 1 + ROW_HEIGHT + CAPTION_HEIGHT + 1                     # with one caption line
 ORB_PX = 92
 ORB_SIDE = orb_mod.widget_side(ORB_PX)      # 104: the orb's widget (its halo overflows the 92 px box)
 ORB_LEFT = ORB_SIDE // 2 + 2                # the bar starts here in the window: the orb's centre is 2 px left of it
@@ -110,7 +128,7 @@ RIGHT_MARGIN = 2
 CHIP_GAP = 10                               # under the bar, and between chips
 CHIP_HEIGHT = 36
 SCREEN_MARGIN = 16                          # the least room beside the HUD on a narrow screen
-WINDOW_HEIGHT = BAR_TOP + BAR_HEIGHT + CHIP_GAP + CHIP_HEIGHT + 2
+WINDOW_HEIGHT = BAR_TOP + BAR_HEIGHT + CHIP_GAP + CHIP_HEIGHT + 2          # with one caption line
 BACK_GAP = 12                               # around the hairline before "Bring Jarvis back" (.back's margins)
 _ORB_DISC = 62.2                            # the dark disc's gradient radius (CSS farthest-corner of an 88 px box)
 _BAR_LINE = holo.alpha(holo.HOLO, 0.38)
@@ -151,6 +169,17 @@ BRACKET_LEG = 20
 BRACKET_LEG_SMALL = 10
 GLOW_DEPTH = 70
 
+# The outer shadows and glows under the interactive windows (Switch.dc.html box-shadow: .hchip :182, .bar :197,
+# .glass :248): per look the dark drop shadow (y offset px, blur px, alpha of black), per look and tone the glow (blur
+# px, alpha of the tone's ink; no offset). A blur of b px is a Gaussian of sigma b / 2, as in CSS.
+GLOW_BAR = "bar"
+GLOW_CHIP = "chip"
+GLOW_CARD = "card"
+_GLOW_DARK = {GLOW_BAR: (10, 40, 0.45), GLOW_CHIP: (6, 22, 0.35), GLOW_CARD: (18, 48, 0.45)}
+_GLOW_TINT = {(GLOW_BAR, TONE_CYAN): (24, 0.10), (GLOW_CHIP, TONE_CYAN): (16, 0.12),
+              (GLOW_CHIP, TONE_AMBER): (16, 0.16), (GLOW_CARD, TONE_CYAN): (22, 0.10),
+              (GLOW_CARD, TONE_AMBER): (26, 0.16)}
+
 WDA_EXCLUDEFROMCAPTURE = 0x11
 _HWND_TOPMOST = -1
 _SWP_NOSIZE = 0x0001
@@ -166,6 +195,11 @@ def needs_ok_text(count: int) -> str:
 
 def rec_text(elapsed: str) -> str:
     return f"REC {elapsed}"
+
+
+def caption_height(lines: int) -> int:
+    """The caption line's height with ``lines`` lines of text (a hairline, 7 px, 20 px a line, 7 px)."""
+    return 1 + CAPTION_PAD + CAPTION_LINE * max(1, min(CAPTION_LINES, int(lines))) + CAPTION_PAD
 
 
 def hud_key_caps(label: str) -> list[str]:
@@ -299,10 +333,12 @@ class _OverlayWindow(QWidget):
 
 
 class _KeyCaps(QWidget):
-    """The HUD key as keycaps after the input (DesktopB .kbd: mono 9, ink-3, a 2 px bottom edge)."""
+    """The HUD key as keycaps after the input (DesktopB / Switch .kbd: mono 9, ink-3, 6 px padding and a 1 px border
+    each side, a 2 px bottom edge - the text's advance + 14 wide, 19 high - and the row's 10 px gap between caps)."""
 
-    GAP = 6
-    HEIGHT = 18
+    GAP = 10
+    HEIGHT = 19
+    CHROME = 14                # the padding and the border on both sides of a cap's text
 
     def __init__(self, label: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -317,7 +353,7 @@ class _KeyCaps(QWidget):
         return list(self._keys)
 
     def _cap_width(self, key: str) -> float:
-        return QFontMetricsF(self._font).horizontalAdvance(key) + 12
+        return QFontMetricsF(self._font).horizontalAdvance(key) + self.CHROME
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
         if not self._keys:
@@ -351,8 +387,10 @@ class _KeyCaps(QWidget):
 
 
 class _CaptionLine(QWidget):
-    """Jarvis's caption (Sora 14 light, one line, cut with an ellipsis; the whole text is its tooltip) or the bar's
-    status in its tone, and at the right the orb's state word with its dot (DesktopB .cap, .status)."""
+    """Jarvis's caption (Sora 14 light, 20 px lines) or the bar's status in its tone, wrapped at word boundaries to
+    at most CAPTION_LINES lines as the prototype's .bcap wraps (the HUD window gives it the height its lines take) and
+    cut with an ellipsis only past that - the whole text is its tooltip -, and at the right the orb's state word with
+    its dot, centred on the lines (DesktopB .cap, .status)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -391,12 +429,32 @@ class _CaptionLine(QWidget):
     def word(self) -> str:
         return self._word
 
-    def shown_text(self) -> str:
-        """The text as painted: cut with an ellipsis when the line is too short for it."""
-        return QFontMetricsF(self._font).elidedText(self.text(), Qt.TextElideMode.ElideRight, self._room())
+    def lines(self, width: float | None = None) -> list[str]:
+        """The text as painted in a caption line ``width`` px wide (its own width by default): wrapped at word
+        boundaries to at most CAPTION_LINES lines, cut with an ellipsis only where it needs more (or one word is wider
+        than the line)."""
+        text = self.text()
+        if not text:
+            return []
+        room = self._room(self.width() if width is None else width)
+        metrics = QFontMetricsF(self._font)
+        return [metrics.elidedText(line, Qt.TextElideMode.ElideRight, room)
+                for line in offer_view.wrap_lines(text, self._font, room, CAPTION_LINES)]
 
-    def _room(self) -> float:
-        return max(0.0, self.word_rect().left() - 7 - 3.5 - 6 - 14)
+    def line_count(self, width: float | None = None) -> int:
+        """How many lines the text takes in a caption line ``width`` px wide (at least one)."""
+        return max(1, len(self.lines(width)))
+
+    def shown_text(self) -> str:
+        """The text as painted, its lines joined: the whole text unless it is cut."""
+        return " ".join(self.lines())
+
+    def _room(self, width: float) -> float:
+        """The text's width in a caption line ``width`` px wide: up to the state word's dot."""
+        return max(0.0, width - self._word_width() - 7 - 3.5 - 6 - 14)
+
+    def _word_width(self) -> float:
+        return QFontMetricsF(self._word_font).horizontalAdvance(self._word) + 2
 
     def _color(self) -> QColor:
         if not self._status:
@@ -411,8 +469,8 @@ class _CaptionLine(QWidget):
         self.update()
 
     def word_rect(self) -> QRectF:
-        """Where the state word is painted (at the line's right end)."""
-        width = QFontMetricsF(self._word_font).horizontalAdvance(self._word) + 2
+        """Where the state word is painted (at the line's right end, centred on its lines)."""
+        width = self._word_width()
         return QRectF(self.width() - width, 0, width, self.height())
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
@@ -432,7 +490,9 @@ class _CaptionLine(QWidget):
             painter.drawText(word, align, self._word)
             painter.setFont(self._font)
             painter.setPen(self._color())
-            painter.drawText(QRectF(0, 0, self._room(), self.height()), align, self.shown_text())
+            room = self._room(self.width())
+            for index, line in enumerate(self.lines()):
+                painter.drawText(QRectF(0, CAPTION_PAD + CAPTION_LINE * index, room, CAPTION_LINE), align, line)
         finally:
             painter.end()
 
@@ -447,7 +507,9 @@ _CHIP_LOOKS = {   # fill, border, hover border, text, dot, chevron
 
 class HudChip(QAbstractButton):
     """A chip under the HUD bar (Switch.dc.html .hchip): 36 high, opaque, a dot, the words and a chevron. Static (no
-    ping, no blinking dot: only the orb loops); NoFocus, a click emits ``clicked``."""
+    ping, no blinking dot: only the orb loops; words that did not change repaint nothing); REC's figures are tabular,
+    so its width holds while the seconds tick (the window's REC readout does the same). NoFocus, a click emits
+    ``clicked``."""
 
     PAD = 12
 
@@ -456,6 +518,11 @@ class HudChip(QAbstractButton):
         self._key = key if key in _CHIP_LOOKS else CHIP_BRIEFING
         self._hover = False
         self._font = hud.body_font(13, 500)
+        if self._key == CHIP_REC:
+            try:
+                self._font.setFeature(QFont.Tag("tnum"), 1)      # as holo.font does for its tabular roles
+            except (AttributeError, TypeError, ValueError):       # Qt before 6.7: proportional figures
+                pass
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -464,6 +531,8 @@ class HudChip(QAbstractButton):
         return self._key
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        if text == self.text():
+            return                         # unchanged (a glance that changed nothing): no repaint, no new size
         super().setText(text)
         self.setAccessibleName(text)
         self.updateGeometry()
@@ -592,16 +661,22 @@ class HudWindow(_OverlayWindow):
 
     bringBackClicked = Signal()
     chipClicked = Signal(str)
+    shapeChanged = Signal()            # the window, the bar or a shown chip moved or changed size
 
     def __init__(self, *, hud_key: str = "", native: HudNative | None = None, hide_from_capture: bool = True) -> None:
         super().__init__(HUD_FLAGS, native, hide_from_capture)
         self.setObjectName("JarvisHud")
         self.setWindowTitle("Jarvis")
         self.setAccessibleName("Jarvis on your desktop")
+        # Never the active window (WindowDoesNotAcceptFocus): Qt shows a tooltip (a cut caption's whole text) only
+        # for the active window or one with this attribute.
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
         self._bar_width = BAR_WIDTH
+        self._caption_lines = 1                             # the caption's lines at the bar's width
         self._area = QRect()                                # the work area it was placed in (none yet)
         self._hairline_x = 0
         self._layout_key: tuple | None = None
+        self._shape_key: tuple | None = None
         self._background: QPixmap | None = None
         self._background_key: tuple | None = None
         self._pending = 0
@@ -641,18 +716,27 @@ class HudWindow(_OverlayWindow):
         self._area = QRect(area)
         room = area.width() - 2 * (ORB_LEFT + SCREEN_MARGIN)       # the orb's room on both sides keeps it centred
         self._bar_width = max(MIN_BAR_WIDTH, min(BAR_WIDTH, room))
+        self._caption_lines = self.caption.line_count(self._caption_width())
         bar_left = area.x() + (area.width() - self._bar_width) // 2
         left = max(area.x(), min(bar_left - ORB_LEFT, area.x() + area.width() - ORB_LEFT - self._bar_width
                                  - RIGHT_MARGIN))
-        self.setGeometry(left, area.y(), self._wanted_width(left), WINDOW_HEIGHT)
+        self.setGeometry(left, area.y(), self._wanted_width(left), self._window_height())
         self._layout()
 
     def area(self) -> QRect:
         """The work area the HUD was placed in (empty before ``place_on`` / ``place_in``)."""
         return QRect(self._area)
 
+    def bar_height(self) -> int:
+        """The bar: the input row and the caption with its lines (BAR_HEIGHT with one; it grows 20 px a line)."""
+        return 1 + ROW_HEIGHT + caption_height(self._caption_lines) + 1
+
+    def caption_lines(self) -> int:
+        """The lines the caption takes now (1 to CAPTION_LINES)."""
+        return self._caption_lines
+
     def bar_rect_local(self) -> QRect:
-        return QRect(ORB_LEFT, BAR_TOP, self._bar_width, BAR_HEIGHT)
+        return QRect(ORB_LEFT, BAR_TOP, self._bar_width, self.bar_height())
 
     def bar_rect(self) -> QRect:
         """The bar in global coordinates."""
@@ -671,9 +755,41 @@ class HudWindow(_OverlayWindow):
                 rect = rect.united(chip.geometry())
         return rect.translated(self.geometry().topLeft())
 
+    def glows(self) -> list[Glow]:
+        """The bar's and the shown chips' outer shadows and glows (global): the DecorLayer under this window paints
+        them (Switch.dc.html .bar and .hchip box-shadows) - this window never does (its margins stay clear)."""
+        origin = self.geometry().topLeft()
+        glows = [Glow(self.bar_rect_local().translated(origin), BAR_RADIUS, GLOW_BAR)]
+        for key, chip in self.chips.items():
+            if not chip.isHidden():
+                glows.append(Glow(chip.geometry().translated(origin), CHIP_HEIGHT / 2, GLOW_CHIP,
+                                  TONE_AMBER if key == CHIP_APPROVALS else TONE_CYAN))
+        return glows
+
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         self._layout()
+
+    def moveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().moveEvent(event)
+        self._check_shape()
+
+    def _check_shape(self) -> None:
+        """``shapeChanged`` once the window, the bar or a shown chip moved or changed size (the shadows follow)."""
+        key = (self.geometry().getRect(), self.bar_rect_local().getRect(),
+               tuple((name, chip.geometry().getRect()) for name, chip in self.chips.items() if not chip.isHidden()))
+        if key != self._shape_key:
+            self._shape_key = key
+            self.shapeChanged.emit()
+
+    def _caption_width(self) -> int:
+        """The caption line's width at the bar's width: from the orb's room to the hairline before Bring Jarvis
+        back."""
+        back_x = ORB_LEFT + self._bar_width - 1 - BACK_GAP - self.back_button.sizeHint().width()
+        return max(0, back_x - BACK_GAP - 1 - SIDE_PAD - (ORB_LEFT + ORB_PAD))
+
+    def _window_height(self) -> int:
+        return BAR_TOP + self.bar_height() + CHIP_GAP + CHIP_HEIGHT + 2
 
     def _chips_width(self) -> int:
         hints = [chip.sizeHint().width() for chip in self.chips.values() if not chip.isHidden()]
@@ -690,9 +806,10 @@ class HudWindow(_OverlayWindow):
         return wanted
 
     def _layout(self) -> None:
-        width = self._wanted_width()
-        if width != self.width():
-            self.resize(width, WINDOW_HEIGHT)
+        self._caption_lines = self.caption.line_count(self._caption_width())
+        size = (self._wanted_width(), self._window_height())
+        if size != (self.width(), self.height()):
+            self.resize(*size)                          # the caption's lines grow the bar, the window grows down
         bar = self.bar_rect_local()
         center = QPoint(ORB_LEFT - 2, BAR_TOP + ORB_DROP)
         self.orb.move(center.x() - self.orb.width() // 2, center.y() - self.orb.height() // 2)
@@ -704,7 +821,7 @@ class HudWindow(_OverlayWindow):
         left = bar.x() + ORB_PAD
         width = max(0, self._hairline_x - SIDE_PAD - left)
         self.bar.setGeometry(left, bar.y() + 1, width, ROW_HEIGHT)
-        self.caption.setGeometry(left, bar.y() + 1 + ROW_HEIGHT + 1, width, CAPTION_HEIGHT - 1)
+        self.caption.setGeometry(left, bar.y() + 1 + ROW_HEIGHT + 1, width, caption_height(self._caption_lines) - 1)
         x, y = left, bar.y() + bar.height() + CHIP_GAP
         for chip in self.chips.values():
             if chip.isHidden():
@@ -717,9 +834,13 @@ class HudWindow(_OverlayWindow):
         if key != self._layout_key:       # the panel moved: repaint it (a chip's change repaints only the chips)
             self._layout_key = key
             self.update()
+        self._check_shape()
 
     def cut_texts(self) -> list[str]:
         """The words this window cuts or crowds now (none at the sizes it is built for; tests and the harness)."""
+        for layout in (self.bar.layout(), self.bar.field.layout()):    # laid out as shown, though it may not be yet
+            if layout is not None:
+                layout.activate()
         cut: list[str] = []
         line_edit = self.bar.input
         if not line_edit.text():
@@ -745,8 +866,10 @@ class HudWindow(_OverlayWindow):
     # ---- what it shows ---------------------------------------------------------------------
 
     def set_caption(self, text: str) -> None:
-        """Jarvis's line ("On your desktop, sir."); the bar's status replaces it while there is one."""
+        """Jarvis's line ("On your desktop, sir."), wrapped to at most CAPTION_LINES lines - the bar grows with it;
+        the bar's status replaces it while there is one."""
         self.caption.set_caption(text)
+        self._layout()
 
     def caption_text(self) -> str:
         return self.caption.text()
@@ -759,6 +882,7 @@ class HudWindow(_OverlayWindow):
             word = orb_mod.READOUTS[orb_mod.IDLE]       # the long waiting readout stays in the window's header
         dot = holo.AMBER if base == orb_mod.NEEDS else holo.STEEL if (muted or offline) else holo.HOLO
         self.caption.set_word(word, dot)
+        self._layout()                                  # a longer word leaves the caption less room
 
     def state_word(self) -> str:
         return self.caption.word()
@@ -794,6 +918,7 @@ class HudWindow(_OverlayWindow):
     def _on_bar_status(self, text: str, tone: str) -> None:
         shown = hud.quiet_readouts(text) if tone != hud.TONE_IDLE else ""
         self.caption.set_status(shown, tone)
+        self._layout()
 
     # ---- paint -----------------------------------------------------------------------------
 
@@ -897,6 +1022,7 @@ class ResultCard(_OverlayWindow):
     """A result beside the thing it is about; see the module docstring."""
 
     buttonClicked = Signal(str)
+    shapeChanged = Signal()            # it moved, changed size or changed tone (its shadow follows)
 
     TITLE_LINES = 2
     META_LINES = 2
@@ -937,6 +1063,21 @@ class ResultCard(_OverlayWindow):
         self.setAccessibleName(content.title)
         self.setAccessibleDescription(" ".join(part for part in (content.kicker, content.meta, content.note) if part))
         self._relayout()
+        self.shapeChanged.emit()                        # its tone (and its size) may have changed
+
+    def glow(self) -> Glow:
+        """Its outer shadow and glow (global; Switch.dc.html .glass, amber for a decision): the DecorLayer under it
+        paints them, this window never does."""
+        tone = TONE_AMBER if self._content.tone == TONE_AMBER else TONE_CYAN
+        return Glow(self.geometry(), CARD_RADIUS, GLOW_CARD, tone)
+
+    def moveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().moveEvent(event)
+        self.shapeChanged.emit()
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self.shapeChanged.emit()
 
     def _relayout(self) -> None:
         """Rows top to bottom; the card's height follows them."""
@@ -1120,8 +1261,113 @@ class Tether:
     label: str = ""
 
 
+@dataclass(frozen=True, eq=True)
+class Glow:
+    """The outer shadow and the glow under an interactive window's rounded shape (a global rect): the bar
+    (``GLOW_BAR``), a chip (``GLOW_CHIP``) or a card (``GLOW_CARD``), cyan or amber (Switch.dc.html box-shadows)."""
+
+    rect: QRect
+    radius: float
+    look: str = GLOW_BAR
+    tone: str = TONE_CYAN
+
+
+def _glow_tint(glow: Glow) -> tuple[float, float]:
+    return _GLOW_TINT.get((glow.look, glow.tone)) or _GLOW_TINT[(glow.look, TONE_CYAN)]
+
+
+def glow_margin(glow: Glow) -> int:
+    """How far ``glow``'s shadows reach beyond its rect (the offset and the blur)."""
+    offset, blur, _alpha = _GLOW_DARK[glow.look]
+    return int(math.ceil(max(abs(offset) + blur, _glow_tint(glow)[0])))
+
+
+def glow_extent(glow: Glow) -> QRect:
+    """Where ``glow`` paints (global): its rect and the room its shadows reach."""
+    margin = glow_margin(glow)
+    return glow.rect.adjusted(-margin, -margin, margin, margin)
+
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _paint_box_shadow(painter: QPainter, shape: QRectF, radius: float, offset: float, blur: float, ink: QColor,
+                      alpha: float) -> None:
+    """One CSS box-shadow of a rounded rect (no spread): its Gaussian falloff (sigma = blur / 2) as nested rounded
+    rects from the outside in, each adding what the falloff gains inside it (painted over each other, so no seam)."""
+    sigma = max(0.5, blur / 2.0)
+    shape = shape.translated(0.0, offset)
+    deepest = min(2.0 * sigma, shape.width() / 2.0, shape.height() / 2.0)     # how far in the falloff is painted
+    step = 1.0 if sigma <= 12 else 2.0
+    grows: list[float] = []
+    grow = 2.0 * sigma
+    while grow > -deepest:
+        grows.append(grow)
+        grow -= step
+    grows.append(-deepest)
+    color = QColor(ink)
+    painted = 0.0                                 # the alpha already painted inside the next rect
+    for index, grow in enumerate(grows):
+        inner = grows[index + 1] if index + 1 < len(grows) else grow
+        wanted = alpha * _normal_cdf(-(grow + inner) / 2.0 / sigma)
+        if wanted <= painted:
+            continue
+        box = shape.adjusted(-grow, -grow, grow, grow)
+        if box.width() <= 0 or box.height() <= 0:
+            continue
+        corner = max(0.0, min(radius + grow, box.width() / 2.0, box.height() / 2.0))
+        color.setAlphaF(min(1.0, (wanted - painted) / (1.0 - painted)))
+        path = QPainterPath()
+        path.addRoundedRect(box, corner, corner)
+        painter.fillPath(path, color)
+        painted = wanted
+
+
+_GLOW_SPRITES: dict[tuple, QImage] = {}
+_GLOW_SPRITES_KEPT = 24
+
+
+def glow_sprite(glow: Glow, dpr: float) -> QImage:
+    """``glow``'s shadows painted once per size, look, tone and device pixel ratio (cached): an image of
+    ``glow_extent(glow)``'s size. The part the window's own opaque fill covers is left out (never seen)."""
+    rect = glow.rect
+    key = (rect.width(), rect.height(), float(glow.radius), glow.look, glow.tone, round(float(dpr), 3))
+    sprite = _GLOW_SPRITES.get(key)
+    if sprite is not None:
+        return sprite
+    margin = glow_margin(glow)
+    width, height = rect.width() + 2 * margin, rect.height() + 2 * margin
+    sprite = QImage(max(1, round(width * dpr)), max(1, round(height * dpr)), QImage.Format.Format_ARGB32_Premultiplied)
+    sprite.setDevicePixelRatio(dpr)
+    sprite.fill(Qt.GlobalColor.transparent)
+    shape = QRectF(margin, margin, rect.width(), rect.height())
+    painter = QPainter(sprite)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # Under the window's own opaque shape nothing shows: leave its middle (the rect less its corners) out.
+        middle = QRegion(QRect(0, 0, math.ceil(width), math.ceil(height)))
+        r = math.ceil(glow.radius)
+        for cut in (shape.toRect().adjusted(r, 1, -r, -1), shape.toRect().adjusted(1, r, -1, -r)):
+            if cut.isValid():
+                middle = middle.subtracted(QRegion(cut))
+        painter.setClipRegion(middle)
+        blur, tint_alpha = _glow_tint(glow)
+        tint = holo.AMBER if glow.tone == TONE_AMBER else holo.HOLO
+        _paint_box_shadow(painter, shape, glow.radius, 0.0, blur, QColor(tint), tint_alpha)   # the glow, under
+        offset, blur, dark_alpha = _GLOW_DARK[glow.look]
+        _paint_box_shadow(painter, shape, glow.radius, offset, blur, QColor(0, 0, 0), dark_alpha)   # the shadow
+    finally:
+        painter.end()
+    while len(_GLOW_SPRITES) >= _GLOW_SPRITES_KEPT:
+        _GLOW_SPRITES.pop(next(iter(_GLOW_SPRITES)))
+    _GLOW_SPRITES[key] = sprite
+    return sprite
+
+
 class DecorLayer(_OverlayWindow):
-    """Brackets, tethers, tags and the in-control glow on one screen; see the module docstring."""
+    """The shadows and glows under the interactive windows, brackets, tethers, tags and the in-control glow on one
+    screen; see the module docstring."""
 
     def __init__(self, screen: QScreen, *, native: HudNative | None = None, hide_from_capture: bool = True) -> None:
         super().__init__(DECOR_FLAGS, native, hide_from_capture)
@@ -1129,6 +1375,7 @@ class DecorLayer(_OverlayWindow):
         self.setWindowTitle("Jarvis")
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._screen = screen
+        self._glows: tuple[Glow, ...] = ()
         self._brackets: tuple[Bracket, ...] = ()
         self._tethers: tuple[Tether, ...] = ()
         self._glow = False
@@ -1145,21 +1392,36 @@ class DecorLayer(_OverlayWindow):
             self.setScreen(self._screen)
             self.setGeometry(self._screen.geometry())
 
-    def set_decor(self, brackets: Sequence[Bracket] = (), tethers: Sequence[Tether] = (), glow: bool = False) -> bool:
-        """The items on this screen (the others are left out); repaints only on a change. True when it changed."""
+    def set_decor(self, brackets: Sequence[Bracket] = (), tethers: Sequence[Tether] = (), glow: bool = False,
+                  glows: Sequence[Glow] = ()) -> bool:
+        """The items on this screen (the others are left out); repaints only on a change - only where a shadow was
+        and is, when only the shadows changed. True when it changed."""
         geometry = self.geometry()
+        mine_g = tuple(item for item in glows if glow_extent(item).intersects(geometry))
         mine_b = tuple(item for item in brackets if item.rect.intersects(geometry))
         mine_t = tuple(item for item in tethers if any(geometry.contains(point) for point in item.points)
                        or _bounds(item.points).intersects(geometry))
         new = (mine_b, mine_t, bool(glow))
-        if new == (self._brackets, self._tethers, self._glow):
+        old = (self._brackets, self._tethers, self._glow)
+        if new == old and mine_g == self._glows:
             return False
+        if new == old:
+            dirty = QRegion()
+            for item in [*(g for g in self._glows if g not in mine_g), *(g for g in mine_g if g not in self._glows)]:
+                dirty = dirty.united(glow_extent(item).translated(-geometry.topLeft()))
+            self._glows = mine_g
+            self.update(dirty)
+            return True
         self._brackets, self._tethers, self._glow = new
+        self._glows = mine_g
         self.update()
         return True
 
     def has_decor(self) -> bool:
-        return bool(self._brackets or self._tethers or self._glow)
+        return bool(self._glows or self._brackets or self._tethers or self._glow)
+
+    def glows(self) -> tuple[Glow, ...]:
+        return self._glows
 
     def brackets(self) -> tuple[Bracket, ...]:
         return self._brackets
@@ -1170,15 +1432,22 @@ class DecorLayer(_OverlayWindow):
     def glowing(self) -> bool:
         return self._glow
 
-    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+    def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         if not self.has_decor():
             return
         painter = QPainter(self)
         try:
+            dirty = event.rect()
+            origin = self.geometry().topLeft()
+            dpr = self.devicePixelRatioF() or 1.0
+            for glow in self._glows:                    # under everything: the interactive windows' shadows
+                extent = glow_extent(glow).translated(-origin)
+                if extent.intersects(dirty):
+                    painter.drawImage(QPointF(extent.topLeft()), glow_sprite(glow, dpr))
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             if self._glow:
                 self._paint_glow(painter)
-            painter.translate(-QPointF(self.geometry().topLeft()))
+            painter.translate(-QPointF(origin))
             for tether in self._tethers:
                 self._paint_tether(painter, tether)
             for bracket in self._brackets:
@@ -1286,6 +1555,7 @@ class HudOverlay(QObject):
         self._stack: list[QWidget] = []
         self._screen: QScreen | None = None            # the screen the HUD shows on
         self.hud = HudWindow(hud_key=hud_key, native=self._native, hide_from_capture=self._hide_from_capture)
+        self.hud.shapeChanged.connect(self._apply_decor)   # its shadows follow the bar and the chips
         app = QGuiApplication.instance()
         if app is not None:
             app.screenAdded.connect(self._sync_screens)
@@ -1349,11 +1619,13 @@ class HudOverlay(QObject):
 
     def show_on(self, screen: QScreen | None = None) -> None:
         """Place the HUD on ``screen`` (the one the Jarvis window is on: ``screen_for(window)``; the primary screen
-        for None) and show it, its decor and its cards - without the focus, without raising anything. The meetings
-        RecPill is held hidden meanwhile (REC is a chip here); then the stacking order."""
+        for None) and show it, its decor - with the shadows and glows under the bar, the chips and the cards - and its
+        cards, without the focus, without raising anything. The meetings RecPill is held hidden meanwhile (REC is a
+        chip here); then the stacking order: the interactive windows above the layers."""
         self._place(screen)
         self._shown = True
         self._hold(self._rec_pill, True)
+        self._sync_decor()
         for layer in self._layers:
             if layer.has_decor():
                 layer.show_quietly()
@@ -1364,11 +1636,13 @@ class HudOverlay(QObject):
         self.restack()
 
     def hide(self) -> None:
-        """Hide every HUD window; the RecPill may show again (at its next tick while a meeting records)."""
+        """Hide every HUD window (the layers and their shadows too); the RecPill may show again (at its next tick
+        while a meeting records)."""
         self._shown = False
         for window in self.windows():
             window.hide()
         self._stack = []
+        self._sync_decor()                               # no shadows while the HUD is away
         self._hold(self._rec_pill, False)
 
     def is_shown(self) -> bool:
@@ -1377,12 +1651,13 @@ class HudOverlay(QObject):
     def new_card(self) -> ResultCard:
         """A card of this HUD (hidden until ``show_card`` places it)."""
         card = ResultCard(native=self._native, hide_from_capture=self._hide_from_capture)
+        card.shapeChanged.connect(self._apply_decor)    # its shadow follows it
         self._cards.append(card)
         return card
 
     def show_card(self, card: ResultCard, target: QRect, area: QRect | None = None) -> QRect:
         """Place ``card`` beside ``target`` (global), clear of the HUD's bar and chips, and show it while the HUD
-        shows (from now on it shows with the HUD)."""
+        shows (from now on it shows with the HUD, its shadow under it)."""
         avoid = [self.hud.occupied_rect()] if self._shown or self.hud.area().isValid() else []
         rect = card.place_beside(target, area, avoid)
         if card in self._cards and card not in self._placed:
@@ -1390,6 +1665,7 @@ class HudOverlay(QObject):
         if self._shown:
             card.show_quietly()
             self.restack()
+        self._apply_decor()
         return rect
 
     def remove_card(self, card: ResultCard) -> None:
@@ -1400,6 +1676,7 @@ class HudOverlay(QObject):
             card.hide()
             card.deleteLater()
             self._stack = [window for window in self._stack if window is not card]
+            self._apply_decor()
 
     def set_decor(self, brackets: Sequence[Bracket] = (), tethers: Sequence[Tether] = (), glow: bool = False) -> None:
         """What the DecorLayers draw (global items; each screen draws its part). A layer shows only while it has
@@ -1407,20 +1684,35 @@ class HudOverlay(QObject):
         self._decor = (tuple(brackets), tuple(tethers), bool(glow))
         self._apply_decor()
 
-    def _apply_decor(self) -> None:
+    def glows(self) -> list[Glow]:
+        """The shadows and glows under the interactive windows while the HUD shows: the bar's, the shown chips' and
+        each placed card's (none while it is hidden)."""
+        if not self._shown or self._closed:
+            return []
+        return [*self.hud.glows(), *(card.glow() for card in self._cards if card in self._placed)]
+
+    def _sync_decor(self) -> None:
+        """Each layer's items as they are now (a layer repaints only what changed)."""
         brackets, tethers, glow = self._decor
+        glows = self.glows()
+        for layer in self._layers:
+            layer.set_decor(brackets, tethers, glow, glows)
+
+    def _apply_decor(self) -> None:
+        if self._closed:
+            return
+        self._sync_decor()
+        if not self._shown:
+            return
         shown_new = False
         for layer in self._layers:
-            layer.set_decor(brackets, tethers, glow)
-            if not self._shown:
-                continue
             if layer.has_decor() and layer.isHidden():
                 layer.show_quietly()
                 shown_new = True
             elif not layer.has_decor() and not layer.isHidden():
                 layer.hide()
         if shown_new:
-            self.restack()
+            self.restack()                               # the interactive windows above the layer it showed
 
     # ---- stacking --------------------------------------------------------------------------
 
