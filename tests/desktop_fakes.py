@@ -1,6 +1,7 @@
 """Fakes for the desktop feature's tests: a backend over a temporary folder that records every call, and the
-stand-ins Phase 1 needs (an index, a window watcher, a clock). None of them reaches the real desktop: the real
-backend cannot even be constructed while the tests run (tests/__init__.py sets backend.TEST_GUARD_ENV).
+stand-ins Phase 1 needs (an index, a window watcher, a clock); ``tags(text)`` spells text in invisible tag
+characters. None of them reaches the real desktop: the real backend cannot even be constructed while the tests run
+(tests/__init__.py sets backend.TEST_GUARD_ENV).
 
 FakeDesktopBackend keeps a pretend disk inside ``base`` (a TemporaryDirectory): the pretend C: drive is
 ``base\\C``, D: is ``base\\D`` and so on. Paths going in and coming out are pretend ones
@@ -42,6 +43,11 @@ KNOWN = {
     "program_files_x86": "C:\\Program Files (x86)",
     "program_data": "C:\\ProgramData",
 }
+
+
+def tags(text: str) -> str:
+    """``text`` (ASCII) spelled in invisible Unicode tag characters (U+E0020-E007E), as a hostile name may hide it."""
+    return "".join(chr(0xE0000 + ord(char)) for char in text)
 
 
 class FakeDesktopBackend:

@@ -4,9 +4,12 @@ Claude never writes a path, an exe, a command line or a host. Every file, folder
 the planner may name is an id that Jarvis issued in THIS run's context: f12 (a file), d3 (a place), a1 (an app), s2
 (a site), w1 (a window), e7 (a field), c4 (a cell); n1 is a new folder the plan itself makes (make_folder's id).
 Each id resolves to the entry Jarvis's own index gave it (``Ref.target``: a path, an app entry ...), and only in the
-index that issued it: a new run starts a new index, so an id from another run, a typed path or an id with a
-leading zero is unknown (validate.py: unknown_ref). Numbers follow the schema's patterns (f up to 4 digits; d, a,
-e, c up to 3; s, w, n up to 2): once a kind's numbers run out it issues no more (``issue`` returns "").
+index that issued it: a typed path, an id this index never issued or an id with a leading zero is unknown
+(validate.py: unknown_ref). Ids carry no run identity: every run starts a new index that numbers each kind from 1
+again, so "f1" in a newer run's index is a different file. A card (and its frozen plan) therefore keeps its own
+RefIndex, or the resolved targets plus their identity (SPEC 5.3), and never re-resolves bare ids against a newer
+run's index. Numbers follow the schema's patterns (f up to 4 digits; d, a, e, c up to 3; s, w, n up to 2): once a
+kind's numbers run out it issues no more (``issue`` returns "").
 
 ``issue(kind, target, label)`` gives the same id to the same target twice. The label is what the planner sees of
 it ("name.ext", "Microsoft Word"); for the kinds other people name (files, places, windows, fields, cells) the

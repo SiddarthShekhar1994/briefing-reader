@@ -26,6 +26,10 @@ Public API
     Settings > Desktop, added (``add_group``) only while [desktop] is on: its values and whether the owner turned it
     on on its first-run card ("Not turned on yet" until then).
 
+``effective_hud_key(config)``
+    The HUD key that can work: [desktop] hud_key, or "" while the keyboard shortcut ([hotkey] enabled) is off (no
+    key can be registered then). The Dock's "<key> switches" line and Settings > Desktop show only this one.
+
 Read only by design: nothing here writes config.toml or .env, and no secret, token, client id, page id, file
 path of a sign-in or e-mail address is ever shown (Accounts: the alias and connected yes / no only).
 """
@@ -79,6 +83,7 @@ DESKTOP_HOW = ("Jarvis on your desktop is turned on or off with [desktop] in con
                "in .env), then a restart. Nothing on this screen changes a setting.")
 NOT_TURNED_ON = "Not turned on yet"
 TURNED_ON = "Turned on - you clicked Turn on"
+NO_HUD_KEY_SHORTCUT_OFF = "No key while the keyboard shortcut is off - the Dock's Desktop switches"
 _DESKTOP_FOLDERS = {"desktop": "Desktop", "documents": "Documents", "downloads": "Downloads", "pictures": "Pictures",
                     "music": "Music", "videos": "Videos"}
 
@@ -228,6 +233,15 @@ def _and(names: list[str]) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
+def effective_hud_key(config: Any) -> str:
+    """The HUD key that can work ("ctrl+alt+h"; "" for none): [desktop] hud_key, but none while the keyboard
+    shortcut ([hotkey] enabled) is off - the hotkey agent registers both keys and does not run then (SPEC 9, D1).
+    What the Dock's "<key> switches" line and Settings > Desktop show."""
+    if not getattr(getattr(config, "hotkey", None), "enabled", False):
+        return ""
+    return str(getattr(getattr(config, "desktop", None), "hud_key", "") or "")
+
+
 def desktop_rows(config: Any, turned_on: bool = False) -> list[tuple[str, str]]:
     """Settings > Desktop: [desktop] as loaded, in plain words, and whether the owner turned it on (its first-run
     card). Read only, like every group."""
@@ -240,13 +254,18 @@ def desktop_rows(config: Any, turned_on: bool = False) -> list[tuple[str, str]]:
     if extra:
         parts.append(f"{extra} {'folder' if extra == 1 else 'folders'} of your own")
     where = ", plus ".join(parts) or "None"
-    hud_key = str(getattr(desktop, "hud_key", "") or "")
+    hud_key = effective_hud_key(config)
+    if hud_key:
+        key_words = f"{_combo(hud_key)} - switches between the window and the HUD"
+    elif getattr(desktop, "hud_key", ""):
+        key_words = NO_HUD_KEY_SHORTCUT_OFF
+    else:
+        key_words = "None - the Dock's Desktop switches"
     days = int(getattr(desktop, "undo_days", 7) or 7)
     shots = str(getattr(desktop, "screenshots_dir", "") or "")
     return [("Your OK", TURNED_ON if turned_on else NOT_TURNED_ON),
             ("Folders Jarvis may look in", where),
-            ("HUD key", f"{_combo(hud_key)} - switches between the window and the HUD" if hud_key
-             else "None - the Dock's Desktop switches"),
+            ("HUD key", key_words),
             ("Left out of screenshots and screen sharing", _yes(getattr(desktop, "hide_from_capture", True))),
             ("Screenshots go to", shots or "Jarvis\\Screenshots in your user folder"),
             ("Undo", f"Offered for {days} {'day' if days == 1 else 'days'}"),

@@ -2,12 +2,16 @@
 
 Every constant named in ``NEVER_CONSTANTS`` has its own unit test (tests/test_desktop_guard.py checks that each one
 does). validate.py makes these checks on the planner's steps and the executor makes them again right before each OS
-call (hard rule 6): no card, setting or voice unlocks any of them. Text is compared as words: NFKC-normalised,
-invisible format characters removed, camelCase and snake_case split, casefolded ("txtCardNumber" reads "txt card
-number"), so a lookalike or a run-together label is caught as well.
+call (hard rule 6): no card, setting or voice unlocks any of them. Text is compared as words: NFKC-normalised (so a
+fullwidth or other compatibility form reads as its plain letter), hidden characters removed, camelCase and
+snake_case split, casefolded ("txtCardNumber" reads "txt card number"), so a run-together label is caught as well.
+Cyrillic and Greek look-alike letters are read as Latin only by the suspect scanner (below).
 
 Public API
 ==========
+Hidden characters (one rule for the whole feature: Unicode categories Cf, Zl and Zp - bidi and other format
+controls, zero-width characters, tag characters, line and paragraph separators): ``hidden_char(char)``,
+``strip_hidden(text)``.
 Secrets and payments: ``UIA_IS_PASSWORD_PROPERTY``, ``SENSITIVE_WORDS`` / ``sensitive_label(text)``,
 ``PAYMENT_WORDS`` / ``payment_page(text)`` (a URL path or a page title; a heuristic, the owner's Submit is the
 backstop).
@@ -46,18 +50,32 @@ from ..actions import web_link_problem
 # Words
 # --------------------------------------------------------------------------
 
-# Invisible format characters (bidi controls, zero-width spaces and joiners, the BOM ...): removed before reading.
-_FORMAT_RE = re.compile("[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]")
+# Hidden characters, by Unicode category: every format character (Cf: bidi controls, zero-width spaces and joiners,
+# the BOM, the tag characters U+E0001 and U+E0020-E007F ...) and the line and paragraph separators (Zl, Zp).
+_HIDDEN_CATEGORIES = ("Cf", "Zl", "Zp")
 _CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _NON_WORD_RE = re.compile(r"[^0-9a-z]+")
 
 
+def hidden_char(char: str) -> bool:
+    """``char`` (one character) is hidden: a bidi or other format control, a zero-width or tag character, or a line
+    or paragraph separator (Unicode categories Cf, Zl and Zp)."""
+    return unicodedata.category(char) in _HIDDEN_CATEGORIES
+
+
+def strip_hidden(text: str) -> str:
+    """``text`` without its hidden characters (``hidden_char``)."""
+    if text.isascii():
+        return text
+    return "".join(char for char in text if not hidden_char(char))
+
+
 def words(text: Any, *, camel: bool = True) -> list[str]:
-    """``text`` as casefolded words: NFKC, format characters removed, snake_case and punctuation split, and with
+    """``text`` as casefolded words: NFKC, hidden characters removed, snake_case and punctuation split, and with
     ``camel`` camelCase split too ("txtCardNumber" -> txt card number)."""
     if not isinstance(text, str):
         return []
-    plain = _FORMAT_RE.sub("", unicodedata.normalize("NFKC", text))
+    plain = strip_hidden(unicodedata.normalize("NFKC", text))
     if camel:
         plain = _CAMEL_RE.sub(" ", plain)
     return [word for word in _NON_WORD_RE.split(plain.casefold()) if word]
@@ -194,13 +212,14 @@ BLOCKED_TYPES = frozenset({
 NEVER_CREATE_TYPES = frozenset({"lnk", "url"})
 # What open_file opens at once (SPEC 2.3); anything else not blocked is "show in folder" only.
 OPENABLE_TYPES = frozenset({
-    "docx", "doc", "odt", "rtf", "txt", "md", "csv", "pdf", "xlsx", "xls", "ods", "pptx", "ppt", "odp",
+    "docx", "odt", "rtf", "txt", "md", "csv", "pdf", "xlsx", "ods", "pptx", "odp",
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "heic", "tif", "tiff",
     "mp3", "m4a", "wav", "flac", "ogg",
     "mp4", "mov", "mkv", "avi", "webm"})
-# Documents that can run macros or scripts: opened only from a card click ("can run macros / scripts").
+# Documents that can run macros or scripts: opened only from a card click ("can run macros / scripts"). The old
+# binary Office types (doc, xls, ppt) can carry macros too (owner, 2026-10-21).
 SCRIPT_CAPABLE_TYPES = frozenset({"docm", "dotm", "xlsm", "xltm", "xlsb", "xlam", "pptm", "potm", "ppsm", "ppam",
-                                  "html", "htm", "xhtml", "svg", "mht", "mhtml"})
+                                  "doc", "xls", "ppt", "html", "htm", "xhtml", "svg", "mht", "mhtml"})
 OPEN_DOCUMENT = "document"              # opens at once
 OPEN_SCRIPT = "script"                  # opens only from a card click
 OPEN_SHORTCUT = "shortcut"              # a .lnk: only when it resolves to an approved app or a document (shown)
@@ -292,7 +311,8 @@ def copy_flags_ok(flags: int) -> bool:
 NEVER_OPEN_APPS: dict[str, frozenset[str]] = {
     "terminal": frozenset({"cmd.exe", "powershell.exe", "powershell_ise.exe", "pwsh.exe", "windowsterminal.exe",
                            "wt.exe", "openconsole.exe", "conhost.exe", "wsl.exe", "wslhost.exe", "bash.exe",
-                           "mintty.exe", "git-bash.exe", "python.exe", "pythonw.exe", "py.exe", "node.exe"}),
+                           "mintty.exe", "git-bash.exe", "git-cmd.exe", "python.exe", "pythonw.exe", "py.exe",
+                           "node.exe"}),
     "script_host": frozenset({"wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe",
                               "msbuild.exe", "installutil.exe"}),
     "system": frozenset({"regedit.exe", "regedt32.exe", "control.exe", "mmc.exe", "systemsettings.exe",
@@ -320,8 +340,9 @@ NEVER_TARGET_APPS: dict[str, frozenset[str]] = {
 }
 # Start-menu names (and window classes' apps) of the same groups, as words.
 NEVER_APP_WORDS: dict[str, tuple[tuple[str, ...], ...]] = {
-    "terminal": _phrases("terminal", "command prompt", "powershell", "windows terminal", "wsl", "ubuntu", "debian",
-                         "kali linux", "opensuse", "git bash", "python", "node js", "developer command prompt"),
+    "terminal": _phrases("terminal", "cmd", "command prompt", "powershell", "windows terminal", "wsl", "ubuntu",
+                         "debian", "kali linux", "opensuse", "git bash", "python", "node js",
+                         "developer command prompt"),
     "system": _phrases("registry editor", "control panel", "services", "task scheduler", "task manager", "settings",
                        "windows security", "group policy", "local security policy", "system configuration",
                        "computer management", "event viewer", "windows update", "bitlocker", "firewall",
@@ -358,11 +379,12 @@ EXCLUDED_NAMES = frozenset({"appdata", "$recycle.bin", "system volume informatio
 CODE_MARKERS = (".git", ".hg", ".svn", ".env", "venv", ".venv", "node_modules")
 # Folders of keys and credentials: never a place.
 SECRET_DIR_NAMES = frozenset({".ssh", ".gnupg", ".aws"})
-# Secret-shaped files: never listed and never touched (casefolded fnmatch patterns).
+# Secret-shaped files: never listed and never touched (casefolded fnmatch patterns; Jarvis's own Google sign-in
+# files too).
 SECRET_FILE_PATTERNS = (".env", ".env.*", "*.pem", "*.key", "*.pfx", "*.p12", "*.ppk", "id_rsa*", "id_dsa*",
                         "id_ecdsa*", "id_ed25519*", "*.kdbx", "*.kdb", "credentials*.json", "token*.json",
-                        "client_secret*.json", ".git-credentials", ".netrc", "_netrc", ".npmrc", ".pypirc",
-                        "wallet.dat")
+                        "client_secret*.json", "google_token*.json", "*client_secret*.json", ".git-credentials",
+                        ".netrc", "_netrc", ".npmrc", ".pypirc", "wallet.dat")
 
 
 def _exe_name(exe_path: Any) -> str:
@@ -396,7 +418,7 @@ def secret_file(name: Any) -> bool:
     """A secret-shaped file name (.env, a key, a password database, credentials or token JSON ...)."""
     if not isinstance(name, str):
         return False
-    base = unicodedata.normalize("NFKC", _FORMAT_RE.sub("", name)).rstrip(". ").casefold()
+    base = unicodedata.normalize("NFKC", strip_hidden(name)).rstrip(". ").casefold()
     base = base.replace("/", "\\").rsplit("\\", 1)[-1]
     return any(fnmatch.fnmatchcase(base, pattern) for pattern in SECRET_FILE_PATTERNS)
 
@@ -446,6 +468,18 @@ _ROLE_RE = re.compile(r"(?:^|[\s\[(<{|>\"'])(?:system|assistant|human|developer)
 _TEMPLATE_RE = re.compile(r"\[/?inst\]|<\|?im_(?:start|end)\|?>|<\|[a-z_]+\|>|<</?sys>>|###\s*(?:instruction|system)")
 # Windows' own copy names ("Budget - Copy (2)", "Copy of Budget") are not orders.
 _WINDOWS_COPY_RE = re.compile(r"(?:\s-\s*copy(?:\s*\(\d+\))?(?=\.[^.]*$|$))|(?:^copy\s+of\s+)")
+_WORD_RE = re.compile(r"\w+")
+# Tag characters U+E0020-E007E are invisible but spell ASCII (U+E0041 is "A"): the scanner reads what they spell too.
+_TAG_OFFSET = 0xE0000
+_TAG_FIRST, _TAG_LAST = 0xE0020, 0xE007E
+# Cyrillic and Greek letters that look like Latin ones, read as those Latin letters (the common look-alikes only).
+_LOOKALIKES = str.maketrans(
+    "\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0456\u0458\u0455\u0501\u04cf\u043a"
+    "\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0423\u0425\u0406\u0408\u0405"
+    "\u03b1\u03b9\u03ba\u03bd\u03bf\u03c1\u03c4\u03c5\u03c7"
+    "\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7",
+    "aeopcyxijsdlk" "ABEKMHOPCTYXIJS" "aikvoptux" "ABEZHIKMNOPTYX")
+_LOOKALIKE_CHARS = frozenset(chr(code) for code in _LOOKALIKES)
 
 
 def suspect_text(text: Any) -> bool:
@@ -453,11 +487,28 @@ def suspect_text(text: Any) -> bool:
     model: an instruction override ("ignore previous instructions"), a role or prompt marker ("system:", "[INST]"),
     a phrase like "you must" or "new instructions", an assistant's name with an order verb, an urgent word with an
     order verb, or an order verb that opens the text and points at something ("Delete all files", "move everything
-    to ..."). Ordinary names ("Copy of Budget.xlsx", "Move-in checklist.pdf", "Important dates.docx") pass."""
+    to ..."). What invisible tag characters spell is read as well, Cyrillic and Greek look-alike letters are read as
+    Latin, and a word mixing Latin letters with such a look-alike ("Jarvis" with a Cyrillic a) is suspect by itself.
+    Ordinary names ("Copy of Budget.xlsx", "Move-in checklist.pdf", "Important dates.docx") pass."""
     if not isinstance(text, str) or not text.strip():
         return False
-    plain = unicodedata.normalize("NFKC", _FORMAT_RE.sub("", text))
-    lowered = _CAMEL_RE.sub(" ", plain).casefold()
+    spelled = _untag(text)
+    return _reads_like_an_order(text) or (spelled != text and _reads_like_an_order(spelled))
+
+
+def _untag(text: str) -> str:
+    """``text`` with its tag characters read as the ASCII they spell."""
+    if text.isascii():
+        return text
+    return "".join(chr(ord(char) - _TAG_OFFSET) if _TAG_FIRST <= ord(char) <= _TAG_LAST else char for char in text)
+
+
+def _reads_like_an_order(text: str) -> bool:
+    plain = unicodedata.normalize("NFKC", strip_hidden(text))
+    for word in _WORD_RE.findall(plain):
+        if any(char in _LOOKALIKE_CHARS for char in word) and any(char.isascii() and char.isalpha() for char in word):
+            return True                          # a Latin word with a Cyrillic or Greek look-alike letter in it
+    lowered = _CAMEL_RE.sub(" ", plain.translate(_LOOKALIKES)).casefold()
     if _OVERRIDE_RE.search(lowered) or _PHRASE_RE.search(lowered) or _ROLE_RE.search(lowered) \
             or _TEMPLATE_RE.search(lowered):
         return True

@@ -670,12 +670,14 @@ def _read_toml(path: Path) -> dict[str, Any]:
 class _TableReader:
     """Reads typed values from one TOML table, replacing bad ones with defaults."""
 
-    def __init__(self, doc: Mapping[str, Any], name: str, known: Sequence[str]) -> None:
+    def __init__(self, doc: Mapping[str, Any], name: str, known: Sequence[str], *, echo: bool = True) -> None:
+        """``echo=False``: a value given instead of the table is not shown in the warning (it may be a folder
+        path)."""
         self.name = name
         table = doc.get(name, {})
         if not isinstance(table, dict):
-            logger.warning("config.toml: %s = %s should be a [%s] table; using defaults",
-                           name, _short_repr(table), name)
+            shown = f" = {_short_repr(table)}" if echo else ""
+            logger.warning("config.toml: %s%s should be a [%s] table; using defaults", name, shown, name)
             table = {}
         self.table: dict[str, Any] = table
         for key in table:
@@ -1155,36 +1157,60 @@ def _absolute_folder(text: str) -> bool:
             and not any(ord(char) < 0x20 for char in text))
 
 
+def _desktop_texts(r: _TableReader, key: str, default: tuple[str, ...]) -> list[tuple[int, str]]:
+    """``desktop.<key>``, a list of texts (one text counts as a list of one), as (entry number from 1, text) pairs.
+    Its warnings name the setting and an entry's number, never a value: an entry may be a folder path."""
+    value = r._get(key)
+    if value is _MISSING:
+        return list(enumerate(default, 1))
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        logger.warning("config.toml: desktop.%s is not a list; using the default", key)
+        return list(enumerate(default, 1))
+    texts: list[tuple[int, str]] = []
+    for number, item in enumerate(value, 1):
+        if isinstance(item, str) and item.strip():
+            texts.append((number, item.strip()))
+        else:
+            logger.warning("config.toml: desktop.%s entry %d is %s; skipped", key, number,
+                           "empty" if isinstance(item, str) else "not a text value")
+    return texts
+
+
 def _parse_desktop(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None,
                    window_combo: str = DEFAULT_COMBO) -> DesktopConfig:
     """``[desktop]`` from config.toml; ``JARVIS_DESKTOP_ENABLED`` (e.g. in the gitignored ``.env``) overrides
     ``enabled`` both ways, like JARVIS_MEETINGS_ENABLED. A folder name Jarvis does not know, an extra folder that is
-    not an absolute local folder and a HUD key that is the window key (``window_combo``) are refused with a warning;
-    the warnings name an extra folder by its number only. Whether an extra folder lies under your user folder is
-    checked when the desktop feature starts (desktop.paths)."""
+    not an absolute local folder and a HUD key that is the window key (``window_combo``) are refused with a warning.
+    The warnings about folders, extra_folders and screenshots_dir (and a [desktop] that is not a table) name the
+    setting and an entry's number only, never a value: it may be one of your folder paths. Whether an extra folder
+    lies under your user folder is checked when the desktop feature starts (desktop.paths)."""
     d = DesktopConfig()
-    r = _TableReader(doc, "desktop", _field_names(DesktopConfig))
+    r = _TableReader(doc, "desktop", _field_names(DesktopConfig), echo=False)
     enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, DESKTOP_ENABLED_ENV, "desktop.enabled")
     folders: list[str] = []
-    for name in r.names("folders", d.folders):
+    for number, name in _desktop_texts(r, "folders", d.folders):
         folded = name.casefold()
         if folded not in DESKTOP_FOLDERS:
-            logger.warning("config.toml: desktop.folders entry %s is not one of %s; skipped", _short_repr(name),
+            logger.warning("config.toml: desktop.folders entry %d is not one of %s; skipped", number,
                            ", ".join(DESKTOP_FOLDERS))
         elif folded not in folders:
             folders.append(folded)
     extra: list[str] = []
-    for index, path in enumerate(r.names("extra_folders", d.extra_folders), 1):
+    for number, path in _desktop_texts(r, "extra_folders", d.extra_folders):
         if not _absolute_folder(path):
             logger.warning("config.toml: desktop.extra_folders entry %d is not a full folder path such as "
-                           "C:\\Users\\you\\Uni; skipped", index)
+                           "C:\\Users\\you\\Uni; skipped", number)
         elif path.casefold() not in (seen.casefold() for seen in extra):
             extra.append(path)
-    screenshots = r.string("screenshots_dir", d.screenshots_dir, allow_empty=True)
-    if screenshots and not _absolute_folder(screenshots):
+    shots = r._get("screenshots_dir")
+    screenshots = d.screenshots_dir
+    if isinstance(shots, str) and (not shots.strip() or _absolute_folder(shots.strip())):
+        screenshots = shots.strip()
+    elif shots is not _MISSING:
         logger.warning("config.toml: desktop.screenshots_dir is not a full folder path; using the default "
                        "(Jarvis\\Screenshots in your user folder)")
-        screenshots = d.screenshots_dir
     hud_key = r.combo("hud_key", d.hud_key)
     if hud_key == window_combo:
         fallback = d.hud_key if d.hud_key != window_combo else ""

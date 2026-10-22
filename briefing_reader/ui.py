@@ -8677,15 +8677,16 @@ class AppController(QObject):
     # ---- Jarvis on your desktop ([desktop]) -------------------------------------------------------------
 
     def _init_desktop(self) -> None:
-        """[desktop] on: the Dock's Desktop with the HUD key's "<key> switches" line, the Find list's Desktop and
-        Settings > Desktop (read only; "Not turned on yet" until the first-run card exists). Off: no Desktop surface
-        anywhere and nothing changes. The HUD itself (entering and leaving it) is built in a later part: until then
-        ``desktopRequested`` is connected to nothing, so a click on Desktop changes nothing."""
+        """[desktop] on: the Dock's Desktop with the HUD key's "<key> switches" line (none while [hotkey] is off: no
+        key can be registered then), the Find list's Desktop and Settings > Desktop (read only; "Not turned on yet"
+        until the first-run card exists). Off: no Desktop surface anywhere and nothing changes. The HUD itself
+        (entering and leaving it) is built in a later part: until then ``desktopRequested`` is connected to nothing,
+        so a click on Desktop changes nothing."""
         desktop = getattr(self.config, "desktop", None)
         if not getattr(desktop, "enabled", False):
             return
         reading = self.window.reading
-        hud_key = str(getattr(desktop, "hud_key", "") or "")
+        hud_key = settings_view.effective_hud_key(self.config)
         reading.set_desktop_available(True, describe_combo(hud_key) if hud_key else "")
         reading.settings_page.add_group(settings_view.DESKTOP_GROUP, settings_view.DESKTOP_TITLE,
                                         note=settings_view.DESKTOP_NOTE, how=settings_view.DESKTOP_HOW,

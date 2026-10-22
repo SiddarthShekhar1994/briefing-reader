@@ -206,6 +206,12 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(data("a|b<c>\td\x07e\u202ef  g\u200b", 0), "a/b\u2039c\u203a d ef g")
         self.assertEqual(data("x" * 10, 5), "xx...")
         self.assertEqual(data(None), "")
+        # Every format character goes (Unicode category Cf): the tag characters too, which can spell hidden text.
+        hidden = "\U000e0001\U000e0049\U000e0047\U000e004e\u0600\U000110bd\u180e"
+        self.assertEqual(data("Re" + hidden + "port", 0), "Report")
+        self.assertEqual(data("a\u2028b\u2029c", 0), "a b c")                        # separators are line breaks
+        text, _ = build_prompt(context(command="hi" + hidden + " there"))
+        self.assertIn("<command>\nhi there\n</command>", text)
 
 
 class IndexTests(unittest.TestCase):

@@ -1722,11 +1722,12 @@ class DesktopConfigTests(ProjectTestCase):
         with self.assertLogs(CONFIG_LOGGER, level="WARNING") as captured:
             d = self.load().desktop
         text = "\n".join(captured.output)
-        for fragment in ("desktop.enabled", "desktop.folders entry 'AppData'", "desktop.extra_folders entry 1",
-                         "desktop.extra_folders entry 2", "desktop.extra_folders entry 3", "desktop.screenshots_dir",
-                         "desktop.undo_days", "desktop.hud_key", "desktop.apps"):
+        for fragment in ("desktop.enabled", "desktop.folders entry 2", "desktop.folders entry 4",
+                         "desktop.extra_folders entry 1", "desktop.extra_folders entry 2",
+                         "desktop.extra_folders entry 3", "desktop.screenshots_dir", "desktop.undo_days",
+                         "desktop.hud_key", "desktop.apps"):
             self.assertIn(fragment, text)
-        for private in ("Owner", "server", "Secret", "Shots"):          # folders are named by their number only
+        for private in ("Owner", "server", "Secret", "Shots", "'AppData'"):   # folders are named by their number only
             self.assertNotIn(private, text)
         self.assertEqual(d, config.DesktopConfig(folders=("documents",), extra_folders=("C:\\Users\\Owner\\Uni",),
                                                  undo_days=30))
@@ -1734,6 +1735,30 @@ class DesktopConfigTests(ProjectTestCase):
         self.assertEqual(self.load_warning("desktop.undo_days").desktop.undo_days, 1)
         self.write_config("[desktop]\nfolders = []\n")
         self.assertEqual(self.load_quietly().desktop.folders, ())
+
+    def test_a_folder_path_in_the_wrong_shape_never_reaches_a_warning(self) -> None:
+        """A path typed into folders, a nested list or a table in extra_folders, a list as screenshots_dir, or a
+        path instead of the whole [desktop] table: the warnings name the setting and the entry's number only."""
+        d = config.DesktopConfig()
+        cases = (
+            ("[desktop]\nfolders = ['documents', 'C:\\Users\\Owner\\Uni']\n", "desktop.folders entry 2",
+             dataclasses.replace(d, folders=("documents",))),
+            ("[desktop]\nfolders = {documents = 'C:\\Users\\Owner\\Uni'}\n", "desktop.folders is not a list", d),
+            ("[desktop]\nextra_folders = [['C:\\Users\\Owner\\Uni'], 'C:\\Users\\Owner\\Notes']\n",
+             "desktop.extra_folders entry 1", dataclasses.replace(d, extra_folders=("C:\\Users\\Owner\\Notes",))),
+            ("[desktop]\nextra_folders = {uni = 'C:\\Users\\Owner\\Uni'}\n", "desktop.extra_folders is not a list", d),
+            ("[desktop]\nscreenshots_dir = ['C:\\Users\\Owner\\Uni']\n", "desktop.screenshots_dir", d),
+            ("desktop = 'C:\\Users\\Owner\\Uni'\n", "desktop should be a [desktop] table", d),
+        )
+        for text, fragment, expected in cases:
+            with self.subTest(text=text):
+                self.write_config(text)
+                with self.assertLogs(CONFIG_LOGGER, level="WARNING") as captured:
+                    loaded = self.load().desktop
+                warnings = "\n".join(captured.output)
+                self.assertIn(fragment, warnings)
+                self.assertNotIn("Owner", warnings)
+                self.assertEqual(loaded, expected)
 
     def test_the_hud_key_is_never_the_window_key(self) -> None:
         self.write_config('[desktop]\nhud_key = "ctrl+alt+j"\n')               # the [hotkey] default

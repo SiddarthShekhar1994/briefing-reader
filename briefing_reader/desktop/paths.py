@@ -2,9 +2,12 @@
 
 The scope (``load_scope``): the roots are the known folders named in [desktop] folders (asked of the backend, so the
 OneDrive redirection is followed) and the absolute [desktop] extra_folders under the user's own folder; each root
-passes the same check as any path, and one that fails (a network drive, a junction, AppData, a code folder ...) is
-left out with a log line naming its key and the reason only. The excluded places are the known folders in
-guard.EXCLUDED_KNOWN_FOLDERS plus the ones the app adds (the Jarvis project and its data folder).
+passes the same check as any path, and one that fails (a network drive, a junction, AppData, a folder named like a
+code marker ...) is left out with a log line naming its key and the reason only. A known folder is never left out
+for holding a code marker itself (Downloads often holds node_modules): only that code subtree is (owner decision
+D2). An extra folder is left out when it, or a folder between your user folder and it, holds one. The excluded places
+are the known folders in guard.EXCLUDED_KNOWN_FOLDERS plus the ones the app adds (the Jarvis project and its data
+folder).
 
 The check (``check_path(path, scope, backend)``), made before a card shows and again before each OS call:
 
@@ -13,23 +16,25 @@ The check (``check_path(path, scope, backend)``), made before a card shows and a
    relative path; no alternate data stream (a ":" after the drive); no "." or ".." component, no empty one; no
    reserved device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, also with an extension); no component ending in a dot
    or a space; none of < > " | ? *.
-2. The final path from the backend (realpath(strict=True), then GetFinalPathNameByHandleW: 8.3 names and junctions
-   resolved; its \\\\?\\ prefix is taken off, and \\\\?\\UNC\\ means a network path), checked lexically again, on a
-   fixed drive (no network or removable drive in v1).
+2. The drive of the path as given is a fixed drive, asked before anything on it is opened (a mapped network drive
+   letter is never touched). Then the final path from the backend (realpath(strict=True), then
+   GetFinalPathNameByHandleW: 8.3 names and junctions resolved; its \\\\?\\ prefix is taken off, and \\\\?\\UNC\\
+   means a network path), checked lexically again, on a fixed drive (no network or removable drive in v1).
 3. Inside a root (both normcase'd, is-relative-to).
 4. Every component lstat'ed without following it: a symbolic link, a junction or an app execution alias anywhere in
    the path as given or in the final path is refused; OneDrive's cloud reparse points are fine; a component that is
    hidden AND system (at or below the root) is refused.
 5. Excluded places: the excluded subtrees, guard.EXCLUDED_ROOT_NAMES right below the drive, guard.EXCLUDED_NAMES
-   and guard.SECRET_DIR_NAMES at any depth, a component named like a code marker, any folder from the drive down
-   holding a code marker (.git, .hg, .svn, .env, venv, .venv, node_modules: this covers the Jarvis project) and a
-   secret-shaped file name.
+   and guard.SECRET_DIR_NAMES at any depth, a component named like a code marker (at any depth), any folder strictly
+   below the root holding a code marker (.git, .hg, .svn, .env, venv, .venv, node_modules: this covers the Jarvis
+   project) and a secret-shaped file name.
 
 A refusal carries a SPEC 4.4 code (``REFUSE_OUTSIDE`` "path_outside" or ``REFUSE_EXCLUDED`` "excluded") and a finer
 reason word for Live and the log (``R_*``; never the path). An accepted path carries its final path, its root and the
-card-row flags: ``FLAG_HIDDEN_CHARS`` (a bidi or invisible format character in it: shown as <U+202E>),
-``FLAG_ONEDRIVE`` (under the OneDrive folder), ``FLAG_ONLINE_ONLY`` (its content is in the cloud). A name with hidden
-characters is not refused here: its real type decides (guard.open_kind), and the card shows the characters.
+card-row flags: ``FLAG_HIDDEN_CHARS`` (a hidden character in it, guard.hidden_char: a bidi or other format control, a
+zero-width or tag character, a line separator; shown as <U+202E>), ``FLAG_ONEDRIVE`` (under the OneDrive folder),
+``FLAG_ONLINE_ONLY`` (its content is in the cloud). A name with hidden characters is not refused here: its real type
+decides (guard.open_kind), and the card shows the characters.
 
 Public API
 ==========
@@ -90,7 +95,6 @@ R_SECRET = "secret"
 _EXCLUDED_REASONS = frozenset({R_UNC, R_NOT_FIXED, R_LINK, R_HIDDEN_SYSTEM, R_SYSTEM_PLACE, R_JARVIS, R_CODE_FOLDER,
                                R_SECRET})
 
-_HIDDEN_RE = re.compile("[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]")
 _BAD_CHARS = frozenset('<>"|?*')
 _RESERVED_RE = re.compile(r"(?:con|prn|aux|nul|conin\$|conout\$|(?:com|lpt)[0-9\u00b9\u00b2\u00b3])", re.IGNORECASE)
 _CODE_MARKERS = frozenset(marker.casefold() for marker in guard.CODE_MARKERS)
@@ -193,20 +197,22 @@ def lexical_problem(path: object) -> str:
 
 
 def display_name(text: str) -> str:
-    """``text`` with its bidi and invisible format characters shown as <U+202E> (the card's row flag)."""
-    return _HIDDEN_RE.sub(lambda match: f"<U+{ord(match.group(0)):04X}>", text)
+    """``text`` with its hidden characters (guard.hidden_char) shown as <U+202E>, <U+E0041> ... (the card's row
+    flag)."""
+    return "".join(f"<U+{ord(char):04X}>" if guard.hidden_char(char) else char for char in text)
 
 
 def name_problem(name: object) -> str:
     """Why a NEW name (a rename, a new folder, a zip) may not be used: REFUSE_NAME, REFUSE_TYPE or "". It must be
-    NFC-normalised already, 1-120 characters, with no control, format or bidi character, none of < > : " / \\ | ? *,
+    NFC-normalised already, 1-120 characters, with no control or hidden character (guard.hidden_char: format, bidi,
+    tag, line separator), none of < > : " / \\ | ? *,
     no reserved device name, no trailing dot or space, and never a blocked type, a shortcut or an internet shortcut.
     (Whether the type may change at all is validate.py's question: only when the owner's words ask.)"""
     if not isinstance(name, str) or not 1 <= len(name) <= MAX_NAME_CHARS:
         return REFUSE_NAME
     if unicodedata.normalize("NFC", name) != name or name in (".", ".."):
         return REFUSE_NAME
-    if any(unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp") for char in name) or _HIDDEN_RE.search(name):
+    if any(unicodedata.category(char) == "Cc" or guard.hidden_char(char) for char in name):
         return REFUSE_NAME
     if any(char in _BAD_CHARS or char in ':/\\' for char in name):
         return REFUSE_NAME
@@ -228,7 +234,7 @@ def _inside(key: str, root_key: str) -> bool:
 
 
 def _fold(component: str) -> str:
-    return unicodedata.normalize("NFKC", _HIDDEN_RE.sub("", component)).casefold().rstrip(". ")
+    return unicodedata.normalize("NFKC", guard.strip_hidden(component)).casefold().rstrip(". ")
 
 
 def _strip_final(path: str) -> str:
@@ -251,9 +257,15 @@ def _prefixes(path: str) -> list[str]:
     return [drive + "\\".join(parts[:i]) for i in range(1, len(parts) + 1)]
 
 
+def _fixed_drive(path: str, backend: DesktopBackend) -> bool:
+    """The drive of ``path`` (lexically fine: "C:\\..." or "C:/...") is a fixed drive. Asked before anything on it is
+    opened, so a mapped network drive letter is never touched."""
+    return backend.drive_type(path.replace("/", "\\")[:3]) == DRIVE_FIXED
+
+
 def _final(path: str, backend: DesktopBackend) -> str:
-    """The checked final path of ``path``, or "" (missing, not plain)."""
-    if lexical_problem(path):
+    """The checked final path of ``path``, or "" (missing, not plain, not on a fixed drive)."""
+    if lexical_problem(path) or not _fixed_drive(path, backend):
         return ""
     try:
         final = _strip_final(backend.final_path(path))
@@ -271,7 +283,10 @@ def _infos(paths: Iterable[str], backend: DesktopBackend) -> list[FileInfo]:
 
 
 def _place_problem(final: str, scope: Scope, backend: DesktopBackend, item_is_dir: bool,
-                   cache: dict[str, bool] | None) -> str:
+                   cache: dict[str, bool] | None, start: int = 0) -> str:
+    """Why ``final`` lies in an excluded place (an R_* word), or "". The name rules apply to every component; the
+    "holds a code marker" rule only to the folders of [drive, C:\\a, C:\\a\\b, ... final] from index ``start`` on
+    (check_path: the folders strictly below the root; the item itself only when it is a folder)."""
     key = _key(final)
     for place, reason in scope.places:
         if _inside(key, _key(place)):
@@ -286,7 +301,7 @@ def _place_problem(final: str, scope: Scope, backend: DesktopBackend, item_is_di
         return R_SECRET
     if any(part in _CODE_MARKERS for part in folded):
         return R_CODE_FOLDER
-    folders = [final[:3]] + _prefixes(final)
+    folders = ([final[:3]] + _prefixes(final))[start:]
     if not item_is_dir:
         folders = folders[:-1]
     for folder in folders:
@@ -313,6 +328,8 @@ def check_path(path: object, scope: Scope, backend: DesktopBackend, *,
     if reason:
         return _refused(reason)
     assert isinstance(path, str)
+    if not _fixed_drive(path, backend):
+        return _refused(R_NOT_FIXED)
     try:
         final = _strip_final(backend.final_path(path))
     except OSError:
@@ -335,11 +352,12 @@ def check_path(path: object, scope: Scope, backend: DesktopBackend, *,
         return _refused(R_LINK)
     if any(info.hidden_system for info in infos):
         return _refused(R_HIDDEN_SYSTEM)
-    reason = _place_problem(final, scope, backend, bool(infos and infos[-1].is_dir), cache)
+    reason = _place_problem(final, scope, backend, bool(infos and infos[-1].is_dir), cache,
+                            start=len(_prefixes(root.path)) + 1)          # the folders strictly below the root
     if reason:
         return _refused(reason)
     flags = set()
-    if _HIDDEN_RE.search(final):
+    if any(guard.hidden_char(char) for char in final):
         flags.add(FLAG_HIDDEN_CHARS)
     if root.onedrive or (scope.onedrive and _inside(_key(final), _key(scope.onedrive))):
         flags.add(FLAG_ONEDRIVE)
@@ -352,8 +370,9 @@ def check_path(path: object, scope: Scope, backend: DesktopBackend, *,
 # The scope
 # --------------------------------------------------------------------------
 
-def _root_problem(path: str, final: str, base: Scope, backend: DesktopBackend) -> str:
-    """Why ``final`` (the final path of ``path``) may not be a root ("" when it may)."""
+def _root_problem(path: str, final: str, base: Scope, backend: DesktopBackend, start: int | None = None) -> str:
+    """Why ``final`` (the final path of ``path``) may not be a root ("" when it may). ``start``: where the "holds a
+    code marker" rule begins (see _place_problem); None for a known folder, which that rule never leaves out (D2)."""
     if backend.drive_type(final[:3]) != DRIVE_FIXED:
         return R_NOT_FIXED
     try:
@@ -364,7 +383,9 @@ def _root_problem(path: str, final: str, base: Scope, backend: DesktopBackend) -
         return R_LINK
     if any(info.hidden_system for info in infos):
         return R_HIDDEN_SYSTEM
-    return _place_problem(final, base, backend, True, None)
+    if start is None:
+        start = len(_prefixes(final)) + 1                                  # a known folder: no folder is asked
+    return _place_problem(final, base, backend, True, None, start)
 
 
 def load_scope(folders: Sequence[str], extra_folders: Sequence[str], backend: DesktopBackend, *,
@@ -383,9 +404,9 @@ def load_scope(folders: Sequence[str], extra_folders: Sequence[str], backend: De
     onedrive = _final(onedrive_path, backend) if onedrive_path else ""
     base = Scope((), tuple(places), onedrive)
     roots: list[Root] = []
-    for name in folders:
-        if name not in ROOT_FOLDERS:
-            logger.warning("Desktop: %r is not a folder Jarvis knows; left out", name[:20])
+    for number, name in enumerate(folders, 1):
+        if name not in ROOT_FOLDERS:                       # named by its number: the entry may be a folder path
+            logger.warning("Desktop: folders entry %d is not a folder Jarvis knows; left out", number)
             continue
         path = backend.known_folder(name) or ""
         _add_root(roots, name, ROOT_LABELS[name], path, base, backend)
@@ -397,16 +418,18 @@ def load_scope(folders: Sequence[str], extra_folders: Sequence[str], backend: De
         if not profile or not final or _key(final) == _key(profile) or not _inside(_key(final), _key(profile)):
             logger.warning("Desktop: extra folder %d is not a folder under your user folder; left out", index)
             continue
-        _add_root(roots, key, ntpath.basename(final.rstrip("\\")), path, base, backend)
+        _add_root(roots, key, ntpath.basename(final.rstrip("\\")), path, base, backend,
+                  start=len(_prefixes(profile)) + 1)        # from just below your user folder down to the extra one
     return Scope(tuple(roots), tuple(places), onedrive)
 
 
-def _add_root(roots: list[Root], key: str, label: str, path: str, base: Scope, backend: DesktopBackend) -> None:
+def _add_root(roots: list[Root], key: str, label: str, path: str, base: Scope, backend: DesktopBackend,
+              start: int | None = None) -> None:
     final = _final(path, backend) if path else ""
     if not final:
         logger.warning("Desktop: the %s folder is not there; left out", key)
         return
-    problem = _root_problem(path, final, base, backend)
+    problem = _root_problem(path, final, base, backend, start)
     if problem:
         logger.warning("Desktop: the %s folder is left out (%s)", key, problem)
         return

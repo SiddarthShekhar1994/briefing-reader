@@ -105,8 +105,43 @@ class DesktopSwitchTests(unittest.TestCase):
         rows = dict(settings_view.desktop_rows(reading.settings_page._config))
         self.assertEqual(rows["HUD key"], "None - the Dock's Desktop switches")
 
+    def test_no_hud_key_while_the_keyboard_shortcut_is_off(self) -> None:
+        # [hotkey] enabled = false: the hotkey agent, which registers both keys, does not run, so no key can work.
+        harness = self.make(DESKTOP_ON + "\n[hotkey]\nenabled = false\n")
+        reading = self.reading
+        self.assertEqual(harness.config.desktop.hud_key, "ctrl+alt+h")       # the setting itself is kept
+        self.assertTrue(reading.desktop_available())
+        self.assertTrue(reading.dock.is_labelled())
+        self.assertEqual(reading.dock.hud_key(), "")
+        self.assertFalse(reading.dock.desktop_hint().isVisible())                # no "Ctrl+Alt+H switches"
+        self.assertNotIn("Ctrl+Alt+H", reading.dock.button(dock.DESKTOP).accessibleDescription())
+        settings = reading.settings_page
+        settings.select_group(settings_view.DESKTOP_GROUP)
+        self.assertEqual(dict(settings.rows())["HUD key"], settings_view.NO_HUD_KEY_SHORTCUT_OFF)
+        self.assertTrue(settings_view.NO_HUD_KEY_SHORTCUT_OFF.startswith("No key"))
+        self.assertNotIn("Ctrl+Alt+H", " ".join(settings.shown_texts()))
+        settings.select_group("ask")
+        self.assertEqual(dict(settings.rows())["Keyboard shortcut"], "Off")      # the Ask group agrees
+
 
 class DesktopRowsTests(unittest.TestCase):
+    def test_the_hud_key_shows_only_while_the_keyboard_shortcut_is_on(self) -> None:
+        from briefing_reader.config import DesktopConfig, HotkeyConfig
+
+        class Config:
+            desktop = DesktopConfig()
+            hotkey = HotkeyConfig()
+
+        self.assertEqual(settings_view.effective_hud_key(Config()), "ctrl+alt+h")
+        self.assertEqual(dict(settings_view.desktop_rows(Config()))["HUD key"],
+                         "Ctrl+Alt+H - switches between the window and the HUD")
+        Config.hotkey = HotkeyConfig(enabled=False)
+        self.assertEqual(settings_view.effective_hud_key(Config()), "")
+        self.assertEqual(dict(settings_view.desktop_rows(Config()))["HUD key"],
+                         "No key while the keyboard shortcut is off - the Dock's Desktop switches")
+        Config.desktop = DesktopConfig(hud_key="")                              # the window key took it as well
+        self.assertEqual(dict(settings_view.desktop_rows(Config()))["HUD key"], "None - the Dock's Desktop switches")
+
     def test_rows_without_config_or_folders(self) -> None:
         self.assertEqual(settings_view.desktop_rows(None), [])
         from briefing_reader.config import DesktopConfig
