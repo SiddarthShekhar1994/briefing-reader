@@ -1,7 +1,7 @@
 """Tests for the desktop feature's switch in the app (P1.1): [desktop] off shows no Desktop surface anywhere; on, the
 Dock's Desktop slot (with the HUD key's line), the Find list's Desktop and Settings > Desktop (read only, "Not
-turned on yet") appear, and a click on Desktop only asks for the HUD (desktopRequested) - the screen, the Dock's
-current slot and the window stay as they were.
+turned on yet") appear, and a click on Desktop asks for the HUD (desktopRequested) - the screen and the Dock's
+current slot stay as they were, and the window is hidden for the HUD (P1.4; tests/test_desktop_hud.py has the rest).
 
 Qt runs offscreen in this process and shows nothing; the real desktop backend is never constructed.
 """
@@ -50,7 +50,7 @@ class DesktopSwitchTests(unittest.TestCase):
         reading._on_find_pick(find_view.FindItem(find_view.KIND_ACTION, ui.FIND_DESKTOP_KEY, "Desktop"))
         self.assertEqual(asked, [])
 
-    def test_on_shows_the_slot_and_a_click_only_asks_for_the_hud(self) -> None:
+    def test_on_shows_the_slot_and_a_click_goes_onto_the_hud(self) -> None:
         harness = self.make()
         reading = self.reading
         window = harness.c.window
@@ -73,7 +73,8 @@ class DesktopSwitchTests(unittest.TestCase):
         self.assertEqual(asked, [True])
         self.assertEqual((reading.current_tab(), reading.dock.current()), (ui.SCREEN_APPROVALS, dock.APPROVALS))
         self.assertEqual(screens, [])
-        self.assertTrue(window.isVisible())                                      # nothing hides it yet (no HUD)
+        self.assertFalse(window.isVisible())                                     # hidden for the HUD (P1.4)
+        self.assertTrue(harness.c.desktop.is_hud())
         self.assertEqual(harness.c.state, state)
 
     def test_settings_shows_the_desktop_group_read_only(self) -> None:

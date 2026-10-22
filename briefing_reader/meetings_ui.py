@@ -6,10 +6,11 @@ It ties the parts together and keeps the owner's rules:
   consent tick is ticked; the request must carry ``consent=True`` again here. Nothing else calls it: not the
   voice, not Ask, not an offer, not the Find list (its "Record a meeting" only opens the card).
 * While it records: REC with the time and Stop in the header (every screen) and on Home, the orb's recording look,
-  the Dock's coral dot on Meetings, the always-on-top pill (also while Jarvis is minimised or hidden) and the tray
-  tooltip ("Jarvis: Recording 12:04"). Stop works from the pill, the header, Home and the Meetings screen; the
-  recorder stops by itself at the end time + 15 min, after 10 min of silence on both channels or at 3 h, and
-  ``shutdown()`` (Jarvis closing) stops and saves.
+  the Dock's coral dot on Meetings, the always-on-top pill (also while Jarvis is minimised or hidden; held hidden
+  while the desktop HUD shows, where REC is a chip: ``pillCreated`` hands it over) and the tray tooltip ("Jarvis:
+  Recording 12:04"). Stop works from the pill, the header, Home and the Meetings screen; the recorder stops by
+  itself at the end time + 15 min, after 10 min of silence on both channels or at 3 h, and ``shutdown()`` (Jarvis
+  closing) stops and saves.
 * After a stop the meeting is written down in a background process (low priority) when the faster-whisper add-on
   and the speech model are there; the model is downloaded only by ``download_model()`` - the owner's click on
   Download (Settings > Meetings or the Meetings screen). Retention runs at start-up and daily (a meeting it
@@ -80,6 +81,7 @@ class MeetingsController(QObject):
     """See the module docstring."""
 
     recordingChanged = Signal(bool)
+    pillCreated = Signal(object)         # the always-on-top pill was made (a recording started): the HUD may hold it
     summaryOpened = Signal(str)          # part 2: a meeting's summary opened (the app lends its cards)
     summaryChanged = Signal(str)         # part 2: a summary was kept or failed (the app may re-render it)
     meetingDeleted = Signal(str)         # part 2: the owner's Delete or retention (the app drops undecided drafts)
@@ -443,6 +445,7 @@ class MeetingsController(QObject):
             if self.pill is None:
                 self.pill = meetings_view.RecPill()
                 self.pill.stopClicked.connect(self.stop)
+                self.pillCreated.emit(self.pill)    # before it shows: on the desktop HUD it is held hidden at once
             self.pill.show_recording(elapsed, warning=warning)
         elif self.pill is not None:
             self.pill.dismiss()

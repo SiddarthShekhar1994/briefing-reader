@@ -578,14 +578,18 @@ class AppHarness:
     ``clock``: a HarnessClock (default: fixed at NOW) for the app, the planner and the bundle.
     ``productivity``: the bundle on ([productivity] enabled plus ``prod_extra`` keys, unless
     ``config_extra`` has the table already); ``prod_inline``: its reads run on the GUI thread
-    (deterministic tests). close() stops the bundle's timer and thread."""
+    (deterministic tests). close() stops the bundle's timer and thread.
+
+    The desktop HUD ([desktop] enabled in ``config_extra``): ``desktop_factory(config)`` makes its
+    windows (a test passes hud_overlay.create with a fake native seam; None: hud_overlay.create, whose
+    seam makes no OS call while the tests run). close() shuts the desktop controller down."""
 
     def __init__(self, test: Any, *, ask: bool = True, runs: Sequence[Any] = (), auth: str | None = None,
                  readers: dict | None = None, ask_mode: bool = False, run_state: Any = None,
                  lines: Sequence[str] = (B_CALENDAR, B_TODO), engine_clock: Any = None,
                  max_per_hour: int = 20, config_extra: str = "", snapshot_factory: Any = None,
                  clock: HarnessClock | None = None, productivity: bool = False, prod_extra: str = "",
-                 prod_inline: bool = True) -> None:
+                 prod_inline: bool = True, desktop_factory: Any = None) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -618,7 +622,8 @@ class AppHarness:
                                       sender_factory=lambda _cfg: self.senders, action_store=self.store,
                                       click_clock=_StepClock(), ask_factory=self.factory, ask_mode=ask_mode,
                                       run_state=run_state, voice_factory=lambda _controller: self.voice,
-                                      snapshot_factory=snapshot_factory or (lambda _controller: self.snapshots))
+                                      snapshot_factory=snapshot_factory or (lambda _controller: self.snapshots),
+                                      desktop_factory=desktop_factory)
         self.c._start_fetch = lambda *args, **kwargs: None   # never Notion: the page is handed over below
         test.addCleanup(self.close)
 
@@ -648,6 +653,8 @@ class AppHarness:
             c.productivity.join(5)
         if getattr(c, "meetings", None) is not None:
             c.meetings.shutdown()       # a recording stops and is saved; the pill goes
+        if getattr(c, "desktop", None) is not None:
+            c.desktop.shutdown()        # the HUD's windows go
         if c._snapshots is not None:
             c._snapshots.shutdown()   # a real snapshotter (a harness's) closes its hidden view
         for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._send_hold_timer, c._undo_timer,

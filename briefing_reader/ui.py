@@ -478,6 +478,28 @@ def force_foreground(widget: QWidget) -> None:
         logger.debug("Could not bring the window to the foreground: %s", exc)
 
 
+def bring_forward_on_click(widget: QWidget) -> None:
+    """Show, raise and activate ``widget`` on the owner's own click (Bring Jarvis back, a HUD chip, the tray, the
+    toast): that click is the latest input Windows saw, so Jarvis may come forward - attached to the foreground
+    window's input as force_foreground's first step is, but NEVER with its synthetic Alt press (SPEC hard rule 13:
+    never in HUD mode). Leaving the desktop HUD uses this, never force_foreground."""
+    if widget.isMinimized():
+        widget.showNormal()
+    else:
+        widget.show()
+    widget.raise_()
+    widget.activateWindow()
+    if not _native_windows():
+        return
+    try:
+        user32 = _user32()
+        hwnd = int(widget.winId())
+        if int(user32.GetForegroundWindow() or 0) != hwnd and not _set_foreground_attached(user32, hwnd):
+            logger.debug("The window did not come to the foreground (no synthetic Alt)")
+    except Exception as exc:  # noqa: BLE001 - best effort
+        logger.debug("Could not bring the window forward (%s)", type(exc).__name__)
+
+
 def _win32_bring_to_front(hwnd: int) -> None:
     user32 = _user32()
     if int(user32.GetForegroundWindow() or 0) == hwnd:
@@ -1074,7 +1096,11 @@ class ReadingView(QWidget):
     agenda panel lives in the Day view's drawer (TODAY / DEADLINES; its Connect link emits ``connectCalendar``).
     ``tabChanged(index)`` when the current screen changes (the Dock, Ctrl+1..6, Ctrl+,, ``set_tab``).
     Desktop ([desktop] on: ``set_desktop_available``) is the Dock's switch to the HUD, not a screen: its click,
-    Ctrl+8 and the Find list's "Desktop" emit ``desktopRequested`` and change nothing else.
+    Ctrl+8 and the Find list's "Desktop" emit ``desktopRequested`` and change nothing else. While Jarvis is on the
+    desktop HUD (desktop_ui; the window hidden, never closed) ``hold_screens(record)`` makes ``set_tab`` only record
+    the screen asked for, ``set_hud_present`` counts that time as present for the start-up, and ``glanceChanged``
+    tells the HUD's chips and orb that "Briefing ready", "N need your OK", REC or the look changed
+    (``is_new_briefing()``, ``pending_count()``, ``recording_state()``, ``look()``).
 
     Alive (the approved motion prototype; ``[ui] motion`` through holo.motion_level): the Dock is labelled
     (each screen's glyph and name, 200 px) from ``DOCK_LABELS_FROM`` px wide and folds to glyphs below;
@@ -1132,6 +1158,7 @@ class ReadingView(QWidget):
     recordNextMeeting = Signal()  # Record on Home's next-meeting tile: that meeting's start card opens (only)
     recordAgendaRow = Signal(str)  # Record on a Day view meeting row (its key): that meeting's start card (only)
     desktopRequested = Signal()  # the Dock's Desktop, Ctrl+8 or the Find list's Desktop: switch to the HUD (only)
+    glanceChanged = Signal()     # Briefing ready, N need your OK, REC or the look changed (the desktop HUD's mirror)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1362,11 +1389,14 @@ class ReadingView(QWidget):
         self.dock.set_slot_visible(dock_mod.MEETINGS, False)     # [meetings] shows it
         self.dock.set_slot_visible(dock_mod.DESKTOP, False)      # [desktop] shows it (set_desktop_available)
         self._desktop_on = False
+        self._screen_hold: Callable[[int], None] | None = None   # on the desktop HUD: set_tab only records
+        self._hud_present = False                 # on the desktop HUD: present for the start-up's clock
         self.dock.slotActivated.connect(self._on_dock_slot)
         self.header = home.HoloHeader()
         # A meeting records: REC, the time and Stop in the header (every screen) and on Home (meetings_ui).
         self._meetings_on = False
         self._recording = ""
+        self._recording_warning = ""              # "No call audio" beside REC while it records ("" none)
         self._rec_badges: list[QWidget] = []      # REC in other headers (the frame's, over the prompt view)
         self.rec_badge = meetings_view.RecBadge()
         self.rec_badge.stopClicked.connect(self.stopRecording)
@@ -1654,11 +1684,19 @@ class ReadingView(QWidget):
         self.sync_presence()
 
     def sync_presence(self) -> None:
-        """Shown, hidden or minimised (the window tells it too): alive.StartupPresence decides."""
+        """Shown, hidden or minimised (the window tells it too): alive.StartupPresence decides. Time on the desktop
+        HUD counts as present (``set_hud_present``)."""
         if not shiboken6.isValid(self):
             return
         window = self.window()
-        self.startup.note_shown(self.isVisible() and not (window is not None and window.isMinimized()))
+        shown = self.isVisible() and not (window is not None and window.isMinimized())
+        self.startup.note_shown(shown or self._hud_present)
+
+    def set_hud_present(self, present: bool) -> None:
+        """Jarvis is on the desktop HUD (the window hidden by Jarvis, never closed): that time counts as present, so
+        coming back after a long HUD session never replays the start-up (SPEC 8.2)."""
+        self._hud_present = bool(present)
+        self.sync_presence()
 
     def _play_startup(self) -> None:
         """The hero orb's rings assemble from the centre out, J.A.R.V.I.S. types in and one scan line sweeps
@@ -1764,6 +1802,7 @@ class ReadingView(QWidget):
         else:
             tone = home.TONE_HOLO
         self.header.set_state_word(word, tone)
+        self.glanceChanged.emit()
 
     def state_word(self) -> str:
         return self.header.state_word()
@@ -2393,12 +2432,21 @@ class ReadingView(QWidget):
     def set_tab(self, index: int) -> None:
         """Open a screen while its Dock slot shows: SCREEN_HOME (hud.TAB_JARVIS), SCREEN_BRIEFING
         (hud.TAB_BRIEFING), SCREEN_LIVE (hud.TAB_LIVE), SCREEN_MEMORY (hud.TAB_MEMORY), SCREEN_APPROVALS,
-        SCREEN_FOLLOWUPS or SCREEN_SETTINGS."""
+        SCREEN_FOLLOWUPS or SCREEN_SETTINGS. While Jarvis is on the desktop HUD (``hold_screens``) the hidden
+        window keeps its screen: the one asked for is only recorded, and the window comes back on it."""
         key = _SCREEN_SLOTS.get(index)
         if key is None or not self.dock.is_slot_visible(key):
             return
+        if self._screen_hold is not None:
+            self._screen_hold(index)
+            return
         self.dock.set_current(key)
         self._show_screen(index)
+
+    def hold_screens(self, record: Callable[[int], None] | None) -> None:
+        """Jarvis went onto the desktop HUD (``record``) or came back (None): meanwhile an automatic ``set_tab`` only
+        calls ``record(index)`` - no screen changes, nothing comes forward (SPEC 1)."""
+        self._screen_hold = record
 
     def current_tab(self) -> int:
         return self._screen
@@ -2414,6 +2462,7 @@ class ReadingView(QWidget):
         if not self._speech_text:
             self.speech.setText(self._new_label or self._speech_fallback)
         self._sync_chip()
+        self.glanceChanged.emit()
 
     def is_new_briefing(self) -> bool:
         return self._new_briefing
@@ -2492,6 +2541,7 @@ class ReadingView(QWidget):
         Nothing here starts or stops a recording."""
         self._recording = elapsed or ""
         recording = bool(elapsed)
+        self._recording_warning = warning if recording else ""
         for badge in (self.rec_badge, self.home_rec, *self._rec_badges):
             badge.set_elapsed(elapsed or "0:00")
             badge.set_warning(warning if recording else "")
@@ -2501,10 +2551,15 @@ class ReadingView(QWidget):
         self.dock.set_recording(recording)
         self.meetings_stage.set_recording(recording)
         self.header._fit_notes()
+        self.glanceChanged.emit()
 
     def recording_text(self) -> str:
         """What the header's REC says ("REC 12:04"; "" while nothing records)."""
         return self.rec_badge.text() if self._recording else ""
+
+    def recording_state(self) -> tuple[str, str]:
+        """(elapsed, warning) while a meeting records ("12:04", "No call audio"); ("", "") while none."""
+        return self._recording, self._recording_warning
 
     def set_followups_available(self, available: bool) -> None:
         """FOLLOW-UPS is on (the bundle): the Dock's Follow-ups slot and its screen."""
@@ -2781,7 +2836,11 @@ class ReadingView(QWidget):
         self._pending = max(0, int(pending))
         self.dock.set_approvals(self._pending)
         self._sync_chip()
-        self._sync_look()
+        self._sync_look()                       # ... and the desktop HUD's "N need your OK" (glanceChanged)
+
+    def pending_count(self) -> int:
+        """Proposals waiting for the owner's OK (``set_pending``: the Dock's amber count, Home's chip)."""
+        return self._pending
 
     # ---- approval cards ------------------------------------------------------
 
@@ -2915,7 +2974,7 @@ class ReadingView(QWidget):
         super().hideEvent(event)
         self.sections_popover.hide()
         self._sync_quiet_timer()
-        self.startup.note_shown(False)
+        self.startup.note_shown(self._hud_present)     # hidden for the desktop HUD: still present
 
     def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         if event.key() == Qt.Key.Key_Escape and (self.transcript_drawer.is_open() or self.day_drawer.is_open()):
@@ -4784,6 +4843,15 @@ class AppController(QObject):
     ``snapshot_factory(controller)`` builds (tests inject a fake: no web
     engine), is handed to the Ask planner; an Ask's Cancel stops its pictures,
     LIVE's Clear drops the ones nobody would see, and quitting stops them all.
+
+    Jarvis on your desktop (``[desktop] enabled``; desktop_ui.DesktopController, ``desktop``): the Dock's Desktop
+    (and the Find list's) hides the window - never closes it - and shows the HUD (``desktop_factory(config)`` makes
+    its windows; tests pass one with a fake native seam). The HUD is a sub-state of STATE_READING
+    (``_hud_active()``): nothing comes forward by itself meanwhile (no force_foreground, no synthetic Alt), an
+    automatic screen change only records the screen the window comes back on, Live never opens by itself, the
+    offers and the announcement take the toast path, and the HUD counts as present (the agenda, the start-up).
+    Bring Jarvis back, a chip, the tray's Bring Jarvis back or the toast's click bring the window back - not a
+    restore, so no greeting.
     """
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
@@ -4802,7 +4870,8 @@ class AppController(QObject):
                  voice_factory: Callable[[Any], Voice] | None = None,
                  locked: Callable[[], bool] | None = None,
                  prefs: AssistantPrefs | None = None,
-                 snapshot_factory: Callable[[Any], Any] | None = None) -> None:
+                 snapshot_factory: Callable[[Any], Any] | None = None,
+                 desktop_factory: Callable[[Any], Any] | None = None) -> None:
         super().__init__()
         self.config = config
         self.client = client
@@ -4842,6 +4911,7 @@ class AppController(QObject):
         self.tray: QSystemTrayIcon | None = None
         self._tray_menu: QMenu | None = None
         self._tray_quit_action: Any = None
+        self._tray_back_action: Any = None   # Bring Jarvis back ([desktop]; shown only on the desktop HUD)
         self._tts: TtsWorker | None = None
         self._audio_dir: Path | None = None
         if action_store is None:
@@ -4869,7 +4939,7 @@ class AppController(QObject):
         self._create_memory()                           # the productivity bundle's memory (needs Ask)
         self.productivity: Any = self._create_productivity()   # the bundle's day read and offers (needs Ask)
         self.meetings: Any = self._create_meetings()    # [meetings]: the meeting recorder, or None while it is off
-        self._init_desktop()                            # [desktop]: the Dock's Desktop and Settings > Desktop
+        self._init_desktop(desktop_factory)             # [desktop]: the Dock's Desktop, Settings > Desktop, the HUD
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -4927,6 +4997,8 @@ class AppController(QObject):
         if self._toast_window is None:
             self._toast_window = states_view.Toast()
             self._toast_window.actionClicked.connect(self._on_toast_action)
+            if getattr(self, "desktop", None) is not None:
+                self.desktop.set_toast(self._toast_window)    # the desktop HUD keeps it under its bar
         return self._toast_window
 
     def _post_toast(self, line: str, action: str, key: str) -> None:
@@ -4946,6 +5018,13 @@ class AppController(QObject):
         if self.state != STATE_READING or self._shut_down:
             return
         reading = self.window.reading
+        if self._hud_active():
+            # On the desktop HUD: the click brings the window back on the toast's screen (leave_hud comes forward on
+            # this click, never with force_foreground's synthetic Alt).
+            screen = {TOAST_VIEW: SCREEN_BRIEFING, TOAST_PREP: SCREEN_HOME}.get(key)
+            if self.desktop.leave_hud(screen) and key == TOAST_PREP:
+                reading.close_moment()
+            return
         if key == TOAST_VIEW:
             reading.set_tab(SCREEN_BRIEFING)
         elif key == TOAST_PREP:
@@ -5481,10 +5560,7 @@ class AppController(QObject):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             logger.info("No system tray available; continuing without a tray icon")
             return
-        menu = QMenu()
-        menu.addAction("Show briefing").triggered.connect(self._on_tray_show)
-        self._tray_quit_action = menu.addAction("Dismiss")
-        self._tray_quit_action.triggered.connect(self._on_tray_quit)
+        menu = self._make_tray_menu()
         tray = QSystemTrayIcon(app_icon(), self)
         tray.setToolTip(TRAY_TOOLTIP)
         tray.setContextMenu(menu)
@@ -5492,14 +5568,40 @@ class AppController(QObject):
         tray.show()
         self.tray, self._tray_menu = tray, menu
 
+    def _make_tray_menu(self) -> QMenu:
+        """The tray's menu: Bring Jarvis back ([desktop] on; shown only while Jarvis is on the desktop HUD), Show
+        briefing, and Dismiss / Quit."""
+        menu = QMenu()
+        if getattr(self, "desktop", None) is not None:
+            from .desktop_ui import BRING_BACK_TEXT
+
+            self._tray_back_action = menu.addAction(BRING_BACK_TEXT)
+            self._tray_back_action.triggered.connect(self._on_tray_bring_back)
+            self._tray_back_action.setVisible(self._hud_active())
+        menu.addAction("Show briefing").triggered.connect(self._on_tray_show)
+        self._tray_quit_action = menu.addAction("Dismiss")
+        self._tray_quit_action.triggered.connect(self._on_tray_quit)
+        self._tray_menu = menu
+        return menu
+
     # ---- tray -------------------------------------------------------------------------
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._on_tray_show()
 
+    def _on_tray_bring_back(self) -> None:
+        """The tray's Bring Jarvis back (only while on the desktop HUD): the window on the screen it would have had,
+        else Home - not a restore: no greeting."""
+        if self._hud_active():
+            self.desktop.leave_hud()
+
     def _on_tray_show(self) -> None:
-        """Show briefing (tray menu or a click): a restore, never an "open" - no greeting."""
+        """Show briefing (tray menu or a click): a restore, never an "open" - no greeting. On the desktop HUD it is
+        Bring Jarvis back."""
+        if self._hud_active():
+            self.desktop.leave_hud()
+            return
         if self.state == STATE_SNOOZED:
             self.show_prompt(take_focus=True)
         elif self.state == STATE_WAITING:
@@ -5524,6 +5626,8 @@ class AppController(QObject):
         if self._tray_quit_action is not None:
             quits = self.state in (STATE_READING, STATE_WAITING)
             self._tray_quit_action.setText("Quit" if quits else "Dismiss")
+        if self._tray_back_action is not None:
+            self._tray_back_action.setVisible(self._hud_active())   # only while on the desktop HUD
 
     def _recording_tooltip(self) -> str:
         """"Jarvis: Recording 12:04" while a meeting records (it wins over every other tooltip), else ""."""
@@ -7771,10 +7875,12 @@ class AppController(QObject):
     # ---- agenda: TODAY / TOMORROW and DEADLINES -----------------------------------------------
 
     def _agenda_active(self) -> bool:
-        """The reading screen is up and visible: the only time the agenda refreshes by itself."""
+        """The reading screen is up and visible - or Jarvis is on the desktop HUD, which counts as present (SPEC 12):
+        the only time the agenda refreshes by itself."""
         window = self.window
-        return (self.state == STATE_READING and window.is_reading_view() and window.isVisible()
-                and not window.isMinimized())
+        if self.state != STATE_READING or not window.is_reading_view():
+            return False
+        return self._hud_active() or (window.isVisible() and not window.isMinimized())
 
     def _sync_agenda_timer(self) -> None:
         """The agenda timer runs only while the reading screen is visible; it catches up when shown."""
@@ -8539,7 +8645,7 @@ class AppController(QObject):
         reading.show_brief(self._brief_info(brief, outcome, link[1], nudges))
         self._plan_gives_way()
         reading.set_answer_chip(HOME_BRIEF_CHIP, entry, MOMENT_BRIEF)
-        in_jarvis = reading.current_tab() == hud.TAB_JARVIS or self.window.isMinimized()
+        in_jarvis = reading.current_tab() == hud.TAB_JARVIS or self.window.isMinimized() or self._hud_active()
         self._prep_say(prep_result_speech(brief.start, address, in_jarvis_tab=in_jarvis, day=brief.day))
 
     def _brief_info(self, brief: Any, outcome: Any, steps_link: str,
@@ -8676,12 +8782,12 @@ class AppController(QObject):
 
     # ---- Jarvis on your desktop ([desktop]) -------------------------------------------------------------
 
-    def _init_desktop(self) -> None:
+    def _init_desktop(self, factory: Callable[[Any], Any] | None = None) -> None:
         """[desktop] on: the Dock's Desktop with the HUD key's "<key> switches" line (none while [hotkey] is off: no
-        key can be registered then), the Find list's Desktop and Settings > Desktop (read only; "Not turned on yet"
-        until the first-run card exists). Off: no Desktop surface anywhere and nothing changes. The HUD itself
-        (entering and leaving it) is built in a later part: until then ``desktopRequested`` is connected to nothing,
-        so a click on Desktop changes nothing."""
+        key can be registered then), the Find list's Desktop, Settings > Desktop (read only; "Not turned on yet"
+        until the first-run card exists) and the HUD (``desktop``: desktop_ui.DesktopController; the Dock's Desktop
+        and the Find list's go onto it). Off: ``desktop`` is None - no Desktop surface, no HUD window, no hook."""
+        self.desktop: Any = None
         desktop = getattr(self.config, "desktop", None)
         if not getattr(desktop, "enabled", False):
             return
@@ -8691,6 +8797,52 @@ class AppController(QObject):
         reading.settings_page.add_group(settings_view.DESKTOP_GROUP, settings_view.DESKTOP_TITLE,
                                         note=settings_view.DESKTOP_NOTE, how=settings_view.DESKTOP_HOW,
                                         rows=lambda: settings_view.desktop_rows(self.config))
+        self.desktop = self._create_desktop(factory)
+
+    def _create_desktop(self, factory: Callable[[Any], Any] | None) -> Any:
+        """desktop_ui.DesktopController over the HUD's windows (``factory(config)``, else hud_overlay.create): the
+        chips go back to Briefing, Approvals and Meetings, the meetings pill (made when a recording starts) and the
+        toast (made at its first post) are handed to it, and leaving it comes forward only on the owner's click."""
+        from . import desktop_ui, hud_overlay
+
+        overlay = (factory or hud_overlay.create)(self.config)
+        if overlay is None:
+            logger.warning("Desktop: no HUD windows could be made; Desktop does nothing")
+            return None
+        controller = desktop_ui.DesktopController(
+            self.config, self.window, overlay,
+            chip_screens={hud_overlay.CHIP_BRIEFING: SCREEN_BRIEFING, hud_overlay.CHIP_APPROVALS: SCREEN_APPROVALS,
+                          hud_overlay.CHIP_REC: SCREEN_MEETINGS},
+            home_screen=SCREEN_HOME, may_enter=self._may_enter_hud, bring_forward=bring_forward_on_click,
+            address=self.config.assistant.address, parent=self)
+        controller.hudChanged.connect(self._on_hud_changed)
+        meetings = getattr(self, "meetings", None)
+        if meetings is not None:
+            meetings.pillCreated.connect(controller.set_rec_pill)
+            controller.set_rec_pill(meetings.pill)
+        return controller
+
+    def _hud_active(self) -> bool:
+        """Jarvis is on the desktop HUD: a sub-state of STATE_READING with the window hidden by Jarvis (never
+        closed). Meanwhile nothing comes forward by itself (SPEC hard rule 13)."""
+        desktop = getattr(self, "desktop", None)
+        return desktop is not None and desktop.is_hud()
+
+    def _may_enter_hud(self) -> bool:
+        """The app side of entering the HUD: the assistant screen is up (not the prompt, a hidden wait or quitting)
+        and no dialog waits for an answer (it would stay over a hidden window)."""
+        return (self.state == STATE_READING and not self._shut_down and self.window.is_reading_view()
+                and QApplication.activeModalWidget() is None)
+
+    def _on_hud_changed(self, entered: bool) -> None:
+        """Jarvis went onto the desktop HUD (``entered``) or came back to the window: the tray's Bring Jarvis back,
+        the agenda's and the offers' timers follow (the HUD counts as present; its offers take the toast path); a
+        newer run that waited for the window (the classic prompt) is asked about now it is back."""
+        self._update_tray()
+        self._sync_agenda_timer()
+        self._prod_sync()
+        if not entered and self._pending_run:
+            QTimer.singleShot(0, self._offer_pending_run)
 
     # ---- offers (the productivity bundle) ----------------------------------------------------------
 
@@ -8750,7 +8902,9 @@ class AppController(QObject):
             self._meetings_sweep_timer.start()
 
     def _on_window_visibility_for_meetings(self) -> None:
-        """The window was hidden or minimised: the start card closes (a consent tick is never carried over)."""
+        """The window was hidden or minimised: the start card closes (a consent tick is never carried over). Going
+        onto the desktop HUD hides the window, so an open start card closes then too, as Not now: unticked, nothing
+        recorded."""
         meetings = getattr(self, "meetings", None)
         window = self.window
         if meetings is not None and (not window.isVisible() or window.isMinimized()):
@@ -9233,9 +9387,12 @@ class AppController(QObject):
         self._update_done_tooltip()
 
     def _prod_activity(self) -> str:
-        """"visible": the reading screen is up and in sight; "minimized": the reading screen minimized;
-        "off": anything else (hidden WAITING, the prompt, quitting)."""
+        """"visible": the reading screen is up and in sight; "minimized": the reading screen minimized - or Jarvis on
+        the desktop HUD (its offers take the toast path; Phase 2-3: none in focus mode or while in control); "off":
+        anything else (hidden WAITING, the prompt, quitting)."""
         window = self.window
+        if self.state == STATE_READING and not self._shut_down and self._hud_active():
+            return "minimized"
         if self.state != STATE_READING or self._shut_down or not window.isVisible():
             return "off"
         if window.isMinimized():
@@ -10804,12 +10961,15 @@ class AppController(QObject):
         while the briefing plays, for a card; not on Approvals, for a card), "window" shows the
         pop-out without the focus, "off" nothing. "tab" shows the pop-out too (without the focus)
         when the LIVE tab would be shorter than LIVE_DOCKED_MIN_PX and there is another screen.
-        Never while the main window is hidden, minimized or on the prompt; an open pop-out keeps
+        Never while the main window is hidden, minimized or on the prompt, and never on the desktop
+        HUD (not even a minimized pop-out is restored there; SPEC 10.1); an open pop-out keeps
         everything as with "off" (a minimized one is restored without the focus). True when LIVE
         became the current tab."""
         if not self.live.enabled or not task_id or self.state == STATE_QUITTING or task_id in self._live_opened:
             return False
         self._live_opened = (self._live_opened + [task_id])[-64:]
+        if self._hud_active():
+            return False
         mode = self._live_mode
         window = self._live_window
         if window is not None and window.isVisible():
@@ -11662,8 +11822,12 @@ class AppController(QObject):
 
     def _on_window_state(self) -> None:
         """The window was minimized or restored: its minimize button, its taskbar button, Win+Down,
-        the tray icon or the hotkey."""
+        the tray icon or the hotkey. Hiding it for the desktop HUD is not a minimize, and coming back
+        from the HUD is not a restore."""
         window = self.window
+        if self._hud_active():
+            self._minimized = False
+            return
         minimized = window.isVisible() and window.isMinimized()
         if minimized == self._minimized:
             return
@@ -11705,7 +11869,13 @@ class AppController(QObject):
         self.quit()
 
     def _on_close_requested(self) -> None:
-        if self.state == STATE_READING:
+        if self.state == STATE_READING and self._hud_active():
+            # Jarvis never closes the window it hid for the desktop HUD; a close from outside (Windows) quits as the
+            # tray's Quit does - never back to the prompt over the HUD.
+            logger.info("Window closed while on the desktop HUD")
+            self._record_done()
+            self.quit()
+        elif self.state == STATE_READING:
             logger.info("Window closed on the reading screen")
             self.done()
         elif self.state == STATE_PROMPT and self.startup_error:
@@ -12228,12 +12398,13 @@ class AppController(QObject):
 
     def _offer_pending_run(self) -> None:
         """The reading ended (or a Send's / Cancel's hold is over) while a newer run was due: show that
-        briefing now (or, in the classic mode, ask about it). Never during a hold: its Undo stays."""
+        briefing now (or, in the classic mode, ask about it). Never during a hold: its Undo stays. On
+        the desktop HUD the classic prompt waits until the window is back (it never shows over the HUD)."""
         if (self.state == STATE_READING and self._pending_run and self._send_hold is None
                 and self.player.state in (IDLE, FINISHED)):
             if self._pending_briefing is not None:
                 self._replace_briefing(self._pending_briefing)
-            else:
+            elif not self._hud_active():
                 self._back_to_prompt(self._pending_run, take_focus=False)
 
     def _after_send_hold(self) -> None:
@@ -12436,8 +12607,16 @@ class AppController(QObject):
     def _open_activation(self, *, ask: bool) -> None:
         """OPEN into a running app: the legacy prompt gives way to the assistant screen; a hidden or
         minimized window is restored with a greeting (unless one was said in the last 2 minutes);
-        a visible one just comes forward, its tab unchanged. A NEW briefing is announced once."""
+        a visible one just comes forward, its tab unchanged. A NEW briefing is announced once. On the
+        desktop HUD (the window key; SPEC 9's HUD row - the rest of that table is P1.6) the window
+        comes back on the screen it would have had, else Home: leaving the HUD is not a restore, so
+        there is no greeting."""
         window = self.window
+        if self._hud_active():
+            if self.desktop.leave_hud() and ask:
+                self.window.reading.focus_command_bar()   # --ask: Home with the bar focused (Ask on)
+            self._announce()
+            return
         restored = self.state != STATE_READING or not window.isVisible() or window.isMinimized()
         if window.isVisible() and window.isMinimized():
             window.showNormal()   # laid out again as a normal window; brought forward below
@@ -12453,10 +12632,15 @@ class AppController(QObject):
             self._announce()
 
     def _read_activation(self) -> None:
-        """READ into the assistant screen: in front on the BRIEFING tab, playing when it was not."""
-        if self.window.isVisible() and self.window.isMinimized():
-            self.window.showNormal()
-        force_foreground(self.window)
+        """READ into the assistant screen: in front on the BRIEFING tab, playing when it was not. On
+        the desktop HUD the window comes back on BRIEFING (never force_foreground there)."""
+        if self._hud_active():
+            if not self.desktop.leave_hud(SCREEN_BRIEFING):
+                return
+        else:
+            if self.window.isVisible() and self.window.isMinimized():
+                self.window.showNormal()
+            force_foreground(self.window)
         self._show_briefing_tab()
         if self._script is not None and self.player.state in (IDLE, FINISHED):
             self.toggle_play()
@@ -12528,18 +12712,22 @@ class AppController(QObject):
             self._start_fetch(self.expected_run)
 
     def _activation_while_reading(self, run: str | None) -> None:
-        """A launch while the reading screen is open: a newer run's briefing is offered."""
+        """A launch while the reading screen is open: a newer run's briefing is offered. On the desktop
+        HUD nothing comes forward by itself: the newer run is asked about once the window is back."""
+        on_hud = self._hud_active()
         if not run or not self._reading_is_outdated(run):
-            force_foreground(self.window)
+            if not on_hud:
+                force_foreground(self.window)
             return
-        if self._send_hold is not None or (self._script is not None
-                                           and self.player.state in (PLAYING, WAITING, PAUSED)):
+        if on_hud or self._send_hold is not None or (self._script is not None
+                                                     and self.player.state in (PLAYING, WAITING, PAUSED)):
             # Never cut off a listen in progress, nor a Send's / Cancel's hold (its Undo stays the whole
             # hold): ask about the new run when it ends (or on Done).
             logger.info("The %s briefing is due; asking about it after this reading", run)
             self._pending_run = run
             self._flash_note(self._pending_note(), sticky=True)
-            force_foreground(self.window)
+            if not on_hud:
+                force_foreground(self.window)
             return
         self._back_to_prompt(run, take_focus=True)
 
@@ -12606,6 +12794,8 @@ class AppController(QObject):
         self._live_feed.stop()
         if getattr(self, "meetings", None) is not None:
             self.meetings.shutdown()   # a recording stops and is saved; the pill goes
+        if getattr(self, "desktop", None) is not None:
+            self.desktop.shutdown()    # the HUD's windows go (the window itself is hidden below, never closed)
         if self._on_shutdown is not None:
             self._on_shutdown()
         flushed = self._flush_send_hold()   # before the worker stops: the owner already saw "Sent"
