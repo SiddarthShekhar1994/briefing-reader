@@ -21,7 +21,8 @@ Public API
     ``stopClicked``.
 ``RecPill``: Jarvis's own always-on-top pill "Recording 12:04" with Stop; a tool window that never takes the focus
     (the toast's flags) and stays while Jarvis is minimised or hidden. ``show_recording(text, warning="")``,
-    ``set_elapsed``, ``warning()``, ``dismiss()``, ``text()``; ``stopClicked``.
+    ``set_elapsed``, ``warning()``, ``dismiss()``, ``text()``; ``set_held(bool)`` / ``is_held()`` (hidden while the
+    desktop HUD shows REC as a chip of its own); ``stopClicked``.
 ``MeetingRowInfo`` / ``MeetingsStage``: the Meetings screen - Record a meeting, what is missing (exact add-ons and
     the model, with Download), the start card, then the meetings (date, title, length, status: Recording /
     Writing it down 40% / Transcript ready / Writing the summary / Summary ready / Failed + Retry) with Delete
@@ -540,6 +541,7 @@ class RecPill(QWidget):
         self.setFixedSize(PILL_SIZE)
         self._elapsed = "0:00"
         self._warning = ""
+        self._held = False
         self.stop_button = holo.HoloButton(STOP_TEXT, holo.DANGER_GHOST, size=holo.SIZE_SM, parent=self)
         self.stop_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)       # a click never moves the focus here
         self.stop_button.setAccessibleName("Stop recording")
@@ -564,15 +566,28 @@ class RecPill(QWidget):
         self.update()
 
     def show_recording(self, elapsed: str, warning: str = "") -> None:
-        """Show (or keep showing) the pill, top centre of the primary screen's work area, never the focus."""
+        """Show (or keep showing) the pill, top centre of the primary screen's work area, never the focus. Held
+        (``set_held``), it only keeps its time."""
         self.set_elapsed(elapsed)
         self.set_warning(warning)
+        if self._held:
+            return
         self.place()
         handle = self.windowHandle()
         if handle is not None:
             handle.setProperty("_q_showWithoutActivating", True)
         if not self.isVisible():
             self.show()
+
+    def set_held(self, held: bool) -> None:
+        """While the desktop HUD shows, its REC chip says this and the pill (where the HUD's bar is) stays hidden;
+        released, the next ``show_recording`` (each second while a meeting records) shows it again."""
+        self._held = bool(held)
+        if self._held:
+            self.hide()
+
+    def is_held(self) -> bool:
+        return self._held
 
     def set_elapsed(self, elapsed: str) -> None:
         if elapsed != self._elapsed:

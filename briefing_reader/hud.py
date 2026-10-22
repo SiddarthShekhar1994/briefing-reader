@@ -7447,6 +7447,7 @@ class _CommandField(QWidget):
     HOLO_GLYPH = 40
     HUD_HEIGHT = 44               # the desktop HUD's input row (Switch.dc.html .qrow)
     HUD_GLYPH = 16
+    HUD_SEND = 28                 # ... its send arrow, smaller than the hologram pill's (where DesktopB has the mic)
     _CUT = 8
 
     def __init__(self, line_edit: _CommandInput, parent: QWidget | None = None) -> None:
@@ -7490,7 +7491,8 @@ class _CommandField(QWidget):
 
     def set_hud(self, send_button: QWidget, trailing: QWidget | None) -> None:
         """The desktop HUD's flat row (after ``set_holo``): the chevron painted at the left, the input in the body
-        type, then ``trailing`` and ``send_button``; no pill (the HUD window paints the panel around it)."""
+        type, then ``trailing`` and ``send_button`` (HUD_SEND px); no pill (the HUD window paints the panel around
+        it)."""
         from . import holo
 
         self._hud = True
@@ -7501,6 +7503,7 @@ class _CommandField(QWidget):
         layout.setSpacing(10)
         if trailing is not None:
             layout.addWidget(trailing, 0, Qt.AlignmentFlag.AlignVCenter)
+        send_button.setFixedSize(self.HUD_SEND, self.HUD_SEND)
         layout.addWidget(send_button, 0, Qt.AlignmentFlag.AlignVCenter)
         self.line_edit.setFont(holo.font("body"))
         self.update()
@@ -7573,7 +7576,8 @@ class _CommandField(QWidget):
 
 class _SendButton(QAbstractButton):
     """The hologram bar's 40 px round send arrow: ``field``-tinted until there is text, then the cyan
-    go; while a request runs, a stop glyph (a filled 10 px square)."""
+    go; while a request runs, a stop glyph (a filled 10 px square). The desktop HUD's row makes it 28 px
+    (smaller glyphs)."""
 
     SIZE = 40
 
@@ -7628,13 +7632,14 @@ class _SendButton(QAbstractButton):
                 painter.setOpacity(0.45)
             painter.drawEllipse(rect)
             ink = QColor(holo.HOLO_INK) if hot else QColor(holo.INK_4)
+            small = self.width() < self.SIZE          # the desktop HUD's 28 px arrow: smaller glyphs
             if self._stop:
-                square = QRectF(0, 0, 10, 10)
+                square = QRectF(0, 0, 8 if small else 10, 8 if small else 10)
                 square.moveCenter(rect.center())
                 painter.setBrush(ink)
                 painter.drawRoundedRect(square, 1.5, 1.5)
             else:
-                box = QRectF(0, 0, 18, 18)
+                box = QRectF(0, 0, 14 if small else 18, 14 if small else 18)
                 box.moveCenter(rect.center())
                 holo.paint_icon(painter, box, "send_arrow", ink, stroke=2.0)
             if self._focus_ring and self.hasFocus():
@@ -7703,7 +7708,6 @@ class CommandBar(QWidget):
         self._hint = False           # the status is only the idle hint: it may fold away
         self._holo = False           # the hologram pill (set_holo): no meta line, only what needs the owner
         self._hud = False            # the desktop HUD's row (set_hud): no status line either
-        self._hud_trailing: QWidget | None = None
         self._typing = False
         self.input = _CommandInput()
         self.field = _CommandField(self.input)
@@ -7790,15 +7794,15 @@ class CommandBar(QWidget):
     def set_hud(self, trailing: QWidget | None = None) -> None:
         """The desktop HUD's bar (SPEC 8.1; Switch.dc.html .qrow): the hologram behaviour (``set_holo``) in one flat
         44 px row - no pill (the HUD window paints the panel), the chevron, the input in the body type, then
-        ``trailing`` (the HUD key's keycaps) while the field is empty and nothing runs, else the send arrow (the
-        stop glyph while a request runs). The status, meta and link lines never show: the HUD's caption line says
-        what ``statusChanged`` says. Nothing in the row takes the keyboard by itself: the input only on a click
-        (or when the HUD gives it the keyboard), the send arrow and the link never."""
+        ``trailing`` (the HUD key's keycaps; DesktopB keeps them while typing) and, while there is text or a request
+        runs, a 28 px send arrow where DesktopB has its mic (the stop glyph while a request runs). The status, meta
+        and link lines never show: the HUD's caption line says what ``statusChanged`` says. Nothing in the row
+        takes the keyboard by itself: the input only on a click (or when the HUD gives it the keyboard), the send
+        arrow and the link never."""
         if self._hud:
             return
         self.set_holo(True)
         self._hud = True
-        self._hud_trailing = trailing
         self.field.set_hud(self.send_button, trailing)
         self.input.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         for widget in (self.send_button, self.link_button, self.button):
@@ -7814,10 +7818,7 @@ class CommandBar(QWidget):
         self.send_button.setToolTip("Stop planning; nothing is proposed (Esc)" if self._running
                                     else "Plan this request (Enter)")
         if self._hud:
-            busy = bool(self.input.text()) or self._running
-            self.send_button.setVisible(busy)
-            if self._hud_trailing is not None:
-                self._hud_trailing.setVisible(not busy)
+            self.send_button.setVisible(bool(self.input.text()) or self._running)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
         if watched is self.input and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):

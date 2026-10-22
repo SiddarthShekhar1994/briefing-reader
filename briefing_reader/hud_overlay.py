@@ -12,12 +12,13 @@ above 0 catches clicks): the glows live in the DecorLayer.
     The orb (``OrbWidget(ORB_PX)``: the compact level of detail in a 104 px widget, no ground, never resized per
     frame) over the left end of the command bar, a 760 px bar centred in the work area 16 px from its top
     (Switch.dc.html ``.hud``): the 44 px input row (a second ``hud.CommandBar`` in its HUD look: the chevron, "Ask
-    Jarvis", the HUD key's keycaps), Jarvis's caption line with the orb's state word, a hairline and "Bring Jarvis
-    back"; under the bar the chips: "Briefing ready" (cyan), "N need your OK" (amber; ui.needs_ok_chip's words) and
-    REC with a coral dot and the time. ``place_on(screen)`` / ``place_in(area)``; ``set_caption(text)``;
-    ``set_look(base, muted=, offline=)`` (the orb and the state word); ``set_briefing_ready(bool)``,
-    ``set_pending(count)``, ``set_recording(elapsed, warning="")``; ``chip_texts()``; ``bar_rect()``,
-    ``orb_center()`` (global). Signals ``bringBackClicked()`` and ``chipClicked(key)`` (``CHIP_BRIEFING``,
+    Jarvis", the HUD key's keycaps - none while no key can work), Jarvis's caption line with the orb's state word, a
+    hairline and "Bring Jarvis back"; under the bar the chips: "Briefing ready" (cyan), "N need your OK" (amber;
+    ui.needs_ok_chip's words) and REC with a coral dot and the time. ``place_on(screen)`` / ``place_in(area)``,
+    ``area()``; ``set_caption(text)``; ``set_look(base, muted=, offline=)`` (the orb and the state word);
+    ``set_briefing_ready(bool)``, ``set_pending(count)``, ``set_recording(elapsed, warning="")``; ``chip_texts()``;
+    ``bar_rect()``, ``orb_center()``, ``occupied_rect()`` (global); ``cut_texts()`` (words cut or crowded: none at
+    the sizes it is built for). Signals ``bringBackClicked()`` and ``chipClicked(key)`` (``CHIP_BRIEFING``,
     ``CHIP_APPROVALS``, ``CHIP_REC``); the bar's own signals are on ``bar``. The bar's status (an answer, a question,
     a problem, what Jarvis is doing) shows in the caption line without its technical readouts. While idle the window
     keeps ``WindowDoesNotAcceptFocus``: the input takes the keyboard only after the HUD key or a click (a later part).
@@ -27,8 +28,9 @@ above 0 catches clicks): the glows live in the DecorLayer.
     A result floating beside the thing it is about (DesktopB ``.glass``): the kicker with its dot, the title, a meta
     line, a row of buttons (NoFocus; a click emits ``buttonClicked(key)``) with a mono tag at its right ("2 OTHER
     MATCHES") and a note. ``set_content(CardContent)``; tones ``TONE_CYAN`` (Jarvis points at something),
-    ``TONE_AMBER`` (a decision waits), ``TONE_DONE``. ``place_beside(target, area=None)`` puts it beside a global
-    rect, never over it, kept inside the work area (ui._keep_on_screen's rule).
+    ``TONE_AMBER`` (a decision waits), ``TONE_DONE``. ``place_beside(target, area=None, avoid=())`` puts it beside a
+    global rect, never over it and clear of ``avoid`` (the HUD), kept inside the work area (ui._keep_on_screen's
+    rule); ``cut_texts()``.
 
 ``DecorLayer``
     One per QScreen, sized to its geometry, also ``WindowTransparentForInput``: the cyan or amber brackets (all four
@@ -37,13 +39,15 @@ above 0 catches clicks): the glows live in the DecorLayer.
     Static: it repaints only when its items change and has no timer; with nothing to draw it stays hidden.
 
 ``HudOverlay``
-    The set: the HUD window, the cards and one DecorLayer per screen (screens coming and going follow).
-    ``show_on(screen)`` / ``hide()`` / ``is_shown()``; ``new_card()``, ``show_card(card, target)``,
-    ``remove_card(card)``, ``cards()``; ``set_decor(brackets, tethers, glow=False)``; ``layers()``; ``windows()``;
-    ``set_neighbours(toast=, rec_pill=)`` and ``restack()``: bottom to top the DecorLayers, the cards, the HUD window,
-    then the meetings RecPill and the Toast when they show (the recording sign and Jarvis's toast are never under
-    the HUD); ``stack_order()``; ``shutdown()``. ``create(config, native=None)`` is None while [desktop] is off: no
-    HUD window then exists at all.
+    The set: the HUD window, the cards and one DecorLayer per screen (screens coming and going follow; a work area
+    that changes moves the HUD with it). ``show_on(screen)`` (``screen_for(window)``: the screen the Jarvis window is
+    on) / ``hide()`` / ``is_shown()`` / ``hud_screen()``; ``new_card()``, ``show_card(card, target)`` (clear of the
+    bar and the chips), ``remove_card(card)``, ``cards()``; ``set_decor(brackets, tethers, glow=False)``;
+    ``layers()``; ``windows()``; ``set_neighbours(toast=, rec_pill=)`` and ``restack()``: bottom to top the
+    DecorLayers, the RecPill, the cards, the Toast, the HUD window - nothing of Jarvis's is ever over the bar; while
+    the HUD shows, the meetings RecPill (top centre, where the bar is) is held hidden (``RecPill.set_held``: REC is
+    a chip here) and it comes back when the HUD hides; ``stack_order()``; ``shutdown()``. ``create(config,
+    native=None)`` is None while [desktop] is off: no HUD window then exists at all.
 
 Capture and stacking go through a small seam, ``HudNative`` (``exclude_from_capture(hwnd)``: SetWindowDisplayAffinity
 WDA_EXCLUDEFROMCAPTURE on every HUD window when [desktop] hide_from_capture is on, once per native window;
@@ -77,7 +81,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QWidget
 
-from . import holo, hud, offer_view
+from . import holo, hud, offer_view, settings_view
 from . import orb as orb_mod
 from .desktop import backend as desktop_backend
 from .hotkey import describe_combo
@@ -107,7 +111,7 @@ CHIP_GAP = 10                               # under the bar, and between chips
 CHIP_HEIGHT = 36
 SCREEN_MARGIN = 16                          # the least room beside the HUD on a narrow screen
 WINDOW_HEIGHT = BAR_TOP + BAR_HEIGHT + CHIP_GAP + CHIP_HEIGHT + 2
-BACK_GAP = 12                               # around the hairline before "Bring Jarvis back"
+BACK_GAP = 12                               # around the hairline before "Bring Jarvis back" (.back's margins)
 _ORB_DISC = 62.2                            # the dark disc's gradient radius (CSS farthest-corner of an 88 px box)
 _BAR_LINE = holo.alpha(holo.HOLO, 0.38)
 _BAR_HAIRLINE = holo.alpha(holo.HOLO, 0.16)
@@ -134,6 +138,7 @@ CARD_WIDTH = 400
 CARD_RADIUS = 12
 CARD_PAD = (16, 18)            # vertical, horizontal
 CARD_GAP = 24                  # between the card and the thing it is about
+CARD_MARGIN = 16               # the least room between a card and the work area's edge (when there is room)
 CARD_BRACKET = 14
 _CARD_LOOKS = {   # fill, border
     TONE_CYAN: (holo.TILE, holo.alpha(holo.HOLO, 0.38)),
@@ -173,6 +178,16 @@ def screen_area(point: QPoint) -> QRect:
     """The work area of the screen at ``point`` (the primary screen's when none is there)."""
     screen = QGuiApplication.screenAt(point) or QGuiApplication.primaryScreen()
     return screen.availableGeometry() if screen is not None else QRect()
+
+
+def screen_for(widget: QWidget | None) -> QScreen | None:
+    """The screen ``widget`` (the Jarvis window) is on - the one under its centre, else its own - or the primary
+    screen; the HUD shows there (``HudOverlay.show_on``). A hidden window still has its last place."""
+    if widget is not None and shiboken6.isValid(widget):
+        screen = QGuiApplication.screenAt(widget.frameGeometry().center()) or widget.screen()
+        if screen is not None:
+            return screen
+    return QGuiApplication.primaryScreen()
 
 # --------------------------------------------------------------------------
 # The OS seam: capture exclusion and stacking
@@ -264,7 +279,8 @@ class _OverlayWindow(QWidget):
         self.show()
 
     def excluded_from_capture(self) -> bool:
-        return bool(self._excluded) and self._excluded == int(self.winId())
+        """True while this window's native window is left out of capture (never creates a native window)."""
+        return bool(self._excluded) and self._excluded == int(self.internalWinId())
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
@@ -375,6 +391,13 @@ class _CaptionLine(QWidget):
     def word(self) -> str:
         return self._word
 
+    def shown_text(self) -> str:
+        """The text as painted: cut with an ellipsis when the line is too short for it."""
+        return QFontMetricsF(self._font).elidedText(self.text(), Qt.TextElideMode.ElideRight, self._room())
+
+    def _room(self) -> float:
+        return max(0.0, self.word_rect().left() - 7 - 3.5 - 6 - 14)
+
     def _color(self) -> QColor:
         if not self._status:
             return QColor(holo.INK_1)
@@ -387,7 +410,8 @@ class _CaptionLine(QWidget):
         self.setAccessibleDescription(text)
         self.update()
 
-    def _word_rect(self) -> QRectF:
+    def word_rect(self) -> QRectF:
+        """Where the state word is painted (at the line's right end)."""
         width = QFontMetricsF(self._word_font).horizontalAdvance(self._word) + 2
         return QRectF(self.width() - width, 0, width, self.height())
 
@@ -396,7 +420,7 @@ class _CaptionLine(QWidget):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            word = self._word_rect()
+            word = self.word_rect()
             dot = QPointF(word.left() - 7 - 3.5, self.height() / 2)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(holo.alpha(self._dot, 0.22))
@@ -406,11 +430,9 @@ class _CaptionLine(QWidget):
             painter.setFont(self._word_font)
             painter.setPen(QColor(holo.INK_3))
             painter.drawText(word, align, self._word)
-            room = max(0.0, dot.x() - 6 - 14)
             painter.setFont(self._font)
             painter.setPen(self._color())
-            text = QFontMetricsF(self._font).elidedText(self.text(), Qt.TextElideMode.ElideRight, room)
-            painter.drawText(QRectF(0, 0, room, self.height()), align, text)
+            painter.drawText(QRectF(0, 0, self._room(), self.height()), align, self.shown_text())
         finally:
             painter.end()
 
@@ -448,11 +470,20 @@ class HudChip(QAbstractButton):
         self.update()
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        width = self.PAD + 7 + 8 + QFontMetricsF(self._font).horizontalAdvance(self.text()) + 8 + 14 + self.PAD
+        width = self._chrome() + QFontMetricsF(self._font).horizontalAdvance(self.text())
         return QSize(math.ceil(width), CHIP_HEIGHT)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return self.sizeHint()
+
+    def _chrome(self) -> float:
+        """Everything but the words: the padding, the dot and the chevron with their gaps."""
+        return self.PAD + 7 + 8 + 8 + 14 + self.PAD
+
+    def shown_text(self) -> str:
+        """The words as painted: cut with an ellipsis only when the chip is narrower than its words."""
+        room = max(0.0, self.width() - self._chrome())
+        return QFontMetricsF(self._font).elidedText(self.text(), Qt.TextElideMode.ElideRight, room + 0.5)
 
     def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().enterEvent(event)
@@ -481,13 +512,77 @@ class HudChip(QAbstractButton):
             painter.setBrush(QColor(dot))
             painter.drawEllipse(center, 3.5, 3.5)
             x = self.PAD + 7 + 8
+            text = self.shown_text()
             painter.setFont(self._font)
             painter.setPen(QColor(ink))
-            width = QFontMetricsF(self._font).horizontalAdvance(self.text())
+            width = QFontMetricsF(self._font).horizontalAdvance(text)
             painter.drawText(QRectF(x, 0, width + 2, self.height()),
-                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.text())
+                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
             holo.paint_icon(painter, QRectF(x + width + 8, rect.center().y() - 7, 14, 14), "chevron",
                             QColor(chevron), stroke=2.0)
+        finally:
+            painter.end()
+
+
+class _BackButton(QAbstractButton):
+    """"Bring Jarvis back" at the bar's right end (Switch.dc.html .back): 38 high, radius 10, the window glyph and
+    Sora 13 on a faint cyan fill, brighter on hover and pressed. NoFocus: a click never moves the focus."""
+
+    HEIGHT = 38
+    PAD = 14
+    ICON = 17
+    GAP = 8
+    RADIUS = 10
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._hover = False
+        self._font = hud.body_font(13, 500)
+        self.setText(text)
+        self.setAccessibleName(text)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = self.PAD + self.ICON + self.GAP + QFontMetricsF(self._font).horizontalAdvance(self.text()) + self.PAD
+        return QSize(math.ceil(width), self.HEIGHT)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self.sizeHint()
+
+    def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().enterEvent(event)
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().leaveEvent(event)
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        if self.isDown():
+            fill, border = holo.alpha(holo.HOLO, 0.28), QColor(holo.HOLO_HI)
+        elif self._hover:
+            fill, border = holo.alpha(holo.HOLO, 0.16), QColor(holo.HOLO)
+        else:
+            fill, border = holo.alpha(holo.HOLO, 0.08), holo.alpha(holo.HOLO, 0.45)
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            painter.setPen(QPen(border, 1.0))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
+            ink = QColor(holo.INK_1)
+            box = QRectF(self.PAD, (self.height() - self.ICON) / 2, self.ICON, self.ICON)
+            holo.paint_icon(painter, box, "window", ink, stroke=1.7)
+            painter.setFont(self._font)
+            painter.setPen(ink)
+            x = self.PAD + self.ICON + self.GAP
+            painter.drawText(QRectF(x, 0, self.width() - x, self.height()),
+                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.text())
         finally:
             painter.end()
 
@@ -504,20 +599,22 @@ class HudWindow(_OverlayWindow):
         self.setWindowTitle("Jarvis")
         self.setAccessibleName("Jarvis on your desktop")
         self._bar_width = BAR_WIDTH
+        self._area = QRect()                                # the work area it was placed in (none yet)
         self._hairline_x = 0
+        self._layout_key: tuple | None = None
         self._background: QPixmap | None = None
         self._background_key: tuple | None = None
         self._pending = 0
         self._recording = ""
         self._warning = ""
         self.orb = orb_mod.OrbWidget(ORB_PX, self)          # no ground: the window is translucent
-        self.keycaps = _KeyCaps(hud_key)
+        self.keycaps = _KeyCaps(hud_key, self)
         self.bar = hud.CommandBar(self)
-        self.bar.set_hud(self.keycaps)
+        # The keycaps say the HUD key only while one can work (settings_view.effective_hud_key); none, none shown.
+        self.bar.set_hud(self.keycaps if self.keycaps.keys() else None)
+        self.keycaps.setVisible(bool(self.keycaps.keys()))
         self.caption = _CaptionLine(self)
-        self.back_button = holo.HoloButton(BRING_BACK_TEXT, holo.GHOST, icon="window", parent=self)
-        self.back_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)     # a click never moves the focus here
-        self.back_button.setAccessibleName(BRING_BACK_TEXT)
+        self.back_button = _BackButton(BRING_BACK_TEXT, self)
         self.back_button.clicked.connect(self.bringBackClicked)
         self.chips: dict[str, HudChip] = {}
         for key in CHIP_KEYS:
@@ -541,13 +638,18 @@ class HudWindow(_OverlayWindow):
 
     def place_in(self, area: QRect) -> None:
         """The bar centred in ``area``, BAR_TOP below its top; narrower on a small screen, the orb kept inside."""
-        room = area.width() - 2 * SCREEN_MARGIN - ORB_LEFT - RIGHT_MARGIN
+        self._area = QRect(area)
+        room = area.width() - 2 * (ORB_LEFT + SCREEN_MARGIN)       # the orb's room on both sides keeps it centred
         self._bar_width = max(MIN_BAR_WIDTH, min(BAR_WIDTH, room))
-        width = ORB_LEFT + self._bar_width + RIGHT_MARGIN
         bar_left = area.x() + (area.width() - self._bar_width) // 2
-        left = max(area.x(), min(bar_left - ORB_LEFT, area.x() + area.width() - width))
-        self.setGeometry(left, area.y(), width, WINDOW_HEIGHT)
+        left = max(area.x(), min(bar_left - ORB_LEFT, area.x() + area.width() - ORB_LEFT - self._bar_width
+                                 - RIGHT_MARGIN))
+        self.setGeometry(left, area.y(), self._wanted_width(left), WINDOW_HEIGHT)
         self._layout()
+
+    def area(self) -> QRect:
+        """The work area the HUD was placed in (empty before ``place_on`` / ``place_in``)."""
+        return QRect(self._area)
 
     def bar_rect_local(self) -> QRect:
         return QRect(ORB_LEFT, BAR_TOP, self._bar_width, BAR_HEIGHT)
@@ -560,20 +662,45 @@ class HudWindow(_OverlayWindow):
         """The orb's centre in global coordinates."""
         return self.geometry().topLeft() + QPoint(ORB_LEFT - 2, BAR_TOP + ORB_DROP)
 
+    def occupied_rect(self) -> QRect:
+        """What the window paints, in global coordinates: the orb, the bar and the chips shown (a card keeps out of
+        it; nothing else of Jarvis's is ever over it)."""
+        rect = self.bar_rect_local().united(self.orb.geometry())
+        for chip in self.chips.values():
+            if not chip.isHidden():
+                rect = rect.united(chip.geometry())
+        return rect.translated(self.geometry().topLeft())
+
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         self._layout()
 
+    def _chips_width(self) -> int:
+        hints = [chip.sizeHint().width() for chip in self.chips.values() if not chip.isHidden()]
+        return sum(hints) + CHIP_GAP * max(0, len(hints) - 1)
+
+    def _wanted_width(self, left: int | None = None) -> int:
+        """The window's width: the orb and the bar, wider to the right when the chips need it (as far as the work
+        area goes)."""
+        base = ORB_LEFT + self._bar_width + RIGHT_MARGIN
+        wanted = max(base, ORB_LEFT + ORB_PAD + self._chips_width() + RIGHT_MARGIN)
+        if wanted > base and self._area.isValid():
+            x = self.x() if left is None else left
+            wanted = max(base, min(wanted, self._area.x() + self._area.width() - x))
+        return wanted
+
     def _layout(self) -> None:
+        width = self._wanted_width()
+        if width != self.width():
+            self.resize(width, WINDOW_HEIGHT)
         bar = self.bar_rect_local()
         center = QPoint(ORB_LEFT - 2, BAR_TOP + ORB_DROP)
         self.orb.move(center.x() - self.orb.width() // 2, center.y() - self.orb.height() // 2)
         back = self.back_button.sizeHint()
-        margin = holo.HoloButton.MARGIN
-        back_x = bar.x() + bar.width() - BACK_GAP - back.width() + margin
+        back_x = bar.x() + bar.width() - 1 - BACK_GAP - back.width()       # inside the bar's 1 px border
         self.back_button.setGeometry(back_x, bar.y() + (bar.height() - back.height()) // 2, back.width(),
                                      back.height())
-        self._hairline_x = back_x + margin - BACK_GAP
+        self._hairline_x = back_x - BACK_GAP - 1
         left = bar.x() + ORB_PAD
         width = max(0, self._hairline_x - SIDE_PAD - left)
         self.bar.setGeometry(left, bar.y() + 1, width, ROW_HEIGHT)
@@ -583,10 +710,37 @@ class HudWindow(_OverlayWindow):
             if chip.isHidden():
                 continue
             hint = chip.sizeHint()
-            chip.setGeometry(x, y, hint.width(), CHIP_HEIGHT)
+            room = max(0, self.width() - RIGHT_MARGIN - x)
+            chip.setGeometry(x, y, min(hint.width(), room), CHIP_HEIGHT)     # cut (never past the window)
             x += hint.width() + CHIP_GAP
-        self._background = None
-        self.update()
+        key = (self.width(), self.height(), self._bar_width, self._hairline_x)
+        if key != self._layout_key:       # the panel moved: repaint it (a chip's change repaints only the chips)
+            self._layout_key = key
+            self.update()
+
+    def cut_texts(self) -> list[str]:
+        """The words this window cuts or crowds now (none at the sizes it is built for; tests and the harness)."""
+        cut: list[str] = []
+        line_edit = self.bar.input
+        if not line_edit.text():
+            needed = QFontMetricsF(line_edit.font()).horizontalAdvance(line_edit.placeholderText())
+            if needed > line_edit.width() - 4:
+                cut.append("placeholder")
+        if self.keycaps.keys() and (self.keycaps.width() < self.keycaps.sizeHint().width()
+                                    or self.keycaps.geometry().right() >= self.bar.field.width()):
+            cut.append("keycaps")
+        if self.caption.shown_text() != self.caption.text():
+            cut.append("caption")
+        if self.caption.word_rect().left() < 0:
+            cut.append("state word")
+        bar = self.bar_rect_local()
+        back = self.back_button.geometry()
+        if back.width() < self.back_button.sizeHint().width() or back.left() < bar.left() + ORB_PAD:
+            cut.append("back")
+        for key, chip in self.chips.items():
+            if not chip.isHidden() and (chip.shown_text() != chip.text() or chip.geometry().right() >= self.width()):
+                cut.append(f"chip {key}")
+        return cut
 
     # ---- what it shows ---------------------------------------------------------------------
 
@@ -713,6 +867,13 @@ class HudWindow(_OverlayWindow):
 # --------------------------------------------------------------------------
 
 
+def _whole(text: str, lines: Sequence[str], font: Any, width: float) -> bool:
+    """True when ``lines`` (offer_view.wrap_lines' result) hold all of ``text`` and none is wider than ``width``."""
+    metrics = QFontMetricsF(font)
+    return " ".join(lines) == " ".join(str(text or "").split()) and all(
+        metrics.horizontalAdvance(line) <= width + 0.5 for line in lines)
+
+
 @dataclass(frozen=True)
 class CardButton:
     key: str
@@ -722,7 +883,7 @@ class CardButton:
 
 @dataclass(frozen=True)
 class CardContent:
-    kicker: str                        # "FILE · WORD DOCUMENT"
+    kicker: str                        # "FILE <middle dot> WORD DOCUMENT"
     title: str
     meta: str = ""                     # where it is, when it changed
     buttons: tuple[CardButton, ...] = ()
@@ -749,7 +910,7 @@ class ResultCard(_OverlayWindow):
         self._buttons: dict[str, holo.HoloButton] = {}
         self._title_font = hud.body_font(18, 500)
         self._meta_font = hud.body_font(13)
-        self._kicker_font = holo.font("label")
+        self._kicker_font = hud.mono_font(10, 500, 0.22)           # DesktopB .kick
         self._tag_font = hud.mono_font(10, 500, 0.2)
         self._rows: dict[str, QRectF] = {}
         self.setFixedSize(CARD_WIDTH, 120)
@@ -824,28 +985,58 @@ class ResultCard(_OverlayWindow):
         """A row's rect ("kicker", "title", "meta", "buttons", "note"); empty when it is not shown."""
         return QRectF(self._rows.get(name, QRectF()))
 
-    def place_beside(self, target: QRect, area: QRect | None = None) -> QRect:
+    def place_beside(self, target: QRect, area: QRect | None = None, avoid: Sequence[QRect] = ()) -> QRect:
         """Beside ``target`` (global): right of it, else left, above, below - inside ``area`` (the work area of the
-        target's screen by default) and never over it; when nothing fits, the right side kept on screen."""
+        target's screen by default), never over the target and clear of ``avoid`` (the HUD: its bar and chips);
+        when nothing fits, the right side kept on screen and below the HUD."""
         area = QRect(area) if area is not None else screen_area(target.center())
+        avoid = [QRect(rect) for rect in avoid if rect.isValid()]
         size = self.size()
         w, h = size.width(), size.height()
+        if area.width() >= w + 2 * CARD_MARGIN and area.height() >= h + 2 * CARD_MARGIN:
+            area = area.adjusted(CARD_MARGIN, CARD_MARGIN, -CARD_MARGIN, -CARD_MARGIN)
 
         def clamp(value: int, low: int, high: int) -> int:
             return max(low, min(value, high))
 
-        top = clamp(target.top(), area.top(), area.bottom() + 1 - h)
+        tops = [clamp(target.top(), area.top(), area.bottom() + 1 - h)]
+        tops += [clamp(rect.bottom() + 1 + CARD_GAP, area.top(), area.bottom() + 1 - h) for rect in avoid]
         left = clamp(target.left(), area.left(), area.right() + 1 - w)
-        candidates = [QRect(target.right() + 1 + CARD_GAP, top, w, h),
-                      QRect(target.left() - CARD_GAP - w, top, w, h),
-                      QRect(left, target.top() - CARD_GAP - h, w, h),
-                      QRect(left, target.bottom() + 1 + CARD_GAP, w, h)]
-        chosen = next((rect for rect in candidates if area.contains(rect) and not rect.intersects(target)), None)
+        candidates = [QRect(target.right() + 1 + CARD_GAP, top, w, h) for top in tops]
+        candidates += [QRect(target.left() - CARD_GAP - w, top, w, h) for top in tops]
+        candidates += [QRect(left, target.top() - CARD_GAP - h, w, h), QRect(left, target.bottom() + 1 + CARD_GAP, w, h)]
+        chosen = next((rect for rect in candidates if area.contains(rect) and not rect.intersects(target)
+                       and not any(rect.intersects(other) for other in avoid)), None)
         if chosen is None:
             first = candidates[0]
             chosen = QRect(clamp(first.x(), area.left(), area.right() + 1 - w), first.y(), w, h)
+            for other in avoid:
+                if chosen.intersects(other):
+                    chosen.moveTop(clamp(other.bottom() + 1 + CARD_GAP, area.top(), area.bottom() + 1 - h))
         self.move(chosen.topLeft())
         return chosen
+
+    def cut_texts(self) -> list[str]:
+        """The words this card cuts or crowds now: an ellipsis in a row, or the buttons running into the tag (none
+        for the results it is built for; tests and the harness)."""
+        content = self._content
+        inner = CARD_WIDTH - 2 * CARD_PAD[1]
+        cut: list[str] = []
+        kicker = QFontMetricsF(self._kicker_font).horizontalAdvance(content.kicker.upper())
+        if kicker > inner - 14:
+            cut.append("kicker")
+        for name, text, font, lines in (("title", content.title, self._title_font, self.TITLE_LINES),
+                                        ("meta", content.meta, self._meta_font, self.META_LINES),
+                                        ("note", content.note, self._meta_font, self.NOTE_LINES)):
+            if text and not _whole(text, self._wrap(text, font, lines), font, inner):
+                cut.append(name)
+        if self._buttons or content.tag:
+            right = max((button.geometry().right() - holo.HoloButton.MARGIN for button in self._buttons.values()),
+                        default=CARD_PAD[1])
+            tag = QFontMetricsF(self._tag_font).horizontalAdvance(content.tag.upper()) if content.tag else 0.0
+            if right + (12 + tag if tag else 0) > CARD_WIDTH - CARD_PAD[1]:
+                cut.append("buttons")
+        return cut
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         content = self._content
@@ -916,7 +1107,7 @@ class Bracket:
 
     rect: QRect
     tone: str = TONE_CYAN
-    tag: str = ""                      # "Downloads · 8 items", "WORD"
+    tag: str = ""                      # "Downloads <middle dot> 8 items", "WORD"
     small: bool = False                # a field: 10 px legs and a faint fill
 
 
@@ -1087,11 +1278,13 @@ class HudOverlay(QObject):
         self._shown = False
         self._closed = False
         self._cards: list[ResultCard] = []
+        self._placed: list[ResultCard] = []             # the cards show_card placed: they show with the HUD
         self._layers: list[DecorLayer] = []
         self._decor: tuple[tuple[Bracket, ...], tuple[Tether, ...], bool] = ((), (), False)
         self._toast: QWidget | None = None
         self._rec_pill: QWidget | None = None
         self._stack: list[QWidget] = []
+        self._screen: QScreen | None = None            # the screen the HUD shows on
         self.hud = HudWindow(hud_key=hud_key, native=self._native, hide_from_capture=self._hide_from_capture)
         app = QGuiApplication.instance()
         if app is not None:
@@ -1131,43 +1324,69 @@ class HudOverlay(QObject):
             if layer is None:
                 layer = DecorLayer(screen, native=self._native, hide_from_capture=self._hide_from_capture)
                 screen.geometryChanged.connect(layer.sync_geometry)
+                screen.availableGeometryChanged.connect(self._on_area_changed)
                 self._layers.append(layer)
             else:
                 layer.sync_geometry()
+        if self._shown and not any(screen is self._screen for screen in screens):
+            self._place(None)                            # its screen went: the primary screen
         self._apply_decor()
+
+    def _on_area_changed(self, *_args: Any) -> None:
+        if self._shown and not self._closed:
+            self._place(self._screen)                    # the taskbar moved, or the screen changed size
+
+    def _place(self, screen: QScreen | None) -> None:
+        screen = screen if screen is not None and shiboken6.isValid(screen) else QGuiApplication.primaryScreen()
+        self._screen = screen
+        self.hud.place_on(screen)
+
+    def hud_screen(self) -> QScreen | None:
+        """The screen the HUD shows on (None before it first shows)."""
+        return self._screen
 
     # ---- showing ---------------------------------------------------------------------------
 
     def show_on(self, screen: QScreen | None = None) -> None:
-        """Place the HUD on ``screen`` (the one the Jarvis window is on) and show it, its decor and its cards -
-        without the focus, without raising anything; then the stacking order."""
-        self.hud.place_on(screen)
+        """Place the HUD on ``screen`` (the one the Jarvis window is on: ``screen_for(window)``; the primary screen
+        for None) and show it, its decor and its cards - without the focus, without raising anything. The meetings
+        RecPill is held hidden meanwhile (REC is a chip here); then the stacking order."""
+        self._place(screen)
         self._shown = True
+        self._hold(self._rec_pill, True)
         for layer in self._layers:
             if layer.has_decor():
                 layer.show_quietly()
         for card in self._cards:
-            card.show_quietly()
+            if card in self._placed:
+                card.show_quietly()
         self.hud.show_quietly()
         self.restack()
 
     def hide(self) -> None:
+        """Hide every HUD window; the RecPill may show again (at its next tick while a meeting records)."""
         self._shown = False
         for window in self.windows():
             window.hide()
         self._stack = []
+        self._hold(self._rec_pill, False)
 
     def is_shown(self) -> bool:
         return self._shown
 
     def new_card(self) -> ResultCard:
+        """A card of this HUD (hidden until ``show_card`` places it)."""
         card = ResultCard(native=self._native, hide_from_capture=self._hide_from_capture)
         self._cards.append(card)
         return card
 
     def show_card(self, card: ResultCard, target: QRect, area: QRect | None = None) -> QRect:
-        """Place ``card`` beside ``target`` (global) and show it while the HUD shows."""
-        rect = card.place_beside(target, area)
+        """Place ``card`` beside ``target`` (global), clear of the HUD's bar and chips, and show it while the HUD
+        shows (from now on it shows with the HUD)."""
+        avoid = [self.hud.occupied_rect()] if self._shown or self.hud.area().isValid() else []
+        rect = card.place_beside(target, area, avoid)
+        if card in self._cards and card not in self._placed:
+            self._placed.append(card)
         if self._shown:
             card.show_quietly()
             self.restack()
@@ -1176,6 +1395,8 @@ class HudOverlay(QObject):
     def remove_card(self, card: ResultCard) -> None:
         if card in self._cards:
             self._cards.remove(card)
+            if card in self._placed:
+                self._placed.remove(card)
             card.hide()
             card.deleteLater()
             self._stack = [window for window in self._stack if window is not card]
@@ -1204,22 +1425,50 @@ class HudOverlay(QObject):
     # ---- stacking --------------------------------------------------------------------------
 
     def set_neighbours(self, *, toast: QWidget | None = None, rec_pill: QWidget | None = None) -> None:
-        """Jarvis's other always-on-top windows: the Toast (bottom right) and the meetings RecPill (top centre)."""
+        """Jarvis's other always-on-top windows (any time; None for none): the Toast (states_view.Toast, bottom right
+        of the primary screen) and the meetings RecPill (meetings_view.RecPill, top centre - where the bar is).
+        While the HUD shows, the pill is held hidden (``set_held``; REC is a chip of the HUD's own) and ``restack``
+        keeps both off the bar."""
+        if self._rec_pill is not None and self._rec_pill is not rec_pill:
+            self._hold(self._rec_pill, False)
         self._toast, self._rec_pill = toast, rec_pill
+        if self._shown:
+            self._hold(rec_pill, True)
+            self.restack()
+
+    def neighbours(self) -> tuple[QWidget | None, QWidget | None]:
+        """(toast, rec_pill) as ``set_neighbours`` gave them (None once deleted)."""
+        return _alive(self._toast), _alive(self._rec_pill)
+
+    @staticmethod
+    def _hold(pill: QWidget | None, held: bool) -> None:
+        pill = _alive(pill)
+        if pill is None:
+            return
+        set_held = getattr(pill, "set_held", None)
+        if callable(set_held):
+            set_held(held)
+        elif held:
+            pill.hide()
 
     def stack_order(self) -> list[QWidget]:
         """Bottom to top, the windows ``restack`` put in order last."""
         return list(self._stack)
 
     def restack(self) -> None:
-        """Bottom to top: the DecorLayers, the cards, the HUD window, the RecPill, the Toast (those showing)."""
+        """Bottom to top, those showing: the DecorLayers; the RecPill (held hidden while the HUD shows; were it up,
+        never over a card or the bar); the cards; the Toast (bottom right: over a card it may cover, never near the
+        bar); the HUD window last, so nothing of Jarvis's is ever over the bar. Never a raise or an activation: the
+        native seam moves each to the top of the always-on-top band in this order (SWP_NOACTIVATE)."""
+        toast, pill = self.neighbours()
         order: list[QWidget] = [layer for layer in self._layers if layer.isVisible()]
+        if pill is not None and pill.isVisible():
+            order.append(pill)
         order += [card for card in self._cards if card.isVisible()]
+        if toast is not None and toast.isVisible():
+            order.append(toast)
         if self.hud.isVisible():
             order.append(self.hud)
-        for neighbour in (self._rec_pill, self._toast):
-            if neighbour is not None and shiboken6.isValid(neighbour) and neighbour.isVisible():
-                order.append(neighbour)
         self._stack = order
         if order:
             self._native.stack([int(window.winId()) for window in order])
@@ -1239,13 +1488,18 @@ class HudOverlay(QObject):
         self.hide()
         for window in self.windows():
             window.deleteLater()
-        self._cards, self._layers = [], []
+        self._cards, self._placed, self._layers = [], [], []
+
+
+def _alive(widget: QWidget | None) -> QWidget | None:
+    return widget if widget is not None and shiboken6.isValid(widget) else None
 
 
 def create(config: Any, *, native: HudNative | None = None) -> HudOverlay | None:
-    """The HUD's windows while [desktop] is on (hidden until shown); None while it is off - nothing is created."""
+    """The HUD's windows while [desktop] is on (hidden until shown); None while it is off - nothing is created. The
+    keycaps say the HUD key that can work (settings_view.effective_hud_key: none while [hotkey] is off)."""
     desktop = getattr(config, "desktop", None)
     if not getattr(desktop, "enabled", False):
         return None
-    key = str(getattr(desktop, "hud_key", "") or "")
-    return HudOverlay(hud_key=key, hide_from_capture=bool(getattr(desktop, "hide_from_capture", True)), native=native)
+    return HudOverlay(hud_key=settings_view.effective_hud_key(config),
+                      hide_from_capture=bool(getattr(desktop, "hide_from_capture", True)), native=native)
