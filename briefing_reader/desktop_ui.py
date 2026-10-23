@@ -1,5 +1,5 @@
-"""Jarvis on your desktop: the app's side of the HUD (SPEC sections 1, 8.2, 8.3 and 12; Phase 1, parts 4 and 5: the
-switch and its flight).
+"""Jarvis on your desktop: the app's side of the HUD (SPEC sections 1, 8.2, 8.3, 9 and 12; Phase 1, parts 4 to 6: the
+switch, its flight, the HUD key and the bar's keyboard).
 
 The AppController makes one ``DesktopController`` while [desktop] is on (none while it is off: no HUD window, no
 hook). It keeps the owner's rules:
@@ -22,9 +22,18 @@ hook). It keeps the owner's rules:
   slower; [ui] motion off, Windows' reduced motion, a window not shown (or minimised), the HUD on another screen or a
   flight that cannot be set up: the instant swap, and no flight window is made at all. One flight per switch: hidden
   and deleted as it ends, no timer left (hard rule 17: only the orb loops).
-* Only the owner starts it: the Dock's Desktop or the Find list's (``desktopRequested``); later the HUD key (P1.6)
-  and a desktop request typed in the window's bar (P1.7). Every entry passes THE CONSENT GATE (``consent_given``,
-  fail-closed), where P1.9 plugs in the first-run "Jarvis on your desktop" card.
+* Only the owner starts it: the Dock's Desktop or the Find list's (``desktopRequested``), the HUD key (the hotkey
+  agent's "desktop" message; AppController.handle_activation decides by SPEC 9's table) and later a desktop request
+  typed in the window's bar (P1.7). Every entry passes THE CONSENT GATE (``consent_given``, fail-closed), where P1.9
+  plugs in the first-run "Jarvis on your desktop" card.
+* The bar's keyboard (SPEC 8.3): ``take_keyboard()`` (the HUD key) gives the HUD's bar the keyboard - at once, or as
+  the HUD shows when the switch to it is on its way (hud_overlay.HudWindow.take_keyboard: the window that had it is
+  remembered and gets it back after Enter or Esc in an empty bar); ``has_keyboard()`` says whether it has it (the next
+  HUD key then goes back to the window). Going back to the window lets it go first - the window takes it on the
+  owner's click - and closing gives it back to the window that had it. ``bar()``: the HUD's bar, which Ask is bound to
+  while the HUD shows (the app's ``AskController.set_bar``).
+* ``in_control()``: Phase 3's control session (none yet: never). Meanwhile both keys are ignored and nothing leaves
+  the HUD - Esc or Stop first.
 * While the HUD shows - and while either switch flies - nothing of Jarvis's comes forward by itself (hard rule 13):
   the window's set_tab only records the screen (ReadingView.hold_screens; the latest one wins when the window comes
   back), the window comes back only on the owner's own click or key - Bring Jarvis back, a chip, the tray's Bring
@@ -136,6 +145,7 @@ class DesktopController(QObject):
         self._flight_screen: Any = None
         self._flight_clock = flight_clock or time.monotonic
         self._left_frame: QPixmap | None = None              # the window's frame as it left: the way back's fallback
+        self._keyboard_wanted = False                        # the HUD key on the way in: the bar takes it as it shows
         self.reading.desktopRequested.connect(self.enter_hud)
         self.reading.glanceChanged.connect(self.sync_glance)
         hud = overlay.hud
@@ -181,6 +191,42 @@ class DesktopController(QObject):
 
     def quitting(self) -> bool:
         return self._quitting
+
+    def in_control(self) -> bool:
+        """Jarvis is in control of an app (Phase 3: the amber pill, Esc or Stop to end it). Meanwhile the window key and
+        the HUD key are ignored and nothing leaves the HUD (SPEC 1, 9). Phase 3's control session answers here; until
+        then never."""
+        return False
+
+    # ---- the bar's keyboard (SPEC 8.3, 9) --------------------------------------------------------------
+
+    def bar(self) -> Any:
+        """The HUD's command bar (the app binds Ask to it while the HUD shows)."""
+        return self.overlay.hud.bar
+
+    def take_keyboard(self) -> bool:
+        """The HUD key: the HUD's bar takes the keyboard (hud_overlay.HudWindow.take_keyboard) - at once while the HUD
+        shows, or as soon as it shows when the switch to it is on its way. False when not on the HUD, on the way back,
+        in control, shut or quitting."""
+        if self._shut or self._quitting or not self._hud or self.in_control():
+            return False
+        if self.overlay.is_shown():
+            return self.overlay.hud.take_keyboard("key")
+        flight = self._flight
+        if self._switching and flight is not None and flight.direction() == alive.TO_HUD:
+            self._keyboard_wanted = True
+            return True
+        return False
+
+    def has_keyboard(self) -> bool:
+        """The HUD's bar has the keyboard (the next HUD key goes back to the window)."""
+        return self._hud and self.overlay.is_shown() and self.overlay.hud.holds_keyboard()
+
+    def _keyboard_on_show(self) -> None:
+        """The HUD's windows have just shown: a HUD key pressed on the way in gives the bar the keyboard now."""
+        if self._keyboard_wanted:
+            self._keyboard_wanted = False
+            self.overlay.hud.take_keyboard("key")
 
     # ---- THE CONSENT GATE (P1.9 plugs in here) -----------------------------------------------------
 
@@ -244,15 +290,20 @@ class DesktopController(QObject):
         return True
 
     def leave_hud(self, screen: int | None = None) -> bool:
-        """Back to the window - Bring Jarvis back, a chip, the tray's item, the toast's click, the window key (SPEC 9's
-        HUD row; the rest of that table is P1.6): the HUD hides and the window comes back on ``screen`` (a chip's),
-        else on the screen an automatic change asked for while on the HUD, else Home - brought forward on that
-        click, never with a synthetic Alt, once it shows at the end of the flight. Not a restore: no greeting, no
-        start-up. False when not on the HUD, during a switch, or while the application quits (nothing comes forward
-        then). (Phase 3: never while Jarvis is in control - Stop first.)"""
+        """Back to the window - Bring Jarvis back, a chip, the tray's item, the toast's click, the window key or the HUD
+        key while the bar has the keyboard (SPEC 9): the bar lets the keyboard go, the HUD hides and the window comes
+        back on ``screen`` (a chip's), else on the screen an automatic change asked for while on the HUD, else Home -
+        brought forward on that click or key, never with a synthetic Alt, once it shows at the end of the flight. Not
+        a restore: no greeting, no start-up. False when not on the HUD, during a switch, while the application quits
+        (nothing comes forward then) or while Jarvis is in control (``in_control``: Esc or Stop first)."""
         if self._shut or self._quitting or not self._hud or self._switching:
             return False
+        if self.in_control():
+            logger.info("Desktop: Jarvis is in control; the window waits (Esc or Stop first)")
+            return False
         target = self.return_screen() if screen is None else int(screen)
+        self._keyboard_wanted = False
+        self.overlay.hud.give_back_keyboard(False, "back to the window")    # the window takes it, on the owner's click
         self._switching = True
         flying = False
         try:
@@ -440,6 +491,7 @@ class DesktopController(QObject):
             self.window.hide()
         self.overlay.show_on(self._flight_screen)
         logger.info("Desktop: on the HUD")
+        self._keyboard_on_show()
 
     def _window_back(self) -> None:
         """Back to the window: its frame is whole in the flight - the window shows there, under the flight (at
@@ -483,6 +535,7 @@ class DesktopController(QObject):
                         self.window.hide()
                     if not self.overlay.is_shown():
                         self.overlay.show_on(self._flight_screen)
+                    self._keyboard_on_show()
             elif self._hud:
                 if self.overlay.is_shown():
                     self.overlay.hide(release=False)
@@ -556,6 +609,9 @@ class DesktopController(QObject):
         it."""
         if self._shut:
             return
+        self._keyboard_wanted = False
+        if shiboken6.isValid(self.overlay.hud):
+            self.overlay.hud.give_back_keyboard(True, "Jarvis closes")      # the window that had it gets it back
         self._shut = True
         self._drop_flight()
         self._hud = False

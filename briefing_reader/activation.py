@@ -4,7 +4,8 @@ A later launch finds the single-instance lock taken (see
 :mod:`briefing_reader.__main__`) and sends the running app a one-line JSON
 message such as ``{"cmd": "activate", "run": null, "now": false, "open": true}``
 (``--open``, ``--now``; ``--read`` sends ``"read": true``, a scheduled ``--run PM``
-the run alone, ``--ask`` adds ``"ask": true``) over a QLocalServer (a named pipe on Windows);
+the run alone, ``--ask`` adds ``"ask": true`` and ``--hud`` - like the hotkey agent's HUD key -
+``"desktop": true``) over a QLocalServer (a named pipe on Windows);
 :class:`ActivationServer` receives it and hands it to
 ``AppController.handle_activation``.
 
@@ -38,11 +39,12 @@ _MAX_MESSAGE_BYTES = 64 * 1024
 # --------------------------------------------------------------------------
 
 def activation_message(run: str | None, *, launch: str | None = None, now: bool = False,
-                       ask: bool = False) -> dict[str, object]:
+                       ask: bool = False, desktop: bool = False) -> dict[str, object]:
     """The one-line message a later launch sends. With ``launch`` ("open", "read", "scheduled"):
     ``{"cmd": "activate", "run": run, "now": false}`` plus ``"open": true`` or ``"read": true``
     (a scheduled launch sends the run alone). Without it, the older form with ``"now"`` as given.
-    ``ask`` (``--ask``) adds ``"ask": true``. An older app ignores the keys it does not know."""
+    ``ask`` (``--ask``) adds ``"ask": true`` and ``desktop`` (``--hud``, as the HUD key's) ``"desktop": true``.
+    An older app ignores the keys it does not know."""
     message: dict[str, object] = {"cmd": "activate", "run": run, "now": bool(now) if launch is None else False}
     if launch == "open":
         message["open"] = True
@@ -50,16 +52,18 @@ def activation_message(run: str | None, *, launch: str | None = None, now: bool 
         message["read"] = True
     if ask:
         message["ask"] = True
+    if desktop:
+        message["desktop"] = True
     return message
 
 
 def forward_to_running_instance(name: str, run: str | None, now: bool = False, *, launch: str | None = None,
-                                ask: bool = False) -> int:
+                                ask: bool = False, desktop: bool = False) -> int:
     """Ask the running instance to come forward (retrying while it starts); the exit code.
     The message is :func:`activation_message`'s (``launch`` says how; without it the older
     ``now`` form, which test launchers still send)."""
     app = QCoreApplication.instance() or QCoreApplication([sys.argv[0] if sys.argv else APP_NAME])
-    message = activation_message(run, launch=launch, now=now, ask=ask)
+    message = activation_message(run, launch=launch, now=now, ask=ask, desktop=desktop)
     payload = (json.dumps(message) + "\n").encode("utf-8")
     deadline = time.monotonic() + ACTIVATION_TIMEOUT_S
     while not try_send(name, payload):

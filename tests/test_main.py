@@ -401,6 +401,117 @@ class HotkeyAgentTests(unittest.TestCase):
             dispatcher()
         start.assert_called_once_with(["--open", "--slots", "am=10:12,pm=23:42"], executable="pythonw.exe")
 
+    # ---- the HUD key (SPEC 9; P1.6) ---------------------------------------------------------------
+
+    def desktop_config(self, enabled: object = True, hud_key: str = "ctrl+alt+h") -> SimpleNamespace:
+        return SimpleNamespace(hotkey=SimpleNamespace(enabled=True, combo="ctrl+alt+j"),
+                               desktop=SimpleNamespace(enabled=enabled, hud_key=hud_key))
+
+    def test_with_desktop_off_the_agent_registers_nothing_new(self) -> None:
+        for config in (self.config(), self.desktop_config(enabled=False), self.desktop_config(enabled="yes"),
+                       self.desktop_config(hud_key="")):
+            with self.subTest(config=config):
+                with mock.patch.object(hotkey, "run_agent", return_value=0) as run_agent:
+                    self.assertEqual(entry._run_hotkey_agent(config, SLOTS), 0)
+                combo, dispatcher = run_agent.call_args.args
+                self.assertEqual(combo, "ctrl+alt+j")
+                self.assertIsInstance(dispatcher, hotkey.PressDispatcher)
+                self.assertEqual(run_agent.call_args.kwargs, {})          # exactly as before: one key
+
+    def test_with_desktop_on_the_agent_listens_for_the_hud_key_too(self) -> None:
+        with mock.patch.object(hotkey, "run_agent", return_value=0) as run_agent, \
+                self.assertLogs(LOGGER, level="INFO") as logs:
+            self.assertEqual(entry._run_hotkey_agent(self.desktop_config(), SLOTS), 0)
+        self.assertIn("the HUD key is listened for too", "\n".join(logs.output))
+        combo, dispatcher = run_agent.call_args.args
+        self.assertEqual(combo, "ctrl+alt+j")
+        kwargs = run_agent.call_args.kwargs
+        self.assertEqual(sorted(kwargs), ["hud_combo", "on_hud_press"])
+        self.assertEqual(kwargs["hud_combo"], "ctrl+alt+h")                # read from config at the agent's start
+        hud = kwargs["on_hud_press"]
+        self.assertIsInstance(hud, hotkey.PressDispatcher)
+        self.assertIsNot(hud, dispatcher)
+        name = entry._instance_name()
+        for press in (dispatcher, hud):
+            press._spawn = lambda work: work()
+        with mock.patch.object(hotkey, "mutex_exists", return_value=True), \
+                mock.patch.object(hotkey, "send_activation", return_value=True) as send, \
+                mock.patch.object(entry, "_start_detached") as start, \
+                self.assertLogs("briefing_reader.hotkey", level="INFO"):
+            hud()
+            dispatcher()
+        self.assertEqual(send.call_args_list, [mock.call(name, entry.DESKTOP_ACTIVATION),
+                                               mock.call(name, entry.OPEN_ACTIVATION)])
+        self.assertEqual(entry.DESKTOP_ACTIVATION, {"cmd": "activate", "run": None, "now": False, "open": True,
+                                                    "desktop": True})
+        start.assert_not_called()
+        hud._last_press = None                                # past its debounce
+        with mock.patch.object(hotkey, "mutex_exists", return_value=False), \
+                mock.patch.object(entry, "_start_detached", return_value=True) as start, \
+                mock.patch.object(entry, "_windowless_python", return_value="pythonw.exe"), \
+                self.assertLogs("briefing_reader.hotkey", level="INFO"):
+            hud()                                             # not running: started onto the desktop
+        start.assert_called_once_with(["--open", "--slots", "am=10:12,pm=23:42", "--hud"], executable="pythonw.exe")
+
+
+class HudLaunchTests(unittest.TestCase):
+    """--hud: what the HUD key starts when Jarvis is not running (SPEC 9's "App not running" row)."""
+
+    def test_the_hud_start_mode(self) -> None:
+        parser = entry.build_parser()
+        self.assertTrue(parser.parse_args(["--hud"]).hud)
+        self.assertFalse(parser.parse_args([]).hud)
+        args = parser.parse_args(["--open", "--slots", "am=10:12,pm=23:42", "--hud"])   # as the agent starts it
+        self.assertTrue(args.hud and args.open)
+        self.assertEqual(entry.launch_kind(args), "open")
+        self.assertEqual(entry.launch_kind(parser.parse_args(["--hud"])), "open")
+        for argv in (["--hud", "--run", "am"], ["--hud", "--ask"], ["--hud", "--hotkey-agent"], ["--hud", "--catch-up"],
+                     ["--hud", "--ask-check"]):
+            with self.subTest(argv=argv):
+                with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                    parser.parse_args(argv)
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            entry.main(["--read", "--hud"])
+
+    def test_a_hud_launch_into_a_running_app_asks_it_to_go_onto_the_desktop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = load_config(Path(tmp), environ={"LOCALAPPDATA": tmp})
+        with mock.patch("briefing_reader.config.setup_logging", return_value=Path("x.log")), \
+                mock.patch("briefing_reader.config.load_config", return_value=config), \
+                mock.patch.object(entry, "_claim_single_instance", return_value=False), \
+                mock.patch("briefing_reader.activation.forward_to_running_instance", return_value=0) as forward, \
+                mock.patch.object(entry, "_run_app") as app, \
+                self.assertLogs("briefing_reader", level="INFO") as logs:
+            self.assertEqual(entry.main(["--open", "--hud"]), 0)
+        app.assert_not_called()
+        forward.assert_called_once_with(entry._instance_name(), None, launch="open", desktop=True)
+        self.assertTrue(any("hud=True" in line for line in logs.output))
+
+    def test_the_activation_message_carries_desktop_only_when_asked(self) -> None:
+        from briefing_reader import activation
+
+        self.assertNotIn("desktop", activation.activation_message(None, launch="open"))
+        message = activation.activation_message(None, launch="open", desktop=True)
+        self.assertEqual(message, entry.DESKTOP_ACTIVATION)  # the same message as the HUD key's
+        self.assertIs(activation.parse_activation(json.dumps(message).encode("utf-8"))["desktop"], True)
+
+    def test_the_app_is_told_it_was_started_for_the_desktop(self) -> None:
+        for argv, wanted in ((["--open", "--hud"], True), (["--open"], False)):
+            with self.subTest(argv=argv):
+                args = entry.build_parser().parse_args(argv)
+                ui_module = SimpleNamespace(AppController=mock.Mock())
+                app = mock.Mock(exec=mock.Mock(return_value=0))
+                with mock.patch("briefing_reader.activation.ActivationServer"), \
+                        mock.patch.object(entry, "_build_client",
+                                          return_value=(object(), SimpleNamespace(data_dir=Path("unused")), None)), \
+                        mock.patch.object(entry, "_release_single_instance"), \
+                        mock.patch.object(entry, "_delete_qt_objects"), \
+                        mock.patch.object(entry, "RunState"):
+                    self.assertEqual(entry._run_controller(args, object(), "name", None, app, ui_module, {}), 0)
+                kwargs = ui_module.AppController.call_args.kwargs
+                self.assertIs(kwargs["desktop_launch"], wanted)
+                self.assertEqual(kwargs["launch"], "open")
+
 
 class SetupErrorTests(unittest.TestCase):
     """A missing NOTION_TOKEN or BRIEFING_PAGE_ID becomes the startup error; nothing is fetched."""

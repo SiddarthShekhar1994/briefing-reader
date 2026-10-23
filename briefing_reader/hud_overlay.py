@@ -24,10 +24,17 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     whose words did not change is not repainted); ``chip_texts()``; ``bar_rect()``, ``orb_center()``,
     ``occupied_rect()`` (global); ``glows()`` (the bar's and the chips' ``Glow``, global); ``cut_texts()`` (words
     cut or crowded: none at the sizes it is built for). Signals ``bringBackClicked()``, ``chipClicked(key)``
-    (``CHIP_BRIEFING``, ``CHIP_APPROVALS``, ``CHIP_REC``) and ``shapeChanged()`` (the window, the bar or a chip moved
-    or changed size); the bar's own signals are on ``bar``. The bar's status (an answer, a question, a problem, what
-    Jarvis is doing) shows in the caption line without its technical readouts. While idle the window keeps
-    ``WindowDoesNotAcceptFocus``: the input takes the keyboard only after the HUD key or a click (a later part). Its
+    (``CHIP_BRIEFING``, ``CHIP_APPROVALS``, ``CHIP_REC``), ``shapeChanged()`` (the window, the bar or a chip moved
+    or changed size) and ``keyboardChanged(bool)``; the bar's own signals are on ``bar``. The bar's status (an answer,
+    a question, a problem, what Jarvis is doing - as Home's thinking line, without its seconds) shows in the caption
+    line without its technical readouts. The bar's keyboard (SPEC 8.3, P1.6): while idle the window keeps
+    ``WindowDoesNotAcceptFocus``; ``take_keyboard()`` (the HUD key, through the app) or a click in the input
+    remembers the window that has the keyboard, drops the flag on the NATIVE window (QWindow.setFlag; never
+    QWidget.setWindowFlag, which recreates and hides it), activates it through the seam (never a synthetic key) and
+    focuses the input - its outline lit; Enter, or Esc in an empty bar, gives the keyboard back
+    (``give_back_keyboard``: the flag back, the remembered window activated again); Esc with text clears it and Esc
+    while a request runs cancels it (CommandBar's own); the owner going to another window, or the HUD hiding, gives it
+    back with nothing activated; ``holds_keyboard()``. Its
     paint is one cached pixmap (the panel, the hairlines, the orb's dark disc): an orb frame repaints 104 px of it.
     ``flight_pictures(dpr)``: the panel and what is in the bar as pictures of the whole window, and the chips' - the
     switch flies them in and out (alive.WindowFlight), also while the window is hidden.
@@ -66,11 +73,14 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     pictures the flight shows: alive.HudScene) and ``hides_from_capture()``. ``create(config, native=None)`` is None
     while [desktop] is off: no HUD window then exists at all.
 
-Capture and stacking go through a small seam, ``HudNative`` (``exclude_from_capture(hwnd)``: SetWindowDisplayAffinity
-WDA_EXCLUDEFROMCAPTURE on every HUD window when [desktop] hide_from_capture is on, once per native window;
-``stack(hwnds)``: SetWindowPos HWND_TOPMOST with SWP_NOACTIVATE, bottom to top - never a raise or an activation).
-``default_native()`` is ``Win32Native`` only on the real Windows platform outside the tests (the desktop test guard),
-else ``NoNative``, which makes no OS call; tests pass their own fake. Logs carry statuses and error numbers only.
+Capture, stacking and the bar's keyboard go through a small seam, ``HudNative`` (``exclude_from_capture(hwnd)``:
+SetWindowDisplayAffinity WDA_EXCLUDEFROMCAPTURE on every HUD window when [desktop] hide_from_capture is on, once per
+native window; ``stack(hwnds)``: SetWindowPos HWND_TOPMOST with SWP_NOACTIVATE, bottom to top - never a raise or an
+activation; ``foreground()``: GetForegroundWindow, none for Jarvis's own; ``activate(hwnd)`` and
+``restore_foreground(hwnd)``: SetForegroundWindow attached to the foreground window's input, never a synthetic key -
+only for the bar's keyboard, on the HUD key or the owner's click). ``default_native()`` is ``Win32Native`` only on the
+real Windows platform outside the tests (the desktop test guard), else ``NoNative``, which makes no OS call; tests pass
+their own fake. Logs carry statuses and error numbers only - never what is typed.
 """
 
 from __future__ import annotations
@@ -83,7 +93,7 @@ from functools import partial
 from typing import Any, Protocol
 
 import shiboken6
-from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -104,6 +114,7 @@ from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QWidget
 from . import alive, holo, hud, offer_view, settings_view
 from . import orb as orb_mod
 from .desktop import backend as desktop_backend
+from .home import thinking_line
 from .hotkey import describe_combo
 
 logger = logging.getLogger(__name__)
@@ -240,6 +251,17 @@ class HudNative(Protocol):
     def stack(self, hwnds: Sequence[int]) -> None:
         """Put the windows at the top of the always-on-top band in this order (the last on top), never activating."""
 
+    def foreground(self) -> int:
+        """The window that has the keyboard now (GetForegroundWindow); 0 for none, or for one of Jarvis's own."""
+
+    def activate(self, hwnd: int) -> bool:
+        """Bring the window to the foreground so it takes the keyboard (the HUD key or a click in the bar): attached
+        to the foreground window's input, never a synthetic key press. True when Windows agreed."""
+
+    def restore_foreground(self, hwnd: int) -> bool:
+        """Give the keyboard back to ``hwnd`` (the window that had it before) if it is still a window that shows,
+        never with a synthetic key press. True when Windows agreed."""
+
 
 class NoNative:
     """Offscreen and in the tests: no OS call at all."""
@@ -250,9 +272,19 @@ class NoNative:
     def stack(self, hwnds: Sequence[int]) -> None:
         return None
 
+    def foreground(self) -> int:
+        return 0
+
+    def activate(self, hwnd: int) -> bool:
+        return False
+
+    def restore_foreground(self, hwnd: int) -> bool:
+        return False
+
 
 class Win32Native:
-    """user32's SetWindowDisplayAffinity and SetWindowPos (ctypes). Refused while the desktop test guard is on."""
+    """user32's SetWindowDisplayAffinity and SetWindowPos (ctypes), and for the bar's keyboard GetForegroundWindow and
+    an attached SetForegroundWindow (never keybd_event). Refused while the desktop test guard is on."""
 
     def __init__(self) -> None:
         if desktop_backend.real_backend_blocked():
@@ -261,12 +293,34 @@ class Win32Native:
         from ctypes import wintypes
 
         user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
         user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
         user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                         ctypes.c_int, wintypes.UINT]
         user32.SetWindowPos.restype = wintypes.BOOL
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        user32.AttachThreadInput.restype = wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.BringWindowToTop.restype = wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        kernel32.GetCurrentThreadId.argtypes = []
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        kernel32.GetCurrentProcessId.argtypes = []
+        kernel32.GetCurrentProcessId.restype = wintypes.DWORD
         self._user32 = user32
+        self._kernel32 = kernel32
+        self._dword = wintypes.DWORD
+        self._byref = ctypes.byref
         self._last_error = ctypes.get_last_error
         self._topmost = wintypes.HWND(_HWND_TOPMOST)
 
@@ -281,6 +335,44 @@ class Win32Native:
         for hwnd in hwnds:
             if not self._user32.SetWindowPos(hwnd, self._topmost, 0, 0, 0, 0, flags):
                 logger.debug("HUD: stacking refused (winerror %d)", self._last_error())
+
+    def foreground(self) -> int:
+        hwnd = int(self._user32.GetForegroundWindow() or 0)
+        if not hwnd:
+            return 0
+        pid = self._dword(0)
+        self._user32.GetWindowThreadProcessId(hwnd, self._byref(pid))
+        return 0 if int(pid.value) == int(self._kernel32.GetCurrentProcessId()) else hwnd
+
+    def activate(self, hwnd: int) -> bool:
+        return self._bring(int(hwnd))
+
+    def restore_foreground(self, hwnd: int) -> bool:
+        hwnd = int(hwnd)
+        if not hwnd or not self._user32.IsWindow(hwnd) or not self._user32.IsWindowVisible(hwnd):
+            return False
+        return self._bring(hwnd)
+
+    def _bring(self, hwnd: int) -> bool:
+        """SetForegroundWindow while attached to the foreground thread's input (as ui.bring_forward_on_click): never
+        a synthetic Alt."""
+        user32 = self._user32
+        if int(user32.GetForegroundWindow() or 0) == hwnd:
+            return True
+        foreground = user32.GetForegroundWindow()
+        ours = int(self._kernel32.GetCurrentThreadId())
+        theirs = int(user32.GetWindowThreadProcessId(foreground, None)) if foreground else 0
+        attached = bool(theirs and theirs != ours and user32.AttachThreadInput(theirs, ours, True))
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(theirs, ours, False)
+        done = int(user32.GetForegroundWindow() or 0) == hwnd
+        if not done:
+            logger.debug("HUD: the foreground did not change (winerror %d)", self._last_error())
+        return done
 
 
 def default_native() -> HudNative:
@@ -667,14 +759,15 @@ class HudWindow(_OverlayWindow):
     bringBackClicked = Signal()
     chipClicked = Signal(str)
     shapeChanged = Signal()            # the window, the bar or a shown chip moved or changed size
+    keyboardChanged = Signal(bool)     # the bar took the keyboard (True) or gave it back (False; SPEC 8.3)
 
     def __init__(self, *, hud_key: str = "", native: HudNative | None = None, hide_from_capture: bool = True) -> None:
         super().__init__(HUD_FLAGS, native, hide_from_capture)
         self.setObjectName("JarvisHud")
         self.setWindowTitle("Jarvis")
         self.setAccessibleName("Jarvis on your desktop")
-        # Never the active window (WindowDoesNotAcceptFocus): Qt shows a tooltip (a cut caption's whole text) only
-        # for the active window or one with this attribute.
+        # Never the active window while idle (WindowDoesNotAcceptFocus): Qt shows a tooltip (a cut caption's whole
+        # text) only for the active window or one with this attribute.
         self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
         self._bar_width = BAR_WIDTH
         self._caption_lines = 1                             # the caption's lines at the bar's width
@@ -687,6 +780,9 @@ class HudWindow(_OverlayWindow):
         self._pending = 0
         self._recording = ""
         self._warning = ""
+        self._holding = False                               # the bar was given the keyboard and has not given it back
+        self._held_active = False                           # ... and this window has been the active one since
+        self._remembered = 0                                # the window that had the keyboard before (0: none known)
         self.orb = orb_mod.OrbWidget(ORB_PX, self)          # no ground: the window is translucent
         self.keycaps = _KeyCaps(hud_key, self)
         self.bar = hud.CommandBar(self)
@@ -704,6 +800,11 @@ class HudWindow(_OverlayWindow):
             self.chips[key] = chip
         self.chips[CHIP_BRIEFING].setText(BRIEFING_READY_TEXT)
         self.bar.statusChanged.connect(self._on_bar_status)
+        # The bar's keyboard (SPEC 8.3): a click in its input takes it; Enter, or Esc in an empty bar, gives it back.
+        self.bar.submitted.connect(self._on_submitted)
+        self.bar.statusDismissed.connect(self._on_dismissed)
+        self.bar.input.installEventFilter(self)
+        self.bar.field.installEventFilter(self)
         self.set_look(orb_mod.IDLE)
         self.resize(ORB_LEFT + BAR_WIDTH + RIGHT_MARGIN, WINDOW_HEIGHT)
         self._layout()
@@ -921,9 +1022,109 @@ class HudWindow(_OverlayWindow):
             self._layout()
 
     def _on_bar_status(self, text: str, tone: str) -> None:
-        shown = hud.quiet_readouts(text) if tone != hud.TONE_IDLE else ""
+        """The bar's status in the caption line: none while idle (the caption shows), what Jarvis is doing as Home's
+        thinking line (no seconds counter: no technical readout on the HUD, and nothing repaints each second), else
+        without its bracketed readouts."""
+        if tone == hud.TONE_IDLE:
+            shown = ""
+        elif tone == hud.TONE_WORKING:
+            shown = thinking_line(text)
+        else:
+            shown = hud.quiet_readouts(text)
         self.caption.set_status(shown, tone)
         self._layout()
+
+    # ---- the bar's keyboard (SPEC 8.3) -------------------------------------------------------
+
+    def take_keyboard(self, reason: str = "key") -> bool:
+        """The bar takes the keyboard: on the HUD key (``reason`` "key") or a click in its input ("click"). The window
+        that has the keyboard now is remembered (it gets it back after Enter, or Esc in an empty bar), the native
+        window drops WindowDoesNotAcceptFocus - QWindow.setFlag on it: QWidget.setWindowFlag would recreate the native
+        window and hide it - and is activated through the native seam (attached to the foreground's input, never a
+        synthetic key) and by Qt, and the input gets the focus; the bar's outline lights. Only while the window shows:
+        False otherwise."""
+        handle = self.windowHandle()
+        if handle is None or not self.isVisible():
+            return False
+        if not self._holding:
+            self._remembered = int(self._native_call("foreground", 0) or 0)
+            self._holding, self._held_active = True, self.isActiveWindow()
+        handle.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, False)
+        self._native_call("activate", False, int(self.winId()))
+        self.activateWindow()
+        self.bar.input.setFocus(Qt.FocusReason.MouseFocusReason if reason == "click"
+                                else Qt.FocusReason.ShortcutFocusReason)
+        self._update_lit()
+        logger.info("HUD: the bar takes the keyboard (%s)", "a click" if reason == "click" else "the HUD key")
+        self.keyboardChanged.emit(True)
+        return True
+
+    def give_back_keyboard(self, restore: bool = True, why: str = "") -> bool:
+        """The bar gives the keyboard back: the input's focus cleared, WindowDoesNotAcceptFocus back on the native window
+        and - with ``restore`` (after Enter, or Esc in an empty bar) - the window that had the keyboard before is
+        activated again through the seam (never a synthetic key). Without it (the owner went to another window, the
+        HUD hid, the window comes back) nothing else is activated. False when the bar did not have it."""
+        if not self._holding:
+            return False
+        remembered, self._remembered = self._remembered, 0
+        self._holding = self._held_active = False
+        if self.bar.input.hasFocus():
+            self.bar.input.clearFocus()
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
+        restored = bool(restore and remembered and self._native_call("restore_foreground", False, remembered))
+        self._update_lit()
+        logger.info("HUD: the bar gives the keyboard back (%s; %s)", why or "asked",
+                    "the window before has it again" if restored else "nothing else activated")
+        self.keyboardChanged.emit(False)
+        return True
+
+    def holds_keyboard(self) -> bool:
+        """The bar has the keyboard: it was given it and has not given it back, and this window is the active one (the
+        owner's keys reach the bar)."""
+        return self._holding and self.isActiveWindow()
+
+    def is_lit(self) -> bool:
+        """The bar's outline is lit: it was given the keyboard."""
+        return self._holding
+
+    def _native_call(self, name: str, default: Any, *args: Any) -> Any:
+        """The native seam's keyboard calls, best effort (their failure leaves the keyboard where Windows put it)."""
+        try:
+            return getattr(self._native, name)(*args)
+        except Exception as exc:  # noqa: BLE001 - logged by type only
+            logger.debug("HUD: the native %s call failed (%s)", name, type(exc).__name__)
+            return default
+
+    def _update_lit(self) -> None:
+        self.update(self.bar_rect_local())          # the panel's outline (the background is cached per lit state)
+
+    def _on_submitted(self, _text: str) -> None:
+        self.give_back_keyboard(True, "Enter")
+
+    def _on_dismissed(self) -> None:
+        self.give_back_keyboard(True, "Esc")
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        """A click in the bar's input (or beside its text) takes the keyboard."""
+        if (event.type() == QEvent.Type.MouseButtonPress and (watched is self.bar.input or watched is self.bar.field)
+                and not self.holds_keyboard()):
+            self.take_keyboard("click")
+        return super().eventFilter(watched, event)
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
+        """The owner went to another window while the bar had the keyboard: it is given back (nothing activated)."""
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self._holding:
+            if self.isActiveWindow():
+                self._held_active = True
+            elif self._held_active:
+                self.give_back_keyboard(False, "the owner went to another window")
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self.give_back_keyboard(False, "the HUD hid")
+        super().hideEvent(event)
 
     # ---- paint -----------------------------------------------------------------------------
 
@@ -931,7 +1132,7 @@ class HudWindow(_OverlayWindow):
         """The window's static paint (the panel, its hairlines and brackets, the orb's dark disc), cached per size
         and device pixel ratio."""
         dpr = float(dpr or self.devicePixelRatioF() or 1.0)
-        key = (self.width(), self.height(), self._bar_width, self._hairline_x, dpr)
+        key = (self.width(), self.height(), self._bar_width, self._hairline_x, self._holding, dpr)
         if self._background is None or self._background_key != key:
             pixmap = QPixmap(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
             pixmap.setDevicePixelRatio(dpr)
@@ -960,7 +1161,7 @@ class HudWindow(_OverlayWindow):
         painter.setPen(QPen(_BAR_SHINE, 1.0))
         painter.drawLine(QPointF(bar.left() + BAR_RADIUS, bar.top() + 1.5), QPointF(bar.right() - BAR_RADIUS,
                                                                                      bar.top() + 1.5))
-        painter.setPen(QPen(_BAR_LINE, 1.0))
+        painter.setPen(QPen(QColor(holo.HOLO) if self._holding else _BAR_LINE, 1.0))   # lit: the bar has the keyboard
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
         holo.paint_brackets(painter, bar, holo.HOLO, leg=12, radius=BAR_RADIUS, corners=holo.BRACKETS_RIGHT,

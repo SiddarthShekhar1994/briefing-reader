@@ -56,12 +56,15 @@ def setUpModule() -> None:
 
 
 class FakeNative:
-    """The HudNative seam, recorded: what Windows would be asked (nothing is)."""
+    """The HudNative seam, recorded: what Windows would be asked (nothing is). ``other``: the pretend window that has
+    the keyboard before the bar takes it; ``keys``: the bar's keyboard calls, in order."""
 
-    def __init__(self, agree: bool = True) -> None:
+    def __init__(self, agree: bool = True, other: int = 4242) -> None:
         self.agree = agree
         self.excluded: list[int] = []
         self.stacks: list[list[int]] = []
+        self.other = other
+        self.keys: list[tuple] = []
 
     def exclude_from_capture(self, hwnd: int) -> bool:
         self.excluded.append(int(hwnd))
@@ -69,6 +72,18 @@ class FakeNative:
 
     def stack(self, hwnds) -> None:
         self.stacks.append([int(hwnd) for hwnd in hwnds])
+
+    def foreground(self) -> int:
+        self.keys.append(("foreground",))
+        return self.other
+
+    def activate(self, hwnd: int) -> bool:
+        self.keys.append(("activate", int(hwnd)))
+        return self.agree
+
+    def restore_foreground(self, hwnd: int) -> bool:
+        self.keys.append(("restore", int(hwnd)))
+        return self.agree
 
 
 def desktop_config(**desktop: object) -> SimpleNamespace:
@@ -279,7 +294,8 @@ class FocusTests(_OverlayTest):
         settle()
         self.assertEqual(asked, [])                     # never an activation, a raise or a focus of its own
         # (The offscreen platform activates every window it shows; Windows honours WindowDoesNotAcceptFocus and
-        # _q_showWithoutActivating, checked in FlagTests.) Nothing in the HUD ever holds the keyboard focus.
+        # _q_showWithoutActivating, checked in FlagTests.) Nothing in the HUD holds the keyboard focus - only the bar,
+        # once the HUD key or a click in its input gives it the keyboard (tests/test_desktop_keys.py).
         self.assertFalse(self._focus_in(overlay))
         for child in win.findChildren(QWidget):
             wanted = Qt.FocusPolicy.ClickFocus if child is win.bar.input else Qt.FocusPolicy.NoFocus

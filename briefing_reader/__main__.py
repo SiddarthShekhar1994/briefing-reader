@@ -15,7 +15,8 @@ Two more modes serve the scheduled tasks:
   whether a scheduled briefing passed in the last 3 hours without an answer;
   only then does it continue exactly like ``--run am|pm``.
 * ``--hotkey-agent`` (at logon) waits for the global hotkey
-  (:mod:`briefing_reader.hotkey`), also without Qt.
+  (:mod:`briefing_reader.hotkey`), also without Qt - and for the HUD key while
+  [desktop] is on (it starts the app with ``--hud`` when none runs).
 
 The Qt half (activation messages, Qt's log output) lives in
 :mod:`briefing_reader.activation` and is imported only when a window or an
@@ -57,6 +58,8 @@ ERROR_ALREADY_EXISTS = 183
 # The hotkey agent's message to a running app: open Jarvis (an older app reads "now": false as a
 # plain "come forward").
 OPEN_ACTIVATION = {"cmd": "activate", "run": None, "now": False, "open": True}
+# ... and the HUD key's ([desktop] hud_key; SPEC 9): "desktop": true (an app before the HUD key reads it as OPEN).
+DESKTOP_ACTIVATION = {**OPEN_ACTIVATION, "desktop": True}
 # Launch kinds (as models.LAUNCH_*; spelled out here so this module never imports more than it must).
 LAUNCH_OPEN = "open"
 LAUNCH_READ = "read"
@@ -114,6 +117,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--ask", action="store_true",
                       help="open Jarvis with the command bar ready, like --open "
                            "([ask] enabled = true in config.toml); a running app opens it there")
+    mode.add_argument("--hud", action="store_true",
+                      help="open Jarvis on your desktop, the HUD over your windows ([desktop] enabled = true in "
+                           "config.toml; otherwise like --open); a running app goes onto it (used by the HUD key)")
     mode.add_argument("--ask-check", action="store_true",
                       help="Ask Jarvis: check that your own Claude Code is installed and signed in to your "
                            "claude.ai plan, and print what Ask can use (no Claude request)")
@@ -166,6 +172,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 parser.error(f"{view} cannot be combined with {flag}")
         if args.read and args.ask:
             parser.error("--read cannot be combined with --ask (--ask opens Jarvis without reading)")
+        if args.read and args.hud:
+            parser.error("--read cannot be combined with --hud (--hud opens Jarvis on your desktop)")
     try:
         return _run(args)
     except Exception:  # noqa: BLE001 - logged; no console is required to see it
@@ -182,11 +190,12 @@ def _view_flag(args: argparse.Namespace) -> str:
 
 
 def launch_kind(args: argparse.Namespace) -> str:
-    """How this launch asks for Jarvis: --read READ; --open, --now or --ask OPEN; --run (or a due
+    """How this launch asks for Jarvis: --read READ; --open, --now, --ask or --hud OPEN; --run (or a due
     --catch-up, which sets run) SCHEDULED; nothing OPEN."""
     if getattr(args, "read", False):
         return LAUNCH_READ
-    if getattr(args, "open", False) or getattr(args, "now", False) or getattr(args, "ask", False):
+    if (getattr(args, "open", False) or getattr(args, "now", False) or getattr(args, "ask", False)
+            or getattr(args, "hud", False)):
         return LAUNCH_OPEN
     if getattr(args, "run", None) or getattr(args, "catch_up", False):
         return LAUNCH_SCHEDULED
@@ -200,11 +209,11 @@ def _run(args: argparse.Namespace) -> int:
     log_file = setup_logging(debug=args.debug, keep_open=not args.hotkey_agent)
     logger.info("%s %s starting (Python %s on %s)", APP_NAME, __version__,
                 platform.python_version(), platform.platform())
-    logger.info("Arguments: run=%s open=%s now=%s read=%s catch_up=%s hotkey_agent=%s ask=%s slots=%s "
+    logger.info("Arguments: run=%s open=%s now=%s read=%s catch_up=%s hotkey_agent=%s ask=%s hud=%s slots=%s "
                 "from_file=%s debug=%s detached=%s launch=%s", args.run or "-", bool(getattr(args, "open", False)),
                 args.now, bool(getattr(args, "read", False)), args.catch_up, args.hotkey_agent,
-                bool(getattr(args, "ask", False)), args.slots or "-", args.from_file or "-", args.debug,
-                args.detached, launch_kind(args))
+                bool(getattr(args, "ask", False)), bool(getattr(args, "hud", False)), args.slots or "-",
+                args.from_file or "-", args.debug, args.detached, launch_kind(args))
     logger.info("Log file: %s", log_file)
 
     config = load_config()
@@ -231,7 +240,7 @@ def _run(args: argparse.Namespace) -> int:
         args.run = run.lower()   # from here on exactly like --run <run>
     elif not _claim_single_instance(name):
         return _forward_to_running(name, _run_name(args), launch=launch_kind(args),
-                                   ask=bool(getattr(args, "ask", False)))
+                                   ask=bool(getattr(args, "ask", False)), desktop=bool(getattr(args, "hud", False)))
     if _should_detach(args):
         _release_single_instance()   # the detached copy takes the lock
         if _start_detached_copy(args, slots):
@@ -366,13 +375,13 @@ def _release_single_instance() -> None:
         logger.debug("Could not release the single-instance mutex: %s", exc)
 
 
-def _forward_to_running(name: str, run: str | None, *, launch: str, ask: bool = False) -> int:
+def _forward_to_running(name: str, run: str | None, *, launch: str, ask: bool = False, desktop: bool = False) -> int:
     """Ask the running app to come forward with this launch's kind (activation.forward_to_running_instance
-    builds the message: "open": true, "read": true, or a run alone for a scheduled launch)."""
+    builds the message: "open": true, "read": true, or a run alone for a scheduled launch; --ask adds "ask": true
+    and --hud "desktop": true)."""
     from .activation import forward_to_running_instance
-    if ask:
-        return forward_to_running_instance(name, run, launch=launch, ask=True)
-    return forward_to_running_instance(name, run, launch=launch)
+    extra = {**({"ask": True} if ask else {}), **({"desktop": True} if desktop else {})}
+    return forward_to_running_instance(name, run, launch=launch, **extra)
 
 
 # --------------------------------------------------------------------------
@@ -458,7 +467,12 @@ def _windowless_python() -> str:
 # --------------------------------------------------------------------------
 
 def _run_hotkey_agent(config: Any, slots: Mapping[str, str]) -> int:
-    """``--hotkey-agent``: listen for the hotkey until logoff; never imports Qt."""
+    """``--hotkey-agent``: listen for the hotkey until logoff; never imports Qt.
+
+    While [desktop] is on (read here, at the agent's start: config.toml and .env as the app reads them, so the
+    scheduled task's command line never changes), the HUD key ([desktop] hud_key) is listened for too: it sends the
+    running app ``DESKTOP_ACTIVATION``, or starts it with ``--hud`` (SPEC 9). With [desktop] off nothing new is
+    registered and the agent is as before."""
     from . import hotkey
 
     if not config.hotkey.enabled:
@@ -471,7 +485,25 @@ def _run_hotkey_agent(config: Any, slots: Mapping[str, str]) -> int:
         activate=lambda: hotkey.send_activation(name, OPEN_ACTIVATION),
         start_app=lambda: _start_detached(start_arguments, executable=_windowless_python()),
     )
-    return hotkey.run_agent(config.hotkey.combo, dispatcher)
+    hud_combo = _agent_hud_key(config)
+    if not hud_combo:
+        return hotkey.run_agent(config.hotkey.combo, dispatcher)
+    hud_dispatcher = hotkey.PressDispatcher(
+        is_app_running=lambda: hotkey.mutex_exists(f"Local\\{name}"),
+        activate=lambda: hotkey.send_activation(name, DESKTOP_ACTIVATION),
+        start_app=lambda: _start_detached([*start_arguments, "--hud"], executable=_windowless_python()),
+        label="HUD key", purpose="go onto your desktop",
+    )
+    logger.info("Hotkey agent: [desktop] is on; the HUD key is listened for too")
+    return hotkey.run_agent(config.hotkey.combo, dispatcher, hud_combo=hud_combo, on_hud_press=hud_dispatcher)
+
+
+def _agent_hud_key(config: Any) -> str:
+    """The HUD key the agent registers: [desktop] hud_key while [desktop] enabled is true, else "" (none)."""
+    desktop = getattr(config, "desktop", None)
+    if getattr(desktop, "enabled", False) is not True:
+        return ""
+    return str(getattr(desktop, "hud_key", "") or "")
 
 
 # --------------------------------------------------------------------------
@@ -566,7 +598,7 @@ def _run_controller(args: argparse.Namespace, config: Any, name: str, run: str |
     controller = ui.AppController(config, client, expected_run=run, now_mode=launch == LAUNCH_READ,
                                   startup_error=startup_error, slots=slots, run_state=run_state,
                                   on_shutdown=start_exit_watchdog, ask_mode=bool(getattr(args, "ask", False)),
-                                  launch=launch)
+                                  launch=launch, desktop_launch=bool(getattr(args, "hud", False)))
     server.set_handler(controller.handle_activation)
     controller.start()
     rc = app.exec()

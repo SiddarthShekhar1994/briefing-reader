@@ -582,14 +582,17 @@ class AppHarness:
 
     The desktop HUD ([desktop] enabled in ``config_extra``): ``desktop_factory(config)`` makes its
     windows (a test passes hud_overlay.create with a fake native seam; None: hud_overlay.create, whose
-    seam makes no OS call while the tests run). close() shuts the desktop controller down."""
+    seam makes no OS call while the tests run). close() shuts the desktop controller down.
+    ``launch`` (models.LAUNCH_*; None: derived as the app derives it) and ``desktop_launch`` (--hud)
+    reach the controller for a test that calls its start()."""
 
     def __init__(self, test: Any, *, ask: bool = True, runs: Sequence[Any] = (), auth: str | None = None,
                  readers: dict | None = None, ask_mode: bool = False, run_state: Any = None,
                  lines: Sequence[str] = (B_CALENDAR, B_TODO), engine_clock: Any = None,
                  max_per_hour: int = 20, config_extra: str = "", snapshot_factory: Any = None,
                  clock: HarnessClock | None = None, productivity: bool = False, prod_extra: str = "",
-                 prod_inline: bool = True, desktop_factory: Any = None) -> None:
+                 prod_inline: bool = True, desktop_factory: Any = None, launch: str | None = None,
+                 desktop_launch: bool = False) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -623,7 +626,7 @@ class AppHarness:
                                       click_clock=_StepClock(), ask_factory=self.factory, ask_mode=ask_mode,
                                       run_state=run_state, voice_factory=lambda _controller: self.voice,
                                       snapshot_factory=snapshot_factory or (lambda _controller: self.snapshots),
-                                      desktop_factory=desktop_factory)
+                                      desktop_factory=desktop_factory, launch=launch, desktop_launch=desktop_launch)
         self.c._start_fetch = lambda *args, **kwargs: None   # never Notion: the page is handed over below
         test.addCleanup(self.close)
 

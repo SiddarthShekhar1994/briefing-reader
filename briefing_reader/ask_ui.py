@@ -7,6 +7,11 @@
         cancel()          ends a running Ask (the CLI is gone within a second); nothing is proposed
         refresh(full)     checks again: Claude Code and the mail after a failed run, only the mail
                           (full=False) after a Google sign-in
+        set_bar(bar)      binds Ask to another command bar (the desktop HUD's while it shows, the
+                          window's again after): one bar at a time; it takes over what Ask shows
+                          (running, Cancel, status, meta, link); on the HUD's bar a finished
+                          request's answer is Jarvis's own words for where it is (HUD_IN_APPROVALS,
+                          HUD_IN_WINDOW), never the planner's
         shutdown()        cancels a running Ask and stops the thread (a daemon: never waited for)
     Signals (GUI thread):
         busyChanged(bool)            an Ask's planning really started (its first stage: the checks
@@ -76,6 +81,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+import shiboken6
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from . import hud
@@ -90,6 +96,7 @@ from .ask.routes import MEMORY_ROUTES, NO_ROUTE, ROUTE_FOLLOWUPS, ROUTE_PLAN, RO
 from .ask.stream import CANCELLED, LIMIT, RESEARCH_CAP
 from .config import Config
 from .google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SIGNED_OUT, logged_alias
+from .persona import with_address
 from .live import (
     ASK_CARDS,
     ASK_REQUEST,
@@ -154,6 +161,11 @@ NOTHING_TEXT = "Nothing to propose for that"
 MAIL_LINK_TEXT = "Allow {alias} mail"
 MAIL_LINK_TIP = ("{message}. Opens Google's sign-in for the {alias} account in your browser: tick the box for "
                  "reading email (read only; Ask uses it only for the request you type)")
+# The desktop HUD's bar (set_bar; SPEC 3): its caption shows only Jarvis's own words, so a finished request says
+# where its answer is - never the planner's words (the window's conversation has them, and Jarvis says them).
+HUD_IN_APPROVALS = "That's in Approvals, {sir}."     # it proposed something: the cards wait there (the chip counts them)
+HUD_IN_WINDOW = "That's in the window, {sir}."       # an answer or a question back: in the window's conversation
+DEFAULT_META = f"uses your Claude plan {DOT} nothing happens without your OK"
 _TICK_MS = 1000
 # The header chip's colour for each planner.CHIP_* state.
 CHIP_STATUSES = {ask_planner.CHIP_OK: hud.STATUS_OK, ask_planner.CHIP_SIGN_IN: hud.STATUS_WARN,
@@ -215,6 +227,7 @@ class _Running:
     mode: str = ""                      # a planner mode's run (ask.modes.MODE_PLAN); "" for an Ask
     clear_text: str = ""                # a click-started run: the typed words that led to it, cleared on success
                                         # only while the bar still holds exactly them (R23)
+    bar: Any = None                     # the bar bound when it started (its words are the ones cleared; set_bar)
 
 
 class _AskBridge(QObject):
@@ -362,12 +375,77 @@ class AskController(QObject):
         self._tick = QTimer(self)
         self._tick.setInterval(_TICK_MS)
         self._tick.timeout.connect(self._show_stage)
+        # What the bound bar shows (replayed on the other bar by set_bar): its status line - ("status", text, tone,
+        # keep_link, the HUD's words or None) or ("hint", text, tooltip) - and its meta line.
+        self._shown: tuple = ("status", CHECKING_TEXT, hud.TONE_IDLE, False, None)
+        self._meta_text = DEFAULT_META
+        self._bind(bar)
+        bar.set_status(CHECKING_TEXT, hud.TONE_IDLE)
+        bar.set_meta(self._meta_text)
+
+    # ---- the bar (the window's, or the desktop HUD's while it shows) -------------------------------
+
+    def set_bar(self, bar: hud.CommandBar) -> None:
+        """Bind Ask to ``bar`` (SPEC 8.3): the window's command bar, or the desktop HUD's while Jarvis is on the HUD
+        (the app calls this as the HUD comes and goes). From now on that bar's Enter, Cancel and Esc, link and Esc in
+        an empty field reach this controller and the other bar's no longer do - one bar is bound at a time - and
+        ``bar`` shows what Ask shows now: running or not (with Cancel as it is), the status line, the meta line and the
+        link. On the HUD's bar a finished request's answer is Jarvis's own words for where it is (HUD_IN_APPROVALS,
+        HUD_IN_WINDOW), never the planner's."""
+        old = self.bar
+        if bar is None or bar is old:
+            return
+        self._unbind(old)
+        self.bar = bar
+        self._bind(bar)
+        running = self._running
+        bar.set_running(running is not None)
+        if running is not None and running.cancel_requested:
+            bar.set_cancel_enabled(False)
+        self._replay()
+        self._update_link()
+        logger.info("Ask: the %s bar is bound", "desktop HUD's" if bar.is_hud() else "window's")
+
+    def _bind(self, bar: hud.CommandBar) -> None:
         bar.submitted.connect(self.submit)
         bar.cancelRequested.connect(self.cancel)
         bar.linkClicked.connect(self._on_link)
         bar.statusDismissed.connect(self._show_idle)
-        bar.set_status(CHECKING_TEXT, hud.TONE_IDLE)
-        bar.set_meta(f"uses your Claude plan {DOT} nothing happens without your OK")
+
+    def _unbind(self, bar: hud.CommandBar) -> None:
+        for signal, slot in ((bar.submitted, self.submit), (bar.cancelRequested, self.cancel),
+                             (bar.linkClicked, self._on_link), (bar.statusDismissed, self._show_idle)):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):   # not connected (or the bar is gone): nothing to let go of
+                pass
+
+    def _replay(self) -> None:
+        """The bound bar shows what Ask showed last: its status line (on the HUD's bar in the HUD's words) and meta."""
+        kind, *rest = self._shown
+        if kind == "hint":
+            text, tooltip = rest
+            self.bar.set_hint(text, tooltip=tooltip)
+        else:
+            text, tone, keep_link, hud_text = rest
+            self.bar.set_status(self._words(text, hud_text), tone, keep_link=keep_link)
+        self.bar.set_meta(self._meta_text)
+
+    def _words(self, text: str, hud_text: str | None) -> str:
+        """``text``, or on the desktop HUD's bar ``hud_text`` when there is one (Jarvis's own words for it)."""
+        return hud_text if hud_text is not None and self.bar.is_hud() else text
+
+    def _put_status(self, text: str, tone: str, *, keep_link: bool = False, hud_text: str | None = None) -> None:
+        self._shown = ("status", text, tone, keep_link, hud_text)
+        self.bar.set_status(self._words(text, hud_text), tone, keep_link=keep_link)
+
+    def _put_hint(self, text: str, tooltip: str = "") -> None:
+        self._shown = ("hint", text, tooltip)
+        self.bar.set_hint(text, tooltip=tooltip)
+
+    def _put_meta(self, text: str) -> None:
+        self._meta_text = text
+        self.bar.set_meta(text)
 
     # ---- lifecycle ----------------------------------------------------------------------------
 
@@ -475,14 +553,14 @@ class AskController(QObject):
         kind = TASK_WEB if forced_question(text) is not None else TASK_ASK
         task = _request_task(self.live, text, briefing, kind=kind,
                              memory=self._memory_given() if kind == TASK_ASK else None)
-        running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind)
+        running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind, bar=self.bar)
         self._running = running
         logger.info("Ask %d started", running.seq)
         self._worker.put(_PlanJob(running.seq, text, briefing, tuple(page_ids), running.cancel,
                                   live=task if task is not NO_TASK else None))
         self.askStarted.emit(running.seq, text)
         self.bar.set_running(True)
-        self.bar.set_meta(RUNNING_META)
+        self._put_meta(RUNNING_META)
         self._notice_until = 0.0
         self._show_stage()
         self._tick.start()
@@ -525,14 +603,14 @@ class AskController(QObject):
         task = _mode_task(self.live, request, words, kind=kind,
                           memory=None if request.mode == MODE_MEETING else self._memory_given())
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind,
-                           typed=request.typed_route, mode=request.mode, clear_text=clear_text)
+                           typed=request.typed_route, mode=request.mode, clear_text=clear_text, bar=self.bar)
         self._running = running
         logger.info("Ask %d started (mode %s, %s)", running.seq, request.mode, request.origin)
         self._worker.put(_ModeJob(running.seq, request, inputs, briefing, tuple(page_ids), running.cancel,
                                   live=task if task is not NO_TASK else None))
         self.askStarted.emit(running.seq, words)
         self.bar.set_running(True)
-        self.bar.set_meta(RUNNING_META)
+        self._put_meta(RUNNING_META)
         self._notice_until = 0.0
         self._show_stage()
         self._tick.start()
@@ -554,12 +632,14 @@ class AskController(QObject):
         except Exception:  # noqa: BLE001 - only what the LIVE step shows
             return None
 
-    def show_note(self, text: str, tone: str = hud.TONE_DONE, *, clear: bool = False) -> None:
-        """A memory shortcut's answer in the status line (``clear``: the typed words are done with).
+    def show_note(self, text: str, tone: str = hud.TONE_DONE, *, clear: bool = False,
+                  hud_text: str | None = None) -> None:
+        """A memory shortcut's answer in the status line (``clear``: the typed words are done with;
+        ``hud_text``: what the desktop HUD's bar says instead - Jarvis's own words, never a note).
         Never while a request runs (the bar belongs to it then)."""
         if self._running is not None or self._stop.is_set():
             return
-        self._status(text, tone)
+        self._status(text, tone, hud_text=hud_text)
         if clear:
             self.bar.clear_input()
 
@@ -626,13 +706,16 @@ class AskController(QObject):
             # A mode with no run is amber, but a brief of Jarvis's own is an answer (it stays as done).
             soft = (outcome.question and not outcome.cards) or (bool(getattr(outcome, "note_kind", ""))
                                                                 and getattr(outcome, "brief", None) is None)
-            self._status(self._answer(outcome), hud.TONE_WARN if soft else hud.TONE_DONE, keep_link=keep_link)
+            self._status(self._answer(outcome), hud.TONE_WARN if soft else hud.TONE_DONE, keep_link=keep_link,
+                         hud_text=self._hud_answer(outcome))
             done = any(not card.error for card in outcome.cards) or getattr(outcome, "brief", None) is not None
-            if done and (running.typed or (running.clear_text and self.bar.text() == running.clear_text)):
+            typed_in = running.bar if running.bar is not None and shiboken6.isValid(running.bar) else self.bar
+            if done and (running.typed or (running.clear_text and typed_in.text() == running.clear_text)):
                 # A question back, choices or nothing to propose keep the draft to edit; a click-started
                 # run (an offer, a choice) never touches what the owner may be typing (R23): a choice
-                # clears only the very words that led to it, still untouched in the bar.
-                self.bar.clear_input()
+                # clears only the very words that led to it, still untouched in the bar - the bar it
+                # started from, should the desktop HUD have come or gone meanwhile (set_bar).
+                typed_in.clear_input()
         else:
             if outcome.kind == LIMIT:
                 self._limit_message = outcome.message
@@ -698,6 +781,19 @@ class AskController(QObject):
             parts = [note, *parts] if first else [*parts, note]
         return " ".join(parts)
 
+    def _hud_answer(self, outcome: Any) -> str:
+        """A finished request's words on the desktop HUD's bar, whose caption shows only Jarvis's own words (SPEC 3):
+        where the answer is - HUD_IN_APPROVALS when it proposed something (the "N need your OK" chip counts it), else
+        HUD_IN_WINDOW (an answer or a question back, in the window's conversation). A brief, a meeting's summary and a
+        mode that did not run say what ``_answer`` says: those are Jarvis's own words already."""
+        mode = getattr(outcome, "mode", "")
+        if getattr(outcome, "note_kind", "") or (mode in (MODE_PREP, MODE_MEETING)
+                                                 and getattr(outcome, "brief", None) is not None):
+            return self._answer(outcome)
+        address = getattr(getattr(self.config, "assistant", None), "address", "sir")
+        proposed = any(not card.error for card in outcome.cards)
+        return with_address(HUD_IN_APPROVALS if proposed else HUD_IN_WINDOW, address)
+
     # ---- checks, chip and the idle bar -------------------------------------------------------
 
     def _on_checked(self, _seq: int, ready: Any, caps: Any, needs: Any) -> None:
@@ -722,24 +818,25 @@ class AskController(QObject):
         ready = self.ready
         caps = self.caps
         if ready is None:
-            self.bar.set_status(CHECKING_TEXT, hud.TONE_IDLE)
+            self._put_status(CHECKING_TEXT, hud.TONE_IDLE)
         elif not ready.ok:
-            self.bar.set_status(ready.message, hud.TONE_WARN)
+            self._put_status(ready.message, hud.TONE_WARN)
         elif caps is not None and not caps.allowed:
-            self.bar.set_status(caps.message, hud.TONE_WARN)
+            self._put_status(caps.message, hud.TONE_WARN)
         elif self._limit_message:
-            self.bar.set_status(self._limit_message, hud.TONE_WARN)
+            self._put_status(self._limit_message, hud.TONE_WARN)
         else:
-            self.bar.set_hint(IDLE_HINT, tooltip=f"{IDLE_HINT}.\n{WEB_HINT}." if self._research_on() else "")
+            self._put_hint(IDLE_HINT, f"{IDLE_HINT}.\n{WEB_HINT}." if self._research_on() else "")
         self._show_meta()
 
     def _research_on(self) -> bool:
         """[research] enabled (web research needs Ask on too, which it is while this bar exists)."""
         return bool(getattr(getattr(self.config, "research", None), "enabled", False))
 
-    def _status(self, text: str, tone: str, *, keep_link: bool = False) -> None:
+    def _status(self, text: str, tone: str, *, keep_link: bool = False, hud_text: str | None = None) -> None:
+        """The status line says ``text`` (on the desktop HUD's bar ``hud_text`` when given: Jarvis's own words)."""
         self._answered = True
-        self.bar.set_status(text, tone, keep_link=keep_link)
+        self._put_status(text, tone, keep_link=keep_link, hud_text=hud_text)
 
     def _show_meta(self, outcome: Any = None, *, web: bool = False) -> None:
         """The bar's meta line: what the last answer put under ASK, how long it took and the runs
@@ -782,7 +879,7 @@ class AskController(QObject):
                     parts.append(RESEARCH_LIMIT_META)
         if not parts:
             parts.append("uses your Claude plan")
-        self.bar.set_meta(f" {DOT} ".join(parts))
+        self._put_meta(f" {DOT} ".join(parts))
 
     def chip(self) -> tuple[str, str]:
         """The ``claude`` chip now: (planner.CHIP_*, tooltip)."""

@@ -4,6 +4,11 @@ The dispatcher is tested with fakes. The Windows tests use an unusual combo
 (Ctrl+Alt+Shift+F24, which no keyboard has) and a private mutex name, release
 the hotkey within seconds, never press a key and never start the app. The
 pipe test talks to a QLocalServer in a separate Python process.
+
+The HUD key (SPEC 9, P1.6) and the foreground hand-over before every pipe
+write (SPEC 8.3) are tested with fakes for user32 and kernel32 only
+(``FakeWin32`` in place of ``hotkey._api()``): no hotkey is registered, no
+pipe is opened and no window's foreground changes.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 from briefing_reader import hotkey
 from briefing_reader.hotkey import (
@@ -366,6 +372,216 @@ print(json.dumps(got), flush=True)
                 proc.communicate()
         self.assertEqual(proc.returncode, 0, err[-2000:])
         self.assertEqual(json.loads(out.strip().splitlines()[-1]), [message])
+
+
+# --------------------------------------------------------------------------
+# The HUD key and the foreground hand-over, with fakes (nothing real is touched)
+# --------------------------------------------------------------------------
+
+ERROR_HOTKEY_ALREADY_REGISTERED = 1409
+HUD_MESSAGE = {"cmd": "activate", "run": None, "now": False, "open": True, "desktop": True}
+
+
+class FakeWin32:
+    """``hotkey._api()`` for the tests: user32 and kernel32 fakes that record every call in order (``calls``).
+    GetMessageW plays ``messages`` - the wParam of one WM_HOTKEY each - then WM_QUIT; RegisterHotKey refuses the ids
+    in ``refuse`` (as when another program holds the keys); the pipe's server is process ``pid`` (None: unknown) and
+    ``pipe`` False means nobody listens."""
+
+    def __init__(self, messages: tuple[int, ...] = (), refuse: tuple[int, ...] = (), pid: int | None = 4321,
+                 pipe: bool = True, allow: bool = True) -> None:
+        from types import SimpleNamespace
+        from ctypes import wintypes
+
+        self.MSG = wintypes.MSG
+        self.calls: list[tuple] = []
+        self.messages = list(messages)
+        self.refuse = set(refuse)
+        self.pid, self.pipe, self.allow = pid, pipe, allow
+        self.invalid_handle = ctypes.c_void_p(-1).value
+        self.user32 = SimpleNamespace(RegisterHotKey=self._register, UnregisterHotKey=self._unregister,
+                                      PeekMessageW=lambda *_args: 0, GetMessageW=self._get_message,
+                                      PostThreadMessageW=lambda *_args: 1,
+                                      AllowSetForegroundWindow=self._allow)
+        self.kernel32 = SimpleNamespace(CreateMutexW=self._mutex, CloseHandle=self._close,
+                                        GetCurrentThreadId=lambda: 7, CreateFileW=self._create_file,
+                                        WriteFile=self._write, WaitNamedPipeW=lambda *_args: 0,
+                                        GetNamedPipeServerProcessId=self._server_pid)
+
+    def valid(self, handle: object) -> bool:
+        return bool(handle) and handle != self.invalid_handle
+
+    def named(self, name: str) -> list[tuple]:
+        return [call for call in self.calls if call[0] == name]
+
+    def _register(self, _hwnd: object, ident: int, modifiers: int, vk: int) -> int:
+        self.calls.append(("RegisterHotKey", ident, modifiers, vk))
+        if ident in self.refuse:
+            ctypes.set_last_error(ERROR_HOTKEY_ALREADY_REGISTERED)
+            return 0
+        return 1
+
+    def _unregister(self, _hwnd: object, ident: int) -> int:
+        self.calls.append(("UnregisterHotKey", ident))
+        return 1
+
+    def _get_message(self, pointer: object, *_args: object) -> int:
+        if not self.messages:
+            return 0                                                   # WM_QUIT
+        msg = pointer._obj                                            # ctypes.byref(MSG)
+        msg.message = hotkey.WM_HOTKEY
+        msg.wParam = self.messages.pop(0)
+        return 1
+
+    def _mutex(self, *_args: object) -> int:
+        ctypes.set_last_error(0)
+        return 11
+
+    def _close(self, handle: object) -> int:
+        self.calls.append(("CloseHandle", handle))
+        return 1
+
+    def _create_file(self, path: str, *_args: object) -> object:
+        self.calls.append(("CreateFileW", path))
+        if not self.pipe:
+            ctypes.set_last_error(2)
+            return self.invalid_handle
+        return 99
+
+    def _server_pid(self, handle: object, pid: object) -> int:
+        self.calls.append(("GetNamedPipeServerProcessId", handle))
+        if self.pid is None:
+            return 0
+        pid._obj.value = self.pid
+        return 1
+
+    def _allow(self, pid: int) -> int:
+        self.calls.append(("AllowSetForegroundWindow", pid))
+        if not self.allow:
+            ctypes.set_last_error(5)
+        return int(self.allow)
+
+    def _write(self, handle: object, payload: bytes, size: int, written: object, _overlapped: object) -> int:
+        self.calls.append(("WriteFile", handle, bytes(payload)[:size]))
+        written._obj.value = size
+        return 1
+
+
+@unittest.skipUnless(WINDOWS, "the agent's Win32 path runs only on Windows (fakes here: nothing real is touched)")
+class HudKeyAgentTests(unittest.TestCase):
+    def agent(self, api: FakeWin32, **kwargs: object) -> tuple[int, list[str]]:
+        presses: list[str] = []
+        with mock.patch.object(hotkey, "_api", return_value=api):
+            rc = run_agent("ctrl+alt+j", lambda: presses.append("window"), mutex_name="Local\\briefing-reader-fake",
+                           **kwargs)
+        return rc, presses
+
+    def hud(self, presses: list[str]) -> dict:
+        return {"hud_combo": "ctrl+alt+h", "on_hud_press": lambda: presses.append("hud")}
+
+    def test_the_hud_key_is_a_second_id_only_when_it_is_given(self) -> None:
+        api = FakeWin32(messages=(hotkey.HOTKEY_ID, hotkey.HUD_HOTKEY_ID))
+        with self.assertLogs(LOGGER, level="INFO") as captured:
+            rc, presses = self.agent(api)                     # [desktop] off: as before
+        self.assertEqual((rc, presses), (0, ["window"]))      # a HUD id that is not ours is not a press
+        self.assertEqual(api.named("RegisterHotKey"),
+                         [("RegisterHotKey", hotkey.HOTKEY_ID, MOD_CONTROL | MOD_ALT | hotkey.MOD_NOREPEAT, 0x4A)])
+        self.assertEqual(api.named("UnregisterHotKey"), [("UnregisterHotKey", hotkey.HOTKEY_ID)])
+        self.assertNotIn("HUD key", "\n".join(captured.output))
+        for kwargs in ({"hud_combo": "ctrl+alt+h"}, {"on_hud_press": lambda: None}, {"hud_combo": "", "on_hud_press":
+                                                                                     lambda: None}):
+            with self.subTest(kwargs=sorted(kwargs)):
+                api = FakeWin32()
+                with self.assertLogs(LOGGER, level="INFO"):
+                    self.agent(api, **kwargs)
+                self.assertEqual([call[1] for call in api.named("RegisterHotKey")], [hotkey.HOTKEY_ID])
+        api = FakeWin32(messages=(hotkey.HUD_HOTKEY_ID, hotkey.HOTKEY_ID, hotkey.HUD_HOTKEY_ID))
+        hud_presses: list[str] = []
+        with self.assertLogs(LOGGER, level="INFO") as captured:
+            rc, presses = self.agent(api, **self.hud(hud_presses))
+        self.assertEqual((rc, presses, hud_presses), (0, ["window"], ["hud", "hud"]))
+        self.assertEqual(api.named("RegisterHotKey"),
+                         [("RegisterHotKey", hotkey.HOTKEY_ID, MOD_CONTROL | MOD_ALT | hotkey.MOD_NOREPEAT, 0x4A),
+                          ("RegisterHotKey", hotkey.HUD_HOTKEY_ID, MOD_CONTROL | MOD_ALT | hotkey.MOD_NOREPEAT, 0x48)])
+        self.assertEqual(sorted(call[1] for call in api.named("UnregisterHotKey")),
+                         sorted([hotkey.HOTKEY_ID, hotkey.HUD_HOTKEY_ID]))
+        text = "\n".join(captured.output)
+        self.assertIn("Listening for the HUD key Ctrl+Alt+H", text)
+        self.assertIn("HUD key Ctrl+Alt+H released", text)
+
+    def test_a_hud_key_another_program_holds_is_a_status_and_the_window_key_works(self) -> None:
+        api = FakeWin32(messages=(hotkey.HOTKEY_ID, hotkey.HUD_HOTKEY_ID, hotkey.HOTKEY_ID),
+                        refuse=(hotkey.HUD_HOTKEY_ID,))
+        hud_presses: list[str] = []
+        with self.assertLogs(LOGGER, level="INFO") as captured:
+            rc, presses = self.agent(api, **self.hud(hud_presses))
+        self.assertEqual((rc, presses, hud_presses), (0, ["window", "window"], []))
+        self.assertEqual(api.named("UnregisterHotKey"), [("UnregisterHotKey", hotkey.HOTKEY_ID)])
+        warnings = [record.getMessage() for record in captured.records if record.levelname == "WARNING"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn(f"Could not register the HUD key Ctrl+Alt+H (error {ERROR_HOTKEY_ALREADY_REGISTERED})",
+                      warnings[0])
+        self.assertIn("The hotkey Ctrl+Alt+J works as before", warnings[0])
+
+    def test_a_window_key_another_program_holds_ends_the_agent_as_before(self) -> None:
+        api = FakeWin32(refuse=(hotkey.HOTKEY_ID,))
+        with self.assertLogs(LOGGER, level="WARNING"):
+            rc, _presses = self.agent(api, **self.hud([]))
+        self.assertEqual(rc, 1)
+        self.assertEqual([call[1] for call in api.named("RegisterHotKey")], [hotkey.HOTKEY_ID])   # no HUD key either
+
+    def test_a_hud_key_that_is_not_valid_or_is_the_window_key_is_not_registered(self) -> None:
+        for combo, words in (("shift+h", "is not valid"), ("alt+ctrl+J", "is the window key")):
+            with self.subTest(combo=combo):
+                api = FakeWin32(messages=(hotkey.HOTKEY_ID,))
+                with self.assertLogs(LOGGER, level="INFO") as captured:
+                    rc, presses = self.agent(api, hud_combo=combo, on_hud_press=lambda: None)
+                self.assertEqual((rc, presses), (0, ["window"]))
+                self.assertEqual([call[1] for call in api.named("RegisterHotKey")], [hotkey.HOTKEY_ID])
+                self.assertIn(words, "\n".join(captured.output))
+
+    def test_every_pipe_write_hands_the_foreground_to_the_app_first(self) -> None:
+        api = FakeWin32(pid=4321)
+        with mock.patch.object(hotkey, "_api", return_value=api):
+            self.assertTrue(hotkey.send_activation("briefing-reader-fake", {"cmd": "activate", "open": True}))
+            self.assertTrue(hotkey.send_activation("briefing-reader-fake", HUD_MESSAGE))
+        names = [call[0] for call in api.calls]
+        once = ["CreateFileW", "GetNamedPipeServerProcessId", "AllowSetForegroundWindow", "WriteFile", "CloseHandle"]
+        self.assertEqual(names, once * 2)                     # before EVERY write: the app's pid, then the write
+        self.assertEqual(api.named("AllowSetForegroundWindow"), [("AllowSetForegroundWindow", 4321)] * 2)
+        self.assertEqual(api.named("CreateFileW")[0][1], "\\\\.\\pipe\\briefing-reader-fake")
+        written = [json.loads(call[2]) for call in api.named("WriteFile")]
+        self.assertEqual(written, [{"cmd": "activate", "open": True}, HUD_MESSAGE])
+
+    def test_without_the_apps_pid_any_process_may_and_a_refusal_still_writes(self) -> None:
+        for api, wanted in ((FakeWin32(pid=None), hotkey.ASFW_ANY), (FakeWin32(allow=False), 4321)):
+            with self.subTest(pid=api.pid, allow=api.allow):
+                with mock.patch.object(hotkey, "_api", return_value=api):
+                    self.assertTrue(hotkey.send_activation("briefing-reader-fake", HUD_MESSAGE))
+                self.assertEqual(api.named("AllowSetForegroundWindow"), [("AllowSetForegroundWindow", wanted)])
+                self.assertEqual(len(api.named("WriteFile")), 1)
+                names = [call[0] for call in api.calls]
+                self.assertLess(names.index("AllowSetForegroundWindow"), names.index("WriteFile"))
+        self.assertEqual(hotkey.ASFW_ANY, 0xFFFFFFFF)
+
+    def test_nobody_listening_hands_nothing_over(self) -> None:
+        api = FakeWin32(pipe=False)
+        with mock.patch.object(hotkey, "_api", return_value=api):
+            self.assertFalse(hotkey.send_activation("briefing-reader-fake", HUD_MESSAGE, timeout_s=0,
+                                                    sleep=lambda _s: None))
+        self.assertEqual([call[0] for call in api.calls], ["CreateFileW"])
+
+
+class HudKeyDispatcherTests(unittest.TestCase):
+    def test_the_hud_keys_dispatcher_words_its_logs_as_its_own(self) -> None:
+        clock = FakeClock()
+        dispatcher = PressDispatcher(is_app_running=lambda: True, activate=lambda: True, start_app=lambda: True,
+                                     clock=clock, spawn=lambda work: work(), label="HUD key",
+                                     purpose="go onto your desktop")
+        with self.assertLogs(LOGGER, level="INFO") as captured:
+            dispatcher()
+        self.assertIn("HUD key: asked the running app to go onto your desktop", "\n".join(captured.output))
+        self.assertEqual(dispatcher(), "ignored")             # its own 2 s debounce, as the window key's
 
 
 class ModuleHygieneTests(unittest.TestCase):

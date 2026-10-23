@@ -7832,7 +7832,8 @@ class CommandBar(QWidget):
         runs, the send arrow where DesktopB has its mic and in its style - an 18 px cyan outline glyph with no disc,
         a 28 px click area (the stop square while a request runs). The status, meta and link lines never show: the
         HUD's caption line says what ``statusChanged`` says. Nothing in the row takes the keyboard by itself: the
-        input only on a click (or when the HUD gives it the keyboard), the send arrow and the link never."""
+        input only on a click (or when the HUD gives it the keyboard), the send arrow and the link never - and the
+        send arrow's click does not focus the input afterwards (the HUD gives the keyboard back after a request)."""
         if self._hud:
             return
         self.set_holo(True)
@@ -7980,7 +7981,8 @@ class CommandBar(QWidget):
             self.cancelRequested.emit()
         else:
             self._on_return()
-            self.focus_input()
+            if not self._hud:
+                self.focus_input()      # the desktop HUD's bar gives the keyboard back after a request instead
 
     # ---- state --------------------------------------------------------------------------
 

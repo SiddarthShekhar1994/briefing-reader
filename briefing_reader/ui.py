@@ -3719,6 +3719,7 @@ MEMORY_CHANGED_TEXT = "Already changed in MEMORY."
 MEMORY_NOT_KEPT_TEXT = "Not kept."
 MEMORY_PUSHED_TEXT = "No longer pending - add it in MEMORY."
 MEMORY_NO_MATCH_TEXT = "I have no note about that, {sir}."
+MEMORY_DUPLICATE_HUD = "I already have that, {sir}."    # the desktop HUD's words for a duplicate (never the note)
 MEMORY_SEVERAL_TEXT = "Which note, {sir}? I've opened MEMORY with the matches."
 # Who gets the notes.
 MEMORY_GIVEN_TO = "every Ask, plan, brief and draft"
@@ -4861,7 +4862,12 @@ class AppController(QObject):
     automatic screen change only records the screen the window comes back on, Live never opens by itself, the
     offers and the announcement take the toast path, and the HUD counts as present (the agenda, the start-up).
     Bring Jarvis back, a chip, the tray's Bring Jarvis back or the toast's click bring the window back - not a
-    restore, so no greeting.
+    restore, so no greeting. The keys (SPEC 9; ``handle_activation``): the window key on the HUD brings the window
+    back; the HUD key (the hotkey agent's "desktop" message; ``desktop_launch``: --hud, it started Jarvis) goes onto
+    the HUD from any state of the window with the HUD's bar taking the keyboard, gives the bar the keyboard on the
+    HUD, and goes back to the window when the bar has it; while Jarvis is in control (Phase 3) both are ignored. Ask
+    is bound to the HUD's bar while the HUD shows (AskController.set_bar): a request typed there runs as the window's
+    would, its cards go to Approvals and the HUD's caption says only Jarvis's own words.
     """
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
@@ -4881,11 +4887,13 @@ class AppController(QObject):
                  locked: Callable[[], bool] | None = None,
                  prefs: AssistantPrefs | None = None,
                  snapshot_factory: Callable[[Any], Any] | None = None,
-                 desktop_factory: Callable[[Any], Any] | None = None) -> None:
+                 desktop_factory: Callable[[Any], Any] | None = None,
+                 desktop_launch: bool = False) -> None:
         super().__init__()
         self.config = config
         self.client = client
         self._on_shutdown = on_shutdown   # e.g. an exit watchdog (the app passes one; tests do not)
+        self._desktop_launch = bool(desktop_launch)   # --hud (the HUD key started Jarvis): onto the HUD once ready
         self._snapshot_factory = snapshot_factory   # tests: a fake page snapshotter (no web engine)
         self.expected_run = _normalize_run(expected_run)
         self.now_mode = bool(now_mode)
@@ -5434,7 +5442,8 @@ class AppController(QObject):
                 # --run X --open: the X briefing is waited for in the background and announced.
                 self._background_run = self.expected_run
                 self._start_fetch(self.expected_run)
-            self.open_assistant(ask_requested=self.ask_mode)
+            if not (self._desktop_launch and self._start_on_hud()):
+                self.open_assistant(ask_requested=self.ask_mode)
             self._begin_greeting(wait=True)
             return
         if self._classic():
@@ -8864,6 +8873,12 @@ class AppController(QObject):
         if meetings is not None:
             meetings.pillCreated.connect(controller.set_rec_pill)
             controller.set_rec_pill(meetings.pill)
+        bar = controller.bar()
+        if self.ask is not None:
+            bar.cancelRequested.connect(self._on_ask_cancel_clicked)   # a Cancel there while Ask is bound to it
+        else:
+            bar.submitted.connect(self._on_hud_submit_without_ask)
+            bar.statusDismissed.connect(lambda: bar.set_status("", hud.TONE_IDLE))
         return controller
 
     def _hud_active(self) -> bool:
@@ -8872,6 +8887,91 @@ class AppController(QObject):
         desktop = getattr(self, "desktop", None)
         return desktop is not None and desktop.is_hud()
 
+    def _desktop_activation(self) -> None:
+        """The HUD key ([desktop] hud_key: the hotkey agent's "desktop" message, or --hud into a running app), by SPEC
+        9's second table:
+
+        * [desktop] off: nothing (the agent registers the key only while it is on);
+        * in control (Phase 3): ignored - Esc or Stop first;
+        * the HUD, the bar with the keyboard: back to the window, on the screen it would have had, else Home;
+        * the HUD, the bar without it: the bar takes the keyboard (on the way in: as the HUD shows; on the way back:
+          nothing);
+        * not turned on yet (THE CONSENT GATE's no): the window comes forward as for the window key - P1.9 PLUGS IN
+          HERE: on its first-run "Jarvis on your desktop" card;
+        * the window, in any state (in front, behind, minimised, hidden, the classic prompt, a hidden wait for a run):
+          the assistant screen comes up - not shown - then the HUD, and the bar takes the keyboard (as soon as it
+          shows). If the HUD cannot open (a dialog waits for an answer), the window comes forward instead.
+
+        Nothing goes through force_foreground or a synthetic Alt on the way onto the HUD or on it: the bar is
+        activated through the HUD's native seam, and going back comes forward as the window key does
+        (bring_forward_on_click; the agent let Jarvis set the foreground before it wrote the message)."""
+        desktop = self.desktop
+        if desktop is None:
+            logger.info("The HUD key: [desktop] is off; nothing happens")
+            return
+        if desktop.quitting():
+            return
+        if desktop.in_control():
+            logger.info("The HUD key while Jarvis is in control: ignored (Esc or Stop first)")
+            return
+        if self._hud_active():
+            if desktop.has_keyboard():
+                logger.info("The HUD key: the bar had the keyboard; back to the window")
+                desktop.leave_hud()
+            elif desktop.take_keyboard():
+                logger.info("The HUD key: the bar takes the keyboard")
+            else:
+                logger.info("The HUD key on the way back to the window: nothing more")
+            return
+        if not desktop.consent_given():
+            logger.info("The HUD key: Jarvis on your desktop is not turned on yet; the window comes forward")
+            self._open_activation(ask=False)
+            return
+        self._reading_for_hud()
+        if desktop.enter_hud():
+            desktop.take_keyboard()
+            return
+        logger.info("The HUD key: the HUD could not open now; the window comes forward")
+        self._open_activation(ask=False)
+
+    def _reading_for_hud(self) -> None:
+        """The HUD key from another state (the classic prompt or its snooze, a hidden wait for a run): the assistant
+        screen comes up first - not shown: the HUD shows instead - a run waited for going on in the background and
+        announced when it arrives (as an OPEN from the wait does); no greeting."""
+        if self.state == STATE_READING:
+            return
+        if self.state == STATE_WAITING and self.expected_run and self.fetching:
+            self._background_run = self.expected_run
+        self._stop_prompt_timers()
+        self.enter_reading(autoplay=False, settle=False)
+
+    def _start_on_hud(self) -> bool:
+        """--hud: the HUD key started Jarvis (SPEC 9's "App not running" row). Once the assistant screen is up - the
+        window never shown - Jarvis goes onto the HUD while [desktop] is on and turned on. False: the window opens as
+        for --open - [desktop] off, not turned on yet (P1.9 PLUGS IN HERE: the window opens on the first-run "Jarvis
+        on your desktop" card), a setup error to show (the window says what is missing) or the HUD could not open."""
+        desktop = self.desktop
+        if desktop is None or not desktop.consent_given() or self.startup_error:
+            logger.info("Started by the HUD key, but %s: the window opens",
+                        "[desktop] is off" if desktop is None else "a setup error waits" if self.startup_error
+                        else "Jarvis on your desktop is not turned on yet")
+            return False
+        self.enter_reading(autoplay=False, settle=False)
+        if desktop.enter_hud():
+            logger.info("Started by the HUD key: onto the desktop HUD")
+            return True
+        logger.info("Started by the HUD key, but the HUD could not open: the window opens")
+        return False
+
+    def _on_hud_submit_without_ask(self, _text: str) -> None:
+        """Enter in the HUD's bar while Ask is off ([ask] enabled = false): its caption says so; nothing is sent (Esc
+        in the empty bar puts the note away)."""
+        from .ask.planner import DISABLED_MESSAGE
+
+        desktop = self.desktop
+        if desktop is not None and self.ask is None:
+            desktop.bar().set_status(DISABLED_MESSAGE, hud.TONE_WARN)
+
     def _may_enter_hud(self) -> bool:
         """The app side of entering the HUD: the assistant screen is up (not the prompt, a hidden wait or quitting)
         and no dialog waits for an answer (it would stay over a hidden window)."""
@@ -8879,10 +8979,13 @@ class AppController(QObject):
                 and QApplication.activeModalWidget() is None)
 
     def _on_hud_changed(self, entered: bool) -> None:
-        """Jarvis went onto the desktop HUD (``entered``) or came back to the window: the tray's Bring Jarvis back,
-        the agenda's and the offers' timers follow (the HUD counts as present; its offers take the toast path); a
-        newer run that waited for the window (the classic prompt) and an account question that came up on the HUD
-        are asked about now it is back."""
+        """Jarvis went onto the desktop HUD (``entered``) or came back to the window: Ask is bound to the HUD's bar or
+        the window's again (AskController.set_bar: one bar at a time; what it shows goes with it), the tray's Bring
+        Jarvis back, the agenda's and the offers' timers follow (the HUD counts as present; its offers take the toast
+        path); a newer run that waited for the window (the classic prompt) and an account question that came up on
+        the HUD are asked about now it is back."""
+        if self.ask is not None and self.desktop is not None:
+            self.ask.set_bar(self.desktop.bar() if entered else self.window.reading.command_bar)
         self._update_tray()
         self._sync_agenda_timer()
         self._prod_sync()
@@ -10366,15 +10469,17 @@ class AppController(QObject):
         elif route.kind == ROUTE_MEMORY_FORGET:
             self._memory_forget_typed(route.payload)
 
-    def _memory_bar(self, text: str, tone: str = hud.TONE_DONE, *, clear: bool = False) -> None:
-        """A memory shortcut's answer in the command bar's status line."""
+    def _memory_bar(self, text: str, tone: str = hud.TONE_DONE, *, clear: bool = False,
+                    hud_text: str | None = None) -> None:
+        """A memory shortcut's answer in the command bar's status line (``hud_text``: the desktop HUD's caption says
+        that instead - Jarvis's own words, never the note it quotes)."""
         ask = self.ask
         if ask is None:
             return
         if text:
-            ask.show_note(text, tone, clear=clear)
+            ask.show_note(text, tone, clear=clear, hud_text=hud_text)
         elif clear and not ask.busy:
-            self.window.reading.command_bar.clear_input()
+            ask.bar.clear_input()      # the bar it was typed in (the desktop HUD's while Ask is bound to it)
 
     def _memory_save_typed(self, note: str) -> None:
         store = self.memory_store
@@ -10384,7 +10489,8 @@ class AppController(QObject):
             text = self._memory_refused(result, note)
             link = (MEMORY_OPEN_TEXT, MEMORY_OPEN_LINK) if result == "full" else ("", "")
             self._jarvis(text, tone=hud.TONE_WARN, link=link)
-            self._memory_bar(text, hud.TONE_WARN)
+            self._memory_bar(text, hud.TONE_WARN, hud_text=with_address(MEMORY_DUPLICATE_HUD, self._address())
+                             if result == "duplicate" else None)       # the HUD never quotes the note kept
             if result in SPOKEN_REFUSALS and self.config.assistant.speak_replies:
                 self._say(KIND_RESULT, memory_refused_speech(self._address()))
             return
@@ -10392,7 +10498,7 @@ class AppController(QObject):
         text = memory_saved_text(result.text, self._address())
         link.entry_id = self._jarvis(text, link=(MEMORY_UNDO_TEXT, f"{MEMORY_UNDO_LINK}{number}"))
         self._memory_saved(result, SOURCE_TOLD)
-        self._memory_bar(text, clear=True)
+        self._memory_bar(text, clear=True, hud_text=memory_saved_speech(self._address()))
         if self.config.assistant.speak_replies:
             self._say(KIND_RESULT, memory_saved_speech(self._address()))
 
@@ -10430,7 +10536,7 @@ class AppController(QObject):
         text = memory_forgotten_text(removed.text, address)
         link.entry_id = self._jarvis(text, link=(MEMORY_UNDO_TEXT, f"{MEMORY_UNDO_LINK}{number}"))
         self._memory_removed(removed)
-        self._memory_bar(text, clear=True)
+        self._memory_bar(text, clear=True, hud_text=memory_forgotten_speech(address))
         if self.config.assistant.speak_replies:
             self._say(KIND_RESULT, memory_forgotten_speech(address))
 
@@ -12606,11 +12712,15 @@ class AppController(QObject):
 
         ``read`` -> READ; ``open`` or ``ask`` -> OPEN; an older launcher's ``now`` alone -> READ
         (its old meaning); a ``run`` alone -> SCHEDULED; nothing -> OPEN, or in the classic mode
-        while the prompt is up or snoozed the prompt comes forward as before."""
+        while the prompt is up or snoozed the prompt comes forward as before. ``desktop`` (the HUD
+        key, or --hud) -> SPEC 9's HUD-key table (``_desktop_activation``). While Jarvis is in
+        control on the desktop (Phase 3) the window key - OPEN or READ - is ignored: Esc or Stop
+        first."""
         message = message if isinstance(message, dict) else {}
         run = _normalize_run(message.get("run"))
         now = message.get("now") is True
         ask = message.get("ask") is True
+        desktop_key = message.get("desktop") is True
         if message.get("read") is True:
             kind: str | None = LAUNCH_READ
         elif message.get("open") is True or ask:
@@ -12621,9 +12731,12 @@ class AppController(QObject):
             kind = LAUNCH_SCHEDULED
         else:
             kind = None
-        logger.info("Another launch asked this instance to come forward (run=%s, now=%s, ask=%s, launch=%s, "
-                    "state=%s)", run or "-", now, ask, kind or "-", self.state)
+        logger.info("Another launch asked this instance to come forward (run=%s, now=%s, ask=%s, desktop=%s, "
+                    "launch=%s, state=%s)", run or "-", now, ask, desktop_key, kind or "-", self.state)
         if self.state in (STATE_QUITTING, STATE_IDLE):
+            return
+        if desktop_key:
+            self._desktop_activation()
             return
         if self.state in (STATE_PROMPT, STATE_SNOOZED) and kind != LAUNCH_OPEN:
             # The classic prompt answers as it always did; READ (--read, or an older now:true) reads.
@@ -12631,6 +12744,9 @@ class AppController(QObject):
             return
         if kind is None:
             kind = LAUNCH_OPEN
+        if kind in (LAUNCH_OPEN, LAUNCH_READ) and self._hud_active() and self.desktop.in_control():
+            logger.info("The window key while Jarvis is in control: ignored (Esc or Stop first)")
+            return
         if self.state == STATE_WAITING:
             self._activation_while_waiting(kind, run)
         elif kind == LAUNCH_SCHEDULED:
@@ -12676,10 +12792,10 @@ class AppController(QObject):
         """OPEN into a running app: the legacy prompt gives way to the assistant screen; a hidden or
         minimized window is restored with a greeting (unless one was said in the last 2 minutes);
         a visible one just comes forward, its tab unchanged. A NEW briefing is announced once. On the
-        desktop HUD (the window key; SPEC 9's HUD row - the rest of that table is P1.6) the window
-        comes back on the screen it would have had, else Home - with ``ask`` (--ask) on Home with the
-        command bar focused, or the note that Ask is off, as open_assistant does: leaving the HUD is
-        not a restore, so there is no greeting."""
+        desktop HUD (the window key; SPEC 9's window-key table, its HUD row) the window comes back on
+        the screen it would have had, else Home - with ``ask`` (--ask) on Home with the command bar
+        focused, or the note that Ask is off, as open_assistant does: leaving the HUD is not a
+        restore, so there is no greeting."""
         window = self.window
         if self._hud_active():
             if self.desktop.leave_hud(SCREEN_HOME if ask else None) and ask:
@@ -12869,6 +12985,8 @@ class AppController(QObject):
         if getattr(self, "meetings", None) is not None:
             self.meetings.shutdown()   # a recording stops and is saved; the pill goes
         if getattr(self, "desktop", None) is not None:
+            if self.ask is not None:
+                self.ask.set_bar(self.window.reading.command_bar)   # never bound to a HUD bar that is deleted
             self.desktop.shutdown()    # the HUD's windows go (the window itself is hidden below, never closed)
             app = QCoreApplication.instance()
             try:

@@ -59,11 +59,14 @@ def setUpModule() -> None:
 
 
 class FakeNative:
-    """The HUD's HudNative seam, recorded: what Windows would be asked (nothing is)."""
+    """The HUD's HudNative seam, recorded: what Windows would be asked (nothing is). ``other`` is the pretend window
+    that has the keyboard before the HUD's bar takes it (``keys``: the bar's keyboard calls, in order)."""
 
-    def __init__(self) -> None:
+    def __init__(self, other: int = 4242) -> None:
         self.excluded: list[int] = []
         self.stacks: list[list[int]] = []
+        self.other = other
+        self.keys: list[tuple] = []
 
     def exclude_from_capture(self, hwnd: int) -> bool:
         self.excluded.append(int(hwnd))
@@ -71,6 +74,18 @@ class FakeNative:
 
     def stack(self, hwnds) -> None:
         self.stacks.append([int(hwnd) for hwnd in hwnds])
+
+    def foreground(self) -> int:
+        self.keys.append(("foreground",))
+        return self.other
+
+    def activate(self, hwnd: int) -> bool:
+        self.keys.append(("activate", int(hwnd)))
+        return True
+
+    def restore_foreground(self, hwnd: int) -> bool:
+        self.keys.append(("restore", int(hwnd)))
+        return True
 
 
 class HudApp(unittest.TestCase):
