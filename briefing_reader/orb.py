@@ -64,7 +64,8 @@ OrbWidget(px=HERO)
     back once they faded, so the idle orb paints exactly as before. ``spike_room()`` is the longest bar that
     fits; each bar is drawn as 1 px hairline strands (Qt's fast antialiased path).
     ``is_animating()``, ``frame_interval()``, ``detail()`` (``"full"`` / ``"compact"``),
-    ``sample(now=None) -> OrbFrame`` (the computed values, for tests), ``paint_times()``.
+    ``sample(now=None) -> OrbFrame`` (the computed values, for tests), ``paint_times()``. ``snapshot()``: the
+    orb now without its ground, in a transparent pixmap (the switch to the desktop HUD flies it; also hidden).
     Accessible name "Jarvis, <state>" (e.g. "Jarvis, needs you").
 
 MiniOrb()
@@ -1423,6 +1424,36 @@ class OrbWidget(_OrbBase):
         self._layer = None
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, painter_fn is not None)
         self.update()
+
+    def snapshot(self) -> QPixmap:
+        """The orb as it is now - its recording ring and quiet-hours dimming too - without its ground, in a
+        transparent pixmap of the widget's size at its device pixel ratio: the switch flies it over the desktop
+        (alive.WindowFlight), also while the widget is hidden. The widget's own ground, ring layer and paint times
+        stay as they were (its motion moves on to now, as a frame would)."""
+        dpr = self.devicePixelRatioF() or 1.0
+        pixmap = QPixmap(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        ground, layer = self._ground, (self._layer, self._layer_key, self._layer_at, self._layer_builds)
+        self._ground, self._layer = None, None       # a ring layer of its own: the widget's is never painted over
+        try:
+            frame = self.sample()
+            painter = QPainter(pixmap)
+            try:
+                self._paint(painter, frame)
+                if self._recording:
+                    self._paint_recording(painter)
+                if self._dim < 1.0:                     # its strength over nothing: the alpha, scaled
+                    painter.resetTransform()
+                    painter.setOpacity(1.0)
+                    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+                    painter.fillRect(self.rect(), QColor(0, 0, 0, round(255 * self._dim)))
+            finally:
+                painter.end()
+        finally:
+            self._ground = ground
+            self._layer, self._layer_key, self._layer_at, self._layer_builds = layer
+        return pixmap
 
     def set_dim(self, level: float) -> None:
         """Draw the whole orb at ``level`` (0..1) of its strength over the ground: quiet hours dim the idle

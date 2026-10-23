@@ -1,5 +1,5 @@
 """Tests for the Hologram orb (briefing_reader.orb): states, transitions, frame rates, when it stops, the
-voice level, reduced motion, the paint budget and the mini orb.
+voice level, reduced motion, the paint budget, the mini orb and the snapshot the switch to the desktop flies.
 
 Qt runs offscreen in this process and shows nothing.
 """
@@ -296,6 +296,35 @@ class StateTests(_OrbCase):
                 else:
                     self.assertGreater(center.lightness(), 70, (px, state))
                 widget.set_phase(None)
+
+    def test_a_snapshot_is_the_orb_without_its_ground_and_leaves_it_as_it_was(self) -> None:
+        stage, widget = self.stage()
+        clock = [50.0]
+        widget._now = lambda: clock[0]
+        widget.set_look(orb.SPEAKING)
+        clock[0] += 2.0
+        widget.grab()                                 # steady: the ring layer is built (two-rate rendering)
+        ground, layer, builds = widget._ground, widget._layer, widget.ring_layer_builds()
+        times = widget.paint_times()
+        picture = widget.snapshot().toImage()
+        grabbed = widget.grab().toImage()
+        self.assertEqual(picture.size(), grabbed.size())
+        self.assertEqual(picture.pixelColor(1, 1).alpha(), 0)            # no ground: the corners stay clear
+        self.assertEqual(grabbed.pixelColor(1, 1).alpha(), 255)          # (the widget paints its ground there)
+        center = picture.pixelColor(picture.width() // 2, picture.height() // 2)
+        self.assertGreater(center.lightness(), 70)
+        self.assertIs(widget._ground, ground)
+        self.assertIs(widget._layer, layer)                             # its own layer was never painted over
+        self.assertEqual(widget.ring_layer_builds(), builds)
+        self.assertEqual(widget.paint_times()[:len(times)], times)
+        widget.set_dim(0.5)                                             # quiet hours: half its strength, over nothing
+        dimmed = widget.snapshot().toImage().pixelColor(picture.width() // 2, picture.height() // 2)
+        self.assertAlmostEqual(dimmed.alpha() / max(1, center.alpha()), 0.5, delta=0.05)
+        widget.set_dim(1.0)
+        stage.hide()                                                    # hidden: it still takes one
+        settle()
+        hidden = widget.snapshot().toImage()
+        self.assertGreater(hidden.pixelColor(hidden.width() // 2, hidden.height() // 2).lightness(), 70)
 
 
 class RunTests(_OrbCase):

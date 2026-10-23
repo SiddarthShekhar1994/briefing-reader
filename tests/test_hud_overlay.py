@@ -6,7 +6,8 @@ tooltip that shows on a window that is never active), the HUD key's keycaps as t
 no key can work), the send control in DesktopB's mic-slot style on the HUD only, the chips' words (REC's width held
 while the seconds tick; no repaint when nothing changed), the orb with no ground, the result card's place, the decor
 layers with the prototypes' shadows and glows under the interactive windows (repainted only when a shape changes),
-the stacking order with the meetings RecPill and the Toast, and the feature off: no HUD window at all.
+the stacking order with the meetings RecPill and the Toast, the feature off: no HUD window at all, and what the switch's
+flight takes from it (P1.5): its pictures adding up to the HUD as it shows, its reach, the pill held from ``prepare``.
 
 Qt runs offscreen in this process (and in one child at 1.5x) and shows nothing. No OS call is made: a fake seam
 records what would be asked, and the real one refuses while the tests run.
@@ -23,8 +24,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer
-from PySide6.QtGui import QFontMetricsF, QGuiApplication, QImage, QRegion
+from PySide6.QtCore import (QAbstractAnimation, QCoreApplication, QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt,
+                            QTimer)
+from PySide6.QtGui import QFontMetricsF, QGuiApplication, QImage, QPainter, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
 
@@ -1008,6 +1010,117 @@ class NeighbourTests(_OverlayTest):
         overlay.restack()
         layer = overlay.layer_for(QGuiApplication.primaryScreen())
         self.assertEqual(overlay.stack_order(), [layer, other, overlay.hud])
+
+
+class SwitchTests(_OverlayTest):
+    """What the switch's flight (alive.WindowFlight; P1.5) takes from the HUD: its pictures, its reach, and the pill
+    held from the switch's start until the window is back."""
+
+    def hud(self) -> tuple[hud_overlay.HudOverlay, hud_overlay.HudWindow]:
+        overlay = self.overlay()
+        win = overlay.hud
+        win.set_caption(CAPTION)
+        win.set_briefing_ready(True)
+        win.set_pending(2)
+        return overlay, win
+
+    def test_prepare_places_it_hidden_and_the_scene_is_the_hud_as_it_will_show(self) -> None:
+        overlay, win = self.hud()
+        overlay.prepare(None)
+        self.assertFalse(win.isVisible() or overlay.is_shown() or any(w.isVisible() for w in overlay.windows()))
+        area = win.area()
+        self.assertTrue(area.isValid())
+        scene = overlay.flight_scene()
+        self.assertFalse(win.isVisible())                                     # taking its pictures shows nothing
+        origin = win.geometry().topLeft()
+        glows = win.glows()
+        self.assertEqual(scene.bar, win.bar_rect())
+        self.assertEqual(scene.bar_glow.rect(), hud_overlay.glow_extent(glows[0]))
+        self.assertEqual([layer.rect() for layer, _glow in scene.chips],
+                         [chip.geometry().translated(origin) for chip in win.chips.values() if not chip.isHidden()])
+        self.assertEqual([glow.rect() for _layer, glow in scene.chips], [hud_overlay.glow_extent(g) for g in glows[1:]])
+        self.assertEqual((scene.panel.rect(), scene.inner.rect()), (win.geometry(), win.geometry()))
+        self.assertIs(scene.orb, win.orb)
+        self.assertEqual(scene.orb_center, QPointF(win.orb_center()))
+        self.assertEqual(scene.strip, QRect(area.left(), area.top(), area.width(), hud_overlay.BAR_TOP))
+
+    def test_the_flights_pictures_add_up_to_the_hud_as_it_shows(self) -> None:
+        overlay, win = self.hud()
+        overlay.prepare(None)
+        dpr = win.devicePixelRatioF()
+        panel, inner, chips = win.flight_pictures(dpr)
+        self.assertEqual(len(chips), 2)
+        overlay.show_on(None)
+        settle()
+        shown = win.grab().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        composed = QImage(shown.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        composed.setDevicePixelRatio(dpr)
+        composed.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(composed)
+        painter.drawPixmap(QPoint(0, 0), panel)
+        painter.drawPixmap(QPoint(0, 0), inner)
+        for pixmap, rect in chips:
+            painter.drawPixmap(rect.topLeft(), pixmap)
+        painter.end()
+        composed = composed.convertToFormat(QImage.Format.Format_ARGB32)
+        bar = win.bar_rect_local()
+        worst, seen = 0, 0
+        areas = [QRect(bar.left() + hud_overlay.ORB_PAD, bar.top(), bar.width() - hud_overlay.ORB_PAD, bar.height()),
+                 *(rect for _pixmap, rect in chips)]              # clear of the orb: its disc and frames fly apart
+        for area in areas:
+            for y in range(area.top(), area.bottom(), 2):
+                for x in range(area.left(), area.right(), 3):
+                    a, b = shown.pixelColor(round(x * dpr), round(y * dpr)), composed.pixelColor(round(x * dpr),
+                                                                                                round(y * dpr))
+                    worst = max(worst, *(abs(p - q) for p, q in zip(a.getRgb(), b.getRgb())))
+                    seen += 1
+        self.assertGreater(seen, 1000)
+        self.assertLessEqual(worst, 2)                             # the same pixels (8-bit rounding of the overs)
+        disc = QPoint(hud_overlay.ORB_LEFT - 2, hud_overlay.BAR_TOP + hud_overlay.ORB_DROP)   # left of the bar
+        self.assertEqual(panel.toImage().pixelColor(disc).alpha(), 0)          # the panel has no disc
+        self.assertGreater(win.background().toImage().pixelColor(disc).alpha(), 150)      # the window's paint has
+
+    def test_the_reach_covers_three_caption_lines_and_the_shadows_never_the_whole_screen(self) -> None:
+        overlay, win = self.hud()
+        overlay.show_on(None)
+        settle()
+        reach = overlay.reach()
+        self.assertTrue(reach.contains(win.geometry()))
+        for glow in overlay.glows():
+            self.assertTrue(reach.contains(hud_overlay.glow_extent(glow)), glow.look)
+        win.set_caption(LONG_CAPTION)                               # three lines: the window grows down
+        settle()
+        self.assertEqual(win.caption_lines(), 3)
+        self.assertTrue(reach.contains(win.geometry()))
+        for glow in overlay.glows():
+            self.assertTrue(reach.contains(hud_overlay.glow_extent(glow)), glow.look)
+        screen = QGuiApplication.primaryScreen().geometry()
+        self.assertLess(reach.intersected(screen).height(), screen.height() // 2)
+
+    def test_the_pill_is_held_from_prepare_until_release(self) -> None:
+        pill, other = meetings_view.RecPill(), meetings_view.RecPill()
+        for widget in (pill, other):
+            self.addCleanup(widget.deleteLater)
+            self.addCleanup(widget.hide)
+        overlay = self.overlay()
+        overlay.set_neighbours(rec_pill=pill)
+        self.assertFalse(pill.is_held())
+        overlay.prepare(None)                                       # the switch to the HUD starts
+        self.assertTrue(pill.is_held())
+        overlay.set_neighbours(rec_pill=other)                      # a recording started on the way
+        self.assertTrue(other.is_held())
+        self.assertFalse(pill.is_held())
+        overlay.show_on(None)
+        overlay.hide(release=False)                                 # the switch back starts: still held
+        self.assertTrue(other.is_held())
+        other.show_recording("0:07")
+        settle()
+        self.assertFalse(other.isVisible())
+        overlay.release()                                           # the window is back
+        self.assertFalse(other.is_held())
+        overlay.show_on(None)
+        overlay.release()                                           # never while the HUD shows
+        self.assertTrue(other.is_held())
 
 
 if __name__ == "__main__":

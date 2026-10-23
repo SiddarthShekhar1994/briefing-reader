@@ -1103,7 +1103,8 @@ class ReadingView(QWidget):
     desktop HUD (desktop_ui; the window hidden, never closed) ``hold_screens(record)`` makes ``set_tab`` only record
     the screen asked for, ``set_hud_present`` counts that time as present for the start-up, and ``glanceChanged``
     tells the HUD's chips and orb that "Briefing ready", "N need your OK", REC or the look changed
-    (``is_new_briefing()``, ``pending_count()``, ``recording_state()``, ``look()``).
+    (``is_new_briefing()``, ``pending_count()``, ``recording_state()``, ``look()``); back in the window after the
+    switch's flight, ``replay_screen()`` assembles the screen shown as a screen change does.
 
     Alive (the approved motion prototype; ``[ui] motion`` through holo.motion_level): the Dock is labelled
     (each screen's glyph and name, 200 px) from ``DOCK_LABELS_FROM`` px wide and folds to glyphs below;
@@ -1594,6 +1595,12 @@ class ReadingView(QWidget):
         self._sync_header_hold()
         self.sections_popover.hide()
         self.tabChanged.emit(index)
+
+    def replay_screen(self) -> bool:
+        """The screen shown assembles again as at a screen change (alive.ScreenTransition): the window is back from
+        the desktop HUD (desktop_ui, once it shows - the transition refuses a hidden stage). False when nothing
+        plays (motion off, hidden)."""
+        return self.transition.play(self._screens.currentWidget())
 
     # ---- the Find list (Ctrl+K; the motion prototype) ---------------------------------------------------
 

@@ -29,6 +29,8 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     Jarvis is doing) shows in the caption line without its technical readouts. While idle the window keeps
     ``WindowDoesNotAcceptFocus``: the input takes the keyboard only after the HUD key or a click (a later part). Its
     paint is one cached pixmap (the panel, the hairlines, the orb's dark disc): an orb frame repaints 104 px of it.
+    ``flight_pictures(dpr)``: the panel and what is in the bar as pictures of the whole window, and the chips' - the
+    switch flies them in and out (alive.WindowFlight), also while the window is hidden.
 
 ``ResultCard``
     A result floating beside the thing it is about (DesktopB ``.glass``): the kicker with its dot, the title, a meta
@@ -58,8 +60,11 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     the HUD shows, the layer under it shows its shadows and glows (they follow the bar, the chips and the cards: a
     caption growing, a chip coming or going, a card placed) and the meetings RecPill (top centre, where the bar is)
     is held hidden (``RecPill.set_held``: REC is a chip here) and it comes back when the HUD hides;
-    ``stack_order()``; ``shutdown()``. ``create(config, native=None)`` is None while [desktop] is off: no HUD window
-    then exists at all.
+    ``stack_order()``; ``shutdown()``. The switch (alive.WindowFlight; desktop_ui): ``prepare(screen)`` as it flies
+    in (placed, still hidden, the pill held already), ``hide(release=False)`` as it flies out (the pill held until
+    ``release()``: the window is back), ``reach()`` (the most it covers, with its shadows), ``flight_scene()`` (the
+    pictures the flight shows: alive.HudScene) and ``hides_from_capture()``. ``create(config, native=None)`` is None
+    while [desktop] is off: no HUD window then exists at all.
 
 Capture and stacking go through a small seam, ``HudNative`` (``exclude_from_capture(hwnd)``: SetWindowDisplayAffinity
 WDA_EXCLUDEFROMCAPTURE on every HUD window when [desktop] hide_from_capture is on, once per native window;
@@ -96,7 +101,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QWidget
 
-from . import holo, hud, offer_view, settings_view
+from . import alive, holo, hud, offer_view, settings_view
 from . import orb as orb_mod
 from .desktop import backend as desktop_backend
 from .hotkey import describe_combo
@@ -940,6 +945,12 @@ class HudWindow(_OverlayWindow):
         return self._background
 
     def _paint_background(self, painter: QPainter) -> None:
+        self._paint_panel(painter)
+        self._paint_hairlines(painter)
+        self._paint_disc(painter)
+
+    def _paint_panel(self, painter: QPainter) -> None:
+        """The bar's panel: its fill, the shine along its top, its outline and the right-hand brackets."""
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         bar = QRectF(self.bar_rect_local())
         edge = bar.adjusted(0.5, 0.5, -0.5, -0.5)
@@ -954,11 +965,20 @@ class HudWindow(_OverlayWindow):
         painter.drawPath(path)
         holo.paint_brackets(painter, bar, holo.HOLO, leg=12, radius=BAR_RADIUS, corners=holo.BRACKETS_RIGHT,
                             width=2.0)
+
+    def _paint_hairlines(self, painter: QPainter) -> None:
+        """The hairline under the input row and the one before Bring Jarvis back (Switch.dc.html .crow, .vsep)."""
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        bar = QRectF(self.bar_rect_local())
         divider = bar.top() + 1 + ROW_HEIGHT + 0.5
         painter.setPen(QPen(_BAR_HAIRLINE, 1.0))
         painter.drawLine(QPointF(bar.left() + 1, divider), QPointF(self._hairline_x, divider))
         painter.drawLine(QPointF(self._hairline_x + 0.5, bar.top() + 12), QPointF(self._hairline_x + 0.5,
                                                                                  bar.bottom() - 12))
+
+    def _paint_disc(self, painter: QPainter) -> None:
+        """The orb's dark disc (Switch.dc.html .forb::before)."""
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         center = QPointF(ORB_LEFT - 2, BAR_TOP + ORB_DROP)
         disc = QRadialGradient(center, _ORB_DISC)
         void = QColor(holo.VOID)
@@ -969,6 +989,41 @@ class HudWindow(_OverlayWindow):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(disc)
         painter.drawEllipse(center, ORB_PX / 2 - 2, ORB_PX / 2 - 2)
+
+    def flight_pictures(self, dpr: float | None = None) -> tuple[QPixmap, QPixmap, list[tuple[QPixmap, QRect]]]:
+        """This window as the switch flies it in and out (alive.WindowFlight; also while hidden), at ``dpr``: the
+        bar's panel (no hairlines, no orb disc - the flight carries the disc with its orb) and what is in the bar
+        (the hairlines, the input row with its keycaps, the caption and Bring Jarvis back), each a picture of the
+        whole window, and each chip shown with its rect in this window."""
+        dpr = float(dpr or self.devicePixelRatioF() or 1.0)
+
+        def picture(width: int, height: int) -> QPixmap:
+            pixmap = QPixmap(max(1, round(width * dpr)), max(1, round(height * dpr)))
+            pixmap.setDevicePixelRatio(dpr)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            return pixmap
+
+        panel, inner = picture(self.width(), self.height()), picture(self.width(), self.height())
+        painter = QPainter(panel)
+        try:
+            self._paint_panel(painter)
+        finally:
+            painter.end()
+        painter = QPainter(inner)
+        try:
+            self._paint_hairlines(painter)
+            for child in (self.bar, self.caption, self.back_button):       # the keycaps are in the bar's row
+                if child.isVisibleTo(self):
+                    child.render(painter, child.pos(), QRegion(), QWidget.RenderFlag.DrawChildren)
+        finally:
+            painter.end()
+        chips = []
+        for chip in self.chips.values():
+            if not chip.isHidden():
+                pixmap = picture(chip.width(), chip.height())
+                chip.render(pixmap, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
+                chips.append((pixmap, chip.geometry()))
+        return panel, inner, chips
 
     def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         pixmap = self.background()
@@ -1554,6 +1609,7 @@ class HudOverlay(QObject):
         self._rec_pill: QWidget | None = None
         self._stack: list[QWidget] = []
         self._screen: QScreen | None = None            # the screen the HUD shows on
+        self._holding = False                           # the RecPill is held (shown, or a switch on its way)
         self.hud = HudWindow(hud_key=hud_key, native=self._native, hide_from_capture=self._hide_from_capture)
         self.hud.shapeChanged.connect(self._apply_decor)   # its shadows follow the bar and the chips
         app = QGuiApplication.instance()
@@ -1624,6 +1680,7 @@ class HudOverlay(QObject):
         chip here); then the stacking order: the interactive windows above the layers."""
         self._place(screen)
         self._shown = True
+        self._holding = True
         self._hold(self._rec_pill, True)
         self._sync_decor()
         for layer in self._layers:
@@ -1635,18 +1692,76 @@ class HudOverlay(QObject):
         self.hud.show_quietly()
         self.restack()
 
-    def hide(self) -> None:
+    def prepare(self, screen: QScreen | None = None) -> None:
+        """The switch to the HUD starts (alive.WindowFlight flies it in; ``show_on`` once it has landed): placed on
+        ``screen`` as ``show_on`` places it, still hidden, and the meetings RecPill held from now on - the bar comes in
+        where it sits."""
+        self._place(screen)
+        self._holding = True
+        self._hold(self._rec_pill, True)
+
+    def hide(self, release: bool = True) -> None:
         """Hide every HUD window (the layers and their shadows too); the RecPill may show again (at its next tick
-        while a meeting records)."""
+        while a meeting records) - with ``release`` False only after ``release()`` (the switch back to the window
+        still on its way)."""
         self._shown = False
         for window in self.windows():
             window.hide()
         self._stack = []
         self._sync_decor()                               # no shadows while the HUD is away
-        self._hold(self._rec_pill, False)
+        if release:
+            self.release()
+
+    def release(self) -> None:
+        """The RecPill is no longer held (it shows again at its next tick while a meeting records and the window is
+        away); nothing while the HUD shows."""
+        if not self._shown:
+            self._holding = False
+            self._hold(self._rec_pill, False)
 
     def is_shown(self) -> bool:
         return self._shown
+
+    def hides_from_capture(self) -> bool:
+        """[desktop] hide_from_capture: every HUD window - and the switch's flight - is left out of capture."""
+        return self._hide_from_capture
+
+    def reach(self) -> QRect:
+        """The most the HUD covers on its screen (global): its window grown to three caption lines and to the work
+        area's right edge for its chips, with the room its shadows and glows take - the switch's flight covers it and
+        the Jarvis window, never the whole screen."""
+        win = self.hud
+        rect = win.geometry()
+        area = win.area()
+        right = max(rect.right(), area.right()) if area.isValid() else rect.right()
+        grown = (CAPTION_LINES - win.caption_lines()) * CAPTION_LINE
+        rect = QRect(rect.topLeft(), QPoint(right, rect.bottom() + max(0, grown)))
+        margin = max(glow_margin(Glow(QRect(), 0.0, look)) for look in (GLOW_BAR, GLOW_CHIP))
+        return rect.adjusted(-margin, -margin, margin, margin)
+
+    def flight_scene(self) -> alive.HudScene:
+        """The HUD as the switch flies it in or out (alive.WindowFlight), placed on its screen, shown or not
+        (global): the bar, its panel and what is in it, the chips shown and their shadows and glows (the decor layer's
+        pictures, where it paints them), the live orb and the strip along the top of the work area where the scan line
+        runs (the HUD's top margin, BAR_TOP high)."""
+        win = self.hud
+        screen = self._screen if self._screen is not None and shiboken6.isValid(self._screen) else None
+        dpr = float(screen.devicePixelRatio() if screen is not None else win.devicePixelRatioF() or 1.0)
+        origin = win.geometry().topLeft()
+        panel, inner, chips = win.flight_pictures(dpr)
+        glows = win.glows()                              # the bar's, then each shown chip's (as flight_pictures)
+
+        def layer(glow: Glow) -> alive.FlightLayer:
+            return alive.FlightLayer(glow_sprite(glow, dpr), glow_extent(glow).topLeft())
+
+        area = win.area() if win.area().isValid() else win.geometry()
+        return alive.HudScene(
+            bar=win.bar_rect(), panel=alive.FlightLayer(panel, origin), inner=alive.FlightLayer(inner, origin),
+            bar_glow=layer(glows[0]),
+            chips=[(alive.FlightLayer(pixmap, rect.topLeft() + origin), layer(glow))
+                   for (pixmap, rect), glow in zip(chips, glows[1:])],
+            orb=win.orb, orb_center=QPointF(win.orb_center()),
+            strip=QRect(area.left(), area.top(), area.width(), BAR_TOP))
 
     def new_card(self) -> ResultCard:
         """A card of this HUD (hidden until ``show_card`` places it)."""
@@ -1724,8 +1839,9 @@ class HudOverlay(QObject):
         if self._rec_pill is not None and self._rec_pill is not rec_pill:
             self._hold(self._rec_pill, False)
         self._toast, self._rec_pill = toast, rec_pill
-        if self._shown:
+        if self._shown or self._holding:
             self._hold(rec_pill, True)
+        if self._shown:
             self.restack()
 
     def neighbours(self) -> tuple[QWidget | None, QWidget | None]:

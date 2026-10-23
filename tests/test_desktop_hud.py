@@ -10,6 +10,7 @@ recording ring mirror the window's live, a recording started on the HUD gives a 
 re-entrancy changes nothing, the consent gate is fail-closed, shutdown on the HUD closes nothing, Windows ending the
 session on the HUD (aboutToQuit, then Qt's quit) runs Jarvis's shutdown as an outside close of the hidden window
 does ("done" recorded, a held Send sent) with nothing brought forward, and with [desktop] off there is no HUD at all.
+The switch here is the instant one ([ui] motion off); its flight (P1.5) is tests/test_desktop_switch.py's.
 
 Qt runs offscreen in this process and shows nothing. No OS call is made: the HUD's native seam is a recording fake
 (and the real one refuses while the tests run), and the Win32 calls of the bring-forward are fakes - the
@@ -29,7 +30,7 @@ from PySide6.QtCore import SIGNAL, QCoreApplication, QEvent, Qt, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
-from briefing_reader import alive, desktop_ui, dock, find_view, hud, hud_overlay, meetings as mt, meetings_view
+from briefing_reader import alive, desktop_ui, dock, find_view, holo, hud, hud_overlay, meetings as mt, meetings_view
 from briefing_reader import live as _live
 from briefing_reader import states_view, ui
 from briefing_reader.ask.planner import DISABLED_MESSAGE
@@ -74,7 +75,10 @@ class FakeNative:
 
 class HudApp(unittest.TestCase):
     """An AppHarness with [desktop] on (``enabled``) and the HUD's windows over a fake native seam (``harness``: more
-    AppHarness arguments)."""
+    AppHarness arguments). The switch is the instant one here (``MOTION``: off - these test the state and its rules;
+    tests/test_desktop_switch.py flies it)."""
+
+    MOTION = holo.MOTION_OFF
 
     def make(self, extra: str = "", *, enabled: bool = True, **harness: object) -> AppHarness:
         self.native = FakeNative()
@@ -82,6 +86,8 @@ class HudApp(unittest.TestCase):
                              desktop_factory=lambda config: hud_overlay.create(config, native=self.native),
                              **harness)
         harness.reading(autoplay=False)
+        holo.set_motion_level(self.MOTION)                  # after the app set [ui] motion's
+        self.addCleanup(holo.set_motion_level, holo.MOTION_LIVELY)
         self.harness, self.c = harness, harness.c
         self.window, self.reading = harness.c.window, harness.c.window.reading
         self.desktop = harness.c.desktop
