@@ -11,8 +11,10 @@ import sys
 import tempfile
 import threading
 import unittest
+import wave
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from briefing_reader import config as config_mod
@@ -422,6 +424,84 @@ class TranscriptionTests(Base):
         with self.assertRaises(RuntimeError):
             sp.transcribe_meeting(folder, fake)
         self.assertFalse((folder / mt.TRANSCRIPT_FILE).exists())
+
+    def test_the_model_gets_the_recording_as_samples_not_through_the_add_ons_decoder(self) -> None:
+        """faster-whisper 1.2's own decoder calls av.open(..., metadata_errors=...), which PyAV 15+ refuses: every
+        meeting failed. The recording is read here and handed over as 16 kHz float32 samples."""
+        np = self.numpy()
+        folder = self.meeting()
+        seen: list[Any] = []
+
+        class Model:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def transcribe(self, audio: Any, **_kwargs: Any) -> tuple[list, None]:
+                seen.append(audio)
+                return [], None
+
+        with mock.patch.object(sp.importlib, "import_module", return_value=mock.Mock(WhisperModel=Model)):
+            transcriber = sp.FasterWhisperTranscriber(self.tmp)
+            sp.transcribe_meeting(folder, transcriber)
+        self.assertEqual(len(seen), 2)
+        for audio in seen:
+            self.assertIsInstance(audio, np.ndarray)
+            self.assertEqual((audio.dtype, audio.ndim, len(audio)), (np.float32, 1, 10 * mt.SAMPLE_RATE))
+            self.assertLessEqual(float(np.abs(audio).max()), 1.0)
+        broken = folder / "broken.wav"
+        broken.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")             # unreadable here: the add-on's decoder tries
+        with mock.patch.object(sp.importlib, "import_module", return_value=mock.Mock(WhisperModel=Model)):
+            list(sp.FasterWhisperTranscriber(self.tmp).transcribe(broken))
+        self.assertEqual(seen[-1], str(broken))
+
+    def test_read_wav_mixes_channels_and_resamples_to_16_khz(self) -> None:
+        np = self.numpy()
+        path = self.tmp / "stereo48k.wav"
+        frames = 48_000
+        left = (np.sin(np.arange(frames) * 2 * np.pi * 440 / 48_000) * 16_000).astype("<i2")
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(2)
+            wav.setsampwidth(2)
+            wav.setframerate(48_000)
+            wav.writeframes(np.column_stack([left, np.zeros(frames, "<i2")]).astype("<i2").tobytes())
+        samples = sp.read_wav(path)
+        self.assertEqual((samples.dtype, len(samples)), (np.float32, mt.SAMPLE_RATE))
+        self.assertAlmostEqual(float(np.abs(samples).max()), 16_000 / 32_768 / 2, places=2)   # averaged with silence
+        eight_bit = self.tmp / "u8.wav"
+        with wave.open(str(eight_bit), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(1)
+            wav.setframerate(16_000)
+            wav.writeframes(bytes(100))
+        with self.assertRaises(ValueError):
+            sp.read_wav(eight_bit)
+
+    def test_a_failed_worker_names_its_kind_in_the_log_and_nothing_else(self) -> None:
+        class Lines(list):
+            def close(self) -> None:
+                pass
+
+        proc = mock.Mock()
+        proc.wait.return_value = 1
+        result: list[str] = []
+        process = sp.TranscriptionProcess(self.tmp, self.tmp, on_progress=lambda _p: None, on_done=result.append)
+        process._proc = proc
+        for line, logged in ((b'{"error": "worker_failed", "kind": "TypeError"}\n',
+                              "(worker_failed, TypeError, exit code 1)"),
+                             (b'{"error": "worker_failed", "kind": "a message about C:\\\\Users"}\n',
+                              "(worker_failed, exit code 1)")):     # only a type name is ever logged
+            proc.stdout = Lines([b'{"progress": 3}\n', line])
+            with self.assertLogs(sp.logger, "INFO") as logs:
+                process._read()
+            self.assertEqual(logs.output, [f"INFO:{sp.logger.name}:Meetings: the writing down failed {logged}"])
+        self.assertEqual(result, [sp.ERR_WORKER, sp.ERR_WORKER])
+
+    def numpy(self) -> Any:
+        try:
+            import numpy
+        except ImportError:   # the add-on (and numpy with it) is not installed here
+            self.skipTest("numpy is not installed")
+        return numpy
 
     def test_the_worker_process_reports_a_missing_add_on(self) -> None:
         """The real background process (no model, no add-on here): it says what is missing as a code."""

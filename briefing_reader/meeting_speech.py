@@ -20,7 +20,8 @@ Public API
 ``speech_missing()`` (the faster-whisper add-on, or ""), ``missing_pieces(models_root)`` -> list of
 ``Missing(key, text)`` (add-ons and the model, in the words the Meetings screen shows).
 ``ModelDownloader(target, session=None, progress=None, cancel=None)``: ``run()`` -> "" or a short error code.
-``Segment(start, end, text)``, ``merge_turns(mic, loopback, gap=)``, ``transcribe_meeting(...)``.
+``Segment(start, end, text)``, ``merge_turns(mic, loopback, gap=)``, ``transcribe_meeting(...)``,
+``read_wav(path)`` (a recording as samples for the model).
 ``FasterWhisperTranscriber(model_dir)`` (the add-on behind a small adapter, imported only when used).
 ``TranscriptionProcess(meeting_dir, model_dir, on_progress, on_done)``: ``start()``, ``cancel()`` (kills the worker
 and waits until it ended), ``running()``.
@@ -348,9 +349,34 @@ def wav_duration(path: Path) -> float:
         return 0.0
 
 
+def read_wav(path: Path) -> Any:
+    """A recording as Whisper hears it: mono float32 samples in [-1, 1] at ``mt.SAMPLE_RATE`` (16 kHz, numpy - it
+    comes with the add-on). The recorder writes 16-bit PCM at that rate already; another rate is resampled
+    (linear) and more channels are averaged. Reading it here, not through the add-on's own decoder, keeps the
+    transcription independent of the PyAV version installed beside faster-whisper (PyAV 15 and later refuse the
+    ``metadata_errors`` argument faster-whisper 1.2 passes, which failed every meeting). Raises ValueError (not
+    16-bit PCM), wave.Error or EOFError for a file it cannot read."""
+    import numpy as np
+
+    with wave.open(str(path), "rb") as wav:
+        channels, width, rate = wav.getnchannels(), wav.getsampwidth(), wav.getframerate()
+        raw = wav.readframes(wav.getnframes())
+    if width != 2 or channels < 1 or rate <= 0:
+        raise ValueError("not 16-bit PCM")
+    samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1:
+        samples = samples[: len(samples) // channels * channels].reshape(-1, channels).mean(axis=1)
+    if rate != mt.SAMPLE_RATE and len(samples) > 1:
+        count = max(1, round(len(samples) * mt.SAMPLE_RATE / rate))
+        positions = np.linspace(0, len(samples) - 1, count)
+        samples = np.interp(positions, np.arange(len(samples)), samples)
+    return np.ascontiguousarray(samples, dtype=np.float32)
+
+
 class FasterWhisperTranscriber:
     """faster-whisper behind a small adapter: ``WhisperModel(model_dir, device="cpu", compute_type="int8")``;
-    ``transcribe(path)`` yields Segments (``vad_filter`` skips the silence, English only)."""
+    ``transcribe(path)`` yields Segments (``vad_filter`` skips the silence, English only). The recording is handed
+    over as samples (``read_wav``); only a file that cannot be read that way goes to the add-on's own decoder."""
 
     def __init__(self, folder: Path, *, threads: int = 0) -> None:
         module = importlib.import_module(SPEECH_MODULE)
@@ -358,7 +384,11 @@ class FasterWhisperTranscriber:
                                           cpu_threads=threads or max(1, (os.cpu_count() or 4) - 2))
 
     def transcribe(self, path: Path) -> Iterable[Segment]:
-        segments, _info = self._model.transcribe(str(path), language="en", beam_size=5, vad_filter=True)
+        try:
+            audio: Any = read_wav(path)
+        except (ValueError, wave.Error, EOFError):
+            audio = str(path)
+        segments, _info = self._model.transcribe(audio, language="en", beam_size=5, vad_filter=True)
         for seg in segments:
             yield Segment(float(seg.start), float(seg.end), str(seg.text))
 
@@ -425,6 +455,7 @@ class TranscriptionProcess:
         proc = self._proc
         assert proc is not None and proc.stdout is not None
         error = ERR_WORKER
+        kind = ""
         for raw in proc.stdout:
             try:
                 message = json.loads(raw.decode("ascii", "replace"))
@@ -438,8 +469,14 @@ class TranscriptionProcess:
                 error = ""
             elif isinstance(message.get("error"), str):
                 error = message["error"][:40]
+                found = message.get("kind")
+                kind = found[:40] if isinstance(found, str) and found.isidentifier() else ""
         proc.stdout.close()
-        proc.wait()
+        code = proc.wait()
+        if error and not self._cancelled:
+            # The failure's kind only (an exception's type name) and the exit code: never a library message.
+            logger.info("Meetings: the writing down failed (%s%s, exit code %s)", error,
+                        f", {kind}" if kind else "", code)
         self._on_done(ERR_CANCELLED if self._cancelled else error)
 
     def running(self) -> bool:
