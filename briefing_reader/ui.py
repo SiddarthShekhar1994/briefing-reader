@@ -8726,10 +8726,11 @@ class AppController(QObject):
     # ---- meeting summaries (meetings part 2) ---------------------------------------------------------------
 
     def _meetings_now_infos(self) -> list[Any]:
-        """The meetings a start card may be for, the likeliest first (meetings_ui.meeting_rank: a real meeting
-        before a block of time, then the start closest to now, so at 2:52 the 3:00 call wins over the 2:00-3:00
-        meeting that is ending): from the bundle's day read when there is one (the invite's guests come with it: a
-        follow-up only ever goes to one of them), else from the agenda (title and times only)."""
+        """The calendar meetings a start card may link (its "Link a calendar meeting"): those on now, the likeliest
+        first (meetings_ui.meeting_rank: a real meeting before a block of time, then the start closest to now, so at
+        2:52 the 3:00 call wins over the 2:00-3:00 meeting that is ending), then the rest of today's not over yet by
+        their start - from the bundle's day read when there is one (the invite's guests come with it: a follow-up
+        only ever goes to one of them), else from the agenda (title and times only)."""
         from . import meetings_ui
         from .ask.offers import event_span
         from .ask.prep import other_guests
@@ -8743,6 +8744,7 @@ class AppController(QObject):
             except Exception:  # noqa: BLE001 - the agenda below
                 day, own = {}, frozenset()
             found = []
+            later = []
             for alias, briefs in day.items():
                 for brief in briefs:
                     span = event_span(brief, now)
@@ -8754,9 +8756,13 @@ class AppController(QObject):
                             "focusTime", "outOfOffice")
                         rank = meetings_ui.meeting_rank(start, now, block=block, guests=other_guests(brief, own))
                         found.append((rank, meetings_ui.meeting_info_of(alias, brief, own)))
-            if found:
-                return [info for _rank, info in sorted(found, key=lambda item: item[0])]
-        return meetings_ui.meetings_now(self._agenda_events, now)
+                    elif meetings_ui.later_today(start, end, now):
+                        later.append((start, meetings_ui.meeting_info_of(alias, brief, own)))
+            if found or later:
+                infos = [info for _rank, info in sorted(found, key=lambda item: item[0])]
+                infos += [info for _start, info in sorted(later, key=lambda item: item[0])]
+                return infos[:meetings_ui.LINK_MAX]
+        return meetings_ui.meetings_today(self._agenda_events, now)
 
     def _meeting_info_for_event(self, event: Any) -> Any:
         """A calendar event of the agenda (Home's next-meeting tile, a Day view row) as the start card's MeetingInfo:
@@ -8781,7 +8787,8 @@ class AppController(QObject):
         return mt.MeetingInfo(getattr(event, "title", ""), getattr(event, "start", None), getattr(event, "end", None))
 
     def _record_next_meeting(self) -> None:
-        """Record on Home's next-meeting tile: that meeting's start card opens (unticked); it never records."""
+        """Record on Home's next-meeting tile: the start card opens linked to that meeting (unticked); it never
+        records."""
         meetings = getattr(self, "meetings", None)
         event = self._next_meeting_event
         if meetings is None or event is None or self.state == STATE_QUITTING:
@@ -8790,7 +8797,8 @@ class AppController(QObject):
         logger.info("Home's next-meeting tile: the start card opened")
 
     def _record_agenda_row(self, key: str) -> None:
-        """Record on a Day view meeting row: that meeting's start card opens (unticked); it never records."""
+        """Record on a Day view meeting row: the start card opens linked to that meeting (unticked); it never
+        records."""
         meetings = getattr(self, "meetings", None)
         event = self._agenda_record.get(key)
         if meetings is None or event is None or self.state == STATE_QUITTING:
@@ -8889,9 +8897,11 @@ class AppController(QObject):
     def _meeting_card_ids(self, meeting_id: str, summary: Any, record: Any) -> list[str]:
         """The follow-up drafts' card ids, one per follow-up in order: this session's, else made again from
         summary.json (each line checked again against the invite: validate.to_cards with FollowupCheck); a card
-        not decided yet goes back under ASK."""
+        not decided yet goes back under ASK. A meeting not linked to a calendar meeting has none."""
         from .ask import meeting_summary as ms
 
+        if not record.linked:
+            return []                                # not linked to a calendar meeting: no guests, no drafts
         known = self._meeting_cards.get(meeting_id, ())
         if len(known) == len(summary.follow_ups):
             return list(known)
@@ -9005,15 +9015,20 @@ class AppController(QObject):
     def _on_meeting_add_block(self, meeting_id: str, index: int) -> None:
         """Add block on one of the owner's action items: a Calendar card (MEETING . CALENDAR) for the first free
         half hour Jarvis sees on the agenda, under ASK and under the item - nothing is added until that card's own
-        Add (and Undo takes it back). Nothing at all happens without this click."""
+        Add (and Undo takes it back). Nothing at all happens without this click, and never for a meeting in person
+        or not linked to a calendar meeting (meetings_ui.blocks_allowed)."""
         from .ask import meeting_summary as ms
         from .ask.context import ContextIndex
         from .ask.validate import to_cards
+        from .meetings_ui import blocks_allowed
 
         meetings = getattr(self, "meetings", None)
         summary = meetings.summary_of(meeting_id) if meetings is not None else None
         if summary is None or not 0 <= index < len(summary.actions) or not summary.actions[index].mine:
             return
+        record = meetings.store.load(meeting_id)
+        if record is None or not blocks_allowed(record):
+            return                                   # in person or not linked: no Add block (owner decision)
         earlier = self._meeting_blocks.get(meeting_id, {}).get(index)
         if earlier and (self.window.reading.approvals.card(earlier) is not None
                         or str((self._store.get(earlier) or {}).get("status") or "") not in ("", STATUS_FAILED)):
@@ -9065,8 +9080,9 @@ class AppController(QObject):
                                     question, entry)
 
     def _record_offer_link(self, offer: Any, state: str) -> None:
-        """The record offer's link: the start card for that meeting opens (unticked, every time); it never
+        """The record offer's link: the start card opens linked to that meeting (unticked, every time); it never
         records - only the card's Start does, after the owner's consent tick. An offer gone since says so."""
+        from . import meetings as mt
         from .meetings_ui import meeting_info_of
 
         meetings = getattr(self, "meetings", None)
@@ -9079,7 +9095,8 @@ class AppController(QObject):
             own = controller._own()
         except Exception:  # noqa: BLE001
             own = frozenset()
-        info = meeting_info_of(offer.alias, brief, own) if brief is not None else None
+        info = (meeting_info_of(offer.alias, brief, own) if brief is not None else
+                mt.MeetingInfo(getattr(offer, "event_title", ""), getattr(offer, "start", None)))
         controller.record_used(offer.id)
         meetings.open_start_card(info)
         logger.info("Record offer link: the start card opened")

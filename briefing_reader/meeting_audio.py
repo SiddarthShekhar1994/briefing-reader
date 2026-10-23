@@ -1,9 +1,11 @@
 """Meeting recording, part 1: the audio devices and the recorder (no Qt).
 
-Two channels, each its own 16 kHz mono 16-bit WAV file in the meeting's folder: ``mic.wav`` (the microphone,
-"You") and ``loopback.wav`` (the call audio from the speakers / headset through WASAPI loopback, "Others").
-Both files follow the wall clock: a channel that delivers nothing (WASAPI loopback is silent while nothing
-plays) is filled with silence, so the two files stay aligned for the You / Others merge.
+On a call two channels, each its own 16 kHz mono 16-bit WAV file in the meeting's folder: ``mic.wav`` (the
+microphone, "You") and ``loopback.wav`` (the call audio from the speakers / headset through WASAPI loopback,
+"Others"). Both files follow the wall clock: a channel that delivers nothing (WASAPI loopback is silent while
+nothing plays) is filled with silence, so the two files stay aligned for the You / Others merge. In person
+(``record.kind`` KIND_IN_PERSON, owner decision 2026-10-22) only the microphone: the call-audio stream is never
+opened and no ``loopback.wav`` is written, so nothing the PC plays is recorded (and there is no "No call audio").
 
 Devices (owner decision 4b): the call audio follows the Windows default output device and the microphone the
 default input, unless the owner picked one in Settings > Meetings. When a followed default changes mid-meeting
@@ -32,11 +34,12 @@ has ``read_available() -> bytes`` (16 kHz mono int16, never blocking) and ``clos
 ``WavWriter(path)``: ``write(bytes)``, ``frames``, ``seconds``, ``sync()``, ``close()``.
 ``repair_wav(path)``, ``wav_seconds(path)``.
 ``Recorder(backend, store, record, mic_pick="", call_pick="", clock=, wall=, on_stop=, on_change=)``:
-``start()`` (opens both streams and files; raises ``RecorderError`` when the microphone cannot be opened, and
-any failure closes every stream and file it opened before it is raised), ``run_thread()``, ``tick()`` (one
-step: read, write, follow the defaults, check the stop rules), ``stop(reason)``, ``elapsed()``,
-``is_recording()``, ``stop_reason``, ``device_names()``, ``call_audio_missing()`` (the call audio is not being
-recorded right now: its device could not be opened).
+``start()`` (opens the streams and files of the record's kind - both on a call, the microphone's only in person;
+raises ``RecorderError`` when the microphone cannot be opened, and any failure closes every stream and file it
+opened before it is raised), ``run_thread()``, ``tick()`` (one step: read, write, follow the defaults, check the
+stop rules), ``stop(reason)``, ``elapsed()``, ``is_recording()``, ``stop_reason``, ``device_names()``,
+``call_audio_missing()`` (on a call, the call audio is not being recorded right now: its device could not be
+opened; never in person).
 """
 
 from __future__ import annotations
@@ -543,25 +546,27 @@ class Recorder:
     # ---- start ----------------------------------------------------------------------------
 
     def start(self) -> None:
-        """Open both devices and both files. A microphone that cannot be opened stops the start
-        (``RecorderError``); call audio that cannot be opened is recorded as silence and tried again. Whatever
-        fails (the record can't be saved, say), every stream and file opened so far is closed before the error
-        goes up: no device stays open behind a start that did not happen."""
+        """Open the devices and the files: on a call both, in person the microphone's only (the call audio's
+        stream is never opened, so nothing the PC plays is recorded). A microphone that cannot be opened stops the
+        start (``RecorderError``); call audio that cannot be opened is recorded as silence and tried again.
+        Whatever fails (the record can't be saved, say), every stream and file opened so far is closed before the
+        error goes up: no device stays open behind a start that did not happen."""
         meeting_id = self.record.id
         try:
-            for kind in mt.CHANNELS:
+            for kind in mt.channels(self.record.kind):
                 self._channels[kind] = _Channel(kind, WavWriter(self.store.audio_path(meeting_id, kind)))
                 self._channels[kind].picked = self._picks[kind]
             try:
                 self._open(self._channels[mt.MIC], first=True)
             except Exception as exc:
                 raise RecorderError("mic_unavailable", "the microphone could not be opened") from exc
-            try:
-                self._open(self._channels[mt.LOOPBACK], first=True)
-            except Exception as exc:  # noqa: BLE001 - the call audio is tried again every few seconds
-                logger.warning("Meeting %s: the call audio could not be opened yet (%s)", meeting_id,
-                               type(exc).__name__)
-                self._note_change(mt.LOOPBACK, "unavailable")
+            if mt.LOOPBACK in self._channels:
+                try:
+                    self._open(self._channels[mt.LOOPBACK], first=True)
+                except Exception as exc:  # noqa: BLE001 - the call audio is tried again every few seconds
+                    logger.warning("Meeting %s: the call audio could not be opened yet (%s)", meeting_id,
+                                   type(exc).__name__)
+                    self._note_change(mt.LOOPBACK, "unavailable")
             now = self._clock()
             self._started = self._last_sound = self._last_sync = self._last_check = now
             self._recording = True
@@ -570,9 +575,10 @@ class Recorder:
         except BaseException:
             self._teardown()
             raise
-        logger.info("Meeting %s: recording (microphone follows the default: %s, call audio follows the default: "
-                    "%s)", meeting_id, self._channels[mt.MIC].follows_default,
-                    self._channels[mt.LOOPBACK].follows_default)
+        loop = self._channels.get(mt.LOOPBACK)
+        logger.info("Meeting %s: recording %s (microphone follows the default: %s, call audio follows the default: "
+                    "%s)", meeting_id, self.record.kind, self._channels[mt.MIC].follows_default,
+                    loop.follows_default if loop is not None else "not recorded")
 
     def _teardown(self) -> None:
         """A start that failed: every stream and file it opened closed (nothing records, nothing stays open)."""

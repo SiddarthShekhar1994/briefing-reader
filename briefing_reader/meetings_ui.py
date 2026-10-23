@@ -19,8 +19,14 @@ It ties the parts together and keeps the owner's rules:
   another call. The meeting record keeps when the box was ticked.
 * The device library is made fresh for each start card, Settings > Meetings and each start (PortAudio lists the
   devices only when it starts); while recording, the call audio that can't be recorded shows on REC, the pill
-  and the meeting's row ("No call audio").
-* Logs: ids, counts, durations and statuses only.
+  and the meeting's row ("No call audio" - never in person, where the call audio is never opened).
+* Any meeting (owner decisions 2026-10-22): the card has a title box ("Meeting, Wed 22 Oct 2:05 PM" when left
+  blank), "In person" / "On a call" (starting on the kind recorded last: ``prefs.kind``; the consent tick is never
+  remembered) and an optional link to a calendar meeting - none by default from Record a meeting (the Meetings
+  screen, the Find list); Record on a calendar meeting (Home's tile, a Day view row, the record offer) opens the
+  card linked to it. A meeting not linked has no guests anywhere: no drafts, no Add block (``job_of`` hands no
+  guests over; ``summary_info`` shows plain follow-ups).
+* Logs: ids, kinds, counts, durations and statuses only.
 
 Part 2, the summary: the transcript leaves this PC only when the owner asked for its summary - the start card's
 own tick "summarise it" (unticked every time; the meeting keeps that he asked and when: the summary then starts
@@ -107,7 +113,8 @@ class MeetingsController(QObject):
         self.store = mt.MeetingStore(root, now=now)
         self.prefs = mt.DevicePrefs(root)
         self.models = mt.models_root(config)
-        # The meetings a start card may be for, best first (on now or starting within 15 minutes; the app's).
+        # The calendar meetings a start card may be linked to, best first: on now or starting within 15 minutes,
+        # then the rest of today's not over yet (the app's; meetings_today).
         self.meetings_now: Callable[[], list[mt.MeetingInfo]] = lambda: []
         # Replaceable (tests): the device library, the worker process, the download, the add-on checks.
         self.backend_factory: Callable[[], tuple[Any, str]] = ma.load_backend
@@ -312,30 +319,35 @@ class MeetingsController(QObject):
         return ""
 
     def open_start_card(self, info: mt.MeetingInfo | None = None) -> None:
-        """The Meetings screen with the start card for ``info`` (a meeting the owner pointed at: the record offer,
-        Home's next-meeting tile, a Day view row), else the meeting he most likely starts now (the next one starting
-        within 15 minutes before one already running), else an unscheduled call. The card names the meeting and
-        lets him switch to another meeting on now or to an unscheduled call. It never records: only the card's
-        Start does, after the consent tick."""
+        """The Meetings screen with the start card: linked to ``info`` when the owner pointed at a calendar
+        meeting (the record offer, Home's next-meeting tile, a Day view row), else linked to none (Record a
+        meeting). The card starts on the kind he recorded last, with an empty title box; "Link a calendar meeting"
+        offers the meetings on now and the rest of today's. It never records: only the card's Start does, after
+        the consent tick."""
         if self._shut:
             return
         self._show_screen()
         if self.is_recording():
             return                                   # one at a time: the screen shows the one recording
-        try:
-            candidates = [item for item in self.meetings_now() or () if isinstance(item, mt.MeetingInfo)]
-        except Exception:  # noqa: BLE001 - no calendar: an unscheduled call
-            candidates = []
-        if info is not None:
-            candidates = [info] + [item for item in candidates if not same_meeting(item, info)]
-        else:
-            info = candidates[0] if candidates else None
+        if info is not None and not info.linked:
+            info = None                              # nothing of a calendar meeting: the card links none
+        candidates = self._link_choices(info)
         mic, call = self.device_choice(fresh=True)
         self.stage.show_list()                       # the card lives on the list page (a summary gives way)
         self.stage.card.open_card(info, mic, call, problem=self.card_problem(mic[0]), choices=candidates,
-                                  summaries=self.summaries_on())
-        logger.info("Meetings: start card opened (scheduled: %s, %d other meeting(s) to choose)",
-                    bool(info and info.scheduled), max(0, len(candidates) - 1))
+                                  summaries=self.summaries_on(), kind=self.prefs.card_kind())
+        logger.info("Meetings: start card opened (%s, linked: %s, %d calendar meeting(s) to link)",
+                    self.prefs.card_kind(), info is not None, len(candidates) - (1 if info is not None else 0))
+
+    def _link_choices(self, info: mt.MeetingInfo | None) -> list[mt.MeetingInfo]:
+        """The calendar meetings the card may link (``info``, the one it is linked to, first)."""
+        try:
+            candidates = [item for item in self.meetings_now() or () if isinstance(item, mt.MeetingInfo)]
+        except Exception:  # noqa: BLE001 - no calendar: nothing to link
+            candidates = []
+        if info is not None:
+            candidates = [info] + [item for item in candidates if not same_meeting(item, info)]
+        return candidates
 
     def _on_tab_changed(self, _index: int) -> None:
         """Another screen came up: the start card closes (its ticks with it)."""
@@ -355,10 +367,13 @@ class MeetingsController(QObject):
             return False
         if self.is_recording():
             return False
+        linked = request.info if request.linked else None
+        again = {"kind": request.kind, "title": request.title or "",     # a card opened again keeps his choices
+                 "choices": self._link_choices(linked)}
         backend, missing = self.backend(fresh=True)
         if backend is None:
-            self.stage.card.open_card(request.info, ("", True), ("", True),
-                                      problem=f"Recording needs the Python add-on {missing}.")
+            self.stage.card.open_card(linked, ("", True), ("", True),
+                                      problem=f"Recording needs the Python add-on {missing}.", **again)
             return False
         try:
             record = self.store.create(request)
@@ -378,8 +393,9 @@ class MeetingsController(QObject):
             problem = ("The microphone could not be opened. Check it, then try again."
                        if isinstance(exc, ma.RecorderError) else
                        "The meeting's files could not be written on this PC. Check the disk, then try again.")
-            self.stage.card.open_card(request.info, mic, call, problem=problem, summaries=self.summaries_on())
+            self.stage.card.open_card(linked, mic, call, problem=problem, summaries=self.summaries_on(), **again)
             return False
+        self.prefs.set(kind=request.kind)            # the next card starts on the kind he recorded last
         self.recorder = recorder
         if self.threaded:
             recorder.run_thread()
@@ -781,13 +797,17 @@ class MeetingsController(QObject):
     def settings_rows(self) -> list[tuple[str, str]]:
         return [("Recording", "On - starts only when you click Start, after the consent tick"),
                 ("Consent", "Ticked on the card for every meeting; never remembered"),
+                ("In person or on a call", "In person: only the microphone, nothing this PC plays. On a call: your "
+                                           "microphone and the call audio"),
+                ("Calendar link", "Optional: a meeting not linked to your calendar has no guests and no drafts"),
                 ("While it records", "REC in the header and a pill on top, also when Jarvis is minimised"),
                 ("Stops by itself", "15 minutes after the meeting's end, after 10 minutes of silence, or at 3 hours"),
                 ("Audio", "Kept 7 days on this PC, then deleted; never uploaded"),
                 ("Transcript and summary", "Kept 30 days on this PC, then deleted"),
                 ("Speech to text", f"On this PC ({sp.MODEL_NAME}); the audio never leaves it"),
                 ("Summary", SUMMARY_ROW_ON if self.summaries_on() else "Needs Ask Jarvis (your Claude Code) on"),
-                ("Follow-ups", "Drafts to the invite's guests only; nothing is sent until you click Send"),
+                ("Follow-ups", "Drafts to the invite's guests only (a linked meeting); nothing is sent until you "
+                               "click Send"),
                 ("Record offer", "Shortly before a meeting with guests (with the productivity bundle); it only opens "
                                  "the start card"),
                 ("Kept in", "The meetings folder inside the data folder")]
@@ -860,10 +880,12 @@ def ms_origin_click() -> str:
 
 
 def job_of(store: mt.MeetingStore, record: mt.MeetingRecord) -> ms.MeetingJob:
-    """What a summary run is handed (memory only): the transcript file and the facts kept with the recording."""
+    """What a summary run is handed (memory only): the transcript file and the facts kept with the recording - its
+    kind, and the invite's guests only when it is linked to a calendar meeting (none otherwise, anywhere)."""
+    guests = tuple(ms.MeetingGuest(name, address) for name, address in record.invite) if record.linked else ()
     return ms.MeetingJob(record.id, store.transcript_path(record.id), record.title, record.scheduled_start
-                         or record.started_at, record.duration_s, record.alias,
-                         tuple(ms.MeetingGuest(name, address) for name, address in record.invite))
+                         or record.started_at, record.duration_s, record.alias, guests, kind=record.kind,
+                         linked=bool(record.linked))
 
 
 def due_text(due: str) -> str:
@@ -877,31 +899,46 @@ def due_text(due: str) -> str:
     return f"due {day:%a} {day.day} {day:%b}"
 
 
+def blocks_allowed(record: mt.MeetingRecord) -> bool:
+    """Add block on the owner's own action items: only for a meeting on a call linked to a calendar meeting (in
+    person nothing is the owner's; a meeting not linked has none)."""
+    return bool(record.linked) and not record.in_person
+
+
 def summary_info(record: mt.MeetingRecord, summary: ms.MeetingSummary, *,
                  blocks: dict[int, tuple[str, str]] | None = None,
                  follow_ups: list[tuple[str, str]] | None = None,
                  notes: list[str] | None = None, steps_link: str = "") -> sv.SummaryInfo:
     """What the summary view shows: the summary's own parts (yours first), each of your items' block state
-    ((state, card id) by index), each follow-up's (state words, card id), each note's state, See every step."""
+    ((state, card id) by index; none unless ``blocks_allowed``), each follow-up draft's (state words, card id) - a
+    meeting not linked has plain follow-ups and no guests instead -, each note's state, See every step, and the
+    date and length Copy summary puts first."""
     blocks = blocks or {}
     started = record.scheduled_start or record.started_at
     meta = " \u00b7 ".join(part for part in (f"{started:%a %d %b} {meetings_view._clock(started)}" if started else "",
                                              mt.length_text(record.duration_s)) if part)
+    when = f"{started:%a} {started.day} {started:%b %Y}, {mt.clock_text(started)}" if started else ""
+    can_block = blocks_allowed(record)
     actions = []
     for index, item in enumerate(summary.actions):
         state, card_id = blocks.get(index, (sv.BLOCK_NONE, ""))
+        if not can_block:
+            state, card_id = sv.BLOCK_OFF, ""
         actions.append(sv.SummaryAction("You" if item.mine else item.who, item.what, due_text(item.due), item.mine,
                                         state if item.mine else sv.BLOCK_NONE, card_id if item.mine else ""))
     follows = []
-    for index, item in enumerate(summary.follow_ups):
+    for index, item in enumerate(summary.follow_ups if record.linked else ()):
         state, card_id = (follow_ups or [])[index] if index < len(follow_ups or []) else ("", "")
         follows.append(sv.SummaryFollowUp(item.to_name, item.subject, state, card_id))
+    plain = tuple(sv.SummaryFollowUpItem(item.who, item.what) for item in summary.follow_up_items)
     shown = [sv.SummaryNote(text, (notes or [])[index] if index < len(notes or []) else sv.NOTE_OFF)
              for index, text in enumerate(summary.memory)]
-    names = [name for name, _address in record.invite] or list(record.guests)
+    names = ([name for name, _address in record.invite] or list(record.guests)) if record.linked else []
     return sv.SummaryInfo(record.id, summary.title or record.shown_title(), meta.upper(), sv.guests_text(names),
                           summary.decisions, tuple(actions), summary.questions, tuple(follows), tuple(shown),
-                          sv.note_text(summary.dropped), steps_link)
+                          sv.note_text(summary.dropped, reason=ms.left_out_words(record)), steps_link, when=when,
+                          length=mt.length_text(record.duration_s), linked=bool(record.linked),
+                          follow_up_items=plain if not record.linked else ())
 
 
 RECORD_OFFER_LINK = "Open the start card"
@@ -1003,3 +1040,25 @@ def meeting_now(events: Any, now: datetime, *, lead: timedelta = START_LEAD) -> 
     """The likeliest of ``meetings_now`` (None: none on now)."""
     found = meetings_now(events, now, lead=lead)
     return found[0] if found else None
+
+
+LINK_MAX = 8                                # the start card's "Link a calendar meeting" lists at most this many
+
+
+def later_today(start: datetime, end: datetime, now: datetime, *, lead: timedelta = START_LEAD) -> bool:
+    """A timed meeting later today (after the ``lead`` before its start - not on now yet, not over)."""
+    wall = now if (now.tzinfo is None) == (start.tzinfo is None) else now.replace(tzinfo=start.tzinfo)
+    return start - lead > wall and start.date() == wall.date() and end > wall
+
+
+def meetings_today(events: Any, now: datetime, *, lead: timedelta = START_LEAD) -> list[mt.MeetingInfo]:
+    """The calendar meetings a start card may link: those on now (``meetings_now``, the likeliest first), then the
+    rest of today's that are not over yet, by their start; at most LINK_MAX."""
+    found = meetings_now(events, now, lead=lead)
+    later = []
+    for event in events or ():
+        start, end = getattr(event, "start", None), getattr(event, "end", None)
+        if start is not None and end is not None and later_today(start, end, now, lead=lead):
+            later.append((start, mt.MeetingInfo(getattr(event, "title", ""), start, end)))
+    found += [info for _start, info in sorted(later, key=lambda item: item[0])]
+    return found[:LINK_MAX]

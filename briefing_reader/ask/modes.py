@@ -92,6 +92,10 @@ FIXED_COMMANDS: dict[Any, str] = {
     MODE_MEETING: "Summarise the meeting in <transcript> for the owner: a title, the decisions, the action items "
                   "(who and what), the open questions, follow-up drafts to guests in <guests> only where the "
                   "meeting clearly calls for one, and facts worth keeping.",
+    # A meeting not linked to a calendar meeting: no guests, so the follow-ups are plain notes, never drafts.
+    (MODE_MEETING, "plain"): "Summarise the meeting in <transcript> for the owner: a title, the decisions, the "
+                             "action items (who and what), the open questions, the follow-ups as plain notes (who "
+                             "and what, never an email), and facts worth keeping.",
 }
 OWNER_WORDS = "The owner's words: "
 OWNER_WORDS_CAP = 300

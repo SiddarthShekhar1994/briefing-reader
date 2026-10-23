@@ -733,6 +733,246 @@ class PortAudioTests(Base):
         self.assertEqual(rec.device_names(), ("Laptop Mic", "Laptop Speakers"))
 
 
+def in_person(*, title: str | None = None) -> mt.StartRequest:
+    return mt.StartRequest(mt.MeetingInfo(), True, NOW, "Owner Laptop Microphone", "", title=title,
+                           kind=mt.KIND_IN_PERSON)
+
+
+class KindAndLinkTests(Base):
+    """Owner decisions 2026-10-22: any meeting, in person or on a call, linked to a calendar meeting or not; a
+    record written before them is a call, linked when it has an event id or guests."""
+
+    def test_a_request_carries_the_title_box_and_the_kind(self) -> None:
+        request = mt.StartRequest(mt.MeetingInfo(), True, NOW, title="  Zq7  weekly   sync ", kind="in_person")
+        self.assertEqual((request.title, request.kind, request.linked), ("Zq7 weekly sync", mt.KIND_IN_PERSON, False))
+        self.assertEqual(mt.StartRequest(mt.MeetingInfo(), True, NOW, kind="hologram").kind, mt.KIND_CALL)
+        self.assertEqual(mt.StartRequest(mt.MeetingInfo(), True, NOW).kind, mt.KIND_CALL)   # as before: a call
+        self.assertEqual(len(mt.StartRequest(mt.MeetingInfo(), True, NOW, title="x" * 300).title), mt.TITLE_CAP)
+        linked = mt.StartRequest(mt.MeetingInfo(TITLE, NOW, NOW + timedelta(minutes=30), "evt1", GUESTS), True, NOW)
+        self.assertEqual((linked.linked, linked.record_title()), (True, TITLE))     # no box: the calendar's title
+        typed = mt.StartRequest(linked.info, True, NOW, title="")
+        self.assertEqual(typed.record_title(), "")                                 # the box left blank wins
+        with self.assertRaises(mt.ConsentMissing):
+            mt.StartRequest(mt.MeetingInfo(), False, NOW, title="x", kind=mt.KIND_IN_PERSON)
+        record = self.store.create(request)
+        loaded = self.store.load(record.id)
+        self.assertEqual((loaded.title, loaded.kind, loaded.linked, loaded.in_person),
+                         ("Zq7 weekly sync", mt.KIND_IN_PERSON, False, True))
+        self.assertEqual((loaded.event_id, loaded.guests, loaded.invite, loaded.scheduled_end), ("", (), (), None))
+        data = json.loads((self.store.folder(record.id) / mt.RECORD_FILE).read_text(encoding="utf-8"))
+        self.assertEqual((data["kind"], data["linked"], data["version"]), ("in_person", False, 2))
+        self.assertNotIn("weekly", repr(request) + repr(loaded))
+
+    def test_a_meeting_left_without_a_title_is_meeting_with_its_date_and_time(self) -> None:
+        record = self.store.create(mt.StartRequest(mt.MeetingInfo(), True, NOW, title=""))
+        self.assertEqual(self.store.load(record.id).title, "")
+        self.assertEqual(self.store.load(record.id).shown_title(), "Meeting, Mon 19 Oct 2:00 PM")
+        self.assertEqual(mt.default_title(datetime(2026, 10, 4, 9, 5)), "Meeting, Sun 4 Oct 9:05 AM")
+        self.assertEqual(mt.default_title(None), "Meeting")
+        self.assertEqual(mt.MeetingInfo().shown_title(), mt.NO_TITLE)              # a calendar meeting with none
+
+    def test_old_records_load_as_calls_linked_by_their_event_id_or_guests(self) -> None:
+        base = {"version": 1, "id": "20261019-140000-abcd", "title": "", "started_at": "2026-10-19T14:00:00",
+                "status": "transcribed"}
+        for data, linked in ((dict(base, event_id="evt1"), True), (dict(base, guests=["Ana Lopez"]), True),
+                             (dict(base), False)):
+            with self.subTest(data=sorted(data)):
+                record = mt.MeetingRecord.from_json(data)
+                self.assertEqual((record.kind, record.linked, record.in_person), (mt.KIND_CALL, linked, False))
+        record = mt.MeetingRecord.from_json(dict(base, kind="in_person", linked=False, event_id="evt1"))
+        self.assertEqual((record.kind, record.linked), (mt.KIND_IN_PERSON, False))   # the fields themselves win
+        self.assertEqual(mt.MeetingRecord.from_json(dict(base, kind="hologram")).kind, mt.KIND_CALL)
+        folder = self.root / base["id"]                                           # an old meeting.json on disk
+        folder.mkdir(parents=True)
+        (folder / mt.RECORD_FILE).write_text(json.dumps(dict(base, event_id="evt1", guests=GUESTS)),
+                                             encoding="utf-8")
+        loaded = self.store.load(base["id"])
+        self.assertEqual((loaded.kind, loaded.linked, loaded.shown_title()),
+                         (mt.KIND_CALL, True, "Meeting, Mon 19 Oct 2:00 PM"))
+        self.store.update(loaded.id, status=mt.STATUS_SUMMARY_READY)               # saved again: both fields written
+        data = json.loads((folder / mt.RECORD_FILE).read_text(encoding="utf-8"))
+        self.assertEqual((data["kind"], data["linked"]), ("call", True))
+
+    def test_the_kind_recorded_last_is_kept_for_the_next_card(self) -> None:
+        prefs = mt.DevicePrefs(self.root)
+        self.assertEqual((prefs.kind, prefs.card_kind()), ("", mt.KIND_CALL))     # "On a call" the first time
+        prefs.set(microphone=MIC_B.name)
+        self.assertEqual(json.loads(prefs.path.read_text(encoding="utf-8")),
+                         {"microphone": MIC_B.name, "call_audio": ""})            # no kind until one was recorded
+        prefs.set(kind=mt.KIND_IN_PERSON)
+        again = mt.DevicePrefs(self.root)
+        self.assertEqual((again.card_kind(), again.microphone), (mt.KIND_IN_PERSON, MIC_B.name))
+        again.set(kind="hologram")
+        self.assertEqual(mt.DevicePrefs(self.root).card_kind(), mt.KIND_CALL)
+
+
+class InPersonRecorderTests(Base):
+    def test_in_person_opens_only_the_microphone_and_writes_mic_wav_only(self) -> None:
+        backend = FakeBackend(loop_fails=True)              # the call audio would fail: it is never even tried
+        record = self.store.create(in_person())
+        with mock.patch.object(backend, "open_loopback", wraps=backend.open_loopback) as loopback:
+            rec = ma.Recorder(backend, self.store, record, clock=self.clock.mono, wall=self.clock.wall)
+            rec.start()
+            self.addCleanup(rec.stop)
+            self.assertTrue(rec.is_recording())
+            self.assertFalse(rec.call_audio_missing())       # never "No call audio" in person
+            backend.default_out = OUT_B                     # a new default output: nothing to follow in person
+            for _ in range(8):
+                self.clock.advance(1.0)
+                backend.live(mt.MIC).feed(tone(1.0, LOUD_MIC))
+                rec.tick()
+            self.assertFalse(rec.call_audio_missing())
+            rec.stop()
+        loopback.assert_not_called()
+        self.assertEqual(backend.opened, [(mt.MIC, MIC_A.id)])
+        self.assertTrue(all(stream.kind == mt.MIC and stream.closed for stream in backend.streams))
+        self.assertAlmostEqual(ma.wav_seconds(self.store.audio_path(record.id, mt.MIC)), 8.0, delta=0.05)
+        self.assertFalse(self.store.audio_path(record.id, mt.LOOPBACK).exists())
+        saved = self.store.load(record.id)
+        self.assertEqual((saved.status, saved.device_changes, saved.devices["call_audio"]),
+                         (mt.STATUS_RECORDED, [], ""))
+        self.assertEqual(rec.device_names(), (MIC_A.name, ""))
+
+    def test_in_person_with_portaudio_never_opens_the_loopback_device(self) -> None:
+        module = FakePortAudio()
+        module.add(0, "Laptop Mic", mic=True)
+        module.add(1, "Laptop Speakers")
+        module.add(2, "Laptop Speakers [Loopback]", loopback=True)
+        module.default_in, module.default_out = 0, 1
+        backend = ma.PyAudioWPatchBackend(module, clock=self.clock.mono)
+        record = self.store.create(in_person())
+        rec = ma.Recorder(backend, self.store, record, clock=self.clock.mono, wall=self.clock.wall)
+        rec.start()
+        self.addCleanup(rec.stop)
+        for _ in range(5):
+            self.clock.advance(1.0)
+            module.deliver(tone(1.0, 3000))
+            rec.tick()
+        self.assertEqual([handle.index for handle in module.handles], [0])      # the microphone only, never 2
+        rec.stop()
+        self.assertFalse(self.store.audio_path(record.id, mt.LOOPBACK).exists())
+
+    def test_in_person_silence_is_the_microphones_and_a_crash_is_saved(self) -> None:
+        with mock.patch.object(ma, "SILENCE_S", 30):
+            backend = FakeBackend()
+            record = self.store.create(in_person())
+            stops: list[str] = []
+            rec = ma.Recorder(backend, self.store, record, clock=self.clock.mono, wall=self.clock.wall,
+                              on_stop=stops.append)
+            rec.start()
+            for _ in range(4):
+                if not rec.is_recording():
+                    break
+                self.clock.advance(10.0)
+                backend.live(mt.MIC).feed(tone(10.0, 0))
+                rec.tick()
+        self.assertEqual(stops, [mt.STOP_SILENCE])                # the microphone's silence alone stops it
+        crashed = self.store.create(in_person())
+        writer = ma.WavWriter(self.store.audio_path(crashed.id, mt.MIC))
+        writer.write(tone(2.0))
+        writer._fh.close()                                   # a crash: the header never synced
+        self.assertEqual(self.store.recover(), [crashed.id])
+        self.assertAlmostEqual(self.store.load(crashed.id).duration_s, 2.0, places=2)
+
+
+class InPersonTranscriptTests(Base):
+    def folder(self, *, loopback: bool = False) -> Path:
+        folder = self.tmp / "sample"
+        folder.mkdir()
+        for channel in (mt.MIC, mt.LOOPBACK) if loopback else (mt.MIC,):
+            writer = ma.WavWriter(folder / mt.AUDIO_FILES[channel])
+            writer.write(tone(10.0, 0))
+            writer.close()
+        return folder
+
+    def test_in_person_every_turn_is_room(self) -> None:
+        record = self.store.create(in_person())
+        writer = ma.WavWriter(self.store.audio_path(record.id, mt.MIC))
+        writer.write(tone(10.0, 0))
+        writer.close()
+        fake = FakeTranscriber({"mic.wav": [sp.Segment(0.0, 2.0, "Ben, can you send it?"), sp.Segment(2.5, 4.0, "Yes."),
+                                            sp.Segment(8.0, 9.0, "Thanks, all.")]})
+        progress: list[int] = []
+        transcript = sp.transcribe_meeting(self.store.folder(record.id), fake, progress.append)
+        self.assertEqual([(t["speaker"], t["text"]) for t in transcript["turns"]],
+                         [("Room", "Ben, can you send it? Yes."), ("Room", "Thanks, all.")])
+        self.assertEqual((transcript["kind"], transcript["speakers"]), (mt.KIND_IN_PERSON, {"mic": "Room"}))
+        self.assertEqual(fake.calls, ["mic.wav"])
+        self.assertEqual(progress[-1], 100)
+        saved = json.loads(self.store.transcript_path(record.id).read_text(encoding="utf-8"))
+        self.assertEqual({turn["speaker"] for turn in saved["turns"]}, {"Room"})
+
+    def test_a_long_meeting_in_person_reaches_the_summary_whole(self) -> None:
+        """One microphone for everyone: no change of speaker ends a turn, so a turn ends by TURN_CHARS and the
+        summary gets every word (it keeps at most TURN_CAP characters of one turn) - on a call too, where one person
+        may talk for minutes."""
+        from briefing_reader.ask import meeting_summary as ms
+
+        said = [sp.Segment(5.3 * index, 5.3 * index + 5.0, f"Zq7 sentence {index:03d} of a long meeting in the room.")
+                for index in range(120)]                                   # about 10 minutes, never a long pause
+        record = self.store.create(in_person())
+        writer = ma.WavWriter(self.store.audio_path(record.id, mt.MIC))
+        writer.write(tone(10.0, 0))
+        writer.close()
+        turns = sp.transcribe_meeting(self.store.folder(record.id), FakeTranscriber({"mic.wav": said}))["turns"]
+        self.assertGreater(len(turns), 1)
+        self.assertTrue(all(turn["speaker"] == "Room" and len(turn["text"]) <= sp.TURN_CHARS for turn in turns))
+        self.assertEqual(" ".join(turn["text"] for turn in turns), " ".join(seg.text for seg in said))
+        self.assertLess(sp.TURN_CHARS, ms.TURN_CAP)
+        lines = ms.transcript_lines([ms.Turn(turn["speaker"], turn["start"], turn["text"]) for turn in turns])
+        self.assertFalse(any(line.endswith("...") for line in lines))      # no turn cut short
+        self.assertEqual(len(sp.merge_turns(said)), 1)                     # merge_turns alone: no cap
+        call = self.store.create(request())
+        for channel in mt.CHANNELS:
+            writer = ma.WavWriter(self.store.audio_path(call.id, channel))
+            writer.write(tone(10.0, 0))
+            writer.close()
+        monologue = sp.transcribe_meeting(self.store.folder(call.id), FakeTranscriber({"mic.wav": said}))["turns"]
+        self.assertGreater(len(monologue), 1)                              # a call's long talk reaches it whole too
+        self.assertTrue(all(turn["speaker"] == "You" and len(turn["text"]) <= sp.TURN_CHARS for turn in monologue))
+        self.assertEqual(" ".join(turn["text"] for turn in monologue), " ".join(seg.text for seg in said))
+
+    def test_the_kind_is_the_records_else_mic_wav_alone_is_in_person(self) -> None:
+        folder = self.folder()
+        self.assertEqual(sp.meeting_kind(folder), mt.KIND_IN_PERSON)            # no record: mic.wav only
+        (folder / mt.RECORD_FILE).write_text(json.dumps({"id": "x", "status": "recorded"}), encoding="utf-8")
+        self.assertEqual(sp.meeting_kind(folder), mt.KIND_CALL)                 # a record from before kinds: a call
+        transcript = sp.transcribe_meeting(folder, FakeTranscriber({"mic.wav": [sp.Segment(0.0, 1.0, "Hello.")]}))
+        self.assertEqual([turn["speaker"] for turn in transcript["turns"]], ["You"])   # exactly as before
+        (folder / mt.RECORD_FILE).write_text(json.dumps({"id": "x", "kind": "in_person"}), encoding="utf-8")
+        self.assertEqual(sp.meeting_kind(folder), mt.KIND_IN_PERSON)
+        both = self.tmp / "both"
+        both.mkdir()
+        for name in mt.AUDIO_FILES.values():
+            (both / name).write_bytes(b"RIFF")
+        self.assertEqual(sp.meeting_kind(both), mt.KIND_CALL)
+        self.assertEqual(sp.merge_turns([sp.Segment(0, 1, "a")], [sp.Segment(2, 3, "b")]),
+                         [{"speaker": "You", "start": 0, "end": 1, "text": "a"},
+                          {"speaker": "Others", "start": 2, "end": 3, "text": "b"}])          # a call: unchanged
+
+    def test_the_worker_writes_down_a_meeting_with_mic_wav_only(self) -> None:
+        """The worker's own entry (the add-on and the model faked): a folder with mic.wav only is written down,
+        every turn "Room"; only progress and done go out, never the text."""
+        import io
+
+        folder = self.folder()
+        out = io.StringIO()
+        fake = FakeTranscriber({"mic.wav": [sp.Segment(0.0, 1.5, "Zq7 hello room."), sp.Segment(6.0, 7.0, "Bye.")]})
+        with mock.patch.object(sp, "speech_missing", return_value=""), \
+                mock.patch.object(sp, "model_ready", return_value=True), \
+                mock.patch.object(sp, "FasterWhisperTranscriber", return_value=fake), \
+                mock.patch.object(sp.sys, "stdout", out):
+            code = sp.main(["--meeting", str(folder), "--model", str(self.tmp / "model")])
+        self.assertEqual(code, 0)
+        lines = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(lines[-1], {"done": True})
+        self.assertTrue(all(set(line) <= {"progress", "done"} for line in lines))
+        self.assertNotIn("Zq7", out.getvalue())
+        self.assertEqual(fake.calls, ["mic.wav"])
+        transcript = json.loads((folder / mt.TRANSCRIPT_FILE).read_text(encoding="utf-8"))
+        self.assertEqual([turn["speaker"] for turn in transcript["turns"]], ["Room", "Room"])
+
+
 class DownloadEdgeTests(Base):
     FILES = DownloadTests.FILES
 

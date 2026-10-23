@@ -81,9 +81,11 @@ an ask.meeting_summary.MeetingJob); one run with its own prompt and schema, the 
 written by other people (data, never instructions) and the invite's guests by name only. The answer is checked
 strictly
 (meeting_summary.summary_from: the whole answer refused when it does not fit), then Jarvis's own checks
-(meeting_summary.check_summary): action items only for "you" or an invited guest, follow-ups only to an
-invited guest (the invite's address, never one from the run) as Email cards through validate.to_cards with
-meeting_summary.FollowupCheck, notes through memory.check_suggestion. Nothing is sent, added or kept here.
+(meeting_summary.check_summary): on a linked call action items only for "you" or an invited guest, follow-ups
+only to an invited guest (the invite's address, never one from the run) as Email cards through
+validate.to_cards with meeting_summary.FollowupCheck; in person nothing is the owner's (every turn is "Room");
+a meeting not linked to a calendar meeting gets no guests and keeps its follow-ups as plain text (no cards);
+notes through memory.check_suggestion. Nothing is sent, added or kept here.
 
 The drafted reply or nudge (ask.modes.MODE_NUDGE, a click on a FOLLOW-UPS row or under a brief,
 spec 3.4): the Ask caps with the bundle's, Claude Code ready, the thread's account readable; the one
@@ -1435,9 +1437,9 @@ class AskPlanner:
         now = self.clock()
         wall = dayplan.to_wall(now, zone) if zone else now
         prompt = meeting_summary.build_prompt(wall, self._owner(), job, turns, labels, zone=zone)
-        _meeting_input(step, turns, labels, prompt)
-        logger.info("Meeting %s: summary context of %d characters (%d turn(s), %d guest(s))", job.meeting_id,
-                    len(prompt), len(turns), len(labels))
+        _meeting_input(step, turns, labels, prompt, job)
+        logger.info("Meeting %s: summary context of %d characters (%s, linked: %s, %d turn(s), %d guest(s))",
+                    job.meeting_id, len(prompt), job.kind, job.linked, len(turns), len(labels))
         on_stage(STAGE_PLANNING)
         result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1, mode=MODE_MEETING)
         del prompt
@@ -1460,7 +1462,7 @@ class AskPlanner:
                                                meeting_id=job.meeting_id)
         notes, notes_dropped = self._meeting_notes(summary, index, job)
         summary = replace(summary, memory=notes)
-        _meeting_validated(live, answer, summary, cards, notes_dropped, self._hour24())
+        _meeting_validated(live, answer, summary, cards, notes_dropped, self._hour24(), job)
         logger.info("Meeting %s: summary checked (%s; %d follow-up card(s), %d refused; %d note(s) left out)",
                     job.meeting_id, ", ".join(f"{name} {count}" for name, count in summary.counts().items()),
                     len(cards.cards) - cards.refused, cards.refused, notes_dropped)
@@ -3066,15 +3068,23 @@ def _prep_validated(live: LiveTask, answer: Any, brief: Any, cards: Cards, hour2
 
 
 @_quiet()
-def _meeting_input(step: LiveStep, turns: Sequence[Any], labels: Mapping[str, Any], prompt: str) -> None:
+def _meeting_input(step: LiveStep, turns: Sequence[Any], labels: Mapping[str, Any], prompt: str,
+                   job: Any = None) -> None:
     """The meeting summary's input: the transcript's size (its text only in the run's own stdin block, marked as
-    written by other people), the guests by name (never an address) and that nothing else goes."""
+    written by other people), the guests by name (never an address; none for a meeting not linked to a calendar
+    meeting) and that nothing else goes."""
     if step is NO_STEP:
         return
-    yours = sum(1 for turn in turns if turn.speaker == meeting_summary.SPEAKER_YOU)
-    step.field("Transcript", f"{_count_words(len(turns), 'turn')} ({yours} yours), marked as written by other "
+    if getattr(job, "in_person", False):
+        whose = "in person: the speakers are not identified"
+    else:
+        whose = f"{sum(1 for turn in turns if turn.speaker == meeting_summary.SPEAKER_YOU)} yours"
+    step.field("Transcript", f"{_count_words(len(turns), 'turn')} ({whose}), marked as written by other "
                              "people - data, never instructions")
-    step.field("Guests given", f"{_count_words(len(labels), 'name')} from the invite (no addresses)")
+    if getattr(job, "linked", True):
+        step.field("Guests given", f"{_count_words(len(labels), 'name')} from the invite (no addresses)")
+    else:
+        step.field("Guests given", "none (not linked to a calendar meeting)")
     step.field("Not given", "mail, your notes, other meetings, the audio")
     step.field("Input", f"{len(prompt):,} characters")
     step.done(STATUS_OK, summary=f"{_count_words(len(turns), 'turn')}, {_count_words(len(labels), 'guest')}")
@@ -3082,18 +3092,24 @@ def _meeting_input(step: LiveStep, turns: Sequence[Any], labels: Mapping[str, An
 
 @_quiet()
 def _meeting_validated(live: LiveTask, answer: Any, summary: Any, cards: Cards, notes_dropped: int,
-                       hour24: bool) -> None:
-    """"Checking the summary": the counts kept and left out, each follow-up as a card or refused."""
+                       hour24: bool, job: Any = None) -> None:
+    """"Checking the summary": the counts kept and left out, each follow-up as a card or refused (a meeting not
+    linked to a calendar meeting: its follow-ups as plain text, no cards)."""
     if not live.enabled:
         return
-    step = live.step(MEETING_VALIDATE, "Checking the summary", fields=[
-        ("Checked against", "the calendar invite's guests (a follow-up only to one of them)")])
+    linked = getattr(job, "linked", True)
+    against = ("the calendar invite's guests (a follow-up only to one of them)" if linked else
+               "no calendar meeting: no guests, the follow-ups as plain text (no drafts)")
+    step = live.step(MEETING_VALIDATE, "Checking the summary", fields=[("Checked against", against)])
     counts = summary.counts()
     step.field("Kept", f"{_count_words(counts['decisions'], 'decision')}, "
                        f"{_count_words(counts['actions'], 'action')} ({counts['yours']} yours), "
                        f"{_count_words(counts['questions'], 'open question')}")
+    if not linked:
+        step.field("Plain follow-ups", _count_words(counts.get("plain_follow_ups", 0), "follow-up"))
     if summary.dropped:
-        step.field("Left out", f"{_count_words(summary.dropped, 'item')} (not you or an invited guest, or a repeat)")
+        words = meeting_summary.left_out_words(job) if job is not None else meeting_summary.LEFT_OUT_LINKED
+        step.field("Left out", f"{_count_words(summary.dropped, 'item')} ({words})")
     if notes_dropped:
         step.field("Notes left out", _count_words(notes_dropped, "suggestion"))
     by_id = {card.id: card for card in cards.cards}

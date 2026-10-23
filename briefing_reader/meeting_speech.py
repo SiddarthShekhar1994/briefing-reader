@@ -11,7 +11,11 @@ named on the Meetings screen (``missing_pieces``).
 The transcription is a separate background process at below-normal priority (``TranscriptionProcess``:
 ``python -m briefing_reader.meeting_speech --meeting DIR --model DIR``) that reports progress as JSON lines on
 its stdout (never the text) and writes ``transcript.json`` into the meeting's folder: each channel transcribed on
-its own, then merged by time into turns - the microphone as "You", the call audio as "Others".
+its own, then merged by time into turns - on a call the microphone as "You" and the call audio as "Others"; in
+person (owner decision 2026-10-22) the microphone only, every turn "Room" (one microphone in the room: who spoke
+is not known, so nothing is the owner's). Either way a turn ends by TURN_CHARS, so a summary gets every word. The kind
+is the meeting record's (``meeting_kind``; a folder without a record whose only recording is ``mic.wav`` is in
+person).
 ``transcribe_meeting(folder, transcriber, progress)`` is that work, with any transcriber (tests: a fake one).
 
 Public API
@@ -20,8 +24,9 @@ Public API
 ``speech_missing()`` (the faster-whisper add-on, or ""), ``missing_pieces(models_root)`` -> list of
 ``Missing(key, text)`` (add-ons and the model, in the words the Meetings screen shows).
 ``ModelDownloader(target, session=None, progress=None, cancel=None)``: ``run()`` -> "" or a short error code.
-``Segment(start, end, text)``, ``merge_turns(mic, loopback, gap=)``, ``transcribe_meeting(...)``,
-``read_wav(path)`` (a recording as samples for the model).
+``Segment(start, end, text)``, ``merge_turns(mic, loopback, gap=, speakers=, most=)``, ``meeting_kind(folder)``,
+``transcribe_meeting(folder, transcriber, progress, kind=)``, ``read_wav(path)`` (a recording as samples for the
+model).
 ``FasterWhisperTranscriber(model_dir)`` (the add-on behind a small adapter, imported only when used).
 ``TranscriptionProcess(meeting_dir, model_dir, on_progress, on_done)``: ``start()``, ``cancel()`` (kills the worker
 and waits until it ended), ``running()``.
@@ -64,6 +69,9 @@ ADDON_SPEECH = "faster-whisper"
 CHUNK = 1 << 20
 TIMEOUT_S = 30
 MERGE_GAP_S = 1.5
+TURN_CHARS = 1_500                # a turn ends before it passes this (in person no change of speaker ends one; on a
+                                  # call one person may talk for minutes), and a summary keeps at most 2,000
+                                  # characters of a turn (ask.meeting_summary.TURN_CAP)
 CANCEL_WAIT_S = 5.0               # a stopped worker is waited for this long (its files are free after)
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 CREATE_NO_WINDOW = 0x08000000
@@ -322,10 +330,15 @@ class Segment:
     text: str = field(repr=False)
 
 
-def merge_turns(mic: Iterable[Segment], loopback: Iterable[Segment], gap: float = MERGE_GAP_S) -> list[dict]:
+def merge_turns(mic: Iterable[Segment], loopback: Iterable[Segment] = (), gap: float = MERGE_GAP_S, *,
+                speakers: dict[str, str] | None = None, most: int = 0) -> list[dict]:
     """Both channels' segments in time order as turns ({speaker, start, end, text}): "You" for the microphone,
-    "Others" for the call audio; a speaker's segments closer than ``gap`` seconds join one turn."""
-    tagged = [(seg, mt.SPEAKERS[mt.MIC]) for seg in mic] + [(seg, mt.SPEAKERS[mt.LOOPBACK]) for seg in loopback]
+    "Others" for the call audio (``speakers``: in person {"mic": "Room"}, no call audio); a speaker's segments
+    closer than ``gap`` seconds join one turn - while its text stays within ``most`` characters when that is given
+    (TURN_CHARS: in person one speaker stands for everyone, and on a call one person may talk for minutes)."""
+    names = speakers or mt.SPEAKERS
+    tagged = [(seg, names[mt.MIC]) for seg in mic] + [(seg, names.get(mt.LOOPBACK, mt.SPEAKERS[mt.LOOPBACK]))
+                                                      for seg in loopback]
     tagged.sort(key=lambda item: (item[0].start, item[0].end))
     turns: list[dict] = []
     for seg, speaker in tagged:
@@ -333,7 +346,8 @@ def merge_turns(mic: Iterable[Segment], loopback: Iterable[Segment], gap: float 
         if not text:
             continue
         last = turns[-1] if turns else None
-        if last is not None and last["speaker"] == speaker and seg.start - last["end"] <= gap:
+        if (last is not None and last["speaker"] == speaker and seg.start - last["end"] <= gap
+                and (not most or len(last["text"]) + 1 + len(text) <= most)):
             last["text"] = f"{last['text']} {text}"
             last["end"] = max(last["end"], round(seg.end, 2))
         else:
@@ -393,37 +407,59 @@ class FasterWhisperTranscriber:
             yield Segment(float(seg.start), float(seg.end), str(seg.text))
 
 
-def transcribe_meeting(folder: Path, transcriber: Any, progress: Callable[[int], Any] | None = None) -> dict:
-    """Transcribe ``mic.wav`` and ``loopback.wav`` in ``folder``, merge them and write ``transcript.json``.
-    ``progress(percent)`` as the audio is worked through (both files together). Returns the transcript."""
+def meeting_kind(folder: Path) -> str:
+    """The kind of the meeting in ``folder``: its record's (meeting.json; a record written before kinds existed is
+    a call), else - no record to read - in person when ``mic.wav`` is its only recording, else a call. Only the
+    kind is read from the record."""
     folder = Path(folder)
-    paths = {kind: folder / mt.AUDIO_FILES[kind] for kind in mt.CHANNELS}
-    present = {kind: path for kind, path in paths.items() if path.is_file()}
+    try:
+        data = json.loads((folder / mt.RECORD_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        return mt.clean_kind(data.get("kind"))
+    mic, loop = (folder / mt.AUDIO_FILES[kind] for kind in mt.CHANNELS)
+    return mt.KIND_IN_PERSON if mic.is_file() and not loop.is_file() else mt.KIND_CALL
+
+
+def transcribe_meeting(folder: Path, transcriber: Any, progress: Callable[[int], Any] | None = None, *,
+                       kind: str | None = None) -> dict:
+    """Transcribe the meeting in ``folder`` and write ``transcript.json``: on a call ``mic.wav`` ("You") and
+    ``loopback.wav`` ("Others") merged by time; in person (``kind``, else ``meeting_kind(folder)``) ``mic.wav``
+    only, every turn "Room". ``progress(percent)`` as the audio is worked through (the files together). Returns
+    the transcript."""
+    folder = Path(folder)
+    kind = mt.clean_kind(kind) if kind is not None else meeting_kind(folder)
+    channels = mt.channels(kind)
+    paths = {channel: folder / mt.AUDIO_FILES[channel] for channel in channels}
+    present = {channel: path for channel, path in paths.items() if path.is_file()}
     if not present:
         raise FileNotFoundError("no audio")
-    durations = {kind: wav_duration(path) for kind, path in present.items()}
+    durations = {channel: wav_duration(path) for channel, path in present.items()}
     total = sum(durations.values()) or 1.0
     done_before = 0.0
     last = -1
-    found: dict[str, list[Segment]] = {kind: [] for kind in mt.CHANNELS}
-    for kind in mt.CHANNELS:
-        path = present.get(kind)
+    found: dict[str, list[Segment]] = {channel: [] for channel in mt.CHANNELS}
+    for channel in channels:
+        path = present.get(channel)
         if path is None:
             continue
         for seg in transcriber.transcribe(path):
-            found[kind].append(seg)
-            percent = int(min(99, 100 * (done_before + min(seg.end, durations[kind])) / total))
+            found[channel].append(seg)
+            percent = int(min(99, 100 * (done_before + min(seg.end, durations[channel])) / total))
             if progress is not None and percent > last:
                 last = percent
                 progress(percent)
-        done_before += durations[kind]
+        done_before += durations[channel]
         percent = int(min(99, 100 * done_before / total))
         if progress is not None and percent > last:
             last = percent
             progress(percent)
-    transcript = {"version": 1, "speakers": dict(mt.SPEAKERS),
-                  "durations": {kind: round(seconds, 1) for kind, seconds in durations.items()},
-                  "turns": merge_turns(found[mt.MIC], found[mt.LOOPBACK])}
+    speakers = mt.speakers(kind)
+    transcript = {"version": 1, "kind": kind, "speakers": speakers,
+                  "durations": {channel: round(seconds, 1) for channel, seconds in durations.items()},
+                  "turns": merge_turns(found[mt.MIC], found[mt.LOOPBACK], speakers=speakers,
+                                       most=TURN_CHARS)}
     mt._write_json(folder / mt.TRANSCRIPT_FILE, transcript)
     if progress is not None:
         progress(100)

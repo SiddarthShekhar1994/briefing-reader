@@ -18,7 +18,7 @@ from briefing_reader.actions import CALENDAR, EMAIL
 from briefing_reader.ask import cli, meeting_summary as ms
 from briefing_reader.ask.modes import FIXED_COMMANDS, MODE_KINDS, MODE_MEETING, MODE_TASKS, ModeRequest
 from briefing_reader.ask.stream import GARBLED, GUARD, MAX_TURNS, AskFailure, InitSummary
-from briefing_reader import live
+from briefing_reader import live, meetings as mt
 
 INIT = InitSummary("none", ("StructuredOutput",), 0, "claude-sonnet-4-5", "2.1.293", True)
 INIT_NO_TOOL = InitSummary("none", (), 0, "claude-sonnet-4-5", "2.1.293", False)
@@ -285,6 +285,118 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(back, summary)
         self.assertIsNone(ms.summary_of(raw, "20261019-140000-ffff"))
         self.assertIsNone(ms.summary_of("junk", summary.meeting_id))
+
+
+class KindAndLinkTests(unittest.TestCase):
+    """Owner decisions 2026-10-22: in person the speakers are not identified (nothing is the owner's); a meeting not
+    linked to a calendar meeting has no guests, plain follow-ups and its names as said; a linked call as before."""
+
+    TURNS = [ms.Turn("You", 2.0, "Zq7 shall we move the demo?"), ms.Turn("Room", 9.5, "Ben, send the budget.")]
+
+    def labels(self) -> dict:
+        return ms.guest_labels((ANA, BEN, ME), OWN)
+
+    def test_a_meeting_not_linked_gives_no_guests_and_asks_for_plain_follow_ups(self) -> None:
+        plain = replace(job(), linked=False)
+        self.assertEqual(plain.guests, ())                                  # never handed over, whatever is passed
+        text = ms.build_prompt(NOW, "sir", plain, PromptTests.TURNS, self.labels(), zone="America/Los_Angeles")
+        self.assertIn("<guests>\nnone\n</guests>", text)
+        self.assertNotIn("Ana Lima", text)
+        self.assertIn("| kind=call | calendar=not linked (no guests)", text)
+        self.assertTrue(text.rstrip().endswith(f"<command>\n{ms.FIXED_COMMAND_PLAIN}\n</command>"))
+        self.assertIn("never an email", ms.FIXED_COMMAND_PLAIN)
+        self.assertIn(ms.TRANSCRIPT_NOTE, text)
+        linked = ms.build_prompt(NOW, "sir", job(), PromptTests.TURNS, self.labels())
+        self.assertIn("| kind=call | calendar=linked", linked)                 # a linked call as before
+        self.assertTrue(linked.rstrip().endswith(f"<command>\n{ms.FIXED_COMMAND}\n</command>"))
+
+    def test_in_person_every_turn_is_room_and_the_note_says_so(self) -> None:
+        room = replace(job(), kind=mt.KIND_IN_PERSON)
+        text = ms.build_prompt(NOW, "sir", room, self.TURNS, self.labels())
+        block = text[text.index("<transcript>"):text.index("</transcript>")]
+        self.assertIn(ms.TRANSCRIPT_NOTE_IN_PERSON, block)
+        self.assertIn("[00:02] Room: Zq7 shall we move the demo?", block)
+        self.assertNotIn("You:", block)
+        self.assertIn("kind=in person (speakers not identified) | calendar=linked", text)
+        self.assertIn("Ana Lima\nBen Ode", text)                             # linked: the invite's guests by name
+
+    def test_not_linked_names_stay_as_said_and_follow_ups_are_plain_text(self) -> None:
+        value = dict(GOOD, action_items=[{"who": "Ben", "what": "Send the budget"},
+                                         {"who": "you", "what": "Book the venue", "due": "2026-10-22"},
+                                         {"who": "unnamed", "what": "Order lunch"},
+                                         {"who": "Ben", "what": "send  the budget"}],
+                     follow_ups=[{"to": "Ben", "subject": "Check finance has the budget", "body": ""},
+                                 {"to": "unnamed", "subject": "Confirm the venue", "body": ""},
+                                 {"to": "you", "subject": "Send the slides", "body": ""}])
+        plain = ms.MeetingJob("20261019-140000-ab12", Path("t.json"), "", None, 600.0, "", (ANA,), linked=False)
+        summary = ms.check_summary(ms.summary_from(value), plain, {}, own=OWN, now=NOW)
+        self.assertEqual([(a.who, a.what, a.mine) for a in summary.actions],
+                         [("you", "Book the venue", True), ("Ben", "Send the budget", False),
+                          ("", "Order lunch", False)])
+        self.assertEqual(summary.follow_ups, ())                            # never a draft
+        self.assertEqual([(item.who, item.what) for item in summary.follow_up_items],
+                         [("Ben", "Check finance has the budget"), ("", "Confirm the venue"),
+                          ("You", "Send the slides")])
+        self.assertEqual(summary.dropped, 1)                                # the repeat only
+        self.assertEqual(ms.followup_cards(summary, {}, alias="work", aliases=("work",), own=OWN, now=NOW).cards, ())
+        back = ms.summary_of(json.loads(json.dumps(ms.summary_json(summary))), summary.meeting_id)
+        self.assertEqual(back, summary)
+        self.assertEqual(summary.counts()["plain_follow_ups"], 3)
+        self.assertNotIn("Ben", repr(summary))
+        self.assertEqual(ms.left_out_words(plain), ms.LEFT_OUT_PLAIN)
+
+    def test_in_person_nothing_is_the_owners(self) -> None:
+        room = replace(job((ANA, BEN)), kind=mt.KIND_IN_PERSON)
+        value = dict(GOOD, action_items=[{"who": "you", "what": "Send the numbers"},
+                                         {"who": "Ana Lima", "what": "Book the room"},
+                                         {"who": "unnamed", "what": "Bring the projector"},
+                                         {"who": "Zed Stranger", "what": "Leak it"}])
+        summary = ms.check_summary(ms.summary_from(value), room, self.labels(), own=OWN)
+        self.assertEqual(summary.mine(), ())                                 # "yours" stays empty
+        self.assertEqual([(a.who, a.what) for a in summary.actions],
+                         [("", "Send the numbers"), ("Ana Lima", "Book the room"), ("", "Bring the projector")])
+        self.assertEqual(summary.dropped, 1)                                 # not an invited guest
+        self.assertEqual([(f.to_name, f.to) for f in summary.follow_ups], [("Ana Lima", "ana.lima@example.org")])
+        self.assertEqual(ms.left_out_words(room), ms.LEFT_OUT_IN_PERSON)
+        plain_room = replace(room, linked=False)
+        summary = ms.check_summary(ms.summary_from(dict(GOOD, follow_ups=[{"to": "you", "subject": "Send the deck",
+                                                                           "body": ""}])), plain_room, {}, own=OWN)
+        self.assertEqual(summary.mine(), ())
+        self.assertEqual(summary.follow_up_items, (ms.FollowUpItem("", "Send the deck"),))
+        back = ms.summary_of(json.loads(json.dumps(ms.summary_json(summary))), summary.meeting_id)
+        self.assertEqual([(a.who, a.what, a.mine) for a in back.actions],
+                         [("Ana Lima", "Book the demo room", False), ("", "Send Ana the Q3 numbers", False)])
+
+    def test_a_linked_call_keeps_its_rules(self) -> None:
+        follow = GOOD["follow_ups"][0]
+        value = dict(GOOD, action_items=[{"who": "unnamed", "what": "Book it"}],
+                     follow_ups=[dict(follow, body=""), dict(follow)])
+        summary = ms.check_summary(ms.summary_from(value), job(), self.labels(), own=OWN)
+        self.assertEqual((summary.actions, len(summary.follow_ups), summary.follow_up_items), ((), 1, ()))
+        self.assertEqual(summary.dropped, 2)        # someone it could not tell, a draft with no text
+        self.assertEqual(ms.left_out_words(job()), ms.LEFT_OUT_LINKED)
+        self.assertEqual((job().kind, job().linked), (mt.KIND_CALL, True))
+
+    def test_the_schema_and_the_prompt_name_both_kinds(self) -> None:
+        schema = json.loads(cli.mode_schema_text(MODE_MEETING))
+        items = schema["properties"]
+        self.assertNotIn("minLength", items["follow_ups"]["items"]["properties"]["body"])   # "" for a plain one
+        self.assertEqual(items["action_items"]["items"]["properties"]["who"]["minLength"], 1)   # "unnamed", never ""
+        self.assertEqual(ms.summary_from(dict(GOOD, follow_ups=[dict(GOOD["follow_ups"][0], body="")])).follow_ups,
+                         (("Ana Lima", "Q3 numbers", ""),))
+        text = cli.MEETING_PROMPT_FILE.read_text(encoding="ascii")
+        for rule in ('otherwise "who" is exactly "unnamed".', 'never write "you" as a "who" or a "to".',
+                     "When calendar=not linked: plain notes, never emails.", "speakers are not identified",
+                     "EXAMPLE (invented; kind=in person | calendar=not linked)"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, text)
+
+    def test_load_turns_keeps_room(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "transcript.json"
+            path.write_text(json.dumps({"turns": [{"speaker": "Room", "start": 1, "text": "a"},
+                                                  {"speaker": "Ghost", "start": 2, "text": "b"}]}), encoding="utf-8")
+            self.assertEqual([(t.speaker, t.text) for t in ms.load_turns(path)], [("Room", "a"), ("Others", "b")])
 
 
 class FreeBlockTests(unittest.TestCase):

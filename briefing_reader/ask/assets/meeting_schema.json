@@ -20,7 +20,7 @@
     "action_items": {
       "type": "array",
       "maxItems": 15,
-      "description": "Who will do what: who is exactly \"you\" or exactly one name from <guests>.",
+      "description": "Who will do what: who is exactly \"you\" (on a call), exactly one name from <guests> (linked), a name the transcript gives (not linked) or exactly \"unnamed\" (in person or not linked, when the words name nobody).",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -41,7 +41,7 @@
     "follow_ups": {
       "type": "array",
       "maxItems": 3,
-      "description": "Short email drafts from the owner, each to exactly one name from <guests>; usually none.",
+      "description": "Linked to the calendar: short email drafts from the owner, each to exactly one name from <guests>. Not linked: plain follow-ups (to = who, subject = what, body = \"\"). Usually none.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -49,7 +49,7 @@
         "properties": {
           "to": {"type": "string", "minLength": 1, "maxLength": 80},
           "subject": {"type": "string", "minLength": 1, "maxLength": 150},
-          "body": {"type": "string", "minLength": 1, "maxLength": 3000}
+          "body": {"type": "string", "maxLength": 3000, "description": "A draft's text; \"\" for a plain follow-up (not linked)."}
         }
       }
     },

@@ -641,7 +641,11 @@ class FrameHeaderRecTests(MeetingsApp):
 
 
 class MeetingChoiceTests(MeetingsApp):
-    def test_the_next_meeting_wins_over_the_one_ending_and_the_card_can_switch(self) -> None:
+    def test_record_a_meeting_links_none_and_offers_the_next_meeting_first(self) -> None:
+        """Owner decision 2026-10-22 (it replaces the card that picked the likeliest meeting by itself): Record a
+        meeting opens the card linked to no calendar meeting; "Link a calendar meeting" offers the meetings on now -
+        the next one before the one that is ending - and links the one clicked (its title into the empty box, its
+        own end for the auto-stop); Unlink removes the link and the title it filled in."""
         self.make()
         ending = CalendarEvent("Zq7 Internal sync", NOW - timedelta(minutes=52), NOW + timedelta(minutes=8))
         starting = CalendarEvent("Zq7 Client call", NOW + timedelta(minutes=8), NOW + timedelta(minutes=38))
@@ -649,17 +653,24 @@ class MeetingChoiceTests(MeetingsApp):
         self.assertEqual([info.title for info in found], ["Zq7 Client call", "Zq7 Internal sync"])
         self.c._agenda_events = [ending, starting]
         card = self.open_card()                                          # Record a meeting on the Meetings screen
-        self.assertEqual(card.title_label.text(), "Zq7 Client call")
-        self.assertEqual(card.info().end, starting.end)                 # its own end drives the auto-stop
-        choices = card.meeting_choices()
-        self.assertEqual([info.title for _text, info in choices], ["Zq7 Internal sync", ""])
-        self.assertTrue(card.change_button.isVisibleTo(card))
+        self.assertIsNone(card.linked())                                 # not linked by default
+        self.assertEqual((card.info(), card.title_edit.text()), (mt.MeetingInfo(), ""))
+        self.assertFalse(card.title_label.isVisibleTo(card))
+        self.assertIn(meetings_view.UNLINKED_NOTE, card.meta_label.text())
+        choices = card.link_choices()
+        self.assertEqual([info.title for _text, info in choices], ["Zq7 Client call", "Zq7 Internal sync"])
+        self.assertTrue(card.link_button.isVisibleTo(card))
+        self.assertFalse(card.unlink_button.isVisibleTo(card))
         card.tick.click()
-        self.assertTrue(card.choose_meeting(0))                         # Another meeting: the ending one
-        self.assertEqual(card.title_label.text(), "Zq7 Internal sync")
+        self.assertTrue(card.link_meeting(0))                            # Link a calendar meeting: the next one
+        self.assertEqual((card.title_label.text(), card.title_edit.text()), ("Zq7 Client call", "Zq7 Client call"))
+        self.assertEqual(card.info().end, starting.end)                 # its own end drives the auto-stop
         self.assertFalse(card.tick.isChecked())                         # a tick is for one meeting only
-        card.choose_meeting(len(card.meeting_choices()) - 1)            # ... or an unscheduled call
-        self.assertEqual(card.title_label.text(), mt.UNSCHEDULED_TITLE)
+        self.assertEqual([info.title for _text, info in card.link_choices()], ["Zq7 Internal sync"])
+        self.assertTrue(card.unlink_button.isVisibleTo(card))
+        card.unlink()                                                    # ... or none again
+        self.assertIsNone(card.linked())
+        self.assertEqual(card.title_edit.text(), "")                    # the title the link filled in goes with it
         self.assertIsNone(card.info().end)
 
     def test_a_block_of_time_gives_way_to_a_real_meeting(self) -> None:
@@ -880,6 +891,201 @@ class StartPointTests(MeetingsApp):
         self.m.stop()
         settle()
         self.assertIsNotNone(self.reading.agenda_panel.event_rows()[1].record_button())
+
+
+INVITE = (("Ana Lopez", "zq7ana@example.org"), ("Ben Okafor", "zq7ben@example.org"))
+
+
+class UniversalCardTests(MeetingsApp):
+    """Owner decisions 2026-10-22: any meeting - a title (blank: "Meeting" with its date and time), In person or On a
+    call (the kind recorded last; the consent tick never remembered) and an optional calendar link."""
+
+    def calendar_meeting(self) -> mt.MeetingInfo:
+        return mt.MeetingInfo(TITLE, NOW + timedelta(minutes=5), NOW + timedelta(minutes=35), "evt-9", GUESTS,
+                              alias="work", calendar_id="primary", invite=INVITE)
+
+    def test_a_typed_title_is_kept_and_a_blank_one_is_meeting_with_its_date_and_time(self) -> None:
+        self.make()
+        card = self.open_card()
+        self.assertTrue(card.title_edit.isVisibleTo(card))
+        self.assertEqual(card.title_edit.text(), "")
+        self.assertIn("left blank: Meeting, Sun 4 Oct 1:52 PM", card.title_edit.placeholderText())
+        card.title_edit.setText("  Zq7   Weekly   sync  ")
+        card.tick.click()
+        card.start_button.click()
+        settle()
+        record = self.m.store.load(self.m.recorder.record.id)
+        self.assertEqual((record.title, record.linked, record.kind), ("Zq7 Weekly sync", False, mt.KIND_CALL))
+        self.m.stop()
+        settle()
+        self.clock.advance(3600)
+        blank = self.record()                                          # nothing typed this time
+        self.assertEqual(self.m.store.load(blank.id).title, "")
+        self.m.stop()
+        settle()
+        self.assertEqual([row.title_label.text() for row in self.m.stage.rows()],
+                         ["Meeting, Sun 4 Oct 2:52 PM", "Zq7 Weekly sync"])
+        self.assertEqual(self.open_card().title_edit.text(), "")       # a new card: an empty box again
+
+    def test_in_person_or_on_a_call_starts_on_the_kind_recorded_last(self) -> None:
+        self.make()
+        card = self.open_card()
+        self.assertEqual(card.kind(), mt.KIND_CALL)                     # "On a call" the first time
+        self.assertTrue(card.kind_choice.call_button.isChecked())
+        card.kind_choice.in_person_button.click()
+        self.assertEqual(card.kind(), mt.KIND_IN_PERSON)
+        self.assertEqual(card.device_texts(), (f"Room - microphone: {MIC_A.name} (Windows default)",
+                                               meetings_view.CALL_NOT_RECORDED))
+        self.assertFalse(card.start_button.isEnabled())                 # the consent tick first, as always
+        card.tick.click()
+        self.assertTrue(card.start_button.isEnabled())
+        card.start_button.click()
+        settle()
+        record = self.m.recorder.record
+        self.assertEqual(self.m.store.load(record.id).kind, mt.KIND_IN_PERSON)
+        self.m.stop()
+        settle()
+        card = self.open_card()
+        self.assertEqual(card.kind(), mt.KIND_IN_PERSON)                # the kind recorded last ...
+        self.assertFalse(card.tick.isChecked())                         # ... never the consent tick
+        self.assertFalse(card.start_button.isEnabled())
+        saved = json.loads((self.m.store.root / mt.DEVICES_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(saved["kind"], mt.KIND_IN_PERSON)
+        card.kind_choice.call_button.click()                            # a choice alone remembers nothing
+        self.assertEqual(card.device_texts()[1], f"Others - call audio: {OUT_A.name} (Windows default)")
+        card.cancel_button.click()
+        self.assertEqual(self.open_card().kind(), mt.KIND_IN_PERSON)
+        self.assertEqual(mt.DevicePrefs(self.m.store.root).card_kind(), mt.KIND_IN_PERSON)   # after a restart too
+
+    def test_linking_fills_the_title_only_when_none_was_typed(self) -> None:
+        self.make()
+        info = self.calendar_meeting()
+        self.m.meetings_now = lambda: [info]
+        card = self.open_card()
+        self.assertIsNone(card.linked())                                 # not linked by default
+        card.title_edit.setText("Zq7 My own name")
+        self.assertTrue(card.link_meeting(0))
+        self.assertEqual(card.title_edit.text(), "Zq7 My own name")      # typed: kept
+        self.assertEqual(card.title_label.text(), TITLE)
+        self.assertIn("with Ana Lopez and Ben Okafor", card.meta_label.text())
+        self.assertEqual(card.summary_tick.text(), meetings_view.SUMMARY_TICK_TEXT)    # the guests' names go
+        card.unlink()
+        self.assertEqual(card.title_edit.text(), "Zq7 My own name")      # still his
+        self.assertEqual(card.summary_tick.text(), meetings_view.SUMMARY_TICK_PLAIN)   # no guests: no names
+        self.assertTrue(card.link_meeting(0))
+        card.tick.click()
+        card.start_button.click()
+        settle()
+        record = self.m.store.load(self.m.recorder.record.id)
+        self.assertEqual((record.title, record.event_id, record.guests, record.linked, record.alias),
+                         ("Zq7 My own name", "evt-9", GUESTS, True, "work"))
+        self.assertEqual((record.scheduled_end, record.invite), (info.end, INVITE))
+        self.m.stop()
+        settle()
+
+    def test_unlink_keeps_nothing_of_the_calendar(self) -> None:
+        self.make()
+        info = self.calendar_meeting()
+        card = self.open_card(info)                                      # a calendar shortcut: opened linked
+        self.assertEqual(card.linked(), info)
+        self.assertEqual(card.title_edit.text(), TITLE)                  # the box was empty: filled in
+        self.assertTrue(card.unlink_button.isVisibleTo(card))
+        card.tick.click()
+        card.unlink()
+        self.assertFalse(card.tick.isChecked())                          # a tick is for one meeting only
+        self.assertEqual((card.linked(), card.title_edit.text()), (None, ""))
+        card.tick.click()
+        card.start_button.click()
+        settle()
+        record = self.m.store.load(self.m.recorder.record.id)
+        self.assertEqual((record.title, record.event_id, record.guests, record.invite, record.alias, record.linked,
+                          record.scheduled_end), ("", "", (), (), "", False, None))
+        self.m.stop()
+        settle()
+
+    def test_the_calendar_shortcuts_open_the_card_linked(self) -> None:
+        self.make()
+        later = CalendarEvent(TITLE, NOW + timedelta(minutes=40), NOW + timedelta(minutes=70))
+        self.c._agenda_status = ui._AGENDA_OK
+        self.c._agenda_events = [later]
+        self.c._agenda_range = (NOW - timedelta(days=1), NOW + timedelta(days=2))
+        self.c._render_agenda()
+        self.reading.agenda_panel.event_rows()[0].record_button().click()      # a Day view row's Record
+        settle()
+        card = self.m.stage.card
+        self.assertTrue(card.isVisible())
+        self.assertEqual((card.linked().start, card.linked().end, card.title_edit.text()),
+                         (later.start, later.end, TITLE))
+        self.assertFalse(card.tick.isChecked())
+        self.assertFalse(card.start_button.isEnabled())
+        self.assertFalse(self.m.is_recording())                                 # it only opened the card
+        card.unlink()
+        self.assertIsNone(card.linked())
+        card.close_card()
+        self.c._next_meeting_event = later                                     # Home's NEXT MEETING tile's Record
+        self.c._record_next_meeting()
+        settle()
+        self.assertEqual(self.m.stage.card.linked().start, later.start)
+        self.assertFalse(self.m.is_recording())
+
+    def test_record_a_meeting_offers_the_rest_of_today_to_link(self) -> None:
+        self.make()
+        on_now = CalendarEvent("Zq7 Standup", NOW - timedelta(minutes=10), NOW + timedelta(minutes=5))
+        later = CalendarEvent("Zq7 Review", NOW + timedelta(hours=2), NOW + timedelta(hours=3))
+        over = CalendarEvent("Zq7 Breakfast", NOW - timedelta(hours=4), NOW - timedelta(hours=3))
+        tomorrow = CalendarEvent("Zq7 Tomorrow", NOW + timedelta(days=1), NOW + timedelta(days=1, hours=1))
+        self.c._agenda_events = [later, over, on_now, tomorrow]
+        card = self.open_card()
+        self.assertEqual([info.title for _text, info in card.link_choices()], ["Zq7 Standup", "Zq7 Review"])
+        self.assertIsNone(card.linked())
+
+
+class InPersonAppTests(MeetingsApp):
+    def test_in_person_records_only_the_microphone_and_never_says_no_call_audio(self) -> None:
+        self.make(model=True)
+        self.backend.loop_fails = True              # the call audio could not be opened: in person it is never tried
+        card = self.open_card()
+        card.kind_choice.in_person_button.click()
+        card.tick.click()
+        card.start_button.click()
+        settle()
+        record = self.m.recorder.record
+        self.tick(3)
+        self.assertEqual([kind for kind, _device in self.backend.opened], [mt.MIC])
+        self.assertTrue(self.reading.rec_badge.isVisible())               # REC, the pill and the tray as always
+        self.assertEqual((self.reading.rec_badge.warning(), self.m.pill.warning()), ("", ""))
+        self.assertEqual(self.c._tray_tooltip(), "Jarvis: Recording 0:03")
+        self.assertNotEqual(self.m.stage.row(record.id).note_label.text(), meetings_view.CALL_MISSING_ROW)
+        self.m.stop()
+        settle()
+        self.assertTrue(self.m.store.audio_path(record.id, mt.MIC).is_file())
+        self.assertFalse(self.m.store.audio_path(record.id, mt.LOOPBACK).exists())
+        saved = self.m.store.load(record.id)
+        self.assertEqual((saved.kind, saved.device_changes), (mt.KIND_IN_PERSON, []))
+        self.assertNotIn("call audio", self.m.stage.row(record.id).info.note)
+        FakeJob.jobs[-1].run(FakeTranscriber({"mic.wav": [sp.Segment(0.0, 1.0, "Shall we start?"),
+                                                          sp.Segment(5.0, 6.0, SPOKEN)]}))
+        settle()
+        self.assertEqual(self.m.stage.row(record.id).info.status_text, "Transcript ready")
+        transcript = json.loads(self.m.store.transcript_path(record.id).read_text(encoding="utf-8"))
+        self.assertEqual([turn["speaker"] for turn in transcript["turns"]], ["Room", "Room"])
+
+    def test_logs_never_carry_a_typed_title(self) -> None:
+        with self.assertLogs("briefing_reader", logging.DEBUG) as logs:
+            self.make()
+            card = self.open_card()
+            card.title_edit.setText("Zq7 Typed Secret Title")
+            card.kind_choice.in_person_button.click()
+            card.tick.click()
+            card.start_button.click()
+            settle()
+            self.tick(2)
+            self.m.stop()
+            settle()
+        text = "\n".join(logs.output)
+        for secret in ("Zq7", "Typed Secret", "Owner"):
+            self.assertNotIn(secret, text)
+        self.assertIn("in_person", text)                                 # kinds may be logged
 
 
 if __name__ == "__main__":

@@ -923,7 +923,9 @@ def _mode_task(live: LiveStream | None, request: ModeRequest, words: str, *, kin
     if request.mode == MODE_MEETING:   # a meeting summary: what started it, and that it gets no notes or mail
         started = ("your tick \"summarise it\" on the meeting's start card (it ran once the transcript was ready)"
                    if request.origin == ORIGIN_AUTO else "your click on Summarise")
-        fields = [("Started by", started), ("Given", "the transcript and the invite's guest names only")]
+        given = ("the transcript and the invite's guest names only" if getattr(request.payload, "linked", True)
+                 else "the transcript only (not linked to a calendar meeting: no guests)")
+        fields = [("Started by", started), ("Given", given)]
     if memory is not None:
         fields.append(("Memory given", memory_words(*memory)))
     step = task.step(MODE_REQUEST, "Your request", fields=fields)

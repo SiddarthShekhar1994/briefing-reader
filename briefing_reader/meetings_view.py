@@ -9,13 +9,20 @@ Public API
 ==========
 ``ConsentTick(text)``: an unticked box (the NEW RECIPIENT tick's look): "Everyone in this meeting has agreed to be
     recorded", and the card's own "summarise it" box. ``StartCard``: ``open_card(info, mic, call, problem="",
-    choices=(), summaries=False)`` always opens UNTICKED (never remembered); Start stays disabled until the consent
-    tick, which counts for CONSENT_FRESH_S only (then it unticks: tick again) and goes whenever the card closes -
-    Cancel, Start, another screen, the window hidden or minimised. ``choices``: the meetings on now (the first is
-    shown); "Another meeting" switches to one of the others or to an unscheduled call (unticking). With
-    ``summaries`` (Ask Jarvis on) a second unticked box asks for the summary: only then does the transcript go to
-    the owner's Claude Code by itself once it is written down. ``startClicked(StartRequest)`` (``consent_at`` = when
-    the box was ticked), ``cancelled``; ``device_texts()``, ``meeting_choices()``, ``choose_meeting(index)``.
+    choices=(), summaries=False, kind=KIND_CALL, title="")`` always opens UNTICKED (never remembered); Start stays
+    disabled until the consent tick, which counts for CONSENT_FRESH_S only (then it unticks: tick again) and goes
+    whenever the card closes - Cancel, Start, another screen, the window hidden or minimised. Any meeting (owner
+    decisions 2026-10-22): a title box (``title_edit``; left blank the meeting is called "Meeting, Wed 22 Oct 2:05
+    PM"), "In person" / "On a call" (``kind_choice``; ``kind`` the one recorded last - in person only the
+    microphone, "Room", is recorded) and an OPTIONAL calendar link: ``info`` the calendar meeting the card opens
+    linked to (Record on a calendar meeting), None for none; "Link a calendar meeting" links one of ``choices`` (the
+    meetings on now, then today's) - filling in its title only when the box is empty, its guests, event and times -
+    and "Unlink" removes the link (both unticking). With ``summaries`` (Ask Jarvis on) a second unticked box asks
+    for the summary: only then does the transcript go to the owner's Claude Code by itself once it is written down.
+    ``startClicked(StartRequest)`` (``consent_at`` = when the box was ticked), ``cancelled``; ``device_texts()``,
+    ``info()`` / ``linked()``, ``link_choices()``, ``link_meeting(index)``, ``unlink()``, ``kind()`` /
+    ``set_kind(kind)``.
+``KindChoice``: the card's "In person" / "On a call" choice (``kind()``, ``set_kind()``, ``kindChanged(str)``).
 ``RecBadge(home=False)``: the alert dot, "REC 12:04" and Stop (the header on every screen; Home's larger one).
     ``set_elapsed(text)``, ``set_warning(text)`` (coral: "No call audio" while it can't be recorded);
     ``stopClicked``.
@@ -46,9 +53,9 @@ from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication, QPainter, QPen
-from PySide6.QtWidgets import (QAbstractButton, QHBoxLayout, QMenu, QScrollArea, QSizePolicy, QStackedWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication, QPainter, QPalette, QPen
+from PySide6.QtWidgets import (QAbstractButton, QHBoxLayout, QLineEdit, QMenu, QScrollArea, QSizePolicy,
+                               QStackedWidget, QVBoxLayout, QWidget)
 
 from . import holo, hud
 from . import meetings as mt
@@ -74,12 +81,23 @@ CARD_NOTE = ("Jarvis records only after you click Start. The audio stays on this
              "the transcript 30 days.")
 SUMMARY_TICK_TEXT = ("When it is written down, summarise it with my Claude Code - the transcript and the guests' "
                      "names go to Claude (Anthropic)")
+SUMMARY_TICK_PLAIN = ("When it is written down, summarise it with my Claude Code - its title and transcript go to "
+                      "Claude (Anthropic)")           # a meeting with no guests (not linked, or none invited)
 SUMMARY_NOTE = ("A summary is written only when you ask: this box, or Summarise on the meeting later. Without it "
                 "the transcript stays on this PC.")
 CONSENT_FRESH_S = 5 * 60          # the consent tick counts this long; then it unticks (tick it again)
 CONSENT_STALE_TEXT = "The tick is more than 5 minutes old - tick it again for this meeting."
-CHANGE_MEETING_TEXT = "Another meeting"
-UNSCHEDULED_CHOICE = "An unscheduled call (not on the calendar)"
+TITLE_PLACEHOLDER = "Title (optional) - left blank: {default}"     # default: "Meeting, Wed 22 Oct 2:05 PM"
+IN_PERSON_TEXT = "In person"
+ON_A_CALL_TEXT = "On a call"
+IN_PERSON_NAME = "In person: only the microphone is recorded, nothing this PC plays"
+ON_A_CALL_NAME = "On a call: your microphone and the call audio are recorded"
+LINK_TEXT = "Link a calendar meeting"
+UNLINK_TEXT = "Unlink"
+LINKED_KICKER = "LINKED TO YOUR CALENDAR"
+UNLINKED_KICKER = "NOT LINKED TO YOUR CALENDAR"
+UNLINKED_NOTE = "Stop it yourself. No guests and no email drafts: nothing of your calendar is used."
+CALL_NOT_RECORDED = "Call audio: not recorded in person - nothing this PC plays is recorded"
 CALL_MISSING_TEXT = "No call audio"
 CALL_MISSING_ROW = ("No call audio: the call audio device could not be opened, so Others are not recorded - check "
                     "Settings > Meetings")
@@ -135,6 +153,17 @@ class ConsentTick(QAbstractButton):
 
         return wrap_lines(self.text(), holo.font("body"), max(80.0, width - holo.TICK_BOX - 12), 3)
 
+    def set_words(self, text: str) -> None:
+        """New words (the box keeps its state): the height follows the wrapped sentence."""
+        if text == self.text():
+            return
+        self.setText(text)
+        self.setAccessibleName(text)
+        if self.width() > 0:
+            self.setFixedHeight(self.heightForWidth(self.width()))
+        self.updateGeometry()
+        self.update()
+
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
         width = max(240, self.width())
         lines = max(1, len(self._lines(width)))
@@ -172,6 +201,130 @@ class ConsentTick(QAbstractButton):
             painter.end()
 
 
+class TitleEdit(QLineEdit):
+    """The start card's title box (``field`` fill, a ``line-input`` border, radius 8): one line, at most
+    TITLE_CAP characters; left blank, the meeting is called "Meeting, Wed 22 Oct 2:05 PM"."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMaxLength(mt.TITLE_CAP)
+        self.setMinimumHeight(38)
+        self.setAccessibleName("Meeting title (optional)")
+        self.setStyleSheet(f"QLineEdit {{ background: {holo.FIELD}; border: 1px solid rgba(60, 211, 238, 128);"
+                           f" border-radius: {holo.RADIUS_BUTTON}px; padding: 0 12px; }}"
+                           f" QLineEdit:focus {{ border: 1px solid {holo.HOLO}; }}")
+        self.setFont(holo.font("body"))
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Text, QColor(holo.INK_1))
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(holo.INK_4))
+        palette.setColor(QPalette.ColorRole.Highlight, holo.alpha(holo.HOLO, 0.35))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor(holo.INK_1))
+        self.setPalette(palette)
+
+
+class _KindButton(QAbstractButton):
+    """One side of the kind choice: a round mark (filled while chosen) and its words; 32 high, radius 8."""
+
+    HEIGHT = 32
+    MARK = 12
+
+    def __init__(self, text: str, kind: str, name: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.kind = kind
+        self.setText(text)
+        self.setAccessibleName(name)
+        self.setCheckable(True)
+        self.setAutoExclusive(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._focus_ring = False
+        self.toggled.connect(lambda _on: self.update())
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = QFontMetricsF(holo.font("button_sm")).horizontalAdvance(self.text())
+        return QSize(int(width) + 14 + self.MARK + 8 + 16, self.HEIGHT)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self.sizeHint()
+
+    def focusInEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self._focus_ring = holo.keyboard_focus(event.reason(), self._focus_ring)
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.reason() != Qt.FocusReason.ActiveWindowFocusReason:
+            self._focus_ring = False
+        super().focusOutEvent(event)
+        self.update()
+
+    def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().leaveEvent(event)
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            if not self.isEnabled():
+                painter.setOpacity(0.45)
+            rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            on = self.isChecked()
+            fill = (holo.alpha(holo.HOLO, 0.12) if on else
+                    holo.alpha(holo.INK_1, 0.05) if self.underMouse() else QColor(0, 0, 0, 0))
+            painter.setPen(QPen(QColor(holo.HOLO) if on else holo.LINE, 1.0))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect, holo.RADIUS_BUTTON, holo.RADIUS_BUTTON)
+            mark = QRectF(rect.left() + 13, rect.center().y() - self.MARK / 2, self.MARK, self.MARK)
+            painter.setPen(QPen(QColor(holo.HOLO) if on else QColor(holo.INK_3), 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(mark)
+            if on:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(holo.HOLO))
+                painter.drawEllipse(mark.center(), 3.0, 3.0)
+            painter.setFont(holo.font("button_sm"))
+            painter.setPen(QColor(holo.INK_1 if on else holo.INK_2))
+            painter.drawText(QRectF(mark.right() + 8, rect.top(), rect.right() - mark.right() - 8, rect.height()),
+                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.text())
+            if self.hasFocus() and self._focus_ring:
+                holo.paint_focus_ring(painter, rect, holo.RADIUS_BUTTON)
+        finally:
+            painter.end()
+
+
+class KindChoice(QWidget):
+    """"In person" / "On a call": one is always chosen (the start card opens on the kind recorded last)."""
+
+    kindChanged = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.in_person_button = _KindButton(IN_PERSON_TEXT, mt.KIND_IN_PERSON, IN_PERSON_NAME, self)
+        self.call_button = _KindButton(ON_A_CALL_TEXT, mt.KIND_CALL, ON_A_CALL_NAME, self)
+        self.call_button.setChecked(True)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(holo.BUTTON_GAP)
+        for button in (self.in_person_button, self.call_button):
+            button.toggled.connect(lambda on, b=button: self.kindChanged.emit(b.kind) if on else None)
+            row.addWidget(button)
+        row.addStretch(1)
+        self.setAccessibleName("In person or on a call")
+
+    def kind(self) -> str:
+        return mt.KIND_IN_PERSON if self.in_person_button.isChecked() else mt.KIND_CALL
+
+    def set_kind(self, kind: str) -> None:
+        (self.in_person_button if mt.clean_kind(kind) == mt.KIND_IN_PERSON else self.call_button).setChecked(True)
+
+
 class StartCard(QWidget):
     """The start card (amber: a decision waits). See the module docstring."""
 
@@ -180,11 +333,13 @@ class StartCard(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._info = mt.MeetingInfo()
+        self._linked: mt.MeetingInfo | None = None
         self._choices: list[mt.MeetingInfo] = []
-        self._devices = ("", "")
+        self._mic: tuple[str, bool] = ("", True)
+        self._call: tuple[str, bool] = ("", True)
         self._problem = ""
         self._summaries = False
+        self._filled = ""                    # the title the link filled in (it goes with an Unlink while untouched)
         self._ticked_at: datetime | None = None
         self._summary_at: datetime | None = None
         self._closing = False
@@ -192,11 +347,18 @@ class StartCard(QWidget):
         self._now = datetime.now
         self.menu: QMenu | None = None
         self.kicker = body_label(holo.role_text("label", CARD_KICKER), "label", holo.AMBER, wrap=False)
-        self.title_label = body_label("", "tile_title", holo.INK_1, name="meetingCardTitle")
+        self.title_edit = TitleEdit()
+        self.kind_choice = KindChoice()
+        self.kind_choice.kindChanged.connect(lambda _kind: self._show_devices())
+        self.link_kicker = body_label("", "label", holo.INK_KICKER, wrap=False, name="meetingCardLink")
+        self.link_button = holo.HoloButton(LINK_TEXT, holo.LINK_CYAN, size=holo.SIZE_SM)
+        self.link_button.setAccessibleName("Link this recording to a calendar meeting")
+        self.link_button.clicked.connect(self._menu)
+        self.unlink_button = holo.HoloButton(UNLINK_TEXT, holo.LINK_CYAN, size=holo.SIZE_SM)
+        self.unlink_button.setAccessibleName("Unlink the calendar meeting")
+        self.unlink_button.clicked.connect(self.unlink)
+        self.title_label = body_label("", "body", holo.INK_1, name="meetingCardTitle")
         self.meta_label = body_label("", "body_sm", holo.INK_3)
-        self.change_button = holo.HoloButton(CHANGE_MEETING_TEXT, holo.LINK_CYAN, size=holo.SIZE_SM)
-        self.change_button.setAccessibleName("Record another meeting instead")
-        self.change_button.clicked.connect(self._menu)
         self.mic_label = body_label("", "body_sm", holo.INK_2, name="meetingCardMic")
         self.call_label = body_label("", "body_sm", holo.INK_2, name="meetingCardCall")
         self.tick = ConsentTick()
@@ -223,17 +385,23 @@ class StartCard(QWidget):
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.cancel_button)
         buttons.addStretch(1)
-        meta_row = QHBoxLayout()
-        meta_row.setContentsMargins(0, 0, 0, 0)
-        meta_row.setSpacing(8)
-        meta_row.addWidget(self.meta_label, 1)
-        meta_row.addWidget(self.change_button, 0, Qt.AlignmentFlag.AlignTop)
+        link_row = QHBoxLayout()
+        link_row.setContentsMargins(0, 0, 0, 0)
+        link_row.setSpacing(8)
+        link_row.addWidget(self.link_kicker, 1, Qt.AlignmentFlag.AlignVCenter)
+        link_row.addWidget(self.link_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        link_row.addWidget(self.unlink_button, 0, Qt.AlignmentFlag.AlignVCenter)
         column = QVBoxLayout(self)
         column.setContentsMargins(20, 16, 20, 16)
         column.setSpacing(6)
         column.addWidget(self.kicker)
+        column.addWidget(self.title_edit)
+        column.addSpacing(2)
+        column.addWidget(self.kind_choice)
+        column.addSpacing(6)
+        column.addLayout(link_row)
         column.addWidget(self.title_label)
-        column.addLayout(meta_row)
+        column.addWidget(self.meta_label)
         column.addSpacing(6)
         column.addWidget(self.mic_label)
         column.addWidget(self.call_label)
@@ -249,83 +417,134 @@ class StartCard(QWidget):
         column.addLayout(buttons)
         self.setMaximumWidth(COLUMN_MAX)
         self.hide()
-        self._sync()
+        self._show_link(None)
 
     def set_clock(self, now: Any) -> None:
         self._now = now
 
     def open_card(self, info: mt.MeetingInfo | None, mic: tuple[str, bool], call: tuple[str, bool], *,
-                  problem: str = "", choices: Sequence[mt.MeetingInfo] = (), summaries: bool = False) -> None:
-        """Show the card for ``info`` (None: an unscheduled call) with the two devices it will use; ``choices``
-        the other meetings on now it may switch to; ``summaries``: the "summarise it" box shows (Ask Jarvis is
-        on). Both ticks are ALWAYS unticked here: never remembered from an earlier meeting."""
-        self._devices = (mic[0], call[0])
+                  problem: str = "", choices: Sequence[mt.MeetingInfo] = (), summaries: bool = False,
+                  kind: str = mt.KIND_CALL, title: str = "") -> None:
+        """Show the card linked to ``info`` (None: linked to no calendar meeting) with the devices it will use;
+        ``choices`` the calendar meetings it may link instead; ``summaries``: the "summarise it" box shows (Ask
+        Jarvis is on); ``kind`` the choice it starts on (the kind recorded last); ``title`` what the box holds.
+        Both ticks are ALWAYS unticked here: never remembered from an earlier meeting."""
+        self._mic, self._call = mic, call
         self._problem = problem
         self._summaries = bool(summaries)
-        self._choices = [item for item in choices if isinstance(item, mt.MeetingInfo)]
-        self.mic_label.setText(f"You - microphone: {device_line(*mic)}")
-        self.call_label.setText(f"Others - call audio: {device_line(*call)}")
+        self._choices = [item for item in choices if isinstance(item, mt.MeetingInfo) and item.linked]
         self.problem_label.setText(problem)
         self.problem_label.setVisible(bool(problem))
         self.summary_tick.setVisible(self._summaries)
         self.summary_note.setVisible(self._summaries)
-        self._show_info(info or mt.MeetingInfo())
+        self.title_edit.setPlaceholderText(TITLE_PLACEHOLDER.format(default=mt.default_title(self._now())))
+        self.title_edit.setText(mt.clean_title(title))
+        self._filled = ""
+        self.kind_choice.set_kind(kind)
+        self._show_devices()
+        self._show_link(info if info is not None and info.linked else None)
         self.show()
 
-    def _show_info(self, info: mt.MeetingInfo) -> None:
-        """The card names ``info``; both ticks go back to unticked (a tick is for one meeting only)."""
-        self._info = info
+    def _show_devices(self) -> None:
+        """The devices the start will use: on a call "You" (the microphone) and "Others" (the call audio); in
+        person "Room" (the microphone) and no call audio."""
+        if self.kind() == mt.KIND_IN_PERSON:
+            self.mic_label.setText(f"Room - microphone: {device_line(*self._mic)}")
+            self.call_label.setText(CALL_NOT_RECORDED)
+        else:
+            self.mic_label.setText(f"You - microphone: {device_line(*self._mic)}")
+            self.call_label.setText(f"Others - call audio: {device_line(*self._call)}")
+
+    def _show_link(self, info: mt.MeetingInfo | None) -> None:
+        """The card linked to ``info`` (None: to none); both ticks go back to unticked (a tick is for one meeting).
+        Linking fills in the meeting's title only when the box is empty; a title the link filled in and nobody
+        changed goes with it."""
+        self._linked = info
         self.tick.setChecked(False)
         self.summary_tick.setChecked(False)
         self.stale_label.hide()
-        self.title_label.setText(self._info.shown_title())
-        meta = []
-        if self._info.start is not None:
-            meta.append(f"{_clock(self._info.start)} to {_clock(self._info.end)}" if self._info.end
-                        else _clock(self._info.start))
-            meta.append("stops by itself 15 minutes after the end")
-        if self._info.guests:
-            meta.append(f"with {mt.merge_names(self._info.guests)}")
-        self.meta_label.setText(" \u00b7 ".join(meta) if meta else "Not on your calendar; stop it yourself.")
-        self.change_button.setVisible(bool(self.meeting_choices()))
+        typed = mt.clean_title(self.title_edit.text())
+        if self._filled and typed == self._filled:
+            self.title_edit.clear()
+            typed = ""
+        self._filled = ""
+        if info is not None and not typed and mt.clean_title(info.title):
+            self._filled = mt.clean_title(info.title)
+            self.title_edit.setText(self._filled)
+        if info is not None:
+            self.link_kicker.setText(holo.role_text("label", LINKED_KICKER))
+            self.title_label.setText(info.shown_title())
+            meta = []
+            if info.start is not None:
+                meta.append(f"{_clock(info.start)} to {_clock(info.end)}" if info.end else _clock(info.start))
+                if info.end is not None:
+                    meta.append("stops by itself 15 minutes after the end")
+            if info.guests:
+                meta.append(f"with {mt.merge_names(info.guests)}")
+            self.meta_label.setText(" · ".join(meta) if meta else "On your calendar.")
+        else:
+            self.link_kicker.setText(holo.role_text("label", UNLINKED_KICKER))
+            self.title_label.setText("")
+            self.meta_label.setText(UNLINKED_NOTE)
+        self.title_label.setVisible(info is not None)
+        self.unlink_button.setVisible(info is not None)
+        self.link_button.setVisible(info is None and bool(self.link_choices()))
+        self.summary_tick.set_words(SUMMARY_TICK_TEXT if info is not None and info.guests else SUMMARY_TICK_PLAIN)
         self._sync()
 
     def info(self) -> mt.MeetingInfo:
-        return self._info
+        """The calendar meeting the card is linked to (``MeetingInfo()``: none)."""
+        return self._linked or mt.MeetingInfo()
+
+    def linked(self) -> mt.MeetingInfo | None:
+        return self._linked
+
+    def kind(self) -> str:
+        return self.kind_choice.kind()
+
+    def set_kind(self, kind: str) -> None:
+        self.kind_choice.set_kind(kind)
+
+    def title_text(self) -> str:
+        """The title in the box, as it will be kept ("" left blank)."""
+        return mt.clean_title(self.title_edit.text())
 
     def device_texts(self) -> tuple[str, str]:
         return self.mic_label.text(), self.call_label.text()
 
-    def meeting_choices(self) -> list[tuple[str, mt.MeetingInfo]]:
-        """What "Another meeting" offers: the other meetings on now, then an unscheduled call (when the card
-        shows a calendar meeting)."""
-        current = self._info
+    def link_choices(self) -> list[tuple[str, mt.MeetingInfo]]:
+        """What "Link a calendar meeting" offers: the calendar meetings on now, then today's (not the linked one)."""
+        current = self._linked
         items: list[tuple[str, mt.MeetingInfo]] = []
         for item in self._choices:
-            if (item.title, item.start, item.event_id) == (current.title, current.start, current.event_id):
+            if current is not None and (item.title, item.start, item.event_id) == (current.title, current.start,
+                                                                                   current.event_id):
                 continue
             when = (f"{_clock(item.start)} to {_clock(item.end)}" if item.start is not None and item.end is not None
                     else _clock(item.start))
             items.append((f"{item.shown_title()} - {when}" if when else item.shown_title(), item))
-        if current.scheduled or current.title:
-            items.append((UNSCHEDULED_CHOICE, mt.MeetingInfo()))
         return items
 
-    def choose_meeting(self, index: int) -> bool:
-        """Switch the card to the ``index``-th of ``meeting_choices()`` (unticked again)."""
-        items = self.meeting_choices()
+    def link_meeting(self, index: int) -> bool:
+        """Link the ``index``-th of ``link_choices()`` (unticked again)."""
+        items = self.link_choices()
         if not 0 <= index < len(items):
             return False
-        self._show_info(items[index][1])
+        self._show_link(items[index][1])
         return True
+
+    def unlink(self) -> None:
+        """Unlink: no calendar meeting (no guests, no end time; unticked again)."""
+        if self._linked is not None:
+            self._show_link(None)
 
     def _menu(self) -> None:
         menu = QMenu(self)
-        for index, (text, _info) in enumerate(self.meeting_choices()):
+        for index, (text, _info) in enumerate(self.link_choices()):
             action = menu.addAction(text)
-            action.triggered.connect(lambda _checked=False, i=index: self.choose_meeting(i))
+            action.triggered.connect(lambda _checked=False, i=index: self.link_meeting(i))
         self.menu = menu
-        menu.popup(self.change_button.mapToGlobal(self.change_button.rect().bottomLeft()))
+        menu.popup(self.link_button.mapToGlobal(self.link_button.rect().bottomLeft()))
 
     def close_card(self) -> None:
         """The card goes and both ticks with it (Cancel, Start, another screen, the window hidden)."""
@@ -382,8 +601,11 @@ class StartCard(QWidget):
             return
         assert self._ticked_at is not None
         summarise = self._summaries and self.summary_tick.isChecked()
-        request = mt.StartRequest(self._info, True, self._ticked_at, self._devices[0], self._devices[1],
-                                  summarise=summarise, summarise_at=self._summary_at if summarise else None)
+        kind = self.kind()
+        request = mt.StartRequest(self.info(), True, self._ticked_at, self._mic[0],
+                                  self._call[0] if kind == mt.KIND_CALL else "", summarise=summarise,
+                                  summarise_at=self._summary_at if summarise else None, title=self.title_text(),
+                                  kind=kind)
         self.close_card()                     # the ticks go back to unticked: never remembered
         self.startClicked.emit(request)
 
