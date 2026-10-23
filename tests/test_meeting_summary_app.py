@@ -10,13 +10,16 @@ there with the bundle or [meetings] off; logs carry ids and counts only. Every n
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
 import time
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QLabel
 
 from briefing_reader import hud, live, meeting_summary_view as sv, meetings as mt, meetings_ui, ui
 from briefing_reader.actions import CALENDAR, EMAIL, SOURCE_ASK, STATUS_CREATED, STATUS_SENT
@@ -666,6 +669,200 @@ class RecordOfferTests(SummaryAppCase):
         self.assertIn("has gone", entry.entry[2])
         self.m.stop()
         settle()
+
+    def test_the_offer_opens_the_card_already_linked_and_unlink_works(self) -> None:
+        start = at(14)
+        self.make(start=start - timedelta(minutes=4), work=[guest_meeting(start)], prod_extra=self.NO_PREP)
+        settle()
+        self.c.productivity.tick()
+        settle()
+        offer, = self.offers()
+        self.c._on_conversation_link(f"{ui.OFFER_LINK}{offer.id}")
+        settle()
+        card = self.m.stage.card
+        self.assertEqual((card.linked().event_id, card.title_edit.text()), ("evt9", TITLE))
+        self.assertEqual(card.summary_tick.text(), meetings_ui.meetings_view.SUMMARY_TICK_TEXT)
+        card.unlink()
+        self.assertIsNone(card.linked())
+        self.assertEqual(card.title_edit.text(), "")
+        self.assertFalse(self.m.is_recording())
+
+
+# Owner decisions 2026-10-22: a meeting not linked to a calendar meeting, and one held in person.
+PLAIN = {"title": "Zq7 the venue and the budget",
+         "decisions": ["Zq7 the launch stays on the 4th."],
+         "action_items": [{"who": "Ben", "what": "Send the revised budget", "due": ""},
+                          {"who": "you", "what": "Book the venue", "due": "2026-10-09"},
+                          {"who": "unnamed", "what": "Order lunch"}],
+         "open_questions": ["Which caterer?"],
+         "follow_ups": [{"to": "Ben", "subject": "Check finance has the budget", "body": ""}],
+         "memory_suggestions": ["Ben runs the budget reviews."]}
+ROOM_TURNS = [dict(turn, speaker="Room") for turn in TURNS]
+
+
+class UniversalSummaryTests(SummaryAppCase):
+    def plain_meeting(self, *, kind: str = mt.KIND_CALL, turns: list = TURNS) -> str:
+        record = self.m.store.create(mt.StartRequest(mt.MeetingInfo(), True, at(11), title=TITLE, kind=kind))
+        self.m.store.update(record.id, status=mt.STATUS_TRANSCRIBED, duration_s=2712.0, ended_at=at(11, 46))
+        mt._write_json(self.m.store.transcript_path(record.id), {"version": 1, "turns": turns})
+        self.m.refresh()
+        return record.id
+
+    def test_not_linked_no_guests_plain_follow_ups_no_drafts_and_no_add_block(self) -> None:
+        self.make(plan_stream(PLAIN))
+        meeting_id = self.plain_meeting()
+        self.assertTrue(self.m.summarise(meeting_id, "summarise"))
+        self.wait_done()
+        self.assertEqual(self.record(meeting_id).status, mt.STATUS_SUMMARY_READY)
+        stdin = self.app.factory.runner.started[0].stdin
+        self.assertIn("<guests>\nnone\n</guests>", stdin)                  # no guests anywhere
+        self.assertIn("calendar=not linked (no guests)", stdin)
+        self.assertTrue(stdin.rstrip().endswith(f"<command>\n{ms.FIXED_COMMAND_PLAIN}\n</command>"))
+        self.assertEqual(self.meeting_cards(), [])                          # no follow-up drafts
+        view = self.open(meeting_id)
+        self.assertEqual(view.sections(), [sv.DECISIONS_TITLE, sv.ACTIONS_TITLE, sv.QUESTIONS_TITLE,
+                                           sv.FOLLOWUP_ITEMS_TITLE, sv.NOTES_TITLE])
+        rows = view.action_rows()
+        self.assertEqual([row.text_label.text() for row in rows],
+                         [f"You - Book the venue {sv.DOT} due Fri 9 Oct", "Ben - Send the revised budget",
+                          "Order lunch"])
+        self.assertFalse(any(row.add_button.isVisibleTo(row) for row in rows))   # no Add block
+        self.assertIn("Ben - Check finance has the budget", view.texts())
+        self.assertFalse(view.drafts_head.isVisibleTo(view) or view.drafts_label.isVisibleTo(view))
+        self.assertFalse(any(text.startswith("with ") for text in view.texts()))  # no guests line
+        self.assertEqual([row.note.state for row in view.note_rows()], [sv.NOTE_PENDING])   # notes stay
+        self.c._on_meeting_add_block(meeting_id, 0)                       # even called directly: nothing proposed
+        settle()
+        self.assertEqual(self.meeting_cards(CALENDAR), [])
+        self.assertEqual(self.app.senders["work"].sent, [])
+        self.m.stage.summary.copy_button.click()
+        copied = QApplication.clipboard().text()
+        self.assertIn("\nFollow-ups\n- Ben - Check finance has the budget\n", copied)
+        self.assertIn("\n- Order lunch\n", copied)
+        self.assertNotIn("With ", copied)
+        self.assertNotIn("Follow-up drafts", copied)
+
+    def test_in_person_nothing_is_yours_and_there_is_no_add_block(self) -> None:
+        self.make(plan_stream(SUMMARY))
+        info = mt.MeetingInfo(TITLE, at(11), at(11, 45), "evt7", ("Ana Lima", "Ben Ode"), alias="work",
+                              calendar_id="primary", invite=(("Ana Lima", ANA), ("Ben Ode", BEN)))
+        record = self.m.store.create(mt.StartRequest(info, True, at(11), kind=mt.KIND_IN_PERSON))
+        self.m.store.update(record.id, status=mt.STATUS_TRANSCRIBED, duration_s=2712.0, ended_at=at(11, 46))
+        mt._write_json(self.m.store.transcript_path(record.id), {"version": 1, "turns": ROOM_TURNS})
+        self.m.refresh()
+        self.m.summarise(record.id, "summarise")
+        self.wait_done()
+        stdin = self.app.factory.runner.started[0].stdin
+        self.assertIn(ms.TRANSCRIPT_NOTE_IN_PERSON, stdin)
+        self.assertNotIn("] You:", stdin)
+        self.assertIn("Ana Lima\nBen Ode", stdin)                            # linked: the invite's guests by name
+        view = self.open(record.id)
+        rows = view.action_rows()
+        self.assertEqual([row.text_label.text() for row in rows],
+                         ["Ana Lima - Book the demo room", f"Send Ana the numbers {sv.DOT} due Fri 9 Oct"])
+        self.assertFalse(any(row.action.mine or row.add_button.isVisibleTo(row) for row in rows))
+        card_action, = self.meeting_cards()                                  # a linked meeting's draft stays a card
+        self.assertIn(self.reading.action_card(card_action.id), view.held())
+        self.assertIn("2 items left out (not an invited guest, or a repeat)", view.texts())
+
+    def test_a_linked_call_still_has_drafts_and_add_block(self) -> None:
+        self.make(plan_stream(SUMMARY))
+        meeting_id = self.meeting()
+        record = self.record(meeting_id)
+        self.assertEqual((record.kind, record.linked), (mt.KIND_CALL, True))
+        self.m.summarise(meeting_id, "summarise")
+        self.wait_done()
+        view = self.open(meeting_id)
+        self.assertTrue(view.action_rows()[0].add_button.isVisibleTo(view.action_rows()[0]))
+        self.assertEqual(len(self.meeting_cards()), 1)
+        self.assertEqual(view.sections()[3], sv.FOLLOWUPS_TITLE)
+
+    def test_records_from_before_are_calls_linked_by_their_invite(self) -> None:
+        self.make(plan_stream(SUMMARY), plan_stream(SUMMARY))
+        linked, plain = self.meeting(), self.plain_meeting()
+        for meeting_id in (linked, plain):                                   # written before kinds and links
+            path = self.m.store.folder(meeting_id) / mt.RECORD_FILE
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data.pop("kind")
+            data.pop("linked")
+            data["version"] = 1
+            path.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual([(self.record(m).kind, self.record(m).linked) for m in (linked, plain)],
+                         [(mt.KIND_CALL, True), (mt.KIND_CALL, False)])
+        self.m.summarise(linked, "summarise")
+        self.wait_done()
+        self.assertEqual(len(self.meeting_cards()), 1)                      # its draft, exactly as before
+        self.m.summarise(plain, "summarise")
+        self.wait_done()
+        self.assertEqual(len(self.meeting_cards()), 1)                      # an old unscheduled call: no draft
+        view = self.open(plain)
+        self.assertEqual(view.sections()[3], sv.FOLLOWUP_ITEMS_TITLE)
+        self.assertIn("Ana Lima - Zq7 numbers", view.texts())               # its follow-ups as plain text
+
+
+class CopySummaryTests(SummaryAppCase):
+    def test_copy_puts_the_whole_summary_on_the_clipboard_as_plain_text(self) -> None:
+        self.make(plan_stream(SUMMARY))
+        meeting_id = self.meeting()
+        self.m.summarise(meeting_id, "summarise")
+        self.wait_done()
+        view = self.open(meeting_id)
+        clipboard = QApplication.clipboard()
+        clipboard.setText("before")
+        self.assertTrue(view.copy_button.isVisibleTo(view))
+        self.assertFalse(view.copied_label.isVisibleTo(view))
+        with self.assertLogs("briefing_reader", logging.DEBUG) as logs:
+            logging.getLogger("briefing_reader.meetings").info("Meetings: check")
+            view.copy_button.click()
+            settle()
+        expected = "\n".join([
+            "Zq7 numbers and the demo",
+            "Date: Sun 4 Oct 2026, 11:00 AM",
+            "Length: 45:12",
+            "With Ana Lima and Ben Ode",
+            "",
+            "Decisions",
+            "- Zq7 the demo moves to next week.",
+            "",
+            "Action items",
+            f"- You - Send Ana the numbers {sv.DOT} due Fri 9 Oct",
+            "- Ana Lima - Book the demo room",
+            "",
+            "Open questions",
+            "- Who joins the demo?",
+            "",
+            "Follow-up drafts",
+            "- To Ana Lima - Zq7 numbers",
+            "",
+            "Worth remembering",
+            "- Ana Lima runs the budget reviews.",
+            "- Ben Ode prefers mornings.",
+        ]) + "\n"
+        self.assertEqual(clipboard.text(), expected)
+        self.assertEqual(view.copy_text(), expected)
+        self.assertTrue(view.copied_label.isVisibleTo(view))                 # a short "Copied"
+        self.assertEqual(view.copied_label.text(), "Copied")
+        record_text = "\n".join(logs.output)
+        for secret in (*SECRETS, ANA, BEN):
+            self.assertNotIn(secret, record_text)                            # the text is never logged
+        self.assertEqual(self.app.senders["work"].sent, [])                 # nothing else happens
+        self.assertEqual(len(self.c.memory_store), 0)
+        self.assertFalse(any(self.c._store.is_decided(action.id) for action in self.meeting_cards()))
+        self.assertEqual(self.m.stage.showing_summary(), meeting_id)
+        self.assertTrue(wait_for(lambda: not view.copied_label.isVisibleTo(view), 6))
+
+    def test_every_text_of_the_summary_can_be_selected(self) -> None:
+        self.make(plan_stream(SUMMARY))
+        meeting_id = self.meeting()
+        self.m.summarise(meeting_id, "summarise")
+        self.wait_done()
+        view = self.open(meeting_id)
+        labels = [label for box in (view.panel, view.notes_box) for label in box.findChildren(QLabel)
+                  if label.text()] + [view.drafts_label]
+        self.assertGreater(len(labels), 10)
+        for label in labels:
+            with self.subTest(text=label.text()[:30]):
+                self.assertTrue(label.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse)
 
 
 if __name__ == "__main__":

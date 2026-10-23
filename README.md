@@ -2013,35 +2013,50 @@ with the line `JARVIS_MEETINGS_ENABLED=true` in `.env`, then a restart. Off,
 there is no Meetings screen, no Record anywhere and no record offer.
 
 **Consent.** California and some other places need everyone's consent before a
-call is recorded. Before every recording, the start card has an unticked box
-"Everyone in this meeting has agreed to be recorded"; Start stays disabled
-until you tick it, every meeting (it is never remembered), and the meeting
-keeps that you confirmed it and when you ticked it. A tick counts for 5
+meeting or a call is recorded. Before every recording, the start card has an
+unticked box "Everyone in this meeting has agreed to be recorded"; Start stays
+disabled until you tick it, every meeting (it is never remembered), and the
+meeting keeps that you confirmed it and when you ticked it. A tick counts for 5
 minutes and goes as soon as the card closes - Cancel, another screen, Jarvis
-hidden or minimised - so it is never carried over to another call. The tick is
-your confirmation, not legal advice: ask everyone first.
+hidden or minimised - or when the card is linked to another calendar meeting
+or unlinked, so it is never carried over to another meeting. The tick is your
+confirmation, not legal advice: ask everyone first.
 
+- **Any meeting**, in person or on a call, on your calendar or not.
+  **Record a meeting** on the Meetings screen and in the Find list (Ctrl+K)
+  opens the start card linked to no calendar meeting; **Record** on Home's
+  NEXT MEETING tile, on a meeting's row in the Day view and the record offer
+  (below) open it already linked to that calendar meeting (**Unlink** undoes
+  it).
+- **The start card**: a title box (optional; left blank, the meeting is called
+  "Meeting, Wed 22 Oct 2:05 PM" - when it started - wherever a title shows);
+  **In person** or **On a call** (it starts on the kind you recorded last, On a
+  call the first time); and an optional **Link a calendar meeting**, which
+  lists the meetings on now and the rest of today's: linking one fills in its
+  title (only when the box is empty), its guests and its times, and **Unlink**
+  removes the link. Not linked by default; a meeting not linked has no guests
+  anywhere (no follow-up drafts, no Add block) and stops only when you stop it
+  (or by the silence and 3-hour rules below).
 - **Recording** starts only from your click on Start on that card: never by
-  itself, never by voice, never from an offer. Record opens the card: on Home's
-  NEXT MEETING tile and on a meeting's row in the Day view (for that meeting),
-  and Record a meeting on the Meetings screen and in the Find list (Ctrl+K) for
-  the meeting on now - the one starting within 15 minutes before one that is
-  ending - or an unscheduled call. The card names the meeting; **Another
-  meeting** switches to another one on now or to an unscheduled call. Jarvis
-  records your microphone as "You" and the call audio from your speakers or
-  headset (Windows loopback) as "Others"; pick the devices in Settings >
-  Meetings, otherwise the Windows defaults are followed (looked at again for
-  each card and each start, and mid-meeting when a headset is unplugged).
+  itself, never by voice, never from an offer. **On a call** Jarvis records your
+  microphone as "You" and the call audio from your speakers or headset (Windows
+  loopback) as "Others". **In person** he records only the microphone: the call
+  audio is never opened, so nothing this PC plays is recorded, and every turn of
+  the transcript is "Room" (one microphone in the room: who spoke is not known).
+  Pick the devices in Settings > Meetings, otherwise the Windows defaults are
+  followed (looked at again for each card and each start, and mid-meeting when
+  a headset is unplugged).
 - **Visible the whole time**: a red REC with the time in the header on every
   screen (also over the "Hear it now?" prompt), the orb's recording look, a
   small pill on top of every window (also while Jarvis is minimised) with Stop,
-  and "Recording" in the tray tooltip. When the call audio can't be recorded
-  (its device could not be opened), REC, the pill and the meeting's row say
-  "No call audio". While a meeting records Jarvis keeps quiet: what he would
-  say shows as text, and a briefing's announcement waits until it stops.
+  and "Recording" in the tray tooltip. On a call, when the call audio can't be
+  recorded (its device could not be opened), REC, the pill and the meeting's
+  row say "No call audio" (never in person). While a meeting records Jarvis
+  keeps quiet: what he would say shows as text, and a briefing's announcement
+  waits until it stops.
 - **Stop** on the pill, the header, Home or the Meetings screen. It also stops
-  by itself 15 minutes after the meeting's end, after 10 minutes of silence on
-  both channels, or at 3 hours, and closing Jarvis stops and saves.
+  by itself 15 minutes after a linked meeting's end, after 10 minutes of silence
+  on everything it records, or at 3 hours, and closing Jarvis stops and saves.
 - **Kept on this PC**: everything is kept in
   `%LOCALAPPDATA%\briefing-reader\meetings\<id>\` (never a folder that syncs);
   the audio is deleted after 7 days, the transcript and the summary after 30
@@ -2060,36 +2075,51 @@ it with my Claude Code" on the start card (a second box, unticked every time;
 the meeting keeps that you asked and when), or click **Summarise** on the
 meeting later. Then your own Claude Code (the same signed-in
 [Ask Jarvis](#ask-jarvis-optional) run as Plan my day and the meeting brief: no
-API key, no paid API) writes it, and **the transcript and the guests' names go
-to Claude (Anthropic)** that way. Without your ask the transcript stays on this
-PC. A summary that failed or was cancelled (Esc on the command bar) has
-**Retry**. Without Ask Jarvis there is no summary, and the list says so.
+API key, no paid API) writes it, and **the transcript, the meeting's title
+and, for a meeting linked to your calendar, the guests' names go to Claude
+(Anthropic)** that way. Without your ask the transcript stays on this PC. A
+summary that failed or was cancelled (Esc on the command bar) has **Retry**.
+Without Ask Jarvis there is no summary, and the list says so.
 
 - **What Claude gets**: the transcript, marked as text written by other people
   (data, never instructions - a request said in the meeting is never followed),
-  the meeting's title, time and length, and the calendar invite's guests by
-  name only. Never their addresses, your mail, your notes or the audio. It runs
-  in the background: nothing is said, paused or switched, and while it runs the
-  command bar says "Writing the meeting summary..." (Esc cancels).
+  the meeting's title, time and length, whether it was in person or on a call
+  and whether it is linked to your calendar, and a linked meeting's invite
+  guests by name only (none for a meeting not linked). Never their addresses,
+  your mail, your notes or the audio. It runs in the background: nothing is
+  said, paused or switched, and while it runs the command bar says "Writing
+  the meeting summary..." (Esc cancels).
 - **Checked strictly**: the answer must be exactly the summary's shape (a
   title, decisions, action items with who and what and a due date only as a
   real date, open questions, at most 3 follow-ups, at most 3 notes) or it is
-  refused whole and the meeting shows **Retry**. An action item is kept only
-  for you or a guest of the invite; anything else is left out and counted.
+  refused whole and the meeting shows **Retry**. On a linked call an action
+  item is kept only for you or a guest of the invite. In person nothing is
+  yours (the speakers are not identified): an item keeps a who only when the
+  words name someone. A meeting not linked keeps the names as they were said
+  (plain text: nothing is sent to anyone). What does not fit is left out and
+  counted.
 - **The summary view** (Open summary on the meeting): Decisions, Action items
-  (yours first), Open questions, the follow-up drafts, the notes worth
-  remembering, and **See every step** (LIVE, this session).
-- **Follow-ups are drafts**: each one goes only to a guest of the calendar
-  invite, from the meeting's account, as an ordinary approval card (also under
-  NEEDS YOUR OK): a new recipient waits for its tick on the card, your own
-  address is refused, and Send shows Sent at once while the real send waits a
-  few hidden seconds so **Undo** truly stops it. Nothing is sent without your
-  click.
-- **Add block** on one of your action items proposes a calendar card for the
-  next free half hour Jarvis sees on your agenda (by its due date when it has
-  one): only on your click, and nothing is added until that card's own **Add**
-  (with **Undo**). The item then says the block was added or dismissed; a
-  proposal no longer listed can be proposed again.
+  (yours first), Open questions, the follow-up drafts (a meeting not linked:
+  FOLLOW-UPS as plain text - who and what, never a draft), the notes worth
+  remembering, and **See every step** (LIVE, this session). Every text in it
+  can be selected with the mouse.
+- **Copy summary** puts the whole summary on this PC's clipboard as plain text
+  (the title, the date, the length, then the decisions, the action items with
+  who and due date, the open questions, the follow-ups and the notes worth
+  remembering, as shown) and says "Copied" for a moment. Nothing else happens:
+  nothing is sent or kept, and the text is never logged.
+- **Follow-ups are drafts** for a meeting linked to your calendar: each one goes
+  only to a guest of the calendar invite, from the meeting's account, as an
+  ordinary approval card (also under NEEDS YOUR OK): a new recipient waits for
+  its tick on the card, your own address is refused, and Send shows Sent at
+  once while the real send waits a few hidden seconds so **Undo** truly stops
+  it. Nothing is sent without your click.
+- **Add block** on one of your action items (a linked call only: in person
+  nothing is yours, and a meeting not linked has none) proposes a calendar card
+  for the next free half hour Jarvis sees on your agenda (by its due date when
+  it has one): only on your click, and nothing is added until that card's own
+  **Add** (with **Undo**). The item then says the block was added or dismissed;
+  a proposal no longer listed can be proposed again.
 - **Notes** the summary suggests wait for **Keep** or **Dismiss** - Memory's
   own, also under MEMORY > JARVIS SUGGESTS. Nothing is kept without Keep; the
   same rules as other suggestions apply (no address, link, number or secret).
@@ -2098,13 +2128,14 @@ PC. A summary that failed or was cancelled (Esc on the command bar) has
 and meetings on, shortly before a meeting with other guests (from 5 minutes
 before its start until 10 minutes after it) Jarvis offers "Record this
 meeting?" in the JARVIS tab and as Home's tile. Like every offer it never
-acts: its one link only opens the start card for that meeting, unticked; it is
-never spoken, and it goes once the meeting is under way. No offer while a
-meeting records.
+acts: its one link only opens the start card already linked to that meeting,
+unticked; it is never spoken, and it goes once the meeting is under way. No
+offer while a meeting records.
 
-**Logs** carry ids, kinds, counts, durations and statuses only - never the
-transcript, a title, a name or an address. LIVE may show the run's steps; the
-transcript stays in memory there.
+**Logs** carry ids, kinds (in person or a call), counts, durations and statuses
+only - never the transcript, the summary, a title (typed or the calendar's), a
+name or an address. LIVE may show the run's steps; the transcript stays in
+memory there.
 
 ## TODAY and DEADLINES
 

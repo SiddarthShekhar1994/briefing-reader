@@ -6,10 +6,17 @@ Owner decisions (2026-10-18, binding; SPEC "Meeting summaries"):
   meeting has agreed to be recorded" - every meeting, never remembered. ``StartRequest`` refuses to exist
   without that tick, and the record keeps that he confirmed it and when (``consent_at``).
 * Everything stays under ``%LOCALAPPDATA%\\briefing-reader\\meetings\\<id>\\`` (``meetings_root(config)``; a
-  root inside a synced folder - OneDrive, Dropbox, Google Drive, iCloud, Downloads - is refused). Audio: two
-  16 kHz mono WAV files, ``mic.wav`` ("You") and ``loopback.wav`` ("Others"). The audio is never uploaded
-  anywhere; the transcript leaves this PC only for a summary the owner asked for (the start card's own tick, or
-  Summarise), and the record keeps that he asked and when (``summary_asked`` / ``summary_asked_at``).
+  root inside a synced folder - OneDrive, Dropbox, Google Drive, iCloud, Downloads - is refused). Audio: 16 kHz
+  mono WAV files - on a call two, ``mic.wav`` ("You") and ``loopback.wav`` ("Others"); in person
+  (KIND_IN_PERSON) only ``mic.wav`` ("Room": the call audio is never opened, so nothing the PC plays is
+  recorded). The audio is never uploaded anywhere; the transcript leaves this PC only for a summary the owner
+  asked for (the start card's own tick, or Summarise), and the record keeps that he asked and when
+  (``summary_asked`` / ``summary_asked_at``).
+* Owner decisions (2026-10-22): a meeting is any meeting, in person or on a call (``kind``), and linking it to a
+  calendar meeting is optional (``linked``; never by default - only the owner's own click links one, or his
+  click on Record for a calendar meeting). An unlinked meeting has no guests anywhere. A meeting with no title
+  is called ``default_title(start)`` ("Meeting, Wed 22 Oct 2:05 PM") wherever a title shows. A record written
+  before these fields loads as a call, linked when it has an event id or guests.
 * Retention (``MeetingStore.cleanup``, at start-up and daily - also while [meetings] is off: ``sweep(root)``):
   audio after ``AUDIO_DAYS`` (7) days, the transcript and summary - the whole folder - after ``TEXT_DAYS`` (30)
   days. ``delete(id)`` removes one meeting at once (audio, text and summary); a file a dying worker still holds
@@ -21,13 +28,17 @@ Public API
 
 ``meetings_root(config)`` / ``models_root(config)``; ``unsafe_root(path)`` (why a root is refused, or "").
 ``MeetingInfo(title, start, end, event_id, guests, alias, calendar_id, invite)``: the calendar meeting a
-    recording belongs to (or an unscheduled call: ``MeetingInfo()``); ``invite`` the guests' (name, address) from
-    the calendar invite (part 2: a follow-up draft only ever goes to one of them). ``repr`` carries no title or
-    name.
-``StartRequest(info, consent, consent_at, mic, call_audio, summarise, summarise_at)``: what the start card hands
-    over; ``consent`` must be True (``ConsentMissing`` otherwise) and ``consent_at`` is when the box was ticked;
-    ``summarise`` is the card's own unticked-by-default "summarise it" tick.
-``MeetingRecord``: one meeting's ``meeting.json`` (``status`` one of STATUS_*; ``status_text()``).
+    recording is linked to (``MeetingInfo()``: none - not linked); ``invite`` the guests' (name, address) from the
+    calendar invite (part 2: a follow-up draft only ever goes to one of them). ``repr`` carries no title or name.
+``StartRequest(info, consent, consent_at, mic, call_audio, summarise, summarise_at, title, kind)``: what the start
+    card hands over; ``consent`` must be True (``ConsentMissing`` otherwise) and ``consent_at`` is when the box was
+    ticked; ``summarise`` is the card's own unticked-by-default "summarise it" tick; ``title`` the card's title box
+    (None: the linked meeting's title); ``kind`` KIND_CALL or KIND_IN_PERSON; ``linked``: ``info`` is a calendar
+    meeting.
+``MeetingRecord``: one meeting's ``meeting.json`` (``status`` one of STATUS_*; ``status_text()``; ``kind``,
+    ``linked``, ``in_person``, ``shown_title()``).
+``default_title(moment)``, ``clock_text(moment)``, ``speakers(kind)`` ({channel: "You" / "Others"} on a call,
+    {"mic": "Room"} in person), ``channels(kind)``.
 ``MeetingStore(root, now=)``: ``create(request, devices)``, ``load(id)``, ``save(record)``, ``list()`` (newest
     first), ``delete(id)``, ``cleanup(now, on_removed=)`` -> (audio removed, meetings removed),
     ``recover(active=())`` (meetings left "recording" by a crash become RECORDED, their WAV headers repaired; a
@@ -35,7 +46,8 @@ Public API
     ``audio_path(id, channel)``; part 2: ``summary_path(id)``, ``save_summary(id, data)``, ``load_summary(id)``
     (summary.json in the meeting's folder: it goes with the folder at 30 days or on Delete).
 ``DevicePrefs(root)``: the devices picked in Settings > Meetings (``microphone``, ``call_audio``; "" follows
-    the Windows default), saved in ``meetings\\devices.json``.
+    the Windows default) and the kind of meeting recorded last (``kind``: the start card's default; "" before
+    the first, which counts as a call), saved in ``meetings\\devices.json``.
 ``sweep(root, now, on_removed=)``: recovery and retention on a meetings folder with no recorder behind it
     ([meetings] off): nothing is made when the folder is not there.
 """
@@ -63,17 +75,23 @@ RECORD_FILE = "meeting.json"
 TRANSCRIPT_FILE = "transcript.json"
 SUMMARY_FILE = "summary.json"     # part 2: the summary (the meeting's folder only; never logged)
 DEVICES_FILE = "devices.json"
-MIC = "mic"                       # the microphone: "You"
-LOOPBACK = "loopback"             # the call audio from the speakers / headset: "Others"
+MIC = "mic"                       # the microphone: "You" on a call, "Room" in person
+LOOPBACK = "loopback"             # the call audio from the speakers / headset: "Others" (on a call only)
 CHANNELS = (MIC, LOOPBACK)
 AUDIO_FILES = {MIC: "mic.wav", LOOPBACK: "loopback.wav"}
 SPEAKERS = {MIC: "You", LOOPBACK: "Others"}
+ROOM_SPEAKERS = {MIC: "Room"}     # in person: one microphone in the room, whoever speaks (never "You")
+KIND_CALL = "call"                # on a call: the microphone ("You") and the call audio ("Others")
+KIND_IN_PERSON = "in_person"      # in person: the microphone only ("Room"); the call audio is never opened
+KINDS = (KIND_CALL, KIND_IN_PERSON)
 AUDIO_DAYS = 7                    # owner decision: audio is deleted after 7 days
 TEXT_DAYS = 30                    # ... the transcript and summary after 30 days
 SAMPLE_RATE = 16_000
 CONSENT_TEXT = "Everyone in this meeting has agreed to be recorded"
-UNSCHEDULED_TITLE = "Unscheduled call"
-RECORD_VERSION = 1
+DEFAULT_TITLE = "Meeting"         # a meeting with no title: "Meeting, Wed 22 Oct 2:05 PM" (default_title)
+NO_TITLE = "(No title)"           # a calendar meeting with no title
+TITLE_CAP = 120
+RECORD_VERSION = 2                # 2: kind and linked (a record without them is a call, linked by its event id)
 
 STATUS_RECORDING = "recording"
 STATUS_RECORDED = "recorded"              # saved; waiting to be written down
@@ -149,9 +167,44 @@ def _inside(path: Path, base: Path) -> bool:
 # What
 # --------------------------------------------------------------------------
 
+def clock_text(moment: datetime | None) -> str:
+    """"2:05 PM" ("" for none)."""
+    if moment is None:
+        return ""
+    return f"{moment.hour % 12 or 12}:{moment.minute:02d} {'AM' if moment.hour < 12 else 'PM'}"
+
+
+def default_title(moment: datetime | None) -> str:
+    """What a meeting with no title is called wherever a title shows (the Meetings list, the summary and its copy):
+    "Meeting, Wed 22 Oct 2:05 PM" from when it started; "Meeting" while that is not known."""
+    if moment is None:
+        return DEFAULT_TITLE
+    return f"{DEFAULT_TITLE}, {moment:%a} {moment.day} {moment:%b} {clock_text(moment)}"
+
+
+def clean_title(text: Any) -> str:
+    """A title as one line of at most TITLE_CAP characters ("" for none)."""
+    return " ".join(str(text or "").split())[:TITLE_CAP].strip()
+
+
+def clean_kind(kind: Any) -> str:
+    """KIND_IN_PERSON or KIND_CALL (anything else is a call: the way every meeting was recorded before)."""
+    return kind if kind in KINDS else KIND_CALL
+
+
+def speakers(kind: str) -> dict[str, str]:
+    """Each recorded channel's speaker: "You" and "Others" on a call, "Room" in person."""
+    return dict(ROOM_SPEAKERS if kind == KIND_IN_PERSON else SPEAKERS)
+
+
+def channels(kind: str) -> tuple[str, ...]:
+    """The channels a meeting of ``kind`` records: the microphone only in person, both on a call."""
+    return (MIC,) if kind == KIND_IN_PERSON else CHANNELS
+
+
 @dataclass(frozen=True)
 class MeetingInfo:
-    """The calendar meeting a recording is for; ``MeetingInfo()`` is an unscheduled call."""
+    """The calendar meeting a recording is linked to; ``MeetingInfo()``: none (the meeting is not linked)."""
 
     title: str = field(default="", repr=False)
     start: datetime | None = None
@@ -171,15 +224,22 @@ class MeetingInfo:
     def scheduled(self) -> bool:
         return self.end is not None
 
+    @property
+    def linked(self) -> bool:
+        """A calendar meeting (anything but ``MeetingInfo()``)."""
+        return self != MeetingInfo()
+
     def shown_title(self) -> str:
-        return self.title or UNSCHEDULED_TITLE
+        return self.title or NO_TITLE
 
 
 @dataclass(frozen=True)
 class StartRequest:
-    """The start card's Start: the meeting, the owner's consent tick (required; ``consent_at`` is when he ticked
-    it), the devices it showed, and its own "summarise it" tick (``summarise``: only then does the transcript go
-    to his Claude Code by itself once it is written down; unticked, a summary waits for Summarise)."""
+    """The start card's Start: the calendar meeting it is linked to (``MeetingInfo()``: none), the owner's consent
+    tick (required; ``consent_at`` is when he ticked it), the devices it showed, its own "summarise it" tick
+    (``summarise``: only then does the transcript go to his Claude Code by itself once it is written down;
+    unticked, a summary waits for Summarise), the title in its box (``title``; None: the linked meeting's title)
+    and the kind of meeting (``kind``: in person records only the microphone)."""
 
     info: MeetingInfo
     consent: bool
@@ -188,6 +248,8 @@ class StartRequest:
     call_audio: str = field(default="", repr=False)
     summarise: bool = False
     summarise_at: datetime | None = None
+    title: str | None = field(default=None, repr=False)
+    kind: str = KIND_CALL
 
     def __post_init__(self) -> None:
         if self.consent is not True:
@@ -195,6 +257,17 @@ class StartRequest:
         if self.summarise is not True:
             object.__setattr__(self, "summarise", False)
             object.__setattr__(self, "summarise_at", None)
+        object.__setattr__(self, "kind", clean_kind(self.kind))
+        if self.title is not None:
+            object.__setattr__(self, "title", clean_title(self.title))
+
+    @property
+    def linked(self) -> bool:
+        return isinstance(self.info, MeetingInfo) and self.info.linked
+
+    def record_title(self) -> str:
+        """The meeting's title: the card's box ("" left blank), else the linked meeting's own."""
+        return self.title if self.title is not None else clean_title(self.info.title)
 
 
 def clean_invite(items: Any) -> tuple[tuple[str, str], ...]:
@@ -263,9 +336,22 @@ class MeetingRecord:
     summary_error: str = ""              # part 2: why the last summary run failed (a short code)
     summary_asked: bool = False          # the owner ticked "summarise it" on the start card (only then by itself)
     summary_asked_at: datetime | None = None
+    kind: str = KIND_CALL                # in person: the microphone only ("Room"); on a call: "You" and "Others"
+    linked: bool | None = None           # linked to a calendar meeting (None: by its event id or guests, as before)
+
+    def __post_init__(self) -> None:
+        self.kind = clean_kind(self.kind)
+        if self.linked is None:
+            self.linked = bool(self.event_id or self.guests)
+        self.linked = self.linked is True
+
+    @property
+    def in_person(self) -> bool:
+        return self.kind == KIND_IN_PERSON
 
     def shown_title(self) -> str:
-        return self.title or UNSCHEDULED_TITLE
+        """The title, else "Meeting, Wed 22 Oct 2:05 PM" (when it started)."""
+        return self.title or default_title(self.started_at or self.scheduled_start)
 
     def status_text(self) -> str:
         """The Meetings screen's status words: Recording / Waiting to be written down / Writing it down 40% /
@@ -303,7 +389,8 @@ class MeetingRecord:
                 "alias": self.alias, "calendar_id": self.calendar_id,
                 "invite": [{"name": name, "email": address} for name, address in self.invite],
                 "summary_error": self.summary_error,
-                "summary_request": {"asked": bool(self.summary_asked), "at": _iso(self.summary_asked_at)}}
+                "summary_request": {"asked": bool(self.summary_asked), "at": _iso(self.summary_asked_at)},
+                "kind": self.kind, "linked": bool(self.linked)}
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> MeetingRecord:
@@ -335,7 +422,9 @@ class MeetingRecord:
                    invite=clean_invite(data.get("invite") if isinstance(data.get("invite"), list) else ()),
                    summary_error=str(data.get("summary_error") or "")[:40],
                    summary_asked=asked.get("asked") is True,
-                   summary_asked_at=_parse(asked.get("at")) if asked.get("asked") is True else None)
+                   summary_asked_at=_parse(asked.get("at")) if asked.get("asked") is True else None,
+                   kind=clean_kind(data.get("kind")),
+                   linked=data.get("linked") if isinstance(data.get("linked"), bool) else None)
 
 
 # --------------------------------------------------------------------------
@@ -394,7 +483,9 @@ class MeetingStore:
             return None
 
     def create(self, request: StartRequest, devices: Mapping[str, Any] | None = None) -> MeetingRecord:
-        """A new meeting folder and record (status RECORDING) for the owner's Start."""
+        """A new meeting folder and record (status RECORDING) for the owner's Start: the title in the card's box,
+        the kind he chose, and the calendar meeting he linked (its times, account and invite) - nothing of a
+        calendar when he linked none."""
         if not isinstance(request, StartRequest) or request.consent is not True:
             raise ConsentMissing("the consent tick is required to record")
         problem = self.check_root()
@@ -404,17 +495,20 @@ class MeetingStore:
         meeting_id = new_meeting_id(now)
         while (self.root / meeting_id).exists():
             meeting_id = new_meeting_id(now)
-        info = request.info
-        record = MeetingRecord(id=meeting_id, title=info.title, event_id=info.event_id, guests=info.guests,
-                               scheduled_start=info.start, scheduled_end=info.end, consent_confirmed=True,
-                               consent_at=request.consent_at, started_at=now, status=STATUS_RECORDING,
-                               devices=dict(devices or {}), alias=info.alias, calendar_id=info.calendar_id,
-                               invite=info.invite, summary_asked=request.summarise is True,
-                               summary_asked_at=(request.summarise_at or now) if request.summarise is True else None)
+        linked = request.linked
+        info = request.info if linked else MeetingInfo()
+        record = MeetingRecord(id=meeting_id, title=request.record_title(), event_id=info.event_id,
+                               guests=info.guests, scheduled_start=info.start, scheduled_end=info.end,
+                               consent_confirmed=True, consent_at=request.consent_at, started_at=now,
+                               status=STATUS_RECORDING, devices=dict(devices or {}), alias=info.alias,
+                               calendar_id=info.calendar_id, invite=info.invite,
+                               summary_asked=request.summarise is True,
+                               summary_asked_at=(request.summarise_at or now) if request.summarise is True else None,
+                               kind=request.kind, linked=linked)
         self.folder(meeting_id).mkdir(parents=True, exist_ok=False)
         self.save(record)
-        logger.info("Meeting %s: created (scheduled: %s, guests: %d, summary asked: %s)", meeting_id,
-                    info.scheduled, len(info.guests), record.summary_asked)
+        logger.info("Meeting %s: created (%s, linked: %s, scheduled: %s, guests: %d, summary asked: %s)",
+                    meeting_id, record.kind, linked, info.scheduled, len(info.guests), record.summary_asked)
         return record
 
     def save(self, record: MeetingRecord) -> None:
@@ -619,12 +713,14 @@ def _age(now: datetime, then: datetime) -> timedelta:
 # --------------------------------------------------------------------------
 
 class DevicePrefs:
-    """The microphone and the call-audio device the owner picked ("" follows the Windows default)."""
+    """The microphone and the call-audio device the owner picked ("" follows the Windows default), and the kind of
+    meeting he recorded last (``kind``: the start card's choice the next time; "" before his first, a call)."""
 
     def __init__(self, root: Path) -> None:
         self.path = Path(root) / DEVICES_FILE
         self.microphone = ""
         self.call_audio = ""
+        self.kind = ""
         self._load()
 
     def _load(self) -> None:
@@ -635,20 +731,33 @@ class DevicePrefs:
         if isinstance(data, Mapping):
             self.microphone = str(data.get("microphone") or "")[:200]
             self.call_audio = str(data.get("call_audio") or "")[:200]
+            self.kind = data.get("kind") if data.get("kind") in KINDS else ""
 
-    def set(self, *, microphone: str | None = None, call_audio: str | None = None) -> None:
+    def card_kind(self) -> str:
+        """The kind the start card starts on: the one recorded last, "On a call" the first time."""
+        return self.kind or KIND_CALL
+
+    def set(self, *, microphone: str | None = None, call_audio: str | None = None, kind: str | None = None) -> None:
         if microphone is not None:
             self.microphone = str(microphone)[:200]
         if call_audio is not None:
             self.call_audio = str(call_audio)[:200]
+        if kind is not None:
+            self.kind = clean_kind(kind)
         if unsafe_root(self.path.parent):
             return
+        data = {"microphone": self.microphone, "call_audio": self.call_audio}
+        if self.kind:
+            data["kind"] = self.kind
         try:
-            _write_json(self.path, {"microphone": self.microphone, "call_audio": self.call_audio})
+            _write_json(self.path, data)
         except OSError as exc:
             logger.warning("Meetings: the device choice could not be saved (%s)", type(exc).__name__)
-        logger.info("Meetings: devices set (microphone picked: %s, call audio picked: %s)",
-                    bool(self.microphone), bool(self.call_audio))
+        if kind is not None:
+            logger.info("Meetings: the start card's next choice is %s (recorded last)", self.kind)
+        if microphone is not None or call_audio is not None:
+            logger.info("Meetings: devices set (microphone picked: %s, call audio picked: %s)",
+                        bool(self.microphone), bool(self.call_audio))
 
 
 def length_text(seconds: float) -> str:

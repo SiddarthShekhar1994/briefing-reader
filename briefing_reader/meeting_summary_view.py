@@ -6,20 +6,28 @@ emits a signal. The follow-up drafts and the Add block cards are the very approv
 the app while the summary shows (``hold(card)`` / ``release(card)`` / ``held()``), so Send, the NEW RECIPIENT tick on
 the card, the own-address refusal, Sent with its hidden hold and Undo, Add and its Undo work exactly as there.
 
+A meeting not linked to a calendar meeting (``SummaryInfo.linked`` False; owner decision 2026-10-22) has no guests
+and no drafts: its follow-ups are plain text under FOLLOW-UPS (who and what), and its items have no Add block.
+**Copy summary** (owner decision 2026-10-22) puts the whole summary on this PC's clipboard as plain text
+(``summary_text``: the title, the date, the length, then each section as shown) and says "Copied" for a moment;
+nothing else happens and the text is never logged. Every text of the summary can be selected with the mouse.
+
 Public API
 ==========
-``SummaryAction(who, what, due, mine, block, card_id)``: one action item; for the owner's own (``mine``) ``block`` is
-    BLOCK_NONE (an Add block button: a click proposes a block card - nothing is added until that card's own Add),
-    BLOCK_PROPOSED (its card shows under ACTION ITEMS), BLOCK_ADDED / BLOCK_DISMISSED (that card was decided: its
-    own Add, or Dismiss; no button - the card keeps its Undo while it is listed) or BLOCK_NO_TIME (no free half hour
-    was found).
+``SummaryAction(who, what, due, mine, block, card_id)``: one action item ("" ``who``: nobody named); for the
+    owner's own (``mine``) ``block`` is BLOCK_NONE (an Add block button: a click proposes a block card - nothing is
+    added until that card's own Add), BLOCK_PROPOSED (its card shows under ACTION ITEMS), BLOCK_ADDED /
+    BLOCK_DISMISSED (that card was decided: its own Add, or Dismiss; no button - the card keeps its Undo while it is
+    listed), BLOCK_NO_TIME (no free half hour was found) or BLOCK_OFF (no Add block: a meeting not linked).
 ``SummaryFollowUp(to, subject, state, card_id)``: one follow-up draft and where its card stands.
+``SummaryFollowUpItem(who, what)``: one plain follow-up (a meeting not linked).
 ``SummaryNote(text, state)``: a suggested note: NOTE_PENDING (Keep / Dismiss: Memory's own), NOTE_KEPT,
     NOTE_DISMISSED, NOTE_OFF (Memory can't keep notes now).
 ``SummaryInfo``: what the view shows (memory only; never logged or spoken).
+``summary_text(info)``: the plain text Copy summary puts on the clipboard.
 ``SummaryView``: ``set_summary(info)``, ``card_ids()``, ``hold`` / ``release`` / ``held``, ``texts()``,
-    ``sections()``; signals ``backClicked()``, ``addBlockClicked(int)``, ``keepClicked(int)``,
-    ``dismissClicked(int)``, ``linkClicked(str)`` (See every step: "live:<task>").
+    ``sections()``, ``copy_summary()`` (Copy summary's click); signals ``backClicked()``, ``addBlockClicked(int)``,
+    ``keepClicked(int)``, ``dismissClicked(int)``, ``linkClicked(str)`` (See every step: "live:<task>").
 """
 
 from __future__ import annotations
@@ -29,8 +37,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import shiboken6
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QPainter
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QGuiApplication, QPainter
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from . import holo, hud
@@ -38,10 +46,14 @@ from .memory_view import COLUMN_MAX, body_label
 
 KICKER = "MEETING SUMMARY"
 BACK_TEXT = "All meetings"
+COPY_TEXT = "Copy summary"
+COPIED_TEXT = "Copied"
+COPIED_MS = 2500                  # "Copied" shows this long after the click
 DECISIONS_TITLE = "DECISIONS"
 ACTIONS_TITLE = "ACTION ITEMS"
 QUESTIONS_TITLE = "OPEN QUESTIONS"
 FOLLOWUPS_TITLE = "FOLLOW-UP DRAFTS"
+FOLLOWUP_ITEMS_TITLE = "FOLLOW-UPS"   # a meeting not linked: plain text, no drafts
 NOTES_TITLE = "WORTH REMEMBERING?"
 NONE_TEXT = "None noted."
 ADD_BLOCK_TEXT = "Add block"
@@ -63,18 +75,23 @@ DOT = "\u00b7"
 
 BLOCK_NONE, BLOCK_PROPOSED, BLOCK_NO_TIME = "none", "proposed", "no_time"
 BLOCK_ADDED, BLOCK_DISMISSED = "added", "dismissed"
+BLOCK_OFF = "off"                 # no Add block (a meeting not linked to the calendar)
 _BLOCK_CARDS = (BLOCK_PROPOSED, BLOCK_ADDED, BLOCK_DISMISSED)     # states whose card the view may hold
 NOTE_PENDING, NOTE_KEPT, NOTE_DISMISSED, NOTE_OFF = "pending", "kept", "dismissed", "off"
 
 
 @dataclass(frozen=True)
 class SummaryAction:
-    who: str = field(repr=False)              # "You" or the guest's name
+    who: str = field(repr=False)              # "You", the guest's name, a name as said, or "" (nobody named)
     what: str = field(repr=False)
     due: str = field(default="", repr=False)  # "due Wed 22 Oct" ("" for none)
     mine: bool = False
     block: str = BLOCK_NONE
     card_id: str = ""
+
+    def text(self) -> str:
+        """"You - Send the Q3 numbers . due Wed 22 Oct" (nobody named: the what alone)."""
+        return (f"{self.who} - {self.what}" if self.who else self.what) + (f" {DOT} {self.due}" if self.due else "")
 
 
 @dataclass(frozen=True)
@@ -83,6 +100,20 @@ class SummaryFollowUp:
     subject: str = field(repr=False)
     state: str = field(default="", repr=False)   # "" while its card shows; else "Sent", "Dismissed", ...
     card_id: str = ""
+
+    def text(self) -> str:
+        return f"To {self.to} - {self.subject}"
+
+
+@dataclass(frozen=True)
+class SummaryFollowUpItem:
+    """A plain follow-up of a meeting not linked to the calendar: who ("" nobody named) and what. Never a draft."""
+
+    who: str = field(repr=False)
+    what: str = field(repr=False)
+
+    def text(self) -> str:
+        return f"{self.who} - {self.what}" if self.who else self.what
 
 
 @dataclass(frozen=True)
@@ -104,10 +135,45 @@ class SummaryInfo:
     notes: tuple[SummaryNote, ...] = field(default=(), repr=False)
     note: str = field(default="", repr=False)                  # "2 items left out (...)"
     steps_link: str = ""
+    when: str = field(default="", repr=False)                  # "Mon 19 Oct 2026, 2:00 PM" (Copy summary's date)
+    length: str = ""                                           # "46:12"
+    linked: bool = True                                        # False: no guests, plain follow-ups, no drafts
+    follow_up_items: tuple[SummaryFollowUpItem, ...] = field(default=(), repr=False)
 
     def __repr__(self) -> str:
+        follow = len(self.follow_ups) if self.linked else len(self.follow_up_items)
         return (f"SummaryInfo({self.meeting_id}, {len(self.decisions)} decision(s), {len(self.actions)} action(s), "
-                f"{len(self.follow_ups)} follow-up(s), {len(self.notes)} note(s))")
+                f"{follow} follow-up(s), {len(self.notes)} note(s), {'linked' if self.linked else 'not linked'})")
+
+
+def summary_text(info: SummaryInfo | None) -> str:
+    """The whole summary as plain text, as the view shows it (Copy summary): the title, the date, the length (and
+    the guests a linked meeting names), then each section - decisions, action items with who and due, open
+    questions, the follow-ups, the notes worth remembering. Memory only: never logged, spoken or sent."""
+    if info is None:
+        return ""
+    lines = [info.title]
+    if info.when:
+        lines.append(f"Date: {info.when}")
+    if info.length:
+        lines.append(f"Length: {info.length}")
+    if info.guests:
+        lines.append(info.guests[:1].upper() + info.guests[1:])
+
+    def section(title: str, items: Sequence[str]) -> None:
+        lines.extend(["", title])
+        lines.extend([f"- {item}" for item in items] or [NONE_TEXT])
+
+    section("Decisions", info.decisions)
+    section("Action items", [action.text() for action in info.actions])
+    section("Open questions", info.questions)
+    if info.linked:
+        section("Follow-up drafts", [item.text() for item in info.follow_ups])
+    else:
+        section("Follow-ups", [item.text() for item in info.follow_up_items])
+    if info.notes:
+        section("Worth remembering", [note.text for note in info.notes])
+    return "\n".join(lines) + "\n"
 
 
 def _label(text: str, role: str, color: str, *, wrap: bool = True, selectable: bool = False) -> QLabel:
@@ -129,7 +195,8 @@ class _Panel(QWidget):
 
 
 class _ActionRow(QWidget):
-    """One action item: "You - Send the Q3 numbers . due Wed 22 Oct", and for the owner's own an Add block button."""
+    """One action item: "You - Send the Q3 numbers . due Wed 22 Oct", and for the owner's own an Add block button
+    (none with BLOCK_OFF: a meeting not linked)."""
 
     addClicked = Signal(int)
 
@@ -137,8 +204,7 @@ class _ActionRow(QWidget):
         super().__init__(parent)
         self.index = index
         self.action = action
-        text = f"{action.who} - {action.what}" + (f" {DOT} {action.due}" if action.due else "")
-        self.text_label = _label(text, "body", holo.INK_1 if action.mine else holo.INK_2, selectable=True)
+        self.text_label = _label(action.text(), "body", holo.INK_1 if action.mine else holo.INK_2, selectable=True)
         self.add_button = holo.HoloButton(ADD_BLOCK_TEXT, holo.GHOST, size=holo.SIZE_SM, icon="calendar")
         self.add_button.setAccessibleName(f"{ADD_BLOCK_TEXT}: {action.what}")
         self.add_button.clicked.connect(lambda: self.addClicked.emit(self.index))
@@ -218,6 +284,17 @@ class SummaryView(QScrollArea):
         self.column.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.back_button = holo.HoloButton(BACK_TEXT, holo.LINK_CYAN, size=holo.SIZE_SM)
         self.back_button.clicked.connect(self.backClicked)
+        # Copy summary: the whole summary on this PC's clipboard as plain text, "Copied" for a moment; nothing else.
+        self.copy_button = holo.HoloButton(COPY_TEXT, holo.GHOST, size=holo.SIZE_SM)
+        self.copy_button.setAccessibleName("Copy the whole summary as plain text")
+        self.copy_button.clicked.connect(self.copy_summary)
+        self.copied_label = _label(COPIED_TEXT, "body_sm", holo.OK, wrap=False)
+        self.copied_label.setObjectName("meetingSummaryCopied")
+        self.copied_label.hide()
+        self._copied = QTimer(self)
+        self._copied.setSingleShot(True)
+        self._copied.setInterval(COPIED_MS)
+        self._copied.timeout.connect(self.copied_label.hide)
         self.panel = _Panel()
         self._panel_layout = QVBoxLayout(self.panel)
         self._panel_layout.setContentsMargins(22, 18, 22, 18)
@@ -226,7 +303,8 @@ class SummaryView(QScrollArea):
         self._blocks_layout = QVBoxLayout(self.blocks_box)
         self._blocks_layout.setContentsMargins(0, 0, 0, 0)
         self._blocks_layout.setSpacing(hud.ActionList.CARD_GAP)
-        self.drafts_head = _label(holo.role_text("label", FOLLOWUPS_TITLE), "label", holo.INK_KICKER, wrap=False)
+        self.drafts_head = _label(holo.role_text("label", FOLLOWUPS_TITLE), "label", holo.INK_KICKER, wrap=False,
+                                  selectable=True)
         self.drafts_label = _label("", "body_sm", holo.INK_3, selectable=True)
         self.cards_box = QWidget()
         self._cards_layout = QVBoxLayout(self.cards_box)
@@ -241,8 +319,11 @@ class SummaryView(QScrollArea):
         self.foot_label = _label(FOOT_TEXT, "body_sm", holo.INK_4)
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(holo.BUTTON_GAP)
         top.addWidget(self.back_button)
         top.addStretch(1)
+        top.addWidget(self.copied_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self.copy_button)
         steps = QHBoxLayout()
         steps.setContentsMargins(0, 0, 0, 0)
         steps.addWidget(self.steps_button)
@@ -276,22 +357,25 @@ class SummaryView(QScrollArea):
             widget.deleteLater()
         self._rows = []
         self._info = info
+        self._copied.stop()
+        self.copied_label.hide()
+        self.copy_button.setEnabled(info is not None)
         self.steps_button.setVisible(bool(info is not None and info.steps_link))
         if info is None:
             return
         add = self._add
         add(_label(KICKER, "label", holo.HOLO, wrap=False))
-        add(_label(info.title, "screen_title", holo.INK_1, selectable=True))
+        add(_label(info.title, "screen_title", holo.INK_1))
         if info.meta:
             add(_label(holo.role_text("readout", info.meta), "readout", holo.INK_KICKER))
         if info.guests:
-            add(_label(info.guests, "body_sm", holo.INK_3, selectable=True))
+            add(_label(info.guests, "body_sm", holo.INK_3))
         if info.note:
             add(_label(info.note, "body_sm", holo.INK_3))
         for title, lines in ((DECISIONS_TITLE, info.decisions),):
             self._section(title)
             for line in lines or (NONE_TEXT,):
-                add(_label(line, "body", holo.INK_2 if lines else holo.INK_4, selectable=bool(lines)))
+                add(_label(line, "body", holo.INK_2 if lines else holo.INK_4))
         self._section(ACTIONS_TITLE)
         if not info.actions:
             add(_label(NONE_TEXT, "body", holo.INK_4))
@@ -301,14 +385,24 @@ class SummaryView(QScrollArea):
             add(row)
         self._section(QUESTIONS_TITLE)
         for line in info.questions or (NONE_TEXT,):
-            add(_label(line, "body", holo.INK_2 if info.questions else holo.INK_4, selectable=bool(info.questions)))
-        drafts = [f"To {item.to} - {item.subject}" + (f" {DOT} {item.state}" if item.state else "")
-                  for item in info.follow_ups]
-        self.drafts_label.setText("\n".join([DRAFTS_NOTE, *drafts]) if drafts else NO_DRAFTS_TEXT)
+            add(_label(line, "body", holo.INK_2 if info.questions else holo.INK_4))
+        if not info.linked:
+            # Not linked to a calendar meeting: the follow-ups are plain text in the summary (who and what) - no
+            # guests, so no drafts and no cards.
+            self._section(FOLLOWUP_ITEMS_TITLE)
+            for line in [item.text() for item in info.follow_up_items] or [NONE_TEXT]:
+                add(_label(line, "body", holo.INK_2 if info.follow_up_items else holo.INK_4))
+        drafts = [item.text() + (f" {DOT} {item.state}" if item.state else "") for item in info.follow_ups]
+        self.drafts_label.setText(("\n".join([DRAFTS_NOTE, *drafts]) if drafts else NO_DRAFTS_TEXT)
+                                  if info.linked else "")
+        self.drafts_head.setVisible(info.linked)
+        self.drafts_label.setVisible(info.linked)
+        self.cards_box.setVisible(info.linked)
         for index, note in enumerate(info.notes):
             if index == 0:
                 head = _label(holo.role_text("label", NOTES_TITLE), "label", holo.AMBER if any(
-                    item.state == NOTE_PENDING for item in info.notes) else holo.INK_KICKER, wrap=False)
+                    item.state == NOTE_PENDING for item in info.notes) else holo.INK_KICKER, wrap=False,
+                              selectable=True)
                 self._notes_layout.addWidget(head)
                 self._rows.append(head)
             row = _NoteRow(index, note)
@@ -320,6 +414,8 @@ class SummaryView(QScrollArea):
         self.verticalScrollBar().setValue(0)
 
     def _add(self, widget: QWidget) -> None:
+        if isinstance(widget, QLabel):           # every text of the summary can be selected with the mouse
+            widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._panel_layout.addWidget(widget)
         self._rows.append(widget)
 
@@ -328,6 +424,24 @@ class SummaryView(QScrollArea):
         spacer.setFixedHeight(8)
         self._add(spacer)
         self._add(_label(holo.role_text("label", title), "label", holo.INK_KICKER, wrap=False))
+
+    # ---- Copy summary ---------------------------------------------------------------------------
+
+    def copy_text(self) -> str:
+        """What Copy summary puts on the clipboard (``summary_text``)."""
+        return summary_text(self._info)
+
+    def copy_summary(self) -> bool:
+        """Copy summary's click: the whole summary as plain text on this PC's clipboard and "Copied" for a moment.
+        Nothing else happens (nothing is sent, kept or logged). False when no summary shows."""
+        text = self.copy_text()
+        clipboard = QGuiApplication.clipboard()
+        if not text or clipboard is None:
+            return False
+        clipboard.setText(text)
+        self.copied_label.show()
+        self._copied.start()
+        return True
 
     def card_ids(self) -> tuple[str, ...]:
         """The approval cards this view shows (the follow-up drafts', then the proposed blocks')."""
@@ -339,9 +453,11 @@ class SummaryView(QScrollArea):
         return tuple(ids)
 
     def sections(self) -> list[str]:
-        """The section labels shown, in order."""
-        titles = (DECISIONS_TITLE, ACTIONS_TITLE, QUESTIONS_TITLE, NOTES_TITLE)
+        """The section labels shown, in order (FOLLOW-UP DRAFTS for a linked meeting, FOLLOW-UPS otherwise)."""
+        titles = (DECISIONS_TITLE, ACTIONS_TITLE, QUESTIONS_TITLE, FOLLOWUP_ITEMS_TITLE, NOTES_TITLE)
         found = [row.text() for row in self._rows if isinstance(row, QLabel) and row.text() in titles]
+        if self._info is not None and not self._info.linked:
+            return found
         return found[:3] + [FOLLOWUPS_TITLE] + found[3:]
 
     def action_rows(self) -> list[_ActionRow]:
@@ -404,11 +520,12 @@ class SummaryView(QScrollArea):
         super().keyPressEvent(event)
 
 
-def note_text(count: int, notes_left: int = 0) -> str:
-    """"2 items left out (not you or an invited guest, or a repeat)" ("" for none)."""
+def note_text(count: int, notes_left: int = 0, *, reason: str = "not you or an invited guest, or a repeat") -> str:
+    """"2 items left out (not you or an invited guest, or a repeat)" ("" for none); ``reason`` the words for this
+    kind of meeting (ask.meeting_summary.left_out_words)."""
     parts = []
     if count:
-        parts.append(f"{count} item{'' if count == 1 else 's'} left out (not you or an invited guest, or a repeat)")
+        parts.append(f"{count} item{'' if count == 1 else 's'} left out ({reason})")
     if notes_left:
         parts.append(f"{notes_left} suggested note{'' if notes_left == 1 else 's'} left out")
     return "; ".join(parts)
