@@ -71,10 +71,13 @@ NUDGE_PROMPT_FILE = ASSETS / "nudge_prompt.md"    # follow-ups: a drafted reply 
 NUDGE_SCHEMA_FILE = ASSETS / "nudge_schema.json"
 MEETING_PROMPT_FILE = ASSETS / "meeting_prompt.md"    # meetings: a recorded meeting's summary
 MEETING_SCHEMA_FILE = ASSETS / "meeting_schema.json"
+# Jarvis on your desktop (P1.7): a desktop request's plan of refs (ask.desktop_mode; its skills grow per phase).
+DESKTOP_PROMPT_FILE = ASSETS / "desktop_prompt.md"
+DESKTOP_SCHEMA_FILE = ASSETS / "desktop_schema.json"
 MODE_PROMPTS = {"plan": PLAN_PROMPT_FILE, "prep": PREP_PROMPT_FILE, "nudge": NUDGE_PROMPT_FILE,
-                "meeting": MEETING_PROMPT_FILE}
+                "meeting": MEETING_PROMPT_FILE, "desktop": DESKTOP_PROMPT_FILE}
 MODE_SCHEMAS = {"plan": PLAN_SCHEMA_FILE, "prep": PREP_SCHEMA_FILE, "nudge": NUDGE_SCHEMA_FILE,
-                "meeting": MEETING_SCHEMA_FILE}
+                "meeting": MEETING_SCHEMA_FILE, "desktop": DESKTOP_SCHEMA_FILE}
 
 SOURCE_ENV = "JARVIS_CLAUDE_EXE"
 SOURCE_PATH = "PATH"

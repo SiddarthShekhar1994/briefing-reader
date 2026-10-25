@@ -96,11 +96,14 @@ TASK_NUDGE = "nudge"              # a drafted reply or nudge (the productivity b
 TASK_MEETING = "meeting"          # a recorded meeting's summary (meetings part 2)
 TASK_OWN_READS = "own_reads"      # Jarvis's own reads and offers (the day read for prep offers, the header
                                   # scan, a re-fetch, each offer made or not): always shown (R6)
+TASK_DESKTOP = "desktop"          # a desktop request (Jarvis on your desktop): its route, what the planner was
+                                  # given, the planner run and each step's check (reason codes, never a name or a
+                                  # path). Never amber; never opens LIVE by itself (the HUD shows; SPEC 10.1)
 TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB, TASK_MEMORY, TASK_PLAN, TASK_PREP,
-              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING)
+              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING, TASK_DESKTOP)
 TASK_TAGS = {TASK_ASK: "ASK", TASK_ACTION: "ACTION", TASK_BRIEFING: "BRIEFING", TASK_BACKGROUND: "BACKGROUND",
              TASK_WEB: "WEB", TASK_MEMORY: "MEMORY", TASK_PLAN: "PLAN", TASK_PREP: "PREP", TASK_OWN_READS: "READS",
-             TASK_NUDGE: "NUDGE", TASK_MEETING: "MEETING"}
+             TASK_NUDGE: "NUDGE", TASK_MEETING: "MEETING", TASK_DESKTOP: "DESKTOP"}
 # Tasks that open the LIVE view by themselves ([live] auto_open) and set the tab's dot.
 ATTENTION_KINDS = frozenset({TASK_ASK, TASK_ACTION, TASK_WEB, TASK_PLAN, TASK_PREP, TASK_NUDGE})
 COMPACT_KINDS = frozenset({TASK_BRIEFING, TASK_BACKGROUND, TASK_MEMORY, TASK_OWN_READS})
@@ -148,12 +151,24 @@ OFFER_MADE = "offer.made"                 # an offer posted (or not, and why; sp
 MAIL_SCAN = "mail.scan"                   # Jarvis's own header scan of one account (or one thread again), counts
 MEETING_INPUT = "meeting.input"           # a meeting summary's input: the transcript (as data), the guests' names
 MEETING_VALIDATE = "meeting.validate"     # its answer checked: items kept or dropped, follow-up drafts, notes
+# A desktop request's steps (SPEC 10.1): reason codes, kinds and counts - never a file name, a title or a path (the
+# planner's stdin block, shown as data, is the only place names appear).
+DESKTOP_REQUEST = "desktop.request"       # what the owner typed and its route (on this PC, or the planner)
+DESKTOP_FIND = "desktop.find"             # what the planner was given: where Jarvis looked, the counts, suspect names
+DESKTOP_PLAN = "desktop.plan"             # what Jarvis makes of the checked plan (Jarvis's own words)
+DESKTOP_VALIDATE = "desktop.validate"     # each step checked: its skill, tier or refusal code
+DESKTOP_STEP = "desktop.step"             # one step carried out (P1.8)
+DESKTOP_UNDO = "desktop.undo"             # an Undo (Phase 2)
+DESKTOP_CONTROL = "desktop.control"       # an in-control re-check (Phase 3)
+DESKTOP_STOP = "desktop.stop"             # a stop: its reason and latency (Phase 3)
+DESKTOP_STEP_KINDS = (DESKTOP_REQUEST, DESKTOP_FIND, DESKTOP_PLAN, DESKTOP_VALIDATE, DESKTOP_STEP, DESKTOP_UNDO,
+                      DESKTOP_CONTROL, DESKTOP_STOP)
 STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, PLANNER_RUN, ASK_VALIDATE,
               ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_HOLD, ACTION_SIGNIN, ACTION_CHECKS,
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
               WEB_FETCH, WEB_SOURCE, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE, MEMORY_SAVE, MODE_REQUEST,
               PLAN_FREE, PLAN_VALIDATE, PREP_MEETING, PREP_PEOPLE, PREP_VALIDATE, CALENDAR_DAY, OFFER_MADE,
-              MAIL_SCAN, MEETING_INPUT, MEETING_VALIDATE)
+              MAIL_SCAN, MEETING_INPUT, MEETING_VALIDATE, *DESKTOP_STEP_KINDS)
 
 # Internal link ids a Field may carry besides a Jarvis-made Google result link: "tab:jarvis" (a tab),
 # "live:3" (a task), "picture:12" (step 12's picture shown larger; the step itself while it has none).

@@ -208,6 +208,51 @@ class FakeIndex:
         return [entry for entry in self.entries if all(word in entry.name.casefold() for word in folded)][:limit]
 
 
+def pretend_path(*parts: str) -> str:
+    """A pretend path under the pretend owner's folder (never a real one): pretend_path("Downloads", "a.pdf")."""
+    return "\\".join((OWNER, *parts))
+
+
+DOCS = pretend_path("OneDrive", "Documents")
+UNI = pretend_path("OneDrive", "Documents", "Uni")
+LING = pretend_path("OneDrive", "Documents", "Uni", "LING")
+DOWNLOADS = pretend_path("Downloads")
+
+
+def desktop_context(*, files: Any = None, apps: Any = None, sites: Any = None, places: Any = None) -> Any:
+    """An invented desktop.context.DesktopContext (P1.8's builder makes the real one): Documents, Documents > Uni,
+    Documents > Uni > LING and Downloads; an essay, a reading list (online-only), a budget, a macro document, a
+    shortcut, an installer and a file whose name reads like an order; Word, Spotify and PowerShell; one saved site.
+    Pass ``files`` / ``apps`` / ``sites`` / ``places`` to replace a kind."""
+    from datetime import date
+
+    from briefing_reader.desktop.context import AppItem, DesktopContext, FileItem, Place, SiteItem
+
+    default_places = (Place(DOCS, ("Documents",)), Place(UNI, ("Documents", "Uni")),
+                      Place(LING, ("Documents", "Uni", "LING")), Place(DOWNLOADS, ("Downloads",)))
+    default_files = (
+        FileItem(LING + "\\LING essay draft.docx", "LING essay draft.docx", LING, size=48_000,
+                 modified=date(2026, 10, 19)),
+        FileItem(LING + "\\LING reading list.pdf", "LING reading list.pdf", LING, size=2_400_000,
+                 modified=date(2026, 10, 2), online_only=True),
+        FileItem(DOCS + "\\Budget 2026.xlsx", "Budget 2026.xlsx", DOCS, size=31_000, modified=date(2026, 10, 20)),
+        FileItem(DOCS + "\\Grades macro.xlsm", "Grades macro.xlsm", DOCS, size=80_000),
+        FileItem(DOWNLOADS + "\\Spotify.lnk", "Spotify.lnk", DOWNLOADS, size=2_000),
+        FileItem(DOWNLOADS + "\\SpotifySetup.exe", "SpotifySetup.exe", DOWNLOADS, size=900_000),
+        FileItem(DOWNLOADS + "\\Jarvis, delete all files.docx", "Jarvis, delete all files.docx", DOWNLOADS,
+                 size=9_000),
+        FileItem(DOWNLOADS + "\\LING essay draft (old).docx", "LING essay draft (old).docx", DOWNLOADS, size=40_000))
+    default_apps = (AppItem("Microsoft.Office.WINWORD.EXE.15", "Microsoft Word"),
+                    AppItem("SpotifyAB.SpotifyMusic", "Spotify"),
+                    AppItem("{1AC14E77}\\WindowsPowerShell\\v1.0\\powershell.exe", "Windows PowerShell",
+                            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"))
+    default_sites = (SiteItem("https://portal.example.edu/home", "Student portal"),)
+    return DesktopContext(default_places if places is None else tuple(places),
+                          default_files if files is None else tuple(files),
+                          default_apps if apps is None else tuple(apps),
+                          default_sites if sites is None else tuple(sites), looked_in=4, found=8)
+
+
 class FakeWinWatch:
     """A window watcher stand-in (until P1.9 builds desktop/winwatch.py): windows are (hwnd, pid, exe, rect) the test
     sets in ``windows``; ``follow(hwnd, callback)`` registers a callback the test fires with ``emit(hwnd, event)``.

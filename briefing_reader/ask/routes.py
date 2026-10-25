@@ -26,6 +26,14 @@ FOLLOWUPS: "follow-ups", "my follow-ups", "show me my follow-ups", "any follow-u
 on me?", "what am I waiting on / for?", "who owes me (a reply / an answer)?": the app answers from its
 follow-up list at once (no planner run, nothing read).
 
+DESKTOP (Jarvis on your desktop, only while [desktop] is enabled: RouteFlags.desktop): clear desktop
+verbs only (desktop.routes.desktop_request) - "open|launch|start <something>" that is not Jarvis's own
+(mail, calendar, briefing, a screen ...), "find|where is|look for|show me <a file, folder or place>",
+and the local routes' later shapes ("volume 30", "pause", "timer 10 minutes", "screenshot", "focus mode
+for 45 minutes"). Route.payload is the text as typed. The app takes it onto the HUD (the window's bar)
+and there to a local route or the desktop planner (ask.modes.MODE_DESKTOP). Everything else stays a
+normal Ask; the other shortcuts keep their words ("show me my follow-ups" is FOLLOWUPS).
+
 Pure; nothing is logged (Route's repr names its kind only).
 """
 
@@ -36,6 +44,7 @@ from dataclasses import dataclass
 
 ROUTE_NONE, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SHOW, ROUTE_PLAN, ROUTE_PREP, ROUTE_FOLLOWUPS = (
     "none", "memory_save", "memory_forget", "memory_show", "plan", "prep", "followups")
+ROUTE_DESKTOP = "desktop"
 MEMORY_ROUTES = frozenset({ROUTE_MEMORY_SAVE, ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SHOW})
 # The parts of a day a plan route names (the same words as ask.dayplan.PART_*).
 PART_DAY, PART_MORNING, PART_AFTERNOON, PART_EVENING, PART_TOMORROW = (
@@ -48,6 +57,7 @@ class RouteFlags:
     plan: bool = False
     prep: bool = False
     followups: bool = False
+    desktop: bool = False      # [desktop] enabled: clear desktop verbs go to the desktop pipeline
 
 
 @dataclass(frozen=True)
@@ -116,6 +126,11 @@ def route(text: str, flags: RouteFlags) -> Route:
             return Route(ROUTE_PREP, target.rstrip(".!?").strip())
     if flags.followups and _FOLLOWUPS_RE.fullmatch(text):
         return Route(ROUTE_FOLLOWUPS)
+    if flags.desktop:
+        from ..desktop.routes import desktop_request
+
+        if desktop_request(text):
+            return Route(ROUTE_DESKTOP, text)
     return NO_ROUTE
 
 

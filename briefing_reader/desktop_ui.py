@@ -53,8 +53,16 @@ hook). It keeps the owner's rules:
   close goes through and from then on nothing switches or comes forward; a switch on its way stops at once.
 * ``shutdown()`` (Jarvis closing, next to the meetings') stops a switch on its way and hides and deletes the HUD's
   windows.
+* Desktop requests (P1.7; SPEC 3): ``route_request(words)`` - a request typed on the HUD's bar that ask.routes calls
+  a desktop request - gives a local route (desktop.routes: handled on this PC, no planner run; ``answer_local``
+  says it in Jarvis's own words, with its LIVE task "Handled on this PC") or the planner's job
+  (ask.desktop_mode.DesktopJob: a run id and the request's candidates, ``context_for`` - P1.8 PLUGS IN HERE with
+  ``context_source`` and ``search``; until then none). The planner's checked plan comes back through the app
+  (``report_plan``: kept in memory as ``last_plan``, counts in the log). Nothing is opened or changed in this part:
+  the caption says what was understood and that nothing was opened yet; P1.8 carries the steps out.
 
-Logs: statuses, durations and screen numbers only.
+Logs: statuses, durations, screen numbers, run ids, skill kinds, counts and refusal codes only - never what was
+typed, a name or a path.
 """
 
 from __future__ import annotations
@@ -70,7 +78,11 @@ from PySide6.QtGui import QImage, QPixmap, QRegion
 from PySide6.QtWidgets import QWidget
 
 from . import alive, dock, holo, hud_overlay
+from . import live as live_events
 from . import orb as orb_mod
+from .ask import desktop_mode
+from .desktop import routes as desktop_routes
+from .desktop.context import DesktopContext
 from .persona import with_address
 
 logger = logging.getLogger(__name__)
@@ -102,6 +114,29 @@ def render(widget: QWidget, flags: QWidget.RenderFlag) -> QPixmap:
     return pixmap
 
 
+LOCAL_ROUTE_TEXT = "on this PC - no planner run"
+
+
+@live_events.quiet(None)
+def _local_task(live: Any, words: str, found: Any, said: str) -> Any:
+    """A local route's LIVE task (TASK_DESKTOP; never opens LIVE by itself): what was typed, the route ("on this PC")
+    and its skill, and Jarvis's words - never a name of an app, a file or a site. None without the LIVE view."""
+    if live is None:
+        return None
+    task = live.task(live_events.TASK_DESKTOP, words or "Desktop request")
+    if task is live_events.NO_TASK:
+        return None
+    step = task.step(live_events.DESKTOP_REQUEST, "Your request", fields=[("You typed", words or "-"),
+                                                                          ("Route", LOCAL_ROUTE_TEXT)])
+    step.done(live_events.STATUS_OK, summary="handled on this PC")
+    result = task.step(live_events.DESKTOP_PLAN, "What Jarvis does with it",
+                       fields=[("Step", found.kind), ("Check", f"refused: {found.code}" if found.code else found.tier),
+                               ("Jarvis says", said)])
+    result.done(live_events.STATUS_WARN if found.code else live_events.STATUS_OK,
+                summary="not yet possible" if found.code else "nothing was opened yet")
+    return task
+
+
 def is_blank(pixmap: QPixmap, step: int = 16) -> bool:
     """True when ``pixmap`` holds nothing (every pixel on a ``step`` px grid fully transparent)."""
     image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
@@ -122,17 +157,26 @@ class DesktopController(QObject):
                  may_enter: Callable[[], bool] | None = None,
                  bring_forward: Callable[[Any], None] | None = None,
                  address: str = "sir", flight_clock: Callable[[], float] | None = None,
-                 parent: QObject | None = None) -> None:
+                 live: Any = None, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self.window = window
         self.reading = window.reading
         self.overlay = overlay
+        self.live = live                                     # the app's live.LiveStream (None: no LIVE view)
         self._chip_screens = dict(chip_screens)
         self._home = int(home_screen)
         self._may_enter = may_enter or (lambda: True)        # the app's side: its assistant screen is up
         self._bring_forward = bring_forward or show_window
+        self._address = address
         self._caption = with_address(HUD_CAPTION, address)
+        # Desktop requests (P1.7). P1.8 PLUGS IN HERE: ``context_source(words)`` gives a request's candidates
+        # (desktop.context.DesktopContext from the index, the Start menu and the scope) and ``search(words)`` the local
+        # search the find route asks; until then no candidates (the planner is told none) and no find route.
+        self.context_source: Callable[[str], Any] | None = None
+        self.search: Callable[[Any], Any] | None = None
+        self.last_plan: Any = None                           # the last checked plan (memory only; P1.8 carries it out)
+        self.last_route: Any = None                          # the last local route answered on this PC
         self._hud = False
         self._switching = False
         self._shut = False
@@ -565,6 +609,64 @@ class DesktopController(QObject):
         if (flight is not None and flight.is_running() and flight.direction() == alive.TO_HUD
                 and not self.overlay.is_shown()):
             flight.set_hud(self.overlay.flight_scene())
+
+    # ---- desktop requests (P1.7: understood and checked; P1.8 carries them out) --------------------------
+
+    def context_for(self, words: str) -> DesktopContext:
+        """The candidates for a request (``context_source``; P1.8). None set, or one that fails: none (the failure
+        logged by its type only)."""
+        source = self.context_source
+        if source is None:
+            return DesktopContext()
+        try:
+            context = source(words)
+        except Exception as exc:  # noqa: BLE001 - the planner is then told of nothing
+            logger.warning("Desktop: the request's candidates could not be read (%s)", type(exc).__name__)
+            return DesktopContext()
+        return context if isinstance(context, DesktopContext) else DesktopContext()
+
+    def route_request(self, words: str) -> Any:
+        """A desktop request typed on the HUD (SPEC 3): a local route (desktop.routes.LocalRoute: handled on this PC,
+        no planner run - ``answer_local`` says it) or the planner's job (ask.desktop_mode.DesktopJob: a new run id and
+        the request's candidates)."""
+        context = self.context_for(words)
+        found = desktop_routes.route(words, context, search=self.search)
+        if found is not None:
+            return found
+        return desktop_mode.DesktopJob(desktop_mode.new_run_id(), context)
+
+    def answer_local(self, found: desktop_routes.LocalRoute, words: str = "") -> tuple[str, bool]:
+        """A local route answered on this PC: Jarvis's words for it (the HUD's caption) and whether they take the soft
+        tone (a later phase's request); its LIVE task ("Handled on this PC": the route and its skill, never a name);
+        the log line (the kind only). Nothing is opened or changed yet (P1.8 carries the step out)."""
+        run_id = desktop_mode.new_run_id()
+        self.last_route = found
+        said = desktop_routes.route_words(found, self._address)
+        task = _local_task(self.live, words, found, said)
+        if found.code:
+            logger.info("Desktop %s: local route %s (%s)", run_id, found.kind, found.code)
+        else:
+            logger.info("Desktop %s: local route %s understood (%s); nothing opened yet", run_id, found.kind,
+                        found.tier)
+        if task is not None:
+            task.finish(live_events.STATUS_WARN if found.code else live_events.STATUS_OK,
+                        summary="handled on this PC - " + ("not yet possible" if found.code else
+                                                           "nothing opened yet"))
+        return said, bool(found.code)
+
+    def report_plan(self, outcome: Any) -> str:
+        """The planner's outcome for a desktop request (ui's _on_ask_outcome): the checked plan is kept (``last_plan``;
+        memory only - P1.8 carries it out) and Jarvis's own words for it come back (the bar's status already shows
+        them in the caption). Counts and codes only in the log."""
+        plan = getattr(outcome, "brief", None)
+        if not getattr(outcome, "ok", False) or plan is None:
+            logger.info("Desktop %s: no plan (%s)", getattr(outcome, "target", "") or "-",
+                        getattr(outcome, "kind", "error"))
+            return str(getattr(outcome, "message", "") or "")
+        self.last_plan = plan
+        logger.info("Desktop %s: plan kept, %d step(s) passed, %d refused; nothing opened yet (P1.8 opens)",
+                    plan.run_id or "-", len(plan.accepted()), len(plan.refused()))
+        return str(getattr(outcome, "message", "") or "")
 
     # ---- the chips and the neighbours ------------------------------------------------------------------
 

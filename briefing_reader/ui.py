@@ -190,9 +190,10 @@ from .agenda import (
     merge_deadlines,
     ordered_events,
 )
+from .ask import desktop_mode
 from .ask.dayplan import PART_DAY, hours_text
-from .ask.modes import (MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_BRIEF, ORIGIN_CHOICE,
-                        ORIGIN_LIST, ORIGIN_OFFER, ModeInputs, ModeRequest, block_line, todo_facts)
+from .ask.modes import (MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_BRIEF,
+                        ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ModeInputs, ModeRequest, block_line, todo_facts)
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import CONFIG_FILE_NAME, DEFAULT_ACCOUNT, PROJECT_ROOT, AgendaConfig, Config
@@ -5298,6 +5299,7 @@ class AppController(QObject):
         self._live_unread = False                  # Ask / card steps came while LIVE was not in sight
         self._live_opened: list[int] = []          # tasks that already switched to LIVE (one switch each)
         self._ask_task_id = 0                      # the running (or last) Ask's LIVE task
+        self._ask_desktop = False                  # the running request is a desktop one (its HUD caption answers)
         self._live_peeks = [0, 0, 0]               # event checks on their way: jobs, cards, problems
         # The calendar days Jarvis already read (today's agenda, Ask's reads): a day picture draws a
         # day's other events only from these (memory only; never a Google call for a picture).
@@ -8197,7 +8199,8 @@ class AppController(QObject):
         controller = ask_ui.AskController(self.config, planner, reading.command_bar, context=self._ask_context,
                                           blocked=self._ask_blocked, calendars=self._calendars, live=self.live,
                                           route_flags=self._route_flags, memory=self._memory_given,
-                                          mode_inputs=self._mode_inputs, parent=self)
+                                          mode_inputs=self._mode_inputs, desktop_request=self._desktop_request,
+                                          parent=self)
         controller.busyChanged.connect(self._on_ask_busy)
         controller.outcomeReady.connect(self._on_ask_outcome)
         controller.askStarted.connect(self._on_ask_started)
@@ -8250,8 +8253,10 @@ class AppController(QObject):
         """An Ask started (the briefing pauses; the orb shows PLANNING; Jarvis says "One moment,
         sir.") or ended."""
         self._ask_busy = bool(busy)
-        if busy and self.ask is not None and self.ask.running_mode == MODE_MEETING:
-            self._update_reading_controls()   # a meeting summary runs in the background: nothing pauses or is said
+        if busy and self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP):
+            # A meeting summary runs in the background, a desktop request on the HUD (its caption says what Jarvis
+            # is doing): nothing pauses or is said.
+            self._update_reading_controls()
             return
         if busy:
             self._voice_call("owner_acted")   # the Ask holds the briefing now: the voice never resumes it
@@ -8275,9 +8280,10 @@ class AppController(QObject):
         screen "tab" brings LIVE up (a "web:" request's WEB task as an Ask's), else Home comes up."""
         if self.state == STATE_QUITTING:
             return
-        if self.ask is not None and self.ask.running_mode == MODE_MEETING:
-            # A meeting summary the owner asked for (the start card's tick, or Summarise): no YOU entry, the
-            # screen stays where the owner is; LIVE has its steps.
+        self._ask_desktop = bool(self.ask is not None and self.ask.running_mode == MODE_DESKTOP)
+        if self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP):
+            # A meeting summary the owner asked for (the start card's tick, or Summarise), or a desktop request on the
+            # HUD (its caption answers): no YOU entry, the screen stays where the owner is; LIVE has its steps.
             self._ask_task_id = self.ask.task_id
             return
         self._you(text)
@@ -8309,6 +8315,9 @@ class AppController(QObject):
         meetings = getattr(self, "meetings", None)
         if meetings is not None and meetings.summary_running():
             meetings.on_summary_cancelled()      # Esc on a meeting summary: Summarise starts it again
+            return
+        if getattr(self, "_ask_desktop", False):
+            self._ask_desktop = False            # a desktop request: the HUD's bar says so; no conversation entry
             return
         self._voice_call("cancel_key", ASK_ACK_KEY)
         self._jarvis(ASK_CANCELLED_ENTRY, tone=hud.TONE_IDLE)
@@ -8412,6 +8421,9 @@ class AppController(QObject):
             return
         if getattr(outcome, "mode", "") == MODE_MEETING:
             self._on_meeting_outcome(outcome)
+            return
+        if getattr(outcome, "mode", "") == MODE_DESKTOP:
+            self._on_desktop_outcome(outcome)
             return
         self._offer_running = 0
         self._converse_ask(outcome)
@@ -8867,7 +8879,7 @@ class AppController(QObject):
             chip_screens={hud_overlay.CHIP_BRIEFING: SCREEN_BRIEFING, hud_overlay.CHIP_APPROVALS: SCREEN_APPROVALS,
                           hud_overlay.CHIP_REC: SCREEN_MEETINGS},
             home_screen=SCREEN_HOME, may_enter=self._may_enter_hud, bring_forward=bring_forward_on_click,
-            address=self.config.assistant.address, parent=self)
+            address=self.config.assistant.address, live=self.live, parent=self)
         controller.hudChanged.connect(self._on_hud_changed)
         meetings = getattr(self, "meetings", None)
         if meetings is not None:
@@ -8963,14 +8975,80 @@ class AppController(QObject):
         logger.info("Started by the HUD key, but the HUD could not open: the window opens")
         return False
 
-    def _on_hud_submit_without_ask(self, _text: str) -> None:
-        """Enter in the HUD's bar while Ask is off ([ask] enabled = false): its caption says so; nothing is sent (Esc
-        in the empty bar puts the note away)."""
+    def _on_hud_submit_without_ask(self, text: str) -> None:
+        """Enter in the HUD's bar while Ask is off ([ask] enabled = false): a local route is still answered on this
+        PC (desktop.routes: no planner needed); anything else - the planner is Ask's - makes its caption say Ask is
+        off; nothing is sent (Esc in the empty bar puts the note away)."""
         from .ask.planner import DISABLED_MESSAGE
+        from .ask.routes import ROUTE_DESKTOP, RouteFlags, route
 
         desktop = self.desktop
-        if desktop is not None and self.ask is None:
-            desktop.bar().set_status(DISABLED_MESSAGE, hud.TONE_WARN)
+        if desktop is None or self.ask is not None:
+            return
+        bar = desktop.bar()
+        found = None
+        try:
+            if route(text, RouteFlags(desktop=True)).kind == ROUTE_DESKTOP:
+                found = desktop.route_request(text)
+        except Exception as exc:  # noqa: BLE001 - the note below instead
+            logger.warning("Desktop: a request typed with Ask off could not be read (%s)", type(exc).__name__)
+        if found is not None and not isinstance(found, desktop_mode.DesktopJob):
+            said, soft = desktop.answer_local(found, text)
+            bar.set_status(said, hud.TONE_WARN if soft else hud.TONE_DONE)
+            bar.clear_input()
+            return
+        bar.set_status(DISABLED_MESSAGE, hud.TONE_WARN)
+
+    def _desktop_request(self, text: str) -> Any:
+        """A typed desktop request (AskController's ROUTE_DESKTOP; SPEC 3). From the window's bar Jarvis goes onto the
+        HUD first (``enter_hud``: the window hidden, never closed) and the request continues there - the window's bar
+        let go of it, the HUD's showing it while it runs; when the HUD can't open now (a dialog waits, a switch on its
+        way, not turned on yet) nothing runs and the bar says so. On the HUD: a local route is answered on this PC (no
+        planner run; None comes back), anything else comes back as the planner's job (ask.desktop_mode.DesktopJob)
+        for ONE desktop planner run. Never logged: the words."""
+        from .ask_ui import DESKTOP_NOT_NOW_TEXT
+
+        desktop = getattr(self, "desktop", None)
+        ask = self.ask
+        if desktop is None or ask is None:
+            return None
+        if not self._hud_active():
+            window_bar = self.window.reading.command_bar
+            if not desktop.enter_hud():
+                ask.show_note(DESKTOP_NOT_NOW_TEXT, hud.TONE_WARN)
+                return None
+            logger.info("Desktop: a request typed in the window goes onto the HUD")
+            if window_bar.text().strip():
+                window_bar.clear_input()             # the request moved to the HUD's bar
+            hud_bar = desktop.bar()
+            if ask.bar is hud_bar and not hud_bar.text().strip():
+                hud_bar.set_text(text)               # there it shows while it runs (cleared when a step passed)
+        found = desktop.route_request(text)
+        if isinstance(found, desktop_mode.DesktopJob):
+            return found
+        said, soft = desktop.answer_local(found, text)
+        ask.show_note(said, hud.TONE_WARN if soft else hud.TONE_DONE, clear=True, hud_text=said)
+        return None
+
+    def _on_desktop_outcome(self, outcome: Any) -> None:
+        """A desktop request's planner run ended (MODE_DESKTOP): the checked plan goes to the desktop controller
+        (which keeps it; P1.8 carries it out) - the HUD's bar already says Jarvis's own words for it - and ACTIVITY
+        gets one row of counts (never the request, a name or Claude's text). No conversation entry: the HUD
+        answers."""
+        self._ask_desktop = False
+        self._voice_call("cancel_key", ASK_ACK_KEY)
+        desktop = getattr(self, "desktop", None)
+        if desktop is not None:
+            desktop.report_plan(outcome)
+        plan = getattr(outcome, "brief", None)
+        if outcome.ok and plan is not None:
+            message = f"Desktop: {_plural(len(plan.accepted()), 'step')} checked"
+            if plan.refused():
+                message += f", {len(plan.refused())} refused"
+            sub = [f"{outcome.duration_ms / 1000:.1f} s", _plural(outcome.runs, "planner run"), "nothing opened yet"]
+            self._activity(hud.TAG_ASK, message, f" {DOT} ".join(sub))
+        elif outcome.kind not in ("empty", "busy"):
+            self._activity(hud.TAG_STOP, "Desktop: nothing was planned", _short(outcome.message or outcome.kind))
 
     def _may_enter_hud(self) -> bool:
         """The app side of entering the HUD: the assistant screen is up (not the prompt, a hidden wait or quitting)
@@ -10404,9 +10482,10 @@ class AppController(QObject):
 
     def _route_flags(self) -> RouteFlags:
         """The typed shortcuts on now: memory ("remember that ..."), the day plan ("plan my day"),
-        the meeting brief ("prep me for my 2 PM"), the follow-up list ("any follow-ups?")."""
+        the meeting brief ("prep me for my 2 PM"), the follow-up list ("any follow-ups?"), and desktop
+        requests ("open my LING essay") only while [desktop] is enabled (the HUD exists)."""
         return RouteFlags(memory=self.memory_store is not None, plan=self._plan_on(), prep=self._prep_on(),
-                          followups=self._followups_section_on())
+                          followups=self._followups_section_on(), desktop=getattr(self, "desktop", None) is not None)
 
     def _memory_prompt_notes(self) -> tuple[str, ...]:
         """The notes the planner gets (any thread: the GUI thread swaps the whole tuple)."""

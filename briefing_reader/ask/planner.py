@@ -93,6 +93,15 @@ thread read in full (the only body read of a follow-up); ask.modes.nudge_guard s
 the owner replied since, they answered since or anything else changed; else one run with the
 thread, <followup> and only the owner's own words from "Tell Jarvis what to say", and its one Reply
 line checked by validate.to_cards with ask.modes.NudgeCheck.
+
+A desktop request (ask.modes.MODE_DESKTOP, Jarvis on your desktop, P1.7): a request the owner typed that
+no local route took (desktop.routes); ModeRequest.payload is an ask.desktop_mode.DesktopJob (its run id and
+the context's candidates, names only). The Ask's checks (no bundle cap: it counts as an Ask run), one run
+with its own prompt and schema and Ask's command line otherwise (no tools, no MCP, nothing saved, stdin
+only), its answer read strictly (desktop_mode.plan_from: refused whole when it does not fit), then every
+step checked by desktop.validate against this run's refs and the owner's typed words only (tiers, the NEVER
+list, intent and scope licensing, the suspect rule, the phase gate, the rate caps). Nothing is opened here:
+the outcome carries the checked plan (``brief``) and Jarvis's own words for it (``message``).
 """
 
 from __future__ import annotations
@@ -118,6 +127,9 @@ from ..live import (
     ASK_CHECKS,
     ASK_VALIDATE,
     CALENDAR_READ,
+    DESKTOP_FIND,
+    DESKTOP_PLAN,
+    DESKTOP_VALIDATE,
     MAIL_SEARCH,
     MAIL_THREAD,
     MEETING_INPUT,
@@ -188,9 +200,10 @@ from .research_validate import validate as validate_research
 from .stream import CANCELLED, OVERAGE, AskFailure, InitSummary, Plan, RunResult, RunStats, run_cli, run_planner
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
 from .validate import LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, Cards, keep_valid, to_cards
-from . import dayplan, meeting_summary, modes, prep
-from .modes import (MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_USAGE,
-                    ModeInputs, ModeRequest)
+from . import dayplan, desktop_mode, meeting_summary, modes, prep
+from ..desktop import validate as desktop_validate
+from .modes import (MODE_DESKTOP, MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP,
+                    MODE_USAGE, ModeInputs, ModeRequest)
 
 logger = logging.getLogger(__name__)
 
@@ -404,7 +417,8 @@ class ClaudeEngine:
         if cancel is not None and cancel.is_set():
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
-        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING):   # mail, or the summary's own notes: never "remember"
+        # Mail, the summary's own notes, or names other people wrote on the desktop: never "remember".
+        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING, MODE_DESKTOP):
             allow_remember = False
         argv = self.mode_argv(ready, mode, allow_remember=allow_remember)
         if mode == MODE_PREP:
@@ -416,6 +430,11 @@ class ClaudeEngine:
             result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
                              timeout_s=min(300.0, max(float(self.ask.timeout_seconds), MEETING_TIMEOUT_S)),
                              read=meeting_summary.read_summary_result, cancel=cancel,
+                             clock=self._clock, progress=progress, capture=capture)
+        elif mode == MODE_DESKTOP:   # a plan of refs, read strictly (desktop_mode.plan_from); validate decides
+            result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                             timeout_s=float(self.ask.timeout_seconds),
+                             read=desktop_mode.read_desktop_result, cancel=cancel,
                              clock=self._clock, progress=progress, capture=capture)
         else:
             result = run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
@@ -790,6 +809,8 @@ class AskOutcome:
                          f"{len(brief.points)}, {brief.dropped} dropped")
             if self.mode == MODE_MEETING and brief is not None:
                 text += ", summary " + ", ".join(f"{name} {count}" for name, count in brief.counts().items())
+            if self.mode == MODE_DESKTOP and brief is not None:
+                text += ", desktop plan " + ", ".join(f"{name} {count}" for name, count in brief.counts().items())
             if self.note_kind:
                 text += f", no run ({self.note_kind})"
             elif self.mode == MODE_PLAN and self.ok:
@@ -1215,9 +1236,9 @@ class AskPlanner:
                   briefing: BriefingContext | None = None, page_ids: Sequence[str] = (),
                   cancel: threading.Event | None = None, on_stage: Callable[[str], None] = lambda stage: None,
                   live: LiveTask | None = None) -> AskOutcome:
-        """One planner mode run (the day plan, the meeting brief, a follow-up draft) on the Ask thread: the same
-        one-at-a-time lock as plan(); never raises; ``live`` gets its steps (the caller finishes the
-        task)."""
+        """One planner mode run (the day plan, the meeting brief, a follow-up draft, a meeting's summary, a desktop
+        request) on the Ask thread: the same one-at-a-time lock as plan(); never raises; ``live`` gets its steps (the
+        caller finishes the task)."""
         task = live or NO_TASK
         if not self._busy.acquire(blocking=False):
             task.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=BUSY_MESSAGE)
@@ -1233,6 +1254,8 @@ class AskPlanner:
                 outcome = self._nudge(request, inputs or ModeInputs(), page_ids, cancel, on_stage, task)
             elif request.mode == MODE_MEETING:
                 outcome = self._meeting(request, inputs or ModeInputs(), page_ids, cancel, on_stage, task)
+            elif request.mode == MODE_DESKTOP:
+                outcome = self._desktop(request, cancel, on_stage, task)
             else:
                 outcome = AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
         except Exception as exc:  # noqa: BLE001 - a mode run must never take the app down
@@ -1498,6 +1521,49 @@ class AskPlanner:
                 continue
             kept.append(note)
         return tuple(kept), len(summary.memory) - len(kept)
+
+    # ---- a desktop request (Jarvis on your desktop, P1.7) ----------------------------------------
+
+    def _desktop(self, request: ModeRequest, cancel: threading.Event | None, on_stage: Callable[[str], None],
+                 live: LiveTask = NO_TASK) -> AskOutcome:
+        """A desktop request the owner typed (ModeRequest.payload: a desktop_mode.DesktopJob): the Ask's checks (Ask
+        on, the caps, Claude Code ready - no bundle cap: it counts as an Ask run), the stdin from the job's context
+        (names only; this run's refs), ONE planner run with its own prompt and schema, the answer read strictly and
+        every step checked by desktop.validate against this run's refs and the owner's typed words only. Nothing is
+        opened or changed here: the outcome carries the checked plan (``brief``: desktop.validate.DesktopPlan) and
+        Jarvis's own words for it (``message``)."""
+        job = request.payload
+        if not isinstance(job, desktop_mode.DesktopJob):
+            return AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
+        refusal = self._refusal(live)
+        if refusal is not None:
+            logger.info("Desktop %s: no planner run (%s)", job.run_id, refusal.kind)
+            return replace(refusal, target=job.run_id)
+        zone = self.sources.time_zone()
+        now = self.clock()
+        wall = dayplan.to_wall(now, zone) if zone else now
+        prompt = desktop_mode.build_prompt(wall, request, job.context, zone=zone, run_id=job.run_id)
+        _desktop_given(live, job, prompt)
+        logger.info("Desktop %s: context of %d characters (%s)", job.run_id, len(prompt.text),
+                    ", ".join(f"{name} {count}" for name, count in prompt.refs.counts().items()) or "nothing")
+        on_stage(STAGE_PLANNING)
+        result = self._run(prompt.text, allow_search=False, cancel=cancel, live=live, number=1, mode=MODE_DESKTOP)
+        answer = result.answer
+        if result.failure is not None or not isinstance(answer, desktop_validate.DesktopAnswer):
+            failed = result.failure
+            kind = failed.kind if failed else "error"
+            logger.info("Desktop %s: planner run %s", job.run_id, kind)
+            return AskOutcome(False, kind, failed.message if failed else "", runs=1 if result.started else 0,
+                              init=result.init, stats=(result.stats,) if result.started else (), target=job.run_id)
+        plan = desktop_validate.check_plan(answer, prompt.refs, request.typed, run_id=job.run_id)
+        words = desktop_mode.plan_words(plan, self._owner())
+        _desktop_validated(live, plan, words)
+        logger.info("Desktop %s: plan checked, steps=%d (%s), refused=%d (%s)%s", job.run_id, len(plan.steps),
+                    plan.skills_text() or "none", len(plan.refused()), plan.codes_text() or "none",
+                    " (read from the planner's plain text)" if answer.via_fallback else "")
+        return AskOutcome(True, "ok", words, say=answer.say, question=answer.question,
+                          refused=len(plan.refused()), runs=1, init=result.init, stats=(result.stats,), brief=plan,
+                          mode=MODE_DESKTOP, target=job.run_id)
 
     # ---- web research -------------------------------------------------------------------------
 
@@ -2499,6 +2565,12 @@ def _run_result(step: LiveStep, result: RunResult, *, keep_text: bool = True) ->
                   f"{_count_words(len(answer.open), 'open item')}, {_count_words(len(answer.points), 'point')}")
         for line in answer.lines:
             step.item(line_text(line, keep_text), mono=True)
+    desktop = answer if isinstance(answer, desktop_validate.DesktopAnswer) else None
+    if desktop is not None:   # a desktop plan (its steps are checked in "Checking the plan": codes, never names)
+        if desktop.say:
+            step.item(f"Says: {desktop.say}")
+        if desktop.question:
+            step.item(f"Asks: {desktop.question}")
     failure = result.failure
     if failure is None and plan is not None and plan.web is not None and plan.search is None:
         why = plan.web.why if 0 < len(plan.web.why) <= HANDOVER_WHY_CHARS else ""
@@ -2507,6 +2579,10 @@ def _run_result(step: LiveStep, result: RunResult, *, keep_text: bool = True) ->
         step.done(STATUS_OK, summary="a brief" + (f" and {_count_words(len(answer.lines), 'reply draft')}"
                                                   if answer.lines else "") + (" (from its plain text)"
                                                                               if answer.via_fallback else ""))
+    elif failure is None and desktop is not None:
+        step.done(STATUS_OK, summary=f"a plan of {_count_words(len(desktop.steps), 'step')}"
+                                     + (" and a question" if desktop.question else "")
+                                     + (" (from its plain text)" if desktop.via_fallback else ""))
     elif failure is None:
         lines = len(plan.lines) if plan is not None else 0
         step.done(STATUS_OK, summary=_count_words(lines, "proposal") + (" (from its plain text)"
@@ -2685,7 +2761,7 @@ def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int
 NO_MAIL_WORDS = "no - a day plan never reads mail"
 NO_WEB_WORDS = "no - a day plan never uses the web"
 MODE_RUN_WORDS = {MODE_PLAN: "day plan", MODE_PREP: "meeting brief", MODE_NUDGE: "follow-up draft",
-                  MODE_MEETING: "meeting summary"}
+                  MODE_MEETING: "meeting summary", MODE_DESKTOP: "desktop plan"}
 FREE_TITLE = "Your free time"
 
 
@@ -3130,9 +3206,70 @@ def _meeting_validated(live: LiveTask, answer: Any, summary: Any, cards: Cards, 
 
 def _mode_target(request: ModeRequest) -> Any:
     """A meeting summary's outcome always names its meeting (its id), also when the run stopped before it read
-    the transcript (busy, an unexpected error): the app then ends that summary there (Retry). None otherwise."""
-    job = request.payload if request.mode == MODE_MEETING else None
+    the transcript (busy, an unexpected error): the app then ends that summary there (Retry); a desktop request's
+    names its run id. None otherwise."""
+    job = request.payload
+    if request.mode == MODE_DESKTOP:
+        return job.run_id if isinstance(job, desktop_mode.DesktopJob) else None
+    if request.mode != MODE_MEETING:
+        return None
     return job.meeting_id if isinstance(job, meeting_summary.MeetingJob) else None
+
+
+@_quiet()
+def _desktop_given(live: LiveTask, job: Any, prompt: Any) -> None:
+    """What the desktop planner is given (SPEC 10.1): where Jarvis looked, how many places, files, apps and sites
+    it is shown (names only - never a path, a file's contents or a typed value), what was left out to fit, and how
+    many names read like instructions (treated as data). Counts only: the names are in the run's stdin block."""
+    if not live.enabled:
+        return
+    shown = prompt.shown
+    context = job.context
+    step = live.step(DESKTOP_FIND, "What the planner is given")
+    if context.looked_in or context.found:
+        step.field("Looked in", f"{_count_words(context.looked_in, 'place')}: "
+                                f"{_count_words(context.found, 'file')}")
+    else:
+        step.field("Looked in", "nothing yet - Jarvis's own search of this PC comes in a later part")
+    step.field("Given", f"{_count_words(shown['places'], 'place')}, {_count_words(shown['files'], 'file')}, "
+                        f"{_count_words(shown['apps'], 'app')}, {_count_words(shown['sites'], 'site')} - names only, "
+                        "never paths or contents")
+    left = [part for part in (_count_words(shown["files_left_out"], "file") if shown["files_left_out"] else "",
+                              _count_words(shown["apps_left_out"], "app") if shown["apps_left_out"] else "") if part]
+    if left:
+        step.field("Left out to fit", ", ".join(left))
+    suspects = len(prompt.refs.suspects())
+    if suspects:
+        step.field("Names that read like instructions",
+                   f"{suspects} - treated as data; used only when your own words name them")
+    step.done(STATUS_WARN if suspects or left else STATUS_OK,
+              summary=f"{_count_words(len(prompt.refs), 'item')} by id, names only")
+
+
+@_quiet()
+def _desktop_validated(live: LiveTask, plan: Any, words: str) -> None:
+    """"Checking the plan": each step with its skill and its tier or refusal code (never a name, a path or Claude's
+    text), then what Jarvis makes of it (desktop.plan): his own words, nothing opened yet."""
+    if not live.enabled:
+        return
+    step = live.step(DESKTOP_VALIDATE, "Checking the plan",
+                     fields=[("Checked against", "the ids given in this run, your typed words and Jarvis's safety "
+                                                 "rules")])
+    for checked in plan.steps:
+        if checked.ok:
+            step.item(desktop_validate.describe(checked), status=STATUS_OK)
+        else:
+            step.item(desktop_validate.describe(checked), status=STATUS_BLOCKED, status_text="REFUSED",
+                      note=desktop_validate.reason_words(checked.code))
+    if plan.question:
+        step.field("Question back", "yes - see the planner's reply above")
+    refused = plan.refused()
+    summary = f"{_count_words(len(plan.accepted()), 'step')} OK, {len(refused)} refused"
+    if refused:
+        summary += f" - {desktop_validate.reason_words(refused[0].code)}"
+    step.done(STATUS_WARN if refused or not plan.accepted() else STATUS_OK, summary=summary)
+    result = live.step(DESKTOP_PLAN, "What Jarvis does with it", fields=[("Jarvis says", words)])
+    result.done(STATUS_OK, summary="nothing was opened yet")
 
 
 def mode_todos(pending: Sequence[ProposedAction], planned: Mapping[str, date] | None = None) -> tuple[Any, ...]:

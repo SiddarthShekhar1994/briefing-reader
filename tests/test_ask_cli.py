@@ -628,7 +628,8 @@ class ModeArgvTests(unittest.TestCase):
         for hardened in (False, True):
             ask = cli.build_argv(self.EXE, model="sonnet", max_turns=4, schema=cli.schema_text(allow_search=True),
                                  hardened=hardened)
-            for name, prompt in (("plan", cli.PLAN_PROMPT_FILE), ("prep", cli.PREP_PROMPT_FILE)):
+            for name, prompt in (("plan", cli.PLAN_PROMPT_FILE), ("prep", cli.PREP_PROMPT_FILE),
+                                 ("desktop", cli.DESKTOP_PROMPT_FILE)):
                 with self.subTest(mode=name, hardened=hardened):
                     mode = cli.build_argv(self.EXE, model="sonnet", max_turns=4, schema=cli.mode_schema_text(name),
                                           hardened=hardened, prompt_file=cli.MODE_PROMPTS[name])
@@ -642,8 +643,8 @@ class ModeArgvTests(unittest.TestCase):
     def test_the_prep_schema_text(self) -> None:
         self.assertEqual(cli.mode_schema_text("prep"), cli.compact_json(json.loads(
             cli.PREP_SCHEMA_FILE.read_text(encoding="utf-8"))))
-        self.assertEqual(set(cli.MODE_PROMPTS), {"plan", "prep", "nudge", "meeting"})
-        self.assertEqual(set(cli.MODE_SCHEMAS), {"plan", "prep", "nudge", "meeting"})
+        self.assertEqual(set(cli.MODE_PROMPTS), {"plan", "prep", "nudge", "meeting", "desktop"})
+        self.assertEqual(set(cli.MODE_SCHEMAS), {"plan", "prep", "nudge", "meeting", "desktop"})
         self.assertEqual(cli.mode_schema_text("nudge"), cli.compact_json(json.loads(
             cli.NUDGE_SCHEMA_FILE.read_text(encoding="utf-8"))))
 

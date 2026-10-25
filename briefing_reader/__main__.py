@@ -130,6 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="the day plan of the productivity bundle: print what its run would get (your "
                            "calendar read now, titles and notes as sizes) and its command line, and stop; no "
                            "Claude request. REQUEST as typed in the app (default: \"plan my day\")")
+    mode.add_argument("--desktop-dry-run", metavar="REQUEST",
+                      help="Jarvis on your desktop: print what a typed desktop request would do - the local route "
+                           "that answers it on this PC, or the stdin its planner run would get (from an invented "
+                           "sample context; nothing on your PC is read) and its command line - and stop; no Claude "
+                           "request, nothing opened, Claude Code not started")
     mode.add_argument("--followups-check", action="store_true",
                       help="the follow-ups of the productivity bundle: one real scan of your accounts' mail "
                            "headers (read only, the last 14 days, never the text); prints counts only")
@@ -167,6 +172,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for flag, used in (("--catch-up", args.catch_up), ("--hotkey-agent", args.hotkey_agent),
                            ("--ask-check", args.ask_check), ("--ask-text", args.ask_text is not None),
                            ("--plan-dry-run", args.plan_dry_run is not None),
+                           ("--desktop-dry-run", args.desktop_dry_run is not None),
                            ("--followups-check", args.followups_check)):
             if used:
                 parser.error(f"{view} cannot be combined with {flag}")
@@ -219,14 +225,16 @@ def _run(args: argparse.Namespace) -> int:
     config = load_config()
     _log_config(config)
     if (getattr(args, "ask_check", False) or getattr(args, "ask_text", None) is not None
-            or getattr(args, "plan_dry_run", None) is not None or getattr(args, "followups_check", False)):
+            or getattr(args, "plan_dry_run", None) is not None or getattr(args, "followups_check", False)
+            or getattr(args, "desktop_dry_run", None) is not None):
         # Ask Jarvis on the command line: no window, no Qt, no single-instance lock. The request
         # text is never logged.
         from .ask import commands
 
-        logger.info("Ask from the command line: check=%s dry_run=%s plan_dry_run=%s followups_check=%s",
-                    bool(args.ask_check), bool(args.ask_dry_run), getattr(args, "plan_dry_run", None) is not None,
-                    bool(getattr(args, "followups_check", False)))
+        logger.info("Ask from the command line: check=%s dry_run=%s plan_dry_run=%s followups_check=%s "
+                    "desktop_dry_run=%s", bool(args.ask_check), bool(args.ask_dry_run),
+                    getattr(args, "plan_dry_run", None) is not None, bool(getattr(args, "followups_check", False)),
+                    getattr(args, "desktop_dry_run", None) is not None)
         return commands.run(args, config, sys.stdout)
     slots = _resolve_slots(args.slots, config.schedule.slots)
     if args.hotkey_agent:

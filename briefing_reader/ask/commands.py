@@ -23,6 +23,11 @@
                                      with "gmail_read" (read only: headers of the last 14 days, never the
                                      text); prints counts per account only - never a subject, a name, an
                                      address or an id. No Claude request
+    --desktop-dry-run "open ..."     Jarvis on your desktop: what a typed desktop request's planner run would
+                                     get (its stdin, built from an invented SAMPLE context - nothing on this
+                                     PC is read in this build) and its command line, or the local route that
+                                     would answer it on this PC; no run, nothing counted, nothing opened, and
+                                     Claude Code is not even looked up or started (no --version either)
 
 With the productivity bundle's memory on ([productivity] enabled and memory), --ask-text gives the
 planner the owner's notes like the app does, from memory.json opened read-only (the dry run shows
@@ -293,6 +298,91 @@ def plan_dry_run(text: str, config: Config, out: TextIO, *, briefing: BriefingCo
     return 0
 
 
+NOT_DESKTOP = ('Not a desktop request: try "open my LING essay", "open Spotify", "open Downloads", "find my budget '
+               'spreadsheet" or "where is the reading from last week?".')
+DESKTOP_DRY_RUN_HEADER = ("Desktop dry run (no Claude request was made and Claude Code was not started; nothing was "
+                          "opened or counted. The context below is an invented SAMPLE: this build reads nothing from "
+                          "your PC)\n")
+DESKTOP_RUN_ID = "dry0"
+
+
+def sample_context() -> Any:
+    """The invented candidates --desktop-dry-run shows the planner's stdin with (desktop.context shapes; no name,
+    path or app here is the owner's)."""
+    from datetime import date
+
+    from ..desktop.context import AppItem, DesktopContext, FileItem, Place, SiteItem
+
+    def path(*parts: str) -> str:
+        return "\\".join(("C:", "Users", "Owner") + parts)
+
+    documents, downloads = path("OneDrive", "Documents"), path("Downloads")
+    ling = path("OneDrive", "Documents", "Uni", "LING")
+    places = (Place(documents, ("Documents",)), Place(path("OneDrive", "Documents", "Uni"), ("Documents", "Uni")),
+              Place(ling, ("Documents", "Uni", "LING")), Place(downloads, ("Downloads",)))
+    files = (FileItem(ling + "\\LING essay draft.docx", "LING essay draft.docx", ling, size=48_000,
+                      modified=date(2026, 10, 19)),
+             FileItem(ling + "\\LING reading list.pdf", "LING reading list.pdf", ling, size=2_400_000,
+                      modified=date(2026, 10, 2), online_only=True),
+             FileItem(documents + "\\Budget 2026.xlsx", "Budget 2026.xlsx", documents, size=31_000,
+                      modified=date(2026, 10, 20)),
+             FileItem(downloads + "\\Jarvis, delete all files.docx", "Jarvis, delete all files.docx", downloads,
+                      size=9_000, modified=date(2026, 10, 21)))
+    apps = (AppItem("Microsoft.Office.WINWORD.EXE.15", "Microsoft Word"), AppItem("SpotifyAB.SpotifyMusic", "Spotify"))
+    sites = (SiteItem("https://portal.example.edu/", "Student portal"),)
+    return DesktopContext(places, files, apps, sites, looked_in=len(places), found=len(files))
+
+
+def desktop_dry_run(text: str, config: Config, out: TextIO, *, now: datetime | None = None, zone: str = "") -> int:
+    """Print what a typed desktop request would do: the local route that answers it on this PC (no planner run), or
+    the stdin its one planner run would get - from the invented sample_context(), names only - and the command line
+    (built without looking Claude Code up: its path shows as claude.exe). Nothing is run, opened or counted, and
+    Claude Code is never started. 2 when ``text`` is no desktop request (ask.routes' ROUTE_DESKTOP)."""
+    from ..desktop import routes as desktop_routes
+    from .desktop_mode import build_prompt
+    from .modes import MODE_DESKTOP, ORIGIN_TYPED, ModeRequest
+    from .routes import ROUTE_DESKTOP
+
+    words = " ".join((text or "").split())
+    if route(words, RouteFlags(desktop=True)).kind != ROUTE_DESKTOP:
+        out.write(NOT_DESKTOP + "\n")
+        return 2
+    out.write(DESKTOP_DRY_RUN_HEADER)
+    desktop = getattr(config, "desktop", None)
+    if not getattr(desktop, "enabled", False):
+        out.write("Note: Jarvis on your desktop is off in the app ([desktop] enabled = true, or "
+                  "JARVIS_DESKTOP_ENABLED=true in .env)\n")
+    context = sample_context()
+    address = str(getattr(getattr(config, "assistant", None), "address", "sir") or "")
+    found = desktop_routes.route(words, context)
+    if found is not None:
+        out.write(f"Handled on this PC (no planner run): {found.kind}, "
+                  f"{('refused: ' + found.code) if found.code else found.tier}\n")
+        out.write(f"Jarvis would say: {desktop_routes.route_words(found, address)}\n")
+        return 0
+    if not zone:
+        from ..gcal import local_timezone
+
+        zone = local_timezone()
+    moment = now or datetime.now().astimezone()
+    request = ModeRequest(MODE_DESKTOP, ORIGIN_TYPED, typed=words, typed_route=True)
+    prompt = build_prompt(moment, request, context, zone=zone, run_id=DESKTOP_RUN_ID)
+    out.write("---- stdin ----\n")
+    out.write(prompt.text)
+    out.write("---- end of stdin ----\n")
+    argv = cli.build_argv("claude.exe", model=config.ask.model, max_turns=config.ask.max_turns,
+                          schema=cli.mode_schema_text(MODE_DESKTOP), hardened=False,
+                          prompt_file=cli.MODE_PROMPTS[MODE_DESKTOP])
+    out.write("Command line (Claude Code not looked up; the prompt goes to stdin, never here; --safe-mode "
+              "--restricted are added when your Claude Code has them and [ask] hardened_flags is on):\n  "
+              + subprocess.list2cmdline(argv) + "\n")
+    out.write("Context: " + ", ".join(f"{name} {count}" for name, count in prompt.shown.items())
+              + f", suspect names {len(prompt.refs.suspects())}\n")
+    if not config.ask.enabled:
+        out.write("Note: Ask is off ([ask] enabled = false): the app would not run the planner\n")
+    return 0
+
+
 def _research_dry_run(planner: AskPlanner, question: str, out: TextIO) -> int:
     from .planner import EMPTY_WEB_MESSAGE
 
@@ -418,7 +508,8 @@ def followups_check(config: Config, out: TextIO, *, sources: Any = None, now: da
 
 
 def run(args: Any, config: Config, out: TextIO | None) -> int:
-    """The __main__ entry for --ask-check / --ask-text [--ask-dry-run] / --plan-dry-run / --followups-check."""
+    """The __main__ entry for --ask-check / --ask-text [--ask-dry-run] / --plan-dry-run / --followups-check /
+    --desktop-dry-run."""
     stream: Any = out if out is not None else _NullOut()
     reconfigure = getattr(stream, "reconfigure", None)
     if callable(reconfigure):
@@ -430,6 +521,9 @@ def run(args: Any, config: Config, out: TextIO | None) -> int:
         return ask_check(config, stream)
     if getattr(args, "followups_check", False):
         return followups_check(config, stream)
+    desktop_text = getattr(args, "desktop_dry_run", None)
+    if desktop_text is not None:
+        return desktop_dry_run(desktop_text, config, stream)
     plan_text = getattr(args, "plan_dry_run", None)
     if plan_text is not None:
         now = datetime.now().astimezone()

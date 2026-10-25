@@ -58,6 +58,13 @@ only pick the meeting (ModeRequest.target) and never reach Claude. A follow-up d
 is only ever click-started (a FOLLOW-UPS row, a brief's "Draft a nudge", "Tell Jarvis what to say"):
 submit_mode with ModeRequest(MODE_NUDGE, ...), so it never clears the bar.
 
+A desktop request (ask.routes ROUTE_DESKTOP, only while [desktop] is on: clear desktop verbs) goes to the
+app first (``desktop_request(text)``): from the window's bar Jarvis goes onto the HUD, where the request
+continues; a local route is answered there on this PC (no planner run); anything else comes back as an
+ask.desktop_mode.DesktopJob and runs as ONE planner mode run (MODE_DESKTOP, live.TASK_DESKTOP, its first step
+desktop.request) - typed, so the bar it was typed in is cleared when a step passed. Its answer on the bar is
+Jarvis's own words for the checked plan (AskOutcome.message), never Claude's say or question.
+
 Web research: a request that starts with "web:" (or "research:") is a WEB task (live.TASK_WEB;
 ``running_kind``) whose "Your request" says nothing is read from the accounts; the command still
 goes to planner.plan() as typed, which runs only the research (ask.research). A request the
@@ -86,13 +93,15 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from . import hud
 from .actions import is_web_open, link_host
+from .ask import desktop_mode
 from .ask import planner as ask_planner
 from .ask.context import COMMAND_CAP
-from .ask.modes import (MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES, ORIGIN_AUTO,
-                        ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs, ModeRequest)
+from .ask.modes import (MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES,
+                        ORIGIN_AUTO, ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs, ModeRequest)
 from .ask.research import forced_question
 from .ask.research_validate import NO_ANSWER, cards_words, source_card_ids
-from .ask.routes import MEMORY_ROUTES, NO_ROUTE, ROUTE_FOLLOWUPS, ROUTE_PLAN, ROUTE_PREP, RouteFlags, route
+from .ask.routes import (MEMORY_ROUTES, NO_ROUTE, ROUTE_DESKTOP, ROUTE_FOLLOWUPS, ROUTE_PLAN, ROUTE_PREP, RouteFlags,
+                         route)
 from .ask.stream import CANCELLED, LIMIT, RESEARCH_CAP
 from .config import Config
 from .google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SIGNED_OUT, logged_alias
@@ -103,6 +112,7 @@ from .live import (
     BACKGROUND_KEY,
     BACKGROUND_TITLE,
     CLAUDE_CHECK,
+    DESKTOP_REQUEST,
     MODE_REQUEST,
     NO_STEP,
     NO_TASK,
@@ -136,7 +146,12 @@ STAGE_TEXTS = {
 _TIMED_STAGES = (ask_planner.STAGE_PLANNING, ask_planner.STAGE_PLANNING_AGAIN, ask_planner.STAGE_RESEARCH)
 # A planner mode's status while it runs (with the seconds; the meta line says Esc cancels).
 MODE_STATUS = {MODE_PLAN: "Planning your day...", MODE_PREP: "Preparing your brief...",
-               MODE_NUDGE: "Drafting a reply...", MODE_MEETING: "Writing the meeting summary..."}
+               MODE_NUDGE: "Drafting a reply...", MODE_MEETING: "Writing the meeting summary...",
+               MODE_DESKTOP: "Planning..."}
+# A desktop request typed in the window's bar when Jarvis can't go onto the desktop now (a dialog waits, a switch is
+# on its way, not turned on yet): nothing runs.
+DESKTOP_NOT_NOW_TEXT = "Jarvis can't go onto your desktop right now; nothing was done"
+DESKTOP_ROUTE_TEXT = "the planner - Claude plans with names only, Jarvis checks every step"
 MEETING_READY_TEXT = "Your meeting summary is ready on the Meetings screen"
 # A click on an offer while a request runs: refused, nothing queued, the link stays (spec 4.1).
 CLICK_BUSY_TEXT = "Jarvis is busy with another request; click the offer again when it's done"
@@ -340,6 +355,7 @@ class AskController(QObject):
                  route_flags: Callable[[], RouteFlags] | None = None,
                  memory: Callable[[], tuple[Sequence[str], int]] | None = None,
                  mode_inputs: Callable[[], ModeInputs] | None = None,
+                 desktop_request: Callable[[str], Any] | None = None,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
@@ -349,6 +365,9 @@ class AskController(QObject):
         self._route_flags = route_flags or RouteFlags
         self._memory = memory                 # (the notes the planner gets, how many left out); None: off
         self._mode_inputs = mode_inputs or ModeInputs   # the app's to-dos and deadlines (GUI thread)
+        # A typed desktop request (ROUTE_DESKTOP; [desktop] on): the app takes it onto the HUD and answers a local
+        # route there (None), or hands back the planner's job (ask.desktop_mode.DesktopJob). None: no desktop.
+        self._desktop_request = desktop_request
         self.last_task_id = 0                  # the LIVE view task of the last finished Ask (0: none)
         # While outcomeReady is handled: the LIVE task of that answer (still open; NO_TASK otherwise).
         self.finishing_task: LiveTask = NO_TASK
@@ -534,6 +553,9 @@ class AskController(QObject):
             logger.info("Ask: a typed %s shortcut", found.kind)
             self.submit_mode(ModeRequest(MODE_PREP, ORIGIN_TYPED, target=found.payload, typed_route=True), text)
             return
+        if found.kind == ROUTE_DESKTOP and self._desktop_request is not None:
+            self._submit_desktop(text)
+            return
         if self._running is not None:
             self._status(BUSY_TEXT if self._running.cancel_requested else
                          "Jarvis is already planning; wait or Cancel it", hud.TONE_WARN)
@@ -600,8 +622,8 @@ class AskController(QObject):
             inputs = ModeInputs()
         self._seq += 1
         kind = MODE_TASKS.get(request.mode, TASK_ASK)
-        task = _mode_task(self.live, request, words, kind=kind,
-                          memory=None if request.mode == MODE_MEETING else self._memory_given())
+        task = _mode_task(self.live, request, words, kind=kind,   # a summary or a desktop plan gets no notes
+                          memory=None if request.mode in (MODE_MEETING, MODE_DESKTOP) else self._memory_given())
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind,
                            typed=request.typed_route, mode=request.mode, clear_text=clear_text, bar=self.bar)
         self._running = running
@@ -615,6 +637,26 @@ class AskController(QObject):
         self._show_stage()
         self._tick.start()
         return True
+
+    def _submit_desktop(self, text: str) -> None:
+        """A typed desktop request (ROUTE_DESKTOP, SPEC 3): busy first (nothing switches while a request runs), then
+        the app's side - from the window's bar onto the HUD, where the request continues; a local route answered on
+        this PC with no planner run - and else ONE desktop planner run (MODE_DESKTOP) with the app's job, typed in the
+        bar now bound (the HUD's). Never logged: the words."""
+        if self._running is not None:
+            self._status(BUSY_TEXT if self._running.cancel_requested else
+                         "Jarvis is already planning; wait or Cancel it", hud.TONE_WARN)
+            return
+        logger.info("Ask: a typed %s request", ROUTE_DESKTOP)
+        try:
+            job = self._desktop_request(text) if self._desktop_request is not None else None
+        except Exception as exc:  # noqa: BLE001 - a desktop request must never take the app down
+            logger.warning("Ask: the desktop request could not be set up (%s)", type(exc).__name__)
+            self._status(DESKTOP_NOT_NOW_TEXT, hud.TONE_WARN)
+            return
+        if job is None:
+            return                                    # answered on this PC, or it could not go onto the desktop
+        self.submit_mode(ModeRequest(MODE_DESKTOP, ORIGIN_TYPED, typed=text, typed_route=True, payload=job), text)
 
     def _route(self, text: str) -> Any:
         try:
@@ -706,9 +748,15 @@ class AskController(QObject):
             # A mode with no run is amber, but a brief of Jarvis's own is an answer (it stays as done).
             soft = (outcome.question and not outcome.cards) or (bool(getattr(outcome, "note_kind", ""))
                                                                 and getattr(outcome, "brief", None) is None)
+            done = any(not card.error for card in outcome.cards) or getattr(outcome, "brief", None) is not None
+            if getattr(outcome, "mode", "") == MODE_DESKTOP:
+                # A desktop plan: Jarvis's own words for it; the request stays in the bar to rephrase when no step
+                # passed (a question back, everything refused).
+                plan = getattr(outcome, "brief", None)
+                soft = plan is None or desktop_mode.plan_tone_warn(plan)
+                done = plan is not None and bool(plan.accepted())
             self._status(self._answer(outcome), hud.TONE_WARN if soft else hud.TONE_DONE, keep_link=keep_link,
                          hud_text=self._hud_answer(outcome))
-            done = any(not card.error for card in outcome.cards) or getattr(outcome, "brief", None) is not None
             typed_in = running.bar if running.bar is not None and shiboken6.isValid(running.bar) else self.bar
             if done and (running.typed or (running.clear_text and typed_in.text() == running.clear_text)):
                 # A question back, choices or nothing to propose keep the draft to edit; a click-started
@@ -766,6 +814,8 @@ class AskController(QObject):
             return outcome.message if getattr(outcome, "note_kind", "") else PREP_READY_STATUS
         if getattr(outcome, "mode", "") == MODE_MEETING and getattr(outcome, "brief", None) is not None:
             return MEETING_READY_TEXT   # never the title: the summary is on its own screen
+        if getattr(outcome, "mode", "") == MODE_DESKTOP:
+            return outcome.message      # Jarvis's own words for the checked plan (never Claude's say or question)
         if getattr(outcome, "note_kind", ""):
             return outcome.message
         parts = [part for part in (outcome.say, outcome.question) if part]
@@ -787,8 +837,8 @@ class AskController(QObject):
         HUD_IN_WINDOW (an answer or a question back, in the window's conversation). A brief, a meeting's summary and a
         mode that did not run say what ``_answer`` says: those are Jarvis's own words already."""
         mode = getattr(outcome, "mode", "")
-        if getattr(outcome, "note_kind", "") or (mode in (MODE_PREP, MODE_MEETING)
-                                                 and getattr(outcome, "brief", None) is not None):
+        if getattr(outcome, "note_kind", "") or mode == MODE_DESKTOP or (mode in (MODE_PREP, MODE_MEETING)
+                                                                         and getattr(outcome, "brief", None) is not None):
             return self._answer(outcome)
         address = getattr(getattr(self.config, "assistant", None), "address", "sir")
         proposed = any(not card.error for card in outcome.cards)
@@ -854,6 +904,8 @@ class AskController(QObject):
         elif outcome is not None and outcome.ok and getattr(outcome, "mode", "") == MODE_MEETING:
             drafts = sum(1 for card in outcome.cards if not card.error)
             parts.append("summary" + (f" + {_plural(drafts, 'follow-up draft')} under ASK" if drafts else ""))
+        elif outcome is not None and outcome.ok and getattr(outcome, "mode", "") == MODE_DESKTOP:
+            parts += _desktop_meta(outcome)
         elif outcome is not None and outcome.ok:
             cards = sum(1 for card in outcome.cards if not card.error)
             noun = "block" if getattr(outcome, "mode", "") == MODE_PLAN else "proposal"
@@ -1016,6 +1068,11 @@ def _mode_task(live: LiveStream | None, request: ModeRequest, words: str, *, kin
     task = live.task(kind, title)
     if task is NO_TASK:
         return NO_TASK
+    if request.mode == MODE_DESKTOP:   # a desktop request: what was typed and its route (the planner here)
+        step = task.step(DESKTOP_REQUEST, "Your request", fields=[("You typed", words or title),
+                                                                  ("Route", DESKTOP_ROUTE_TEXT)])
+        step.done(STATUS_OK)
+        return task
     fields = [("You typed" if request.typed_route else "You clicked", words or title)]
     if request.mode == MODE_MEETING:   # a meeting summary: what started it, and that it gets no notes or mail
         started = ("your tick \"summarise it\" on the meeting's start card (it ran once the transcript was ready)"
@@ -1050,8 +1107,8 @@ def _card_words(card: Any, hour24: bool = False) -> str:
 def _cards_step(task: LiveTask, outcome: Any, hour24: bool = False) -> None:
     """Right before the answer is handed over: what Jarvis says and the cards, as returned (a web
     research: its answer, how many sources it showed and left out, and the sources' cards)."""
-    if task is NO_TASK:
-        return
+    if task is NO_TASK or getattr(outcome, "mode", "") == MODE_DESKTOP:
+        return   # a desktop plan has no cards: its steps are in "Checking the plan" and "What Jarvis does with it"
     step = task.step(ASK_CARDS, "Answer and cards")
     for label, value in (("Jarvis says", outcome.say), ("Question", outcome.question), ("Note", outcome.message)):
         if value:
@@ -1133,6 +1190,8 @@ def _finish_words(outcome: Any, *, cancelled: bool) -> tuple[str, str]:
         return _prep_finish_words(outcome)
     if outcome.ok and getattr(outcome, "mode", "") == MODE_MEETING:
         return _meeting_finish_words(outcome)
+    if outcome.ok and getattr(outcome, "mode", "") == MODE_DESKTOP:
+        return _desktop_finish_words(outcome)
     if outcome.ok and getattr(outcome, "mode", "") == MODE_NUDGE and getattr(outcome, "note_kind", ""):
         from .persona import nudge_no_run_words
 
@@ -1194,6 +1253,30 @@ def _prep_finish_words(outcome: Any) -> tuple[str, str]:
     if problems:
         return STATUS_WARN, f"{words}, {', '.join(problems)}"
     return STATUS_OK, words
+
+
+def _desktop_meta(outcome: Any) -> list[str]:
+    """The meta line after a desktop plan: "desktop plan: 2 steps OK, 1 refused - nothing opened yet"."""
+    plan = getattr(outcome, "brief", None)
+    if plan is None:
+        return ["desktop plan"]
+    words = f"desktop plan: {_plural(len(plan.accepted()), 'step')} OK"
+    if plan.refused():
+        words += f", {len(plan.refused())} refused"
+    return [words + " - nothing opened yet"]
+
+
+def _desktop_finish_words(outcome: Any) -> tuple[str, str]:
+    """A desktop request's LIVE task end: "plan checked: 2 steps OK - nothing opened yet"; CHECK when a step was
+    refused or none passed."""
+    plan = getattr(outcome, "brief", None)
+    if plan is None:
+        return STATUS_WARN, "no plan"
+    words = f"plan checked: {_plural(len(plan.accepted()), 'step')} OK"
+    if plan.refused():
+        words += f", {len(plan.refused())} refused"
+    words += " - nothing opened yet"
+    return (STATUS_WARN if desktop_mode.plan_tone_warn(plan) else STATUS_OK), words
 
 
 def _meeting_finish_words(outcome: Any) -> tuple[str, str]:

@@ -2,7 +2,8 @@
 
 A mode is a planner run of its own (ClaudeEngine.run_mode): its own system prompt and schema, no
 tools, no mail search, no web research, no second run: the day plan, the meeting brief and the
-drafted reply or nudge of a follow-up:
+drafted reply or nudge of a follow-up; also a meeting's summary (MODE_MEETING) and a desktop request
+(MODE_DESKTOP, ask.desktop_mode: one JSON plan of refs, no card lines):
 
     ModeRequest(mode, origin, typed=, part=, ...)   what started it (typed, an offer, a click); the
                                      owner's own words only in ``typed``
@@ -68,18 +69,23 @@ from .mail import MailThread, trim_threads
 MODE_PLAN, MODE_PREP, MODE_NUDGE = "plan", "prep", "nudge"
 # Meetings part 2: a recorded meeting's summary (ask.meeting_summary). Not a bundle run: it counts as an Ask run.
 MODE_MEETING = "meeting"
+# Jarvis on your desktop (P1.7): a desktop request the owner typed (ask.desktop_mode). Claude only plans: its answer
+# is one JSON plan of refs, never card lines (MODE_KINDS empty), which desktop.validate checks. Counts as an Ask run.
+MODE_DESKTOP = "desktop"
 ORIGIN_OFFER, ORIGIN_TYPED, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_BRIEF = "offer", "typed", "choice", "list", "brief"
 # A summary runs only when the owner asked for it: ORIGIN_AUTO - his own "summarise it" tick on that meeting's
 # start card (unticked every time), once the transcript is ready; ORIGIN_SUMMARISE - his click on Summarise.
 ORIGIN_AUTO, ORIGIN_SUMMARISE = "auto", "summarise"
 MODE_KINDS = {MODE_PLAN: frozenset({CALENDAR}), MODE_PREP: frozenset({REPLY}), MODE_NUDGE: frozenset({REPLY}),
-              MODE_MEETING: frozenset({EMAIL})}
-MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1, MODE_MEETING: 3}
+              MODE_MEETING: frozenset({EMAIL}), MODE_DESKTOP: frozenset()}
+# A desktop plan has no lines: at most this many steps (desktop_schema.json's steps maxItems).
+MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1, MODE_MEETING: 3, MODE_DESKTOP: 12}
 MODE_TASKS = {MODE_PLAN: live.TASK_PLAN, MODE_PREP: live.TASK_PREP, MODE_NUDGE: live.TASK_NUDGE,
-              MODE_MEETING: live.TASK_MEETING}
+              MODE_MEETING: live.TASK_MEETING, MODE_DESKTOP: live.TASK_DESKTOP}
 MODE_USAGE = {MODE_PLAN: usage.KIND_PLAN_DAY, MODE_PREP: usage.KIND_PREP, MODE_NUDGE: usage.KIND_NUDGE,
-              MODE_MEETING: usage.KIND_PLAN}
-MODE_TITLES = {MODE_PLAN: "Plan", MODE_PREP: "Prep", MODE_NUDGE: "Nudge", MODE_MEETING: "Meeting"}
+              MODE_MEETING: usage.KIND_PLAN, MODE_DESKTOP: usage.KIND_PLAN}
+MODE_TITLES = {MODE_PLAN: "Plan", MODE_PREP: "Prep", MODE_NUDGE: "Nudge", MODE_MEETING: "Meeting",
+               MODE_DESKTOP: "Desktop"}
 FIXED_COMMANDS: dict[Any, str] = {
     MODE_PLAN: "Plan the day in <day> for the owner: propose time blocks inside <free> for what needs time in "
                "<todos> and <briefing>, as Calendar lines, or ask one question.",
@@ -96,6 +102,9 @@ FIXED_COMMANDS: dict[Any, str] = {
     (MODE_MEETING, "plain"): "Summarise the meeting in <transcript> for the owner: a title, the decisions, the "
                              "action items (who and what), the open questions, the follow-ups as plain notes (who "
                              "and what, never an email), and facts worth keeping.",
+    # The owner's typed words follow ("The owner's words: ..."): they are the request.
+    MODE_DESKTOP: "Plan what the owner asks for on his desktop as one JSON plan: only the ids given in <places>, "
+                  "<files>, <apps> and <sites>, only opening, showing and finding, or ask one question.",
 }
 OWNER_WORDS = "The owner's words: "
 OWNER_WORDS_CAP = 300
@@ -158,7 +167,8 @@ class ModeRequest:
     offer_id: int = 0
     typed_route: bool = False
     # A meeting summary's job (ask.meeting_summary.MeetingJob: the meeting's id, its transcript file and the
-    # invite's facts); memory only, never logged.
+    # invite's facts), or a desktop request's (ask.desktop_mode.DesktopJob: its run id and the context's candidates);
+    # memory only, never logged.
     payload: Any = field(default=None, repr=False, compare=False)
 
     def __repr__(self) -> str:
