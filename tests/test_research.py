@@ -202,8 +202,12 @@ class PromptTests(unittest.TestCase):
             self.assertNotIn(bad, text)
         self.assertEqual(len(text.split("<question>\n")[1].split("\n")[0]), len(text.split("<question>\n")[1].split(
             "\n")[0]))
-        long = build_research_prompt("x" * 900, hint="y" * 900, now=NOW, time_zone=ZONE, limits=ResearchLimits())
-        self.assertLessEqual(len(long.split("<question>\n")[1].split("\n")[0]), 500)
+        from briefing_reader.ask.context import COMMAND_CAP
+
+        # The owner's words as long as an Ask's (no word limit of the bar's): the run's own caps do not grow.
+        long = build_research_prompt("x" * (COMMAND_CAP + 900), hint="y" * 900, now=NOW, time_zone=ZONE,
+                                     limits=ResearchLimits())
+        self.assertEqual(len(long.split("<question>\n")[1].split("\n")[0]), COMMAND_CAP)
         self.assertLessEqual(len(long.split("<search_hint>\n")[1].split("\n")[0]), 200)
         unknown_zone = build_research_prompt("q", hint="", now=NOW, time_zone="", limits=ResearchLimits())
         self.assertIn("(time zone unknown)", unknown_zone)

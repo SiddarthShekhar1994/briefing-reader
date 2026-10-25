@@ -196,6 +196,8 @@ from .ask.modes import (MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TIT
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import CONFIG_FILE_NAME, DEFAULT_ACCOUNT, PROJECT_ROOT, AgendaConfig, Config
+from .conversation import CONVERSATION_FILE, ConversationStore, Turn
+from .conversation import recent as recent_turns
 from .executor import (
     DISCONNECT_FAILED_MESSAGE,
     NEW_RECIPIENT_NOTE,
@@ -968,8 +970,11 @@ _TIERS = (_Tier(1320, 300, 372, 168), _Tier(1040, 260, 340, 168), _Tier(860, 230
 _SHORT_VIEW_BELOW = 520
 _SHORT_STRIP_PAD = 6
 _SPEECH_LINES = 3          # the spoken line under the orb is cut to this many lines
-STRIP_CAPTION = f"Conversation {DOT} this session"   # the centre panel's strip on the JARVIS tab
+STRIP_CAPTION = f"Conversation {DOT} the last day"   # the centre panel's strip on the JARVIS tab
 STRIP_CAPTION_SHORT = "Conversation"                 # ... when the whole caption does not fit
+CLEAR_CONVERSATION_TEXT = "Clear conversation"       # the Transcript drawer's head
+CLEAR_CONVERSATION_TIP = ("Clear this conversation, here and on this PC (conversation.json): Jarvis forgets what "
+                          "was said. Notes, cards and LIVE stay")
 LIVE_AWAY_TEXT = live_view.AWAY_TEXT                  # the Live screen while the pop-out shows the steps
 POP_OUT_TEXT = live_view.POP_OUT_LABEL                # the name of the Live strip's Pop out (an icon)
 POP_OUT_TIP = "Show LIVE in its own window - put it on a second screen"
@@ -1058,7 +1063,9 @@ class ReadingView(QWidget):
     sits over them. Screens (``set_tab(index)``, ``current_tab()``, ``tabChanged``; Ctrl+1..6, Ctrl+,):
     Home (SCREEN_HOME = hud.TAB_JARVIS: ``stage`` with the ``hero`` orb, ``echo``, ``captions``, one
     quiet chip, the command bar, the Transcript drawer holding ``conversation`` (round 2, part 3a: a
-    transcript_view.TranscriptLog), an open offer as ONE amber tile beside the orb (``offer_tile``,
+    transcript_view.TranscriptLog; the app keeps its last day on this PC, and the drawer's Clear
+    conversation, ``transcript_clear_button``, emits ``clearConversation``), an open offer as ONE amber
+    tile beside the orb (``offer_tile``,
     ``set_offers``: its commit is the offer's own link, ``homeLink``; Not now, ``offerNotNow``) and the plan or
     the brief in place of the orb (``show_plan`` / ``show_brief``: ``plan_stage``, ``brief_stage``; the brief's
     reply cards are NEEDS YOUR OK's own, lent while it shows)), Briefing (STATUS and
@@ -1122,6 +1129,7 @@ class ReadingView(QWidget):
     openConfig = Signal()        # Settings: Open config.toml
     openDataFolder = Signal()    # Settings: Open the data folder
     homeLink = Signal(str)       # an offer tile's commit, a moment's See every step: the Transcript's own link
+    clearConversation = Signal()  # the Transcript's Clear conversation (the app forgets what was said)
     offerNotNow = Signal(int)    # an offer tile's Not now (Home only): the offer id
     recordMeeting = Signal()     # the Find list's "Record a meeting": the start card opens (it never records)
     stopRecording = Signal()     # Stop on the header's REC or Home's (the pill and Meetings have their own)
@@ -1509,6 +1517,13 @@ class ReadingView(QWidget):
         self.transcript_drawer = home.Drawer(TRANSCRIPT_TITLE, self._main)
         self.transcript_drawer.body_layout.addWidget(self.conversation, 1)
         self.transcript_drawer.closed.connect(self._sync_echo)
+        # Clear conversation: only while there is one (the app clears it here and on this PC).
+        self.transcript_clear_button = holo.HoloButton(CLEAR_CONVERSATION_TEXT, holo.GHOST, size=holo.SIZE_SM)
+        self.transcript_clear_button.setToolTip(CLEAR_CONVERSATION_TIP)
+        self.transcript_clear_button.clicked.connect(lambda: self.clearConversation.emit())
+        self.transcript_drawer.add_head_button(self.transcript_clear_button)
+        self.conversation.changed.connect(self._sync_transcript_clear)
+        self._sync_transcript_clear()
         self.day_drawer = home.Drawer(DAY_VIEW_TITLE, self._main)
         self._place_agenda(self.day_drawer.body_layout, hud.AGENDA_DAY)
         self._apply_tier(READING_SIZE.width())
@@ -1694,6 +1709,11 @@ class ReadingView(QWidget):
         if self._answer[0]:
             self._answer = ("", 0, "")          # seen: the answer's chip goes
             self._sync_chip()
+
+    def _sync_transcript_clear(self) -> None:
+        """The Transcript's Clear conversation shows only while there is a conversation to clear."""
+        if shiboken6.isValid(self.transcript_clear_button):
+            self.transcript_clear_button.setVisible(bool(self.conversation.entry_widgets()))
 
     def open_day_view(self) -> None:
         """The Day view (the header clock): TODAY / DEADLINES in a drawer over the current screen."""
@@ -3642,6 +3662,8 @@ _RESULT_TONES = {OUTCOME_GOOD: hud.TONE_GOOD, OUTCOME_ERROR: hud.TONE_ERROR, OUT
 _GREETING_WAIT_MS = 3000          # an opening greeting waits this long for the first fetch answer
 _GREETING_REPEAT_S = 120.0        # an open of a hidden or minimized window greets again after this
 _LOCK_RECHECK_MS = 5000           # a held announcement checks the lock screen again this often
+_CONVERSATION_SAVE_MS = 500       # conversation.json is written this long after the conversation changed
+_CONVERSATION_PRUNE_MS = 3600 * 1000   # ... and hourly: an entry leaves it within the hour after a day
 
 LOADING_TEXT = "Fetching your briefing from Notion..."
 ACTIONS_FILE = "actions.json"
@@ -4830,6 +4852,7 @@ class AppController(QObject):
         self._init_talk_state(prefs, locked)
         self._init_timers()
         self._connect_signals()
+        self._init_conversation()                       # the last day's conversation (conversation.json)
         self._init_live_view()
         self._init_memory_state()
         self.ask: Any = self._create_ask(ask_factory)   # ask_ui.AskController, or None while [ask] is off
@@ -5019,10 +5042,9 @@ class AppController(QObject):
         self._plan_focus_guard: tuple[str, float] = ("", -math.inf)
         self._mode_auto_opened = 0
         # The meeting brief (memory only): "Prep this one" links by counter -> the meeting, the link's
-        # words, the entries of the same choice (one click starts one brief: the others lose their
-        # link) and the typed words that led to it (cleared from the bar once the brief is in, while
-        # the bar still holds exactly them, R23).
-        self._prep_choices: dict[int, tuple[Any, str, tuple[int, ...], str]] = {}
+        # words and the entries of the same choice (one click starts one brief: the others lose their
+        # link).
+        self._prep_choices: dict[int, tuple[Any, str, tuple[int, ...]]] = {}
         self._prep_choice_seq = 0
 
     @property
@@ -5165,6 +5187,7 @@ class AppController(QObject):
         self._live_unread = False                  # Ask / card steps came while LIVE was not in sight
         self._live_opened: list[int] = []          # tasks that already switched to LIVE (one switch each)
         self._ask_task_id = 0                      # the running (or last) Ask's LIVE task
+        self._ask_you_entry = 0                    # ... and its YOU entry in the conversation
         self._live_peeks = [0, 0, 0]               # event checks on their way: jobs, cards, problems
         # The calendar days Jarvis already read (today's agenda, Ask's reads): a day picture draws a
         # day's other events only from these (memory only; never a Google call for a picture).
@@ -8009,7 +8032,8 @@ class AppController(QObject):
         controller = ask_ui.AskController(self.config, planner, reading.command_bar, context=self._ask_context,
                                           blocked=self._ask_blocked, calendars=self._calendars, live=self.live,
                                           route_flags=self._route_flags, memory=self._memory_given,
-                                          mode_inputs=self._mode_inputs, parent=self)
+                                          mode_inputs=self._mode_inputs, conversation=self._conversation_turns,
+                                          parent=self)
         controller.busyChanged.connect(self._on_ask_busy)
         controller.outcomeReady.connect(self._on_ask_outcome)
         controller.askStarted.connect(self._on_ask_started)
@@ -8092,9 +8116,10 @@ class AppController(QObject):
             # screen stays where the owner is; LIVE has its steps.
             self._ask_task_id = self.ask.task_id
             return
-        self._you(text)
-        self._ask_task_id = self.ask.task_id if self.ask is not None else 0
         kind = (self.ask.running_kind if self.ask is not None else "") or _live.TASK_ASK
+        # A "web:" request is never given to a later Ask as the conversation (ISO-4), nor is its answer.
+        self._ask_you_entry = self._you(text, context=kind != _live.TASK_WEB)
+        self._ask_task_id = self.ask.task_id if self.ask is not None else 0
         self._mode_auto_opened = 0
         was_live = self.window.reading.current_tab() == hud.TAB_LIVE
         if not self._live_auto_open(kind, self._ask_task_id):
@@ -8196,7 +8221,11 @@ class AppController(QObject):
         sub.append(steps_words(report))
         task_id = self._ask_task_id
         link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
-        self._jarvis(text, tone=hud.TONE_DONE, sub=f" {DOT} ".join(sub), link=link)
+        # Nothing the research was asked or found reaches a later Ask (ISO-4): its answer and the request it
+        # answers (also one the planner handed over) stay out of the conversation Ask is given.
+        if self._ask_you_entry:
+            self.window.reading.conversation.update(self._ask_you_entry, context=False)
+        self._jarvis(text, tone=hud.TONE_DONE, sub=f" {DOT} ".join(sub), link=link, context=False)
         if assistant.speak_replies:
             reply = research_reply_speech(report.answer, sources=len(report.sources), cards=proposals,
                                           address=assistant.address)
@@ -8546,7 +8575,6 @@ class AppController(QObject):
         (the link maps, in memory only, to the meeting's account, calendar and id)."""
         hour24 = self.config.display.hour24
         conversation = self.window.reading.conversation
-        typed = self.ask.bar.text() if self.ask is not None else ""
         lead = self._jarvis(outcome.message or prep_choices_text(len(outcome.choices), self.config.assistant.address),
                             tone=hud.TONE_WARN, sub="no planner run")
         made: list[tuple[int, Any, str]] = []
@@ -8559,7 +8587,7 @@ class AppController(QObject):
                                         link=(PREP_THIS_ONE_TEXT, f"{PREP_CHOICE_LINK}{number}")))
             made.append((number, choice.ref, f"{PREP_THIS_ONE_TEXT}: {text}"))
         for number, ref, words in made:
-            self._prep_choices[number] = (ref, words, tuple(entries), typed)
+            self._prep_choices[number] = (ref, words, tuple(entries))
         while len(self._prep_choices) > 30:   # memory only: the oldest group goes, whole, links included
             gone = self._prep_choices[next(iter(self._prep_choices))][2]
             for key in [key for key, value in self._prep_choices.items() if value[2] == gone]:
@@ -8569,8 +8597,8 @@ class AppController(QObject):
         conversation.follow_from(lead)   # the question first, then the choices (never a bare link on top)
 
     def _prep_choice_link(self, number_text: str) -> None:
-        """"Prep this one": a brief of that meeting (a click-started run: the bar's text stays unless
-        it is still exactly the typed words that led to these choices, R23). A gone link does
+        """"Prep this one": a brief of that meeting (a click-started run: the bar's text stays, R23 - the
+        typed words that led to these choices left it when that request started). A gone link does
         nothing; a click while busy is refused and the link stays."""
         try:
             number = int(number_text)
@@ -8580,8 +8608,8 @@ class AppController(QObject):
         if found is None or self.ask is None or self.state == STATE_QUITTING:
             logger.info("Prep: a choice link that is gone")
             return
-        ref, words, entries, typed = found
-        started = self.ask.submit_mode(ModeRequest(MODE_PREP, ORIGIN_CHOICE, event=ref), words, clear_text=typed)
+        ref, words, entries = found
+        started = self.ask.submit_mode(ModeRequest(MODE_PREP, ORIGIN_CHOICE, event=ref), words)
         if not started:
             return
         conversation = self.window.reading.conversation
@@ -9973,7 +10001,7 @@ class AppController(QObject):
                 link = (FOLLOWUPS_SHOW_LINK, FOLLOWUPS_SHOW)
         self._jarvis(answer, tone=hud.TONE_DONE, link=link)
         if self.ask is not None:
-            self.ask.show_note(answer, clear=True)
+            self.ask.show_note(answer)
         logger.info("Follow-ups: answered a typed request (no run)")
 
     # ---- Memory (the productivity bundle) -------------------------------------------------------
@@ -9981,7 +10009,8 @@ class AppController(QObject):
     def _init_memory_state(self) -> None:
         """The notes are memory.json's (MemoryStore); everything else here is memory only."""
         self.memory_store: MemoryStore | None = None
-        self._memory_notes: tuple[tuple[str, ...], int] = ((), 0)   # what the planner gets, how many left out
+        self._memory_notes: tuple[tuple[str, ...], int] = ((), 0)   # what a plan gets (newest), how many left out
+        self._memory_all: tuple[str, ...] = ()                       # every note, newest first (the planner picks)
         self._memory_asked: tuple[str, ...] = ()                     # the notes the last typed Ask started with
         self._memory_dismissed: tuple[frozenset[str], ...] = ()
         self._memory_links: dict[int, _MemoryLink] = {}               # Undo / Remember this, by counter
@@ -10028,8 +10057,9 @@ class AppController(QObject):
                           followups=self._followups_section_on())
 
     def _memory_prompt_notes(self) -> tuple[str, ...]:
-        """The notes the planner gets (any thread: the GUI thread swaps the whole tuple)."""
-        return self._memory_notes[0]
+        """Every note, newest first: the planner gives a run the ones that fit, an Ask's the closest to its
+        command first (any thread: the GUI thread swaps the whole tuple)."""
+        return self._memory_all
 
     def _memory_dismissed_marks(self) -> tuple[frozenset[str], ...]:
         return self._memory_dismissed
@@ -10039,15 +10069,19 @@ class AppController(QObject):
         store = self.memory_store
         return store is not None and not store.read_only
 
-    def _memory_given(self) -> tuple[tuple[str, ...], int] | None:
-        """"Memory given" in a typed Ask's "Your request" step (None while memory is off). Asked as
-        the Ask starts: memory.json is taken again first (the owner may have changed or deleted it by
-        hand), so the planner gets what the file holds now."""
-        if self.memory_store is None:
+    def _memory_given(self, command: str = "") -> tuple[tuple[str, ...], int] | None:
+        """"Memory given" in a request's "Your request" step: the notes the planner gets for ``command``
+        (an Ask's words: the closest first when they don't all fit; "" for a planner mode: the newest) and
+        how many were left out (None while memory is off). Asked as the request starts: memory.json is
+        taken again first (the owner may have changed or deleted it by hand), so the planner gets what the
+        file holds now."""
+        store = self.memory_store
+        if store is None:
             return None
         self._memory_refresh()
-        self._memory_asked = self._memory_notes[0]
-        return self._memory_notes
+        given = store.prompt_notes(command)
+        self._memory_asked = given[0]
+        return given
 
     def _memory_spoken_guard(self) -> tuple[str, ...]:
         """The notes an Ask's spoken answer must not repeat: those the planner started with and those
@@ -10096,24 +10130,20 @@ class AppController(QObject):
             if self._memory_filter:   # every note, not the matches of an earlier "forget"
                 self._memory_filter = ""
                 self._render_memory()
-            self.window.reading.set_tab(hud.TAB_MEMORY)
-            self._memory_bar("", clear=True)
+            self.window.reading.set_tab(hud.TAB_MEMORY)   # its typed words left the bar when it was taken
             return
-        self._you(text)
+        self._you(text, keep=False)   # shown only: the note reaches Ask through <memory>
         if route.kind == ROUTE_MEMORY_SAVE:
             self._memory_save_typed(route.payload)
         elif route.kind == ROUTE_MEMORY_FORGET:
             self._memory_forget_typed(route.payload)
 
-    def _memory_bar(self, text: str, tone: str = hud.TONE_DONE, *, clear: bool = False) -> None:
-        """A memory shortcut's answer in the command bar's status line."""
+    def _memory_bar(self, text: str, tone: str = hud.TONE_DONE) -> None:
+        """A memory shortcut's answer in the command bar's status line (its typed words left the bar when
+        the shortcut was taken: Up brings them back to edit)."""
         ask = self.ask
-        if ask is None:
-            return
-        if text:
-            ask.show_note(text, tone, clear=clear)
-        elif clear and not ask.busy:
-            self.window.reading.command_bar.clear_input()
+        if ask is not None and text:
+            ask.show_note(text, tone)
 
     def _memory_save_typed(self, note: str) -> None:
         store = self.memory_store
@@ -10122,16 +10152,16 @@ class AppController(QObject):
         if isinstance(result, str):
             text = self._memory_refused(result, note)
             link = (MEMORY_OPEN_TEXT, MEMORY_OPEN_LINK) if result == "full" else ("", "")
-            self._jarvis(text, tone=hud.TONE_WARN, link=link)
+            self._jarvis(text, tone=hud.TONE_WARN, link=link, keep=False)
             self._memory_bar(text, hud.TONE_WARN)
             if result in SPOKEN_REFUSALS and self.config.assistant.speak_replies:
                 self._say(KIND_RESULT, memory_refused_speech(self._address()))
             return
         number, link = self._memory_link("undo_add", result)
         text = memory_saved_text(result.text, self._address())
-        link.entry_id = self._jarvis(text, link=(MEMORY_UNDO_TEXT, f"{MEMORY_UNDO_LINK}{number}"))
+        link.entry_id = self._jarvis(text, link=(MEMORY_UNDO_TEXT, f"{MEMORY_UNDO_LINK}{number}"), keep=False)
         self._memory_saved(result, SOURCE_TOLD)
-        self._memory_bar(text, clear=True)
+        self._memory_bar(text)
         if self.config.assistant.speak_replies:
             self._say(KIND_RESULT, memory_saved_speech(self._address()))
 
@@ -10141,22 +10171,22 @@ class AppController(QObject):
         address = self._address()
         if store.read_only:
             text = self._memory_refused("read_only", "")
-            self._jarvis(text, tone=hud.TONE_WARN)
+            self._jarvis(text, tone=hud.TONE_WARN, keep=False)
             self._memory_bar(text, hud.TONE_WARN)
             return
         matches = store.match(words)
         if not matches:
             text = with_address(MEMORY_NO_MATCH_TEXT, address)
-            self._jarvis(text, tone=hud.TONE_WARN)
+            self._jarvis(text, tone=hud.TONE_WARN, keep=False)
             self._memory_bar(text, hud.TONE_WARN)
             return
         if len(matches) > 1:
             text = with_address(MEMORY_SEVERAL_TEXT, address)
-            self._jarvis(text)
+            self._jarvis(text, keep=False)
             self._memory_filter = " ".join(words.split())
             self._render_memory()
             self.window.reading.set_tab(hud.TAB_MEMORY)
-            self._memory_bar(text, clear=True)
+            self._memory_bar(text)
             return
         place = store.position(matches[0].id)
         removed = store.delete(matches[0].id)
@@ -10167,9 +10197,9 @@ class AppController(QObject):
         number, link = self._memory_link("undo_forget", removed)
         link.place = place
         text = memory_forgotten_text(removed.text, address)
-        link.entry_id = self._jarvis(text, link=(MEMORY_UNDO_TEXT, f"{MEMORY_UNDO_LINK}{number}"))
+        link.entry_id = self._jarvis(text, link=(MEMORY_UNDO_TEXT, f"{MEMORY_UNDO_LINK}{number}"), keep=False)
         self._memory_removed(removed)
-        self._memory_bar(text, clear=True)
+        self._memory_bar(text)
         if self.config.assistant.speak_replies:
             self._say(KIND_RESULT, memory_forgotten_speech(address))
 
@@ -10223,7 +10253,7 @@ class AppController(QObject):
         if store is not None and store.read_only:
             if link.entry_id:
                 self.window.reading.conversation.update(link.entry_id, link_text="", link_id="")
-            self._jarvis(self._memory_refused("read_only", ""), tone=hud.TONE_WARN)
+            self._jarvis(self._memory_refused("read_only", ""), tone=hud.TONE_WARN, keep=False)
             return
         logger.info("Memory: undo ignored (already changed)")
         self._memory_entry(link.entry_id, MEMORY_CHANGED_TEXT)
@@ -10273,7 +10303,7 @@ class AppController(QObject):
         if not quiet:
             number, link = self._memory_link("save_suggestion", suggestion=self._memory_suggestion_seq)
             entry_id = self._jarvis(memory_suggestion_text(text, self._address()), sub=MEMORY_SUGGESTION_SUB,
-                                    link=(MEMORY_REMEMBER_TEXT, f"{MEMORY_SAVE_LINK}{number}"))
+                                    link=(MEMORY_REMEMBER_TEXT, f"{MEMORY_SAVE_LINK}{number}"), keep=False)
             link.entry_id = entry_id
         self._memory_suggestions.append(_MemorySuggestion(self._memory_suggestion_seq, text, entry_id, number))
         while len(self._memory_suggestions) > MAX_PENDING_SUGGESTIONS:
@@ -10293,7 +10323,7 @@ class AppController(QObject):
         if isinstance(result, str):
             text = self._memory_refused(result, suggestion.text)
             if from_conversation:
-                self._jarvis(text, tone=hud.TONE_WARN,
+                self._jarvis(text, tone=hud.TONE_WARN, keep=False,
                              link=(MEMORY_OPEN_TEXT, MEMORY_OPEN_LINK) if result == "full" else ("", ""))
             else:
                 self.window.reading.memory_view.set_refusal(text)
@@ -10489,11 +10519,13 @@ class AppController(QObject):
             return
         self._memory_follow_store()
         entries = store.entries()
-        sent, left_out = store.prompt_notes()
+        given, left_out = store.prompt_entries()   # without a request: the newest that fit (the others when relevant)
+        sent = tuple(entry.text for entry in given)
         self._memory_notes = (sent, left_out)
+        self._memory_all = tuple(entry.text for entry in entries)
         self._memory_dismissed = store.dismissed()
         shown = set(entry.id for entry in store.match(self._memory_filter)) if self._memory_filter else None
-        sent_ids = {entry.id for entry in entries[:len(sent)]}
+        sent_ids = {entry.id for entry in given}
         rows = [(entry, False) for entry in entries if shown is None or entry.id in shown]
         for entry, place in sorted(self._memory_trash.values(), key=lambda item: item[1]):
             rows.insert(min(place, len(rows)), (entry, True))   # "Deleted. Undo" where the note was
@@ -10517,19 +10549,96 @@ class AppController(QObject):
     # ---- the conversation and Jarvis's voice ----------------------------------------------
 
     def _jarvis(self, text: str, *, tone: str = hud.TONE_DONE, sub: str = "",
-                link: tuple[str, str] = ("", "")) -> int:
+                link: tuple[str, str] = ("", ""), keep: bool = True, context: bool = True) -> int:
         """A JARVIS entry in the conversation (display only: never logged); its id for later updates.
-        A dot on the JARVIS tab tells the owner when another tab is current."""
+        A dot on the JARVIS tab tells the owner when another tab is current. ``keep`` False: shown only,
+        never kept on this PC or given to Ask as the conversation (memory's answers, which quote notes);
+        ``context`` False: kept, never given to Ask (a web research's answer, ISO-4)."""
         reading = self.window.reading
         entry = reading.conversation.add(hud.ROLE_JARVIS, text, when=self._now(), tone=tone, sub=sub,
-                                         link_text=link[0], link_id=link[1])
+                                         link_text=link[0], link_id=link[1], keep=keep, context=context)
         reading.mark_unread()
         return entry
 
-    def _you(self, text: str) -> int:
-        """A YOU entry (the owner's request, as typed; display only, never logged) and Home's YOU echo."""
+    def _you(self, text: str, *, keep: bool = True, context: bool = True) -> int:
+        """A YOU entry (the owner's request, as typed; display only, never logged) and Home's YOU echo.
+        ``keep`` False: shown only (a memory shortcut: its note reaches Ask only through <memory>);
+        ``context`` False: kept, never given to Ask (a "web:" request, ISO-4)."""
         self.window.reading.show_request(text)
-        return self.window.reading.conversation.add(hud.ROLE_YOU, text, when=self._now())
+        return self.window.reading.conversation.add(hud.ROLE_YOU, text, when=self._now(), keep=keep, context=context)
+
+    # ---- the conversation kept on this PC (conversation.json) ------------------------------------
+
+    def _init_conversation(self) -> None:
+        """The last day's conversation: shown again at a start (what is older than a day leaves the file
+        now and within the hour after it turns a day old), kept on this PC a moment after it changes and at
+        the quit, and cleared with the Transcript's Clear conversation. Ask's <conversation> comes from it.
+        Never logged: counts only."""
+        self._conversation_store = ConversationStore(self.config.data_dir / CONVERSATION_FILE, clock=self._now)
+        reading = self.window.reading
+        turns = self._conversation_store.turns()
+        for turn in turns:
+            reading.conversation.add(turn.role, turn.text, when=turn.at, stamp=self._turn_stamp(turn.at),
+                                     tone=turn.tone or hud.TONE_DONE, context=turn.context)
+        if turns:
+            logger.info("Conversation: %d entr%s of the last day shown again", len(turns),
+                        "y" if len(turns) == 1 else "ies")
+        self._conversation_store.prune()
+        self._conversation_timer = self._make_timer(self._save_conversation, single_shot=True,
+                                                    interval_ms=_CONVERSATION_SAVE_MS)
+        self._conversation_prune_timer = self._make_timer(self._save_conversation, single_shot=False,
+                                                          interval_ms=_CONVERSATION_PRUNE_MS)
+        self._conversation_prune_timer.start()
+        reading.conversation.changed.connect(self._on_conversation_changed)
+        reading.clearConversation.connect(self.clear_conversation)
+
+    def _turn_stamp(self, at: datetime) -> str:
+        """A kept entry's time as the conversation shows it again: "9:41 AM", or "Yesterday 9:41 PM"."""
+        now = self._now()
+        local = at.astimezone(now.tzinfo) if now.tzinfo is not None else at
+        clock = format_time(local, hour24=self.config.display.hour24)
+        return clock if local.date() == now.date() else f"Yesterday {clock}"
+
+    def _conversation_turns(self) -> tuple[Turn, ...]:
+        """The window's conversation of the last day as conversation.Turn, oldest first (an entry without its
+        time is left out). GUI thread: what is kept on this PC, and what an Ask is handed as it starts."""
+        turns = []
+        for role, when, text, tone, context in self.window.reading.conversation.kept_entries():
+            if when is None or not text.strip():
+                continue
+            turns.append(Turn(role, text, when if when.utcoffset() is not None else when.astimezone(), tone,
+                              context))
+        return recent_turns(turns, self._now())
+
+    def _on_conversation_changed(self) -> None:
+        """What the conversation says changed: kept on this PC a moment later (one write for a burst)."""
+        if self.state != STATE_QUITTING and not self._shut_down:
+            self._conversation_timer.start()
+
+    def _save_conversation(self) -> None:
+        """conversation.json as the window's conversation is now (the last day, at most 100 entries); also
+        hourly, so an entry leaves the file within the hour after it turns a day old. Never once Jarvis is
+        quitting (shutdown() saves it before that)."""
+        self._conversation_timer.stop()
+        if self.state == STATE_QUITTING or not shiboken6.isValid(self.window):
+            return
+        try:
+            self._conversation_store.save(self._conversation_turns())
+        except Exception as exc:  # noqa: BLE001 - the conversation stays on screen either way
+            logger.warning("Conversation: not kept (%s)", type(exc).__name__)
+
+    def clear_conversation(self) -> None:
+        """The Transcript's Clear conversation: the window forgets what was said and so does this PC
+        (conversation.json is deleted), and the next Ask gets no earlier exchange. Notes, cards, ACTIVITY
+        and LIVE stay."""
+        if self.state == STATE_QUITTING:
+            return
+        conversation = self.window.reading.conversation
+        count = len(conversation.entry_widgets())
+        conversation.clear()
+        self._conversation_timer.stop()
+        self._conversation_store.clear()
+        logger.info("Conversation: cleared (%d entr%s)", count, "y" if count == 1 else "ies")
 
     def _say(self, kind: str, text: str, *, key: str = "") -> bool:
         """Hand ``text`` to Jarvis's voice; False when it will not be spoken (muted, off, failed, the app is
@@ -12567,6 +12676,8 @@ class AppController(QObject):
             return
         self._shut_down = True
         logger.info("Shutting down")
+        self._save_conversation()      # the conversation as it is now stays on this PC (its timers stop below)
+        self._conversation_prune_timer.stop()
         self.live.set_listener(None)   # the LIVE view's feed hears nothing more
         self._live_feed.stop()
         if getattr(self, "meetings", None) is not None:

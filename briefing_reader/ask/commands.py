@@ -27,7 +27,9 @@
 With the productivity bundle's memory on ([productivity] enabled and memory), --ask-text gives the
 planner the owner's notes like the app does, from memory.json opened read-only (the dry run shows
 them as sizes); "remember that ..." (and "forget that ...", "show my memory") is the app's: the
-command line prints so and exits 2, nothing saved or changed.
+command line prints so and exits 2, nothing saved or changed. --ask-text also gives the planner the
+conversation the app kept on this PC (conversation.json, the last day; read only, never written), as
+an Ask in the app gets it (the dry run shows each turn as its size); a "web:" request never gets it.
 
 These print to the console only. The log gets what the app logs anyway (kinds, counts, durations):
 never the request, the context, the planner's text or anything from the web.
@@ -77,20 +79,32 @@ def memory_on(config: Config) -> bool:
 
 
 def cli_memory(config: Config) -> Callable[[], tuple[str, ...]] | None:
-    """The owner's notes for a command-line Ask: memory.json opened read-only (never written), or
-    None while memory is off."""
+    """The owner's notes for a command-line Ask: memory.json opened read-only (never written), every
+    note newest first (the planner gives a run the ones that fit, an Ask's the closest to its command
+    first), or None while memory is off."""
     if not memory_on(config):
         return None
     from ..memory import MEMORY_FILE, MemoryStore
 
     store = MemoryStore(config.data_dir / MEMORY_FILE, read_only=True,
                         max_entries=config.productivity.max_memory)
-    return lambda: store.prompt_notes()[0]
+    return lambda: tuple(entry.text for entry in store.entries())
 
 
 def _with_memory(planner: AskPlanner, config: Config) -> AskPlanner:
     planner.memory = cli_memory(config)   # never memory_suggestions: nothing could be saved here
     return planner
+
+
+def cli_conversation(config: Config, *, clock: Callable[[], datetime] | None = None) -> tuple[Any, ...]:
+    """What the app's conversation kept on this PC holds (conversation.json: the last day before
+    ``clock()``, oldest first; read only, never written) for a command-line Ask's <conversation>; ()
+    while Ask is off."""
+    if not config.ask.enabled:
+        return ()
+    from ..conversation import CONVERSATION_FILE, ConversationStore
+
+    return ConversationStore(config.data_dir / CONVERSATION_FILE, clock=clock).turns()
 
 
 def google_sources(config: Config) -> GoogleSources:
@@ -235,9 +249,9 @@ def ask_dry_run(text: str, config: Config, out: TextIO, *, briefing: BriefingCon
     if question is not None:
         return _research_dry_run(planner, question, out)   # web research never gets the notes
     _with_memory(planner, config)
-    dry = planner.dry_run(text, briefing=briefing)
+    dry = planner.dry_run(text, briefing=briefing, conversation=cli_conversation(config))
     out.write("Ask Jarvis dry run (no Claude request was made; nothing was counted)\n")
-    out.write("---- stdin (email text shown as counts) ----\n")
+    out.write("---- stdin (email text, notes and the conversation shown as counts) ----\n")
     out.write(dry.prompt)
     out.write("---- end of stdin ----\n")
     if dry.argv:
@@ -336,10 +350,12 @@ def ask_once(text: str, config: Config, out: TextIO, *, briefing: BriefingContex
     environ = os.environ if environ is None else environ
     engine = ClaudeEngine(config.ask, config.data_dir, runner=runner, environ=environ)
     planner = AskPlanner(config, engine, sources if sources is not None else google_sources(config), clock=now)
+    earlier: tuple[Any, ...] = ()
     if forced_question(text) is None:
         _with_memory(planner, config)   # web research never gets the notes (nor any other context)
+        earlier = cli_conversation(config, clock=now)
     page_ids = [action.id for action in (briefing.pending if briefing else ())]
-    outcome = planner.plan(text, briefing=briefing, page_ids=page_ids,
+    outcome = planner.plan(text, briefing=briefing, page_ids=page_ids, conversation=earlier,
                            on_stage=lambda stage: out.write(STAGE_WORDS.get(stage, stage) + "\n"))
     if outcome.init is not None:
         init = outcome.init

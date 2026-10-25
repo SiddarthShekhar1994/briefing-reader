@@ -578,14 +578,15 @@ class AppHarness:
     ``clock``: a HarnessClock (default: fixed at NOW) for the app, the planner and the bundle.
     ``productivity``: the bundle on ([productivity] enabled plus ``prod_extra`` keys, unless
     ``config_extra`` has the table already); ``prod_inline``: its reads run on the GUI thread
-    (deterministic tests). close() stops the bundle's timer and thread."""
+    (deterministic tests). ``prepare(config)`` runs before the controller is made (a test puts a file in
+    its data folder, as an earlier run would have left it). close() stops the bundle's timer and thread."""
 
     def __init__(self, test: Any, *, ask: bool = True, runs: Sequence[Any] = (), auth: str | None = None,
                  readers: dict | None = None, ask_mode: bool = False, run_state: Any = None,
                  lines: Sequence[str] = (B_CALENDAR, B_TODO), engine_clock: Any = None,
                  max_per_hour: int = 20, config_extra: str = "", snapshot_factory: Any = None,
                  clock: HarnessClock | None = None, productivity: bool = False, prod_extra: str = "",
-                 prod_inline: bool = True) -> None:
+                 prod_inline: bool = True, prepare: Any = None) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -612,6 +613,8 @@ class AppHarness:
         live_config = self.config.live
         self.snapshots = FakeSnapshotter(keep_text=live_config.text,
                                          max_per_run=max(0, min(4, self.config.research.max_fetches)))
+        if prepare is not None:
+            prepare(self.config)
         with mock.patch.object(ui, "BriefingPlayer", FakePlayer), mock.patch.object(ui, "PROD_INLINE", prod_inline):
             self.c = ui.AppController(self.config, self.client, expected_run="AM", now_mode=False, volume=0.0,
                                       now_func=self.clock.now, calendar_factory=lambda _cfg: self.calendars,

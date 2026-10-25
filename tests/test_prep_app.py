@@ -107,7 +107,7 @@ class PrepFlowTests(PrepAppCase):
         for said in spoken:
             for secret in ("Zq7", "Sam", "Budget", "Jarvis test sync"):
                 self.assertNotIn(secret, said)
-        self.assertEqual(self.reading.command_bar.text(), "")              # typed: cleared (R23)
+        self.assertEqual(self.reading.command_bar.text(), "")              # typed: it left the bar (R23)
         self.assertEqual(self.reading.current_tab(), hud.TAB_JARVIS)        # LIVE gave way (R33)
         newest = self.reading.activity.entries()[0]
         self.assertEqual((newest[1], newest[2]), (hud.TAG_ASK, "Prep: brief ready (1 thread read), 1 reply"))
@@ -224,12 +224,14 @@ class PrepFlowTests(PrepAppCase):
         self.assertEqual((self.reader.searches, app.factory.runner.started), ([], []))
         self.assertEqual(self.entries()[-1].entry[2], "I don't see a meeting like that today or tomorrow, sir.")
         self.assertEqual(app.voice.texts()[-1], "I don't see a meeting like that today or tomorrow, sir.")
-        self.assertEqual(self.reading.command_bar.text(), "prep me for the Zebra review")   # kept to edit
+        bar = self.reading.command_bar
+        self.assertEqual((bar.text(), bar.last_request()), ("", "prep me for the Zebra review"))   # Up: to edit
         self.assertEqual(self.reading.activity.entries()[0][2], "Prep: no run (no such meeting)")
 
-    def test_a_failed_run_keeps_the_words(self) -> None:
+    def test_a_failed_run_proposes_nothing_and_up_brings_the_words_back(self) -> None:
         """A run whose answer can't be read: the failure entry (red), one STOP row of counts, no card,
-        nothing spoken about the meeting, and the typed words stay in the bar to edit (R23)."""
+        nothing spoken about the meeting; the typed words left the bar as the run started, and Up
+        brings them back to edit (R23)."""
         app = self.make(plan_stream({"say": "Sam waits.", "threads": "not a list", "open": [], "points": [],
                                      "lines": []}))
         self.prep()
@@ -240,7 +242,8 @@ class PrepFlowTests(PrepAppCase):
         self.assertEqual(self.prep_cards(), [])
         newest = self.reading.activity.entries()[0]
         self.assertEqual((newest[1], newest[2]), (hud.TAG_STOP, "Prep: nothing was proposed"))
-        self.assertEqual(self.reading.command_bar.text(), TYPED)              # kept to edit
+        bar = self.reading.command_bar
+        self.assertEqual((bar.text(), bar.last_request()), ("", TYPED))      # a run was made: Up to edit
         for said in app.voice.texts():
             for secret in ("Zq7", "Sam", "Jarvis test sync"):
                 self.assertNotIn(secret, said)
@@ -280,15 +283,16 @@ class PrepChoiceTests(PrepAppCase):
         you = [entry.entry[2] for entry in self.entries() if entry.entry[0] == hud.ROLE_YOU]
         self.assertEqual(you[-1], "Prep this one: Jarvis test sync at 2:00 PM (work), tomorrow")
 
-    def test_the_click_clears_the_typed_words_still_in_the_bar(self) -> None:
-        """R23: the words that led to the choices are done with once the brief is in, but only while
-        the bar still holds exactly them (anything the owner typed since stays)."""
+    def test_the_typed_words_left_the_bar_before_the_choices(self) -> None:
+        """R23: the words that led to the choices left the bar as that request started; the choice's
+        click starts the brief and never touches the bar."""
         app = self.make(plan_stream(ANSWER))
         personal = app.calendars["personal"]
         personal.events["jts0002bb"] = event("jts0002bb", "Jarvis test sync", NOW.replace(hour=16, minute=0))
         personal.guests["jts0002bb"] = (Guest("lee@example.com", "Lee Example", "accepted"),)
         self.prep()
-        self.assertEqual(self.reading.command_bar.text(), TYPED)              # kept with the choices
+        self.assertEqual(self.reading.command_bar.text(), "")                 # gone as the request started
+        self.assertEqual(self.reading.command_bar.last_request(), TYPED)
         tomorrow = self.entries()[-1]
         tomorrow.link_button.click()
         self.assertTrue(wait_for(lambda: not self.c.ask.busy, 10))

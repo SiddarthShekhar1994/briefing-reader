@@ -57,7 +57,8 @@ Public API
 ``Drawer``
     A panel that slides in from the right (420 wide, ``raised``, 280 ms in, 180 ms out), with a title
     and a close button; Esc closes it and the focus goes back to the opener. ``body_layout`` holds
-    the content (the Transcript's conversation, the Day view's agenda).
+    the content (the Transcript's conversation, the Day view's agenda); ``add_head_button`` puts a
+    control of that content beside the close button (the Transcript's Clear conversation).
 
 Settings has its own module since round 2, part 2b (settings_view.SettingsStage).
 """
@@ -1536,6 +1537,7 @@ class Drawer(QWidget):
         head.setContentsMargins(20, 10, 12, 4)
         head.addWidget(self._title, 1, Qt.AlignmentFlag.AlignVCenter)
         head.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._head = head
         self.body_layout = QVBoxLayout()
         self.body_layout.setContentsMargins(8, 0, 8, 12)
         self.body_layout.setSpacing(0)
@@ -1551,6 +1553,11 @@ class Drawer(QWidget):
 
     def is_open(self) -> bool:
         return self.isVisible() and not self._closing
+
+    def add_head_button(self, button: QWidget) -> None:
+        """A control of the drawer's own content in its head, before the close button (the Transcript's
+        Clear conversation)."""
+        self._head.insertWidget(self._head.count() - 1, button, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def _target(self) -> QRect:
         host = self.parentWidget()

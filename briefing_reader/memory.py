@@ -5,8 +5,9 @@
         add(text, source=)           a new note, or the REFUSE_* word why not (nothing saved)
         edit(entry_id, text)         a changed note, or a REFUSE_* word
         delete(entry_id) / restore(entry)   remove a note (returned for Undo) / put it back
-        prompt_notes()               (the notes the planner gets, newest first, at most 4 KB; how many
-                                     were left out)
+        prompt_notes(command="")     (the notes the planner gets for ``command``, newest first, at most
+                                     8 KB: pick_notes; how many were left out)
+        prompt_entries(command="")   the same as the notes themselves (MEMORY marks the others)
         match(words)                 the notes "forget that <words>" means
         duplicate_of(text, besides=) a kept note (not the one being edited) that says the same
                                      (casefold, punctuation removed, or >= 80 % of the words)
@@ -15,6 +16,10 @@
         refresh()                    take memory.json again if it changed on disk (edited or deleted
                                      by hand while Jarvis runs)
     clean_note(text)               one line: control and format characters removed, spaces collapsed
+    pick_notes(texts, command="", cap=PROMPT_CAP)   which notes a planner run is given: all of them
+                                     when they fit in ``cap`` characters, else the ones that share the
+                                     most words, names and places with ``command`` first, then the
+                                     newest, while they fit
     memory_refusal(text)             "" or why a note is not kept (empty, long, secret, digits)
     check_suggestion(text, index=, command=, titles=, dismissed=)
                                      "" or why a planner's suggestion is not shown (8 to 160
@@ -67,7 +72,7 @@ MEMORY_FILE = "memory.json"
 FILE_VERSION = 1
 TEXT_CAP = 200
 TEXT_MIN = 3
-PROMPT_CAP = 4_000                   # characters of notes in <memory>, newest first
+PROMPT_CAP = 8_000                   # characters of notes in <memory> (pick_notes: the closest to the request first)
 SOURCE_TOLD, SOURCE_SUGGESTED = "told", "suggested"
 SOURCES = (SOURCE_TOLD, SOURCE_SUGGESTED)
 SUGGESTION_CAP = 160
@@ -106,10 +111,13 @@ _FREE_CAPITALS = frozenset(
     "i jarvis am pm monday tuesday wednesday thursday friday saturday sunday mondays tuesdays wednesdays thursdays "
     "fridays saturdays sundays mon tue tues wed thu thur thurs fri sat sun january february march april may june "
     "july august september october november december jan feb mar apr jun jul aug sep sept oct nov dec".split())
-# Words that say nothing of a note on their own (note_spoken leaves them out of the note's words).
+# Words that say nothing of a note on their own (note_spoken leaves them out of the note's words, pick_notes
+# out of the request's).
 _COMMON_WORDS = frozenset(
     "the and for with that this are was were has have had his her hers its our ours you your yours their them they "
     "not but from who what when where which will can".split())
+# Words of a request that name no person, place or subject of a note (pick_notes).
+_NOT_NAMES = frozenset({"jarvis", "am", "pm"})
 
 
 @dataclass(frozen=True)
@@ -177,6 +185,49 @@ def _same_note(first: str, second: str) -> bool:
     if _plain(first) == _plain(second):
         return True
     return _overlap(set(_tokens(first)), set(_tokens(second))) >= OVERLAP
+
+
+def _recall_terms(command: str) -> tuple[frozenset[str], frozenset[str]]:
+    """What a note may share with a request: its words of >= 3 letters (casefolded, a few common ones
+    aside) and its names and places - the words it capitalises after its first, also of 2 letters
+    ("Ana", "LA"), casefolded."""
+    text = clean_note(command)
+    words = frozenset(token for token in _tokens(text) if token not in _COMMON_WORDS and token not in _NOT_NAMES)
+    names: set[str] = set()
+    for word in _WORD_RE.findall(text)[1:]:
+        base = re.split("['\u2019]", word)[0]      # "Ana's" -> "Ana"
+        if len(base) >= 2 and base[0].isupper():
+            names.update(part for part in base.casefold().split("-") if len(part) >= 2 and part not in _NOT_NAMES)
+    return words, frozenset(names)
+
+
+def _relevance(note: str, words: frozenset[str], names: frozenset[str]) -> int:
+    """How much a note shares with a request: one for each shared word or name, one more for a name."""
+    tokens = set(_TOKEN_RE.findall(note.casefold()))
+    return len(tokens & (words | names)) + len(tokens & names)
+
+
+def pick_notes(texts: Sequence[str], command: str = "", cap: int = PROMPT_CAP) -> tuple[int, ...]:
+    """Which of ``texts`` (the notes, newest first) a planner run is given, as their places in that order:
+    every one when they fit in ``cap`` characters in all; else the notes that share the most with
+    ``command`` first (its words of >= 3 letters, casefolded, a few common ones aside, and its names and
+    places, which count twice; _recall_terms), the newest first among equals, each while it still fits (a
+    note too long for what is left is passed over for a shorter one). Without a command: the newest."""
+    sizes = [len(text) for text in texts]
+    if sum(sizes) <= cap:
+        return tuple(range(len(texts)))
+    words, names = _recall_terms(command)
+    order: Sequence[int] = range(len(texts))
+    if words or names:
+        scores = [_relevance(text, words, names) for text in texts]
+        order = sorted(range(len(texts)), key=lambda number: (-scores[number], number))
+    picked: list[int] = []
+    used = 0
+    for number in order:
+        if used + sizes[number] <= cap:
+            picked.append(number)
+            used += sizes[number]
+    return tuple(sorted(picked))
 
 
 def check_suggestion(text: Any, *, index: ContextIndex | None, command: str, titles: Sequence[str],
@@ -396,19 +447,20 @@ class MemoryStore:
             self._sync()
             return (self.state, tuple(self._entries), tuple(self._dismissed)) != before
 
-    def prompt_notes(self) -> tuple[tuple[str, ...], int]:
-        """(the notes' texts the planner gets, newest first, at most PROMPT_CAP characters in all;
-        how many older ones were left out)."""
+    def prompt_entries(self, command: str = "") -> tuple[tuple[MemoryEntry, ...], int]:
+        """(the notes the planner gets for ``command``, newest first, at most PROMPT_CAP characters in
+        all - pick_notes: every note while they all fit, else the closest to the request first, then the
+        newest; how many were left out)."""
         with self._lock:
-            texts = [entry.text for entry in self._entries]
-        sent: list[str] = []
-        used = 0
-        for text in texts:
-            if used + len(text) > PROMPT_CAP:
-                break
-            sent.append(text)
-            used += len(text)
-        return tuple(sent), len(texts) - len(sent)
+            entries = tuple(self._entries)
+        picked = pick_notes([entry.text for entry in entries], command)
+        return tuple(entries[number] for number in picked), len(entries) - len(picked)
+
+    def prompt_notes(self, command: str = "") -> tuple[tuple[str, ...], int]:
+        """(the notes' texts the planner gets for ``command``, newest first, at most PROMPT_CAP
+        characters in all: prompt_entries; how many were left out)."""
+        given, left_out = self.prompt_entries(command)
+        return tuple(entry.text for entry in given), left_out
 
     def match(self, words: str) -> list[MemoryEntry]:
         """The notes that hold every word of ``words`` of >= 3 letters (casefolded), newest first;
