@@ -9,6 +9,7 @@ does not fit; Jarvis's own words for a checked plan never carry a name or Claude
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -22,7 +23,7 @@ from briefing_reader.ask.stream import GARBLED, GUARD, MAX_TURNS, AskFailure, In
 from briefing_reader.desktop import refs as refs_mod
 from briefing_reader.desktop import validate as dv
 from briefing_reader.desktop.context import AppItem, DesktopContext, FileItem, Place, SiteItem, file_kind, size_bucket
-from tests.desktop_fakes import DOCS, DOWNLOADS, LING, OWNER, desktop_context, pretend_path
+from tests.desktop_fakes import DOCS, DOWNLOADS, LING, OWNER, desktop_context
 
 INIT = InitSummary("none", ("StructuredOutput",), 0, "claude-sonnet-4-5", "2.1.293", True)
 INIT_NO_TOOL = InitSummary("none", (), 0, "claude-sonnet-4-5", "2.1.293", False)
@@ -211,25 +212,69 @@ class PromptTests(unittest.TestCase):
 
     def test_the_budget_trims_files_first_then_apps_and_a_cut_row_has_no_ref(self) -> None:
         long = "x" * 110
+        places = [Place(DOCS + f"\\{long}{n}", ("Documents", f"{long}{n}", "y" * 40, "z" * 40)) for n in range(100)]
         files = [FileItem(DOCS + f"\\{long}{n}.docx", f"{long}{n}.docx", DOCS, size=10, modified=NOW)
                  for n in range(200)]
-        made = prompt(desktop_context(files=files))
-        self.assertLessEqual(len(made.text), MAX_PROMPT_CHARS)
+        made = prompt(desktop_context(files=files, places=places))
+        self.assertLessEqual(len(made.text), MAX_PROMPT_CHARS)                # the stdin budget (SPEC 4.1: 40k)
         kept = made.shown["files"]
         self.assertLess(kept, 200)
+        self.assertGreater(kept, 0)
         self.assertEqual(made.shown["files_left_out"], 200 - kept)
-        self.assertEqual(made.shown["apps"], 3)                              # the apps kept: files go first
+        self.assertEqual((made.shown["places"], made.shown["apps"], made.shown["apps_left_out"]), (100, 3, 0))
         self.assertIn(dm.LEFT_OUT.format(count=200 - kept, what="files"), made.text)
         self.assertEqual(made.refs.ids(refs_mod.FILE), [f"f{n}" for n in range(1, kept + 1)])
         self.assertIsNone(made.refs.resolve(f"f{kept + 1}"))               # the planner never saw it: no ref
         self.assertIsNotNone(made.refs.resolve(f"f{kept}"))
-        with mock.patch.object(dm, "MAX_PROMPT_CHARS", 1200):
+        with mock.patch.object(dm, "MAX_PROMPT_CHARS", 860):
             made = prompt(desktop_context(files=files[:20]))
         self.assertEqual(made.shown["files"], 0)                             # every file went, then apps
         self.assertLess(made.shown["apps"], 3)
         self.assertEqual(made.refs.ids(refs_mod.FILE), [])
         self.assertEqual(len(made.refs.ids(refs_mod.APP)), made.shown["apps"])
         self.assertIn("more apps left out", made.text)
+
+    def test_the_stdin_never_passes_the_budget(self) -> None:
+        """Every kind past its cap and every name past its own: <files>, then <apps>, give way; the places, the sites
+        and the owner's words always fit."""
+        long = "w" * 200
+        places = [Place(DOCS + f"\\p{n}", ("Documents", long, long, long)) for n in range(dm.MAX_PLACES + 20)]
+        files = [FileItem(DOCS + f"\\f{n}.docx", f"{long}{n}.docx", DOCS, size=5, modified=NOW, online_only=True)
+                 for n in range(dm.MAX_FILES + 50)]
+        apps = [AppItem(f"app{n}", f"{long}{n}") for n in range(dm.MAX_APPS + 10)]
+        sites = [SiteItem(f"https://site{n}.example.org/", f"{long}{n}") for n in range(dm.MAX_SITES + 5)]
+        made = prompt(desktop_context(files=files, apps=apps, sites=sites, places=places), typed="open " + long * 3)
+        self.assertLessEqual(len(made.text), MAX_PROMPT_CHARS)
+        self.assertEqual((made.shown["places"], made.shown["sites"]), (dm.MAX_PLACES, dm.MAX_SITES))
+        self.assertLess(made.shown["files"], dm.MAX_FILES)
+        self.assertEqual(made.shown["files"] + made.shown["files_left_out"], dm.MAX_FILES)
+        self.assertEqual(made.shown["apps"] + made.shown["apps_left_out"], dm.MAX_APPS)
+        self.assertEqual(len(made.refs), sum(made.shown[kind] for kind in ("places", "files", "apps", "sites")))
+        self.assertTrue(made.text.rstrip().endswith("</command>"))
+        self.assertIn(OWNER_WORDS + "open " + "w" * 20, made.text)
+
+    def test_secret_shaped_files_are_never_listed(self) -> None:
+        secrets = [FileItem(DOCS + "\\" + name, name, DOCS) for name in
+                   (".env", "id_rsa", "server.pem", "google_token.json", "client_secret_123.json", "Passwords.kdbx",
+                    "credentials-old.json", ".env.local", "wallet.dat")]
+        made = prompt(desktop_context(files=[*secrets, desktop_context().files[0]]))
+        self.assertEqual(made.refs.ids(refs_mod.FILE), ["f1"])               # only the essay
+        self.assertEqual(made.refs.resolve("f1").target.name, "LING essay draft.docx")
+        for item in secrets:
+            with self.subTest(name=item.name):
+                self.assertNotIn(item.name, made.text)
+        self.assertEqual(made.shown["files"], 1)
+
+    def test_names_only_d6_no_other_context(self) -> None:
+        """Owner decision D6: names, titles and labels only - the desktop run's context blocks are its own: no
+        notes, no conversation, no accounts, calendar, mail or briefing, whatever an Ask would get."""
+        text = prompt().text
+        for tag in ("<memory>", "<conversation>", "<owner>", "<accounts>", "<calendar>", "<mail>", "<briefing>",
+                    "<contacts>", "<day>", "<todos>"):
+            with self.subTest(tag=tag):
+                self.assertNotIn(tag, text)
+        self.assertEqual(sorted(re.findall(r"^<([a-z]+)>$", text, re.MULTILINE)),
+                         ["apps", "command", "files", "now", "places", "sites"])
 
     def test_the_kind_and_size_words(self) -> None:
         self.assertEqual([file_kind(name) for name in ("a.docx", "b.JPG", "c.mp3", "d.mkv", "e.zip", "f")],

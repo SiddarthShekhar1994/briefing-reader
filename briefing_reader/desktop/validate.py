@@ -30,8 +30,10 @@ The checks, in this order; the first problem wins and its code goes to Live (``R
    flagged, not promoted (D5: files open at once).
 7. Intent licensing (``licensed_skills``: SPEC 4.5's table, deterministic, on the owner's typed words only - never a
    name, a title or Claude's text; "tidy my Downloads" can never license recycle_files) (``INTENT_NOT_LICENSED``)
-   and scope licensing: what a step touches lies under the places the owner's words named ("in my LING folder"),
-   when he named any (``SCOPE``).
+   and scope licensing: what a step works on - its files, the place it looks in or opens - lies under the places
+   the owner's words named to look in ("in my LING folder", "from Downloads", "the Uni folder"), when he named any
+   (``SCOPE``). Where things go is no scope: "into LING" names a destination, and a move's ``to`` (or the place a
+   new folder is made in) is not checked against the places named.
 8. The suspect rule: a step touching an item whose name reads like instructions (refs.Ref.suspect, guard's
    scanner) is refused unless the owner's own words name that item (``SUSPECT_ITEM``).
 9. The phase gate: a skill not shipped yet is refused (``NOT_YET``).
@@ -438,8 +440,10 @@ def typed_url(owner_words: Any, url: Any) -> bool:
     return bool(wanted) and any(_bare_address(word) == wanted for word in owner_words.split())
 
 
-# Where the owner's words name a place: "in / from / under ... (my|the) <name>" or "<name> folder".
-_PLACE_BEFORE = frozenset({"in", "from", "under", "inside", "within", "on", "at", "into", "of"})
+# Where the owner's words name a place to look in or work on: "in / from / under ... (my|the) <name>" or "<name>
+# folder" - never where things go ("into / to / onto (my|the) <name> (folder)": a destination is no scope).
+_PLACE_BEFORE = frozenset({"in", "from", "under", "inside", "within", "on", "at", "of"})
+_PLACE_TO = frozenset({"into", "to", "onto"})
 _PLACE_AFTER = frozenset({"folder", "folders", "directory"})
 _FILLERS = frozenset({"my", "the", "our", "this", "that"})
 
@@ -452,6 +456,8 @@ def _named_place(tokens: Sequence[str], place: Place) -> bool:
     for start in _find(tokens, wanted):
         before = [token for token in tokens[max(0, start - 3):start] if token not in _FILLERS]
         after = tokens[start + len(wanted):start + len(wanted) + 1]
+        if before and before[-1] in _PLACE_TO:
+            continue                                      # where things go: not a place to look in
         if (before and before[-1] in _PLACE_BEFORE) or (after and after[0] in _PLACE_AFTER):
             return True
     return False
@@ -812,21 +818,20 @@ def _tier(step: PlannedStep, targets: tuple[Ref, ...], run: _Run) -> tuple[str, 
 
 # ---- 7. intent and scope licensing ---------------------------------------------------------------------
 
-def _sources(targets: tuple[Ref, ...]) -> list[str]:
-    """The paths a step reads from or works on (files, places)."""
-    found = []
-    for ref in targets:
-        target = ref.target
-        if isinstance(target, (FileItem, Place)):
-            found.append(target.path)
-    return found
+def _sources(step: PlannedStep, targets: tuple[Ref, ...]) -> list[str]:
+    """The paths a step reads from or works on: its files and the place it looks in or opens - never where things go
+    (a move's, a copy's or a zip's ``to``; the place a new folder is made in), which scope licensing does not ask
+    about."""
+    goes_to = {step.to, step.place if step.skill == MAKE_FOLDER else ""} - {""}
+    return [ref.target.path for ref in targets
+            if isinstance(ref.target, (FileItem, Place)) and ref.id not in goes_to]
 
 
 def _licensed(step: PlannedStep, targets: tuple[Ref, ...], run: _Run) -> str:
     if step.skill not in run.licensed:
         return INTENT_NOT_LICENSED
     if run.named_places:
-        for path in _sources(targets):
+        for path in _sources(step, targets):
             if not any(_under(path, place.path) for place in run.named_places):
                 return SCOPE
     return ""

@@ -9021,19 +9021,22 @@ class AppController(QObject):
         except Exception as exc:  # noqa: BLE001 - the note below instead
             logger.warning("Desktop: a request typed with Ask off could not be read (%s)", type(exc).__name__)
         if found is not None and not isinstance(found, desktop_mode.DesktopJob):
+            bar.take_request(text)                   # taken (R23): the words leave the bar; Up brings them back
             said, soft = desktop.answer_local(found, text)
             bar.set_status(said, hud.TONE_WARN if soft else hud.TONE_DONE)
-            bar.clear_input()
             return
-        bar.set_status(DISABLED_MESSAGE, hud.TONE_WARN)
+        bar.set_status(DISABLED_MESSAGE, hud.TONE_WARN)   # not taken: the words stay
 
     def _desktop_request(self, text: str) -> Any:
         """A typed desktop request (AskController's ROUTE_DESKTOP; SPEC 3). From the window's bar Jarvis goes onto the
-        HUD first (``enter_hud``: the window hidden, never closed) and the request continues there - the window's bar
-        let go of it, the HUD's showing it while it runs; when the HUD can't open now (a dialog waits, a switch on its
-        way, not turned on yet) nothing runs and the bar says so. On the HUD: a local route is answered on this PC (no
-        planner run; None comes back), anything else comes back as the planner's job (ask.desktop_mode.DesktopJob)
-        for ONE desktop planner run. Never logged: the words."""
+        HUD first (``enter_hud``: the window hidden, never closed) and the request continues there: it leaves the
+        window's bar at once (R23: take_request - Up there brings it back) and goes on in the HUD's bar, now Ask's, as
+        if typed there - so it leaves that bar too as it is accepted (Up brings it back there) and comes back to it
+        when refused before any run (give_back); a draft the HUD's bar already holds is never replaced. When the HUD
+        can't open now (a dialog waits, a switch on its way, not turned on yet) nothing runs, the bar says so and the
+        words stay where they were typed. On the HUD: a local route is answered on this PC (no planner run; taken from
+        the bar; None comes back), anything else comes back as the planner's job (ask.desktop_mode.DesktopJob) for ONE
+        desktop planner run, which takes the words from the bar as it starts. Never logged: the words."""
         from .ask_ui import DESKTOP_NOT_NOW_TEXT
 
         desktop = getattr(self, "desktop", None)
@@ -9046,11 +9049,14 @@ class AppController(QObject):
                 ask.show_note(DESKTOP_NOT_NOW_TEXT, hud.TONE_WARN)
                 return None
             logger.info("Desktop: a request typed in the window goes onto the HUD")
-            if window_bar.text().strip():
-                window_bar.clear_input()             # the request moved to the HUD (taken: no bar keeps it)
+            window_bar.take_request(text)            # it left the window's bar (R23: Up there brings it back)
+            hud_bar = desktop.bar()
+            if ask.bar is hud_bar and not hud_bar.text():
+                hud_bar.set_text(text)               # it goes on in the HUD's bar, which lets it go as it is taken
         found = desktop.route_request(text)
         if isinstance(found, desktop_mode.DesktopJob):
             return found
+        ask.bar.take_request(text)                   # answered on this PC: taken (R23)
         said, soft = desktop.answer_local(found, text)
         ask.show_note(said, hud.TONE_WARN if soft else hud.TONE_DONE, hud_text=said)
         return None

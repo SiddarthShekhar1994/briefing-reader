@@ -77,8 +77,10 @@ A desktop request (ask.routes ROUTE_DESKTOP, only while [desktop] is on: clear d
 app first (``desktop_request(text)``): from the window's bar Jarvis goes onto the HUD, where the request
 continues; a local route is answered there on this PC (no planner run); anything else comes back as an
 ask.desktop_mode.DesktopJob and runs as ONE planner mode run (MODE_DESKTOP, live.TASK_DESKTOP, its first step
-desktop.request) - typed, so the bar it was typed in is cleared when a step passed. Its answer on the bar is
-Jarvis's own words for the checked plan (AskOutcome.message), never Claude's say or question.
+desktop.request) - typed, so its words leave the bar as it starts (R23: the app takes a local route's words itself,
+and a request from the window's bar leaves it and goes on in the HUD's). It gets no notes and no conversation (owner
+decision D6: names only). Its answer on the bar is Jarvis's own words for the checked plan (AskOutcome.message), never
+Claude's say or question.
 
 Web research: a request that starts with "web:" (or "research:") is a WEB task (live.TASK_WEB;
 ``running_kind``) whose "Your request" says nothing is read from the accounts; the command still

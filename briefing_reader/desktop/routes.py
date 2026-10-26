@@ -66,7 +66,7 @@ def _pattern(core: str) -> re.Pattern[str]:
 
 
 _OPEN_APP_RE = _pattern(r"(?:open|start|launch)\s+(?:the\s+)?(?P<name>\S.*?)(?:\s+app)?")
-_OPEN_FOLDER_RE = _pattern(r"(?:open|show\s+(?:me\s+)?)\s*(?:my\s+|the\s+)?"
+_OPEN_FOLDER_RE = _pattern(r"(?:open\s+|show\s+(?:me\s+)?)(?:my\s+|the\s+)?"
                            r"(?P<folder>desktop|documents|downloads|pictures|music|videos)(?:\s+folder)?")
 _OPEN_URL_RE = _pattern(r"open\s+(?P<url>https://\S+)")
 _OPEN_HOST_RE = _pattern(r"open\s+(?P<host>(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?P<end>[a-z]{2,6}))"

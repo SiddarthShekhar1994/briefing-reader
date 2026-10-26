@@ -19,9 +19,10 @@ once: the mode's fixed words, then "The owner's words: ..." (modes.command_text)
     s1 "Student portal" (portal.example.edu)          a saved site, by its host only
 
 A name that reads like instructions (guard.suspect_text: an order, an override, look-alike letters, tag characters)
-is marked [suspect]. The rows are numbered by position and trimmed to the budget (context.MAX_PROMPT_CHARS: <files>
-first, then <apps>; "[N more ... left out]"); only THEN is the run's RefIndex made, from the rows shown: a row cut to
-fit has no ref, so no step can name it.
+is marked [suspect]; a secret-shaped file (.env, a key, a token ...: guard.secret_file) is never listed, whatever the
+context holds (SPEC 2.4). The rows are numbered by position and trimmed to the budget (context.MAX_PROMPT_CHARS:
+<files> first, then <apps>; "[N more ... left out]"); only THEN is the run's RefIndex made, from the rows shown: a
+row cut to fit has no ref, so no step can name it.
 
     DesktopJob(run_id, context)          ModeRequest.payload of a desktop run (memory only): its run id ("d7f3", the
                                          logs' and Live's handle) and the context's candidates (desktop.context;
@@ -52,7 +53,7 @@ from urllib.parse import urlsplit
 
 from ..desktop import guard
 from ..desktop import validate as dv
-from ..desktop.context import AppItem, DesktopContext, FileItem, Place, SiteItem, size_bucket
+from ..desktop.context import DesktopContext, FileItem, Place, SiteItem, size_bucket
 from ..desktop.refs import APP, FILE, PLACE, SITE, RefIndex
 from ..persona import with_address
 from .context import MAX_PROMPT_CHARS, data, now_line
@@ -141,6 +142,12 @@ def _suspect(*texts: Any) -> bool:
     return any(guard.suspect_text(text) for text in texts)
 
 
+def _secret(item: FileItem) -> bool:
+    """A secret-shaped file (.env, a key, a token ...: guard.secret_file): never listed (SPEC 2.4), whatever the
+    context holds."""
+    return guard.secret_file(item.name) or guard.secret_file(item.path)
+
+
 def _day(moment: date | datetime | None) -> str:
     if isinstance(moment, datetime):
         return moment.date().isoformat()
@@ -188,7 +195,7 @@ def build_prompt(now: datetime, request: ModeRequest, context: DesktopContext | 
     ``request.typed`` the owner's own words (the <command>'s "The owner's words: ...")."""
     context = context if isinstance(context, DesktopContext) else DesktopContext()
     places = _unique(context.places, lambda place: _key(place.path))[:MAX_PLACES]
-    files = _unique(context.files, lambda item: _key(item.path))[:MAX_FILES]
+    files = _unique((item for item in context.files if not _secret(item)), lambda item: _key(item.path))[:MAX_FILES]
     apps = _unique(context.apps, lambda app: app.app_id.casefold())[:MAX_APPS]
     sites = [site for site in _unique(context.sites, lambda site: site.url.casefold())
              if not guard.url_problem(site.url) and site_host(site)][:MAX_SITES]
@@ -235,9 +242,9 @@ def build_prompt(now: datetime, request: ModeRequest, context: DesktopContext | 
                 + [f"a{n}" for n in range(1, keep_apps + 1)] + [f"s{n}" for n in range(1, len(sites) + 1)])
     if issued != expected:   # never expected (every kind is unique by its key): no plan rather than a wrong one
         raise RuntimeError("the desktop context's refs do not match its rows")
+    # Left out TO FIT (the "[N more ... left out]" rows say the same number); the context gives no more than its caps.
     shown = {"places": len(places), "files": keep_files, "apps": keep_apps, "sites": len(sites),
-             "files_left_out": len(context.files) - keep_files if len(context.files) > keep_files else 0,
-             "apps_left_out": len(context.apps) - keep_apps if len(context.apps) > keep_apps else 0}
+             "files_left_out": len(file_rows) - keep_files, "apps_left_out": len(app_rows) - keep_apps}
     return DesktopPrompt(text, refs, shown)
 
 
