@@ -2,20 +2,23 @@
 
 ``load(backend)`` reads the Start menu (backend.start_menu_apps: shell:AppsFolder's names and ids) and keeps only the
 apps Jarvis may open: never one on the never-open list (guard.never_app, by its name, by its id read as words -
-"Microsoft.WindowsTerminal..." is a terminal - and by its exe: terminals, script hosts, system and security tools,
-installers, Claude, password managers, banking, trading and crypto apps, remote desktop and VM clients, Jarvis
-himself), and never an id that is not of an AppsFolder id's shape (``app_id_problem``): an AUMID, or a known folder's
-id or a drive followed by the exe's path - no "..", no network path, no address, no other type Windows runs than an
-exe. ``match(words, apps)`` gives the apps the owner's words name for <apps> (at most 40, SPEC 4.1); the local route
-"open <app>" takes an app whose whole name the owner typed (desktop.routes). A launch re-reads the Start menu and
-finds the same id with the same name again (desktop.executor) before the backend opens it with no arguments.
+"Microsoft.WindowsTerminal..." is a terminal - and by its exe: terminals and the Start menu's Run, script hosts,
+system and security tools, installers, Claude, password managers, banking, trading and crypto apps, remote desktop and
+VM clients, apps that capture the camera, the microphone or the screen - Camera, Sound Recorder, Snipping Tool, Xbox
+Game Bar, OBS ... -, Jarvis himself), and never an id that is not of an AppsFolder id's shape (``app_id_problem``): an
+AUMID, or a known folder's id or a drive followed by the exe's path - no "..", no network path, no address, no other
+type Windows runs than an exe. ``match(words, apps)`` gives the apps the owner's words name for <apps> (at most 40,
+SPEC 4.1); the local route "open <app>" takes an app whose whole name the owner typed (desktop.routes). A launch
+re-reads the Start menu and finds the same id with the same name again (desktop.executor) before the backend opens it
+with no arguments.
 
 Pure apart from ``load``'s one backend call; nothing is logged but counts.
 
 Public API
 ==========
 ``MAX_LISTED``, ``MAX_MATCHED``; ``app_id_problem(app_id)``; ``exe_name(app_id)``; ``never(name, app_id)``;
-``AppList(apps, left_out)``; ``load(backend, limit=)``; ``match(words, apps, cap=)``; ``find(apps, app_id)``.
+``never_item(app)``; ``AppList(apps, left_out)``; ``load(backend, limit=)``; ``match(words, apps, cap=)``;
+``find(apps, app_id)``.
 """
 
 from __future__ import annotations
@@ -82,6 +85,12 @@ def never(name: Any, app_id: Any) -> str:
     be opened)."""
     exe = exe_name(app_id)
     return guard.never_app(name, exe) or guard.never_app(app_id if isinstance(app_id, str) else "", exe)
+
+
+def never_item(app: AppItem) -> str:
+    """``never`` for a listed app (an AppItem: by its name, its id read as words and its exe), and by the exe it was
+    listed with - the same check wherever an app may be opened (the local route, the planner's step, the launch)."""
+    return never(app.name, app.app_id) or guard.never_app(app.name, app.exe)
 
 
 @dataclass(frozen=True)

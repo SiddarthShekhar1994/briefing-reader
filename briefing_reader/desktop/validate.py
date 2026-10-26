@@ -26,8 +26,9 @@ The checks, in this order; the first problem wins and its code goes to Live (``R
    find_files, show_in_folder and open_folder INSTANT; open_file INSTANT for a document (2.3), CARD for one that can
    run macros or scripts and for a shortcut (its real target shown first), ONE_CLICK when its name has hidden
    characters; open_app INSTANT when the owner named the app exactly, else ONE_CLICK; open_url INSTANT for a saved
-   site or an address the owner typed word for word, else ONE_CLICK (its host shown). An online-only file is
-   flagged, not promoted (D5: files open at once).
+   site or an address the owner typed word for word, https:// and all, else ONE_CLICK (its host shown: one Claude
+   suggested, or one typed without its https:// - "logo.ai" may be a file's name). An online-only file is flagged,
+   not promoted (D5: files open at once).
 7. Intent licensing (``licensed_skills``: SPEC 4.5's table, deterministic, on the owner's typed words only - never a
    name, a title or Claude's text; "tidy my Downloads" can never license recycle_files) (``INTENT_NOT_LICENSED``)
    and scope licensing: what a step works on - its files, the place it looks in or opens - lies under the places
@@ -49,9 +50,9 @@ Tiers ``INSTANT``, ``ONE_CLICK``, ``CARD``, ``NEVER`` (``TIERS``), ``promote(tie
 ``MAX_OPENS``, ``MAX_URLS``). Flags ``FLAG_*`` (why a tier went up). ``PlannedStep``, ``DesktopAnswer`` (the
 planner's answer as read), ``CheckedStep``, ``DesktopPlan`` (``accepted()``, ``refused()``, ``counts()``,
 ``skills_text()``, ``codes_text()``), ``check_plan(answer, refs, owner_words, run_id=, path_check=)``,
-``licensed_skills(words)``, ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url)``,
-``places_named(words, places)`` (the places scope licensing reads in the owner's words; desktop.index searches them
-first).
+``licensed_skills(words)``, ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url,
+bare=)``, ``places_named(words, places)`` (the places scope licensing reads in the owner's words; desktop.index
+searches them first).
 
 Pure: nothing is logged, opened or read here, and every repr names skills, codes and counts only.
 """
@@ -63,6 +64,7 @@ from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import apps as desktop_apps
 from . import guard, paths
 from .context import AppItem, FileItem, Place, SiteItem
 from .refs import APP, CELL, FIELD, FILE, NEW, PLACE, SITE, WINDOW, Ref, RefIndex, parse_ref
@@ -119,6 +121,7 @@ FLAG_SHORTCUT = "shortcut"             # a .lnk: its real target is shown on a c
 FLAG_HIDDEN_CHARS = "hidden_chars"     # the name has hidden characters: shown as <U+202E> before it opens
 FLAG_NOT_NAMED = "not_named"           # an app the owner did not name exactly: one click
 FLAG_SUGGESTED = "suggested"           # a web address the owner did not type: one click, its host shown
+FLAG_BARE_HOST = "bare_host"           # one he typed without its https:// ("logo.ai" may be a file's name): one click
 FLAG_ONLINE_ONLY = "online_only"       # opening it downloads it from OneDrive (flagged only: D5)
 
 
@@ -434,12 +437,19 @@ def _bare_address(text: str) -> str:
     return value.rstrip("/")
 
 
-def typed_url(owner_words: Any, url: Any) -> bool:
-    """The owner typed this web address word for word (with or without https:// and www.)."""
+def typed_url(owner_words: Any, url: Any, *, bare: bool = False) -> bool:
+    """The owner typed this web address word for word, https:// and all (www. and a trailing "/" aside): only then
+    does it open at once (SPEC 2.1). ``bare``: also when he typed it without its https:// ("example.org/news", or
+    "logo.ai" - which may be a file's name, so it waits for his click)."""
     if not isinstance(owner_words, str) or not isinstance(url, str):
         return False
     wanted = _bare_address(url)
-    return bool(wanted) and any(_bare_address(word) == wanted for word in owner_words.split())
+    return bool(wanted) and any(_bare_address(word) == wanted and (bare or _with_https(word))
+                                for word in owner_words.split())
+
+
+def _with_https(word: str) -> bool:
+    return word.strip().strip(".,;:!?\"'()[]").casefold().startswith("https://")
 
 
 # Where the owner's words name a place to look in or work on: "in / from / under ... (my|the) <name>" or "<name>
@@ -805,14 +815,15 @@ def _tier(step: PlannedStep, targets: tuple[Ref, ...], run: _Run) -> tuple[str, 
             flags.add(FLAG_ONLINE_ONLY)                   # flagged only: files open at once (owner decision D5)
     elif skill == OPEN_APP:
         app = targets[0].target
-        if not isinstance(app, AppItem) or guard.never_app(app.name, app.exe):
+        if not isinstance(app, AppItem) or desktop_apps.never_item(app):     # by its name, id and exe
             return NEVER, APP_NOT_APPROVED, frozenset(flags)
         if not named_exactly(run.words, app.name):
             tier = promote(tier, ONE_CLICK)
             flags.add(FLAG_NOT_NAMED)
     elif skill == OPEN_URL and step.url and not typed_url(run.words, step.url):
-        tier = promote(tier, ONE_CLICK)                   # Claude suggested it: one click, its host shown
-        flags.add(FLAG_SUGGESTED)
+        # One click, its host shown: Claude suggested it, or the owner typed it without its https:// ("logo.ai").
+        tier = promote(tier, ONE_CLICK)
+        flags.add(FLAG_BARE_HOST if typed_url(run.words, step.url, bare=True) else FLAG_SUGGESTED)
     elif skill == ZIP_FILES:
         if any(isinstance(ref.target, FileItem) and guard.blocked_type(ref.target.name) for ref in targets):
             return NEVER, BLOCKED_TYPE, frozenset(flags)   # blocked types are never zipped

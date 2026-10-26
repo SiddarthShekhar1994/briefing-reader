@@ -9042,13 +9042,18 @@ class AppController(QObject):
 
     def _on_desktop_turn_off(self) -> None:
         """Settings > Desktop's Turn off: the owner's OK goes (for this run even when it couldn't be saved - then the
-        panel says it will be on again after a restart)."""
+        panel says it will be on again after a restart), and what is on its way stops at once - the desktop's own jobs
+        (desktop_ui.turn_off: nothing opens after it) and a desktop request's planner run (cancelled)."""
         from .desktop_view import TURN_OFF_NOT_SAVED_TEXT
 
         desktop = getattr(self, "desktop", None)
         if desktop is None:
             return
         saved = desktop.turn_off()
+        ask = self.ask
+        if ask is not None and ask.running_mode == MODE_DESKTOP:
+            logger.info("Desktop: turned off while a desktop request's planner run was on its way; cancelled")
+            ask.cancel()
         self._sync_desktop_settings("" if saved else TURN_OFF_NOT_SAVED_TEXT)
 
     def _sync_desktop_settings(self, problem: str = "") -> None:
@@ -9170,7 +9175,8 @@ class AppController(QObject):
         if wanted and desktop.request(text, planner=False):
             bar.set_status(LOOKING_TEXT, hud.TONE_WORKING)    # the words stay until it is handled
             return
-        bar.set_status(BUSY_TEXT if wanted and desktop.busy() else DISABLED_MESSAGE, hud.TONE_WARN)
+        # Not done (hard rule 17: coral - amber is for a decision that waits).
+        bar.set_status(BUSY_TEXT if wanted and desktop.busy() else DISABLED_MESSAGE, hud.TONE_ERROR)
 
     def _desktop_request(self, text: str) -> Any:
         """A typed desktop request (AskController's ROUTE_DESKTOP; SPEC 3). From the window's bar Jarvis goes onto the
@@ -9194,7 +9200,7 @@ class AppController(QObject):
         if desktop is None or ask is None:
             return None
         if desktop.busy():
-            ask.show_note(BUSY_TEXT, hud.TONE_WARN)  # one at a time: the words stay
+            ask.show_note(BUSY_TEXT, hud.TONE_ERROR)  # one at a time: the words stay (not done: coral)
             return None
         if not self._hud_active():
             window_bar = self.window.reading.command_bar
@@ -9213,15 +9219,16 @@ class AppController(QObject):
             if ask.bar is hud_bar and not hud_bar.text():
                 hud_bar.set_text(text)               # it goes on in the HUD's bar, which lets it go as it is taken
         if not desktop.request(text, planner=True):
-            ask.show_note(BUSY_TEXT, hud.TONE_WARN)
+            ask.show_note(BUSY_TEXT, hud.TONE_ERROR)
             return None
         ask.show_note(LOOKING_TEXT, hud.TONE_WORKING, hud_text=LOOKING_TEXT)
         return None
 
-    def _on_desktop_answered(self, said: str, soft: bool, words: str, taken: bool) -> None:
+    def _on_desktop_answered(self, said: str, tone: str, words: str, taken: bool) -> None:
         """A desktop request handled without the planner (desktop_ui.answered): a local route carried out on this PC
         - its words leave the bar it is in (R23: Up brings them back) - or nothing could be looked at (the words
-        stay); the caption says Jarvis's own words."""
+        stay); the caption says Jarvis's own words in their tone (amber only while a decision waits, coral when it
+        was not done: hard rule 17)."""
         desktop = getattr(self, "desktop", None)
         if desktop is None:
             return
@@ -9229,7 +9236,6 @@ class AppController(QObject):
         bar = ask.bar if ask is not None else desktop.bar()
         if taken:
             bar.take_request(words)
-        tone = hud.TONE_WARN if soft else hud.TONE_DONE
         if ask is not None:
             ask.show_note(said, tone, hud_text=said)
         else:
@@ -9246,7 +9252,7 @@ class AppController(QObject):
         if job is None or self.ask is None:
             from .ask.planner import DISABLED_MESSAGE
 
-            desktop.bar().set_status(DISABLED_MESSAGE, hud.TONE_WARN)
+            desktop.bar().set_status(DISABLED_MESSAGE, hud.TONE_ERROR)    # not done: coral (hard rule 17)
             return
         self.ask.submit_mode(ModeRequest(MODE_DESKTOP, ORIGIN_TYPED, typed=words, typed_route=True, payload=job),
                              words)

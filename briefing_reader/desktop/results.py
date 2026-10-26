@@ -9,9 +9,9 @@ or a card's click) and turns its results into ``Card`` s - the result cards the 
   where it is and when it changed, the app it opened in (backend.app_for: the type's association - its name for the
   card and its exe to find its window by) and, for a file, the other matches as "Open this instead" rows;
 * ``WAITING``: a step held for the owner's click (hard rule 4): ONE_CLICK - an app he did not name exactly, a web
-  page he did not type (its host shown), a file whose name has hidden characters (spelled out as <U+202E>) - or CARD,
-  amber - a document that can run macros or scripts, a shortcut (its real target shown first: backend.link_target,
-  read and never resolved; it opens only when that is a document in his folders);
+  page he did not type or typed without its https:// (its host shown), a file whose name has hidden characters
+  (spelled out as <U+202E>) - or CARD, amber - a document that can run macros or scripts, a shortcut (its real target
+  shown first: backend.link_target, read and never resolved; it opens only when that is a document in his folders);
 * ``FOUND``: what a find found, as rows to open (or show in their folder: a type Jarvis never opens).
 
 Every card keeps its OWN items - the resolved target and the identity it passed its check with (verified review
@@ -77,6 +77,7 @@ SCRIPT_NOTE = "It can run macros or scripts, so it opens only when you click Ope
 HIDDEN_NOTE = "Its name had hidden characters (spelled out above). Check it is the file you want before you open it."
 NOT_NAMED_NOTE = "You didn't name this app exactly, so it opens only on your click."
 SUGGESTED_NOTE = "You didn't type this address, so it opens only on your click. Check the site first."
+BARE_HOST_NOTE = "You typed it without https://, so it opens only on your click. Check the site first."
 LINK_NOTE = "It leads to {name}{where}. Open opens that file."
 LINK_SCRIPT_NOTE = "It leads to {name}{where}, which can run macros or scripts. Open opens it - only if you trust it."
 LINK_NEVER_NOTE = "It leads to something Jarvis doesn't open - an app, a program or a place outside your folders."
@@ -534,8 +535,9 @@ def _waiting_text(card: Card) -> CardText:
         return CardText(f"APP{SEP}YOUR CLICK OPENS IT", card.name, "", NOT_NAMED_NOTE, NOTE_INFO, CYAN, buttons,
                         note_first=True)
     if card.skill == dv.OPEN_URL:
-        return CardText(f"WEB PAGE{SEP}YOUR CLICK OPENS IT", card.host, card.address, SUGGESTED_NOTE, NOTE_INFO, CYAN,
-                        buttons, note_first=True)
+        note = BARE_HOST_NOTE if dv.FLAG_BARE_HOST in flags else SUGGESTED_NOTE
+        return CardText(f"WEB PAGE{SEP}YOUR CLICK OPENS IT", card.host, card.address, note, NOTE_INFO, CYAN, buttons,
+                        note_first=True)
     kicker = f"{card.type_words}{SEP}NAME HAD HIDDEN CHARACTERS" if dv.FLAG_HIDDEN_CHARS in flags \
         else f"{card.type_words}{SEP}YOUR CLICK OPENS IT"
     return CardText(kicker, card.name, _meta(card.where, card.when), HIDDEN_NOTE if dv.FLAG_HIDDEN_CHARS in flags

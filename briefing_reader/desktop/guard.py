@@ -331,6 +331,11 @@ NEVER_OPEN_APPS: dict[str, frozenset[str]] = {
     "remote": frozenset({"mstsc.exe", "msrdc.exe", "anydesk.exe", "teamviewer.exe", "rustdesk.exe", "parsecd.exe",
                          "vncviewer.exe", "quickassist.exe", "vmware.exe", "vmplayer.exe", "virtualbox.exe",
                          "virtualboxvm.exe", "vmconnect.exe"}),
+    # The camera, the microphone and the screen (SPEC 2.4's "Other"): an app that records or captures them.
+    "capture": frozenset({"windowscamera.exe", "soundrec.exe", "soundrecorder.exe", "voicerecorder.exe",
+                          "snippingtool.exe", "screensketch.exe", "screenclippinghost.exe", "gamebar.exe",
+                          "gamebarftserver.exe", "obs64.exe", "obs32.exe", "obs.exe", "psr.exe", "bdcam.exe",
+                          "camtasiastudio.exe", "camrecorder.exe", "sharex.exe", "clipchamp.exe", "loom.exe"}),
 }
 # Opened when the owner names them, but never an automation target (in-control mode never works in them).
 NEVER_TARGET_APPS: dict[str, frozenset[str]] = {
@@ -343,7 +348,7 @@ NEVER_TARGET_APPS: dict[str, frozenset[str]] = {
 NEVER_APP_WORDS: dict[str, tuple[tuple[str, ...], ...]] = {
     "terminal": _phrases("terminal", "cmd", "command prompt", "powershell", "windows terminal", "wsl", "ubuntu",
                          "debian", "kali linux", "opensuse", "git bash", "python", "node js",
-                         "developer command prompt"),
+                         "developer command prompt", "run dialog"),       # the Start menu's Run (its id's words)
     "system": _phrases("registry editor", "control panel", "services", "task scheduler", "task manager", "settings",
                        "windows security", "group policy", "local security policy", "system configuration",
                        "computer management", "event viewer", "windows update", "bitlocker", "firewall",
@@ -359,6 +364,13 @@ NEVER_APP_WORDS: dict[str, tuple[tuple[str, ...], ...]] = {
                       "revolut", "monzo"),
     "remote": _phrases("remote desktop", "remote desktop connection", "anydesk", "teamviewer", "rustdesk",
                        "parsec", "vnc", "quick assist", "vmware", "virtualbox", "hyper v", "virtual machine"),
+    # The camera, the microphone and the screen: "Camera", "Sound Recorder" (once "Voice Recorder"), "Snipping Tool"
+    # (once "Snip & Sketch", its id "ScreenSketch"), "Xbox Game Bar" (its id "XboxGamingOverlay"), "OBS Studio",
+    # "Steps Recorder" and the like - never opened, whatever the request's words say.
+    "capture": _phrases("camera", "webcam", "sound recorder", "voice recorder", "audio recorder", "screen recorder",
+                        "screen recording", "snipping tool", "snip sketch", "screen sketch", "game bar",
+                        "gaming overlay", "obs", "obs studio", "steps recorder", "bandicam", "camtasia", "sharex",
+                        "clipchamp", "loom"),
     "jarvis": _phrases("jarvis", "jarvis assistant", "briefing reader"),     # Jarvis's own: never opened again
 }
 NEVER_TARGET_WORDS: dict[str, tuple[tuple[str, ...], ...]] = {

@@ -799,18 +799,21 @@ class AskController(QObject):
             # A mode with no run is amber, but a brief of Jarvis's own is an answer (it stays as done).
             soft = (outcome.question and not outcome.cards) or (bool(getattr(outcome, "note_kind", ""))
                                                                 and getattr(outcome, "brief", None) is None)
+            tone = hud.TONE_WARN if soft else hud.TONE_DONE
             if getattr(outcome, "mode", "") == MODE_DESKTOP:
-                # A desktop plan: Jarvis's own words for it and what came of it (amber when no step passed - a
-                # question back, everything refused -, a step was refused or failed, or one needs the owner's OK).
-                soft = _desktop_soft(outcome)
+                # A desktop plan: Jarvis's own words for it and what came of it - amber only while a step needs the
+                # owner's OK on a card, coral when it was not done (no step passed, a step refused, failed or
+                # stopped: hard rule 17).
+                tone = _desktop_tone(outcome)
             # The bar is never touched here: a typed request left it as it started (Up brings it back),
             # and a click-started run never touches what the owner may be typing (R23).
-            self._status(self._answer(outcome), hud.TONE_WARN if soft else hud.TONE_DONE, keep_link=keep_link,
-                         hud_text=self._hud_answer(outcome))
+            self._status(self._answer(outcome), tone, keep_link=keep_link, hud_text=self._hud_answer(outcome))
         else:
             if outcome.kind == LIMIT:
                 self._limit_message = outcome.message
             tone = hud.TONE_WARN if outcome.kind in _SOFT_KINDS else hud.TONE_ERROR
+            if running.mode == MODE_DESKTOP:
+                tone = hud.TONE_ERROR          # a desktop request not run (a limit, busy ...): coral, never amber
             self._status(outcome.message or "Ask failed; nothing was proposed", tone)
             if running.typed and running.words and not outcome.runs:
                 # Refused before any planner run (a limit, Claude Code not ready, web research off):
@@ -1311,8 +1314,8 @@ def _prep_finish_words(outcome: Any) -> tuple[str, str]:
 
 
 def _desktop_soft(outcome: Any) -> bool:
-    """A desktop request's words take the soft tone: no plan, every step refused or none accepted, or - carried out -
-    a step refused, failed, cancelled or waiting for the owner's OK on a card (desktop.executor.run_soft)."""
+    """A desktop request is not simply done (LIVE's CHECK): no plan, every step refused or none accepted, or - carried
+    out - a step refused, failed, cancelled or waiting for the owner's OK on a card (desktop.executor.run_soft)."""
     plan = getattr(outcome, "brief", None)
     if plan is None:
         return True
@@ -1320,6 +1323,14 @@ def _desktop_soft(outcome: Any) -> bool:
     if run is not None and run.results:
         return desktop_executor.run_soft(run, plan)
     return desktop_mode.plan_tone_warn(plan)
+
+
+def _desktop_tone(outcome: Any) -> str:
+    """A desktop request's words on the bar (hard rule 17): amber only while a decision waits - a step held for the
+    owner's OK on a NEEDS YOUR OK card -, coral when it was not done (``_desktop_soft``), else the done tone."""
+    if desktop_executor.run_waits(getattr(outcome, "desktop_run", None)):
+        return hud.TONE_WARN
+    return hud.TONE_ERROR if _desktop_soft(outcome) else hud.TONE_DONE
 
 
 def _desktop_acted(outcome: Any) -> bool:

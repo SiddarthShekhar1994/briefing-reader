@@ -42,15 +42,14 @@ Statuses ``DONE``, ``WAITING``, ``FOUND``, ``REFUSED``, ``FAILED``, ``CANCELLED`
 ``waiting()``, ``found()``, ``not_done()``, ``counts()``, ``statuses_text()``; ``shown``: what the result cards show
 of it - desktop.results, P1.9); ``FindQuery``; ``Executor(backend, scope=, apps=, find=, clock=)`` (``run_plan(plan,
 words=, others_from=, cancel=)``, ``run_route(route, words=, run_id=)``, ``run_click(skill, target, granted=, ...)``,
-``recheck(item)``); ``run_words(run, plan=None, address=)``; ``run_soft(run, plan=None)``; ``describe(result)``;
-``status_words(result)``; ``WAITING_NOUNS``; ``MAX_OTHERS``.
+``recheck(item)``); ``run_words(run, plan=None, address=)``; ``run_soft(run, plan=None)``; ``run_waits(run)``;
+``describe(result)``; ``status_words(result)``; ``WAITING_NOUNS``; ``MAX_OTHERS``.
 """
 
 from __future__ import annotations
 
 import logging
 import ntpath
-import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -181,7 +180,7 @@ class Executor:
     # ---- a planner's plan -------------------------------------------------------------------------
 
     def run_plan(self, plan: dv.DesktopPlan, *, words: str = "", others_from: Sequence[FileItem] = (),
-                 cancel: threading.Event | None = None) -> DesktopRun:
+                 cancel: Any = None) -> DesktopRun:
         """Every accepted step of ``plan`` (in order; the refused ones were never accepted), as the module docstring
         says. ``words``: the owner's typed words (the D5 other matches are ranked by them); ``others_from``: the
         files the planner was shown."""
@@ -223,10 +222,10 @@ class Executor:
     # ---- a local route ------------------------------------------------------------------------------
 
     def run_route(self, route: Any, *, words: str = "", run_id: str = "",
-                  cancel: threading.Event | None = None) -> DesktopRun:
-        """A local route (desktop.routes.LocalRoute) carried out: an open (INSTANT: the owner named it exactly),
-        or a find whose files the route's search found (checked as they were listed); nothing once ``cancel`` is
-        set."""
+                  cancel: Any = None) -> DesktopRun:
+        """A local route (desktop.routes.LocalRoute) carried out: an open (INSTANT: the owner named it exactly; a
+        bare web address is held for his click - ONE_CLICK, its flags kept), or a find whose files the route's search
+        found (checked as they were listed); nothing once ``cancel`` is set."""
         started = self._clock()
         self._cancel = cancel
         kind, tier = getattr(route, "kind", ""), getattr(route, "tier", "") or dv.INSTANT
@@ -238,8 +237,8 @@ class Executor:
             hits = tuple(getattr(route, "hits", ()))
             result = StepResult(0, kind, tier, FOUND, found=hits)
         else:
-            result = self._open(0, kind, tier, frozenset(), getattr(route, "target", None),
-                                getattr(route, "folder", "") or "", _Caps())
+            result = self._open(0, kind, tier, frozenset(getattr(route, "flags", ()) or ()),
+                                getattr(route, "target", None), getattr(route, "folder", "") or "", _Caps())
         run = DesktopRun(run_id, (result,), round(self._clock() - started, 3))
         self._log(run)
         return run
@@ -509,7 +508,8 @@ _NOUNS = {dv.OPEN_FILE: ("the file", "{n} files"), dv.OPEN_FOLDER: ("the folder"
 WAITING_NOUNS = ((dv.FLAG_SCRIPT, "a file that can run macros or scripts"), (dv.FLAG_SHORTCUT, "a shortcut"),
                  (dv.FLAG_HIDDEN_CHARS, "a file with hidden characters in its name"),
                  (dv.FLAG_NOT_NAMED, "an app you didn't name exactly"),
-                 (dv.FLAG_SUGGESTED, "a web page you didn't type"))
+                 (dv.FLAG_SUGGESTED, "a web page you didn't type"),
+                 (dv.FLAG_BARE_HOST, "a web page"))
 
 
 def _and(items: Sequence[str]) -> str:
@@ -614,15 +614,21 @@ def run_words(run: DesktopRun | None, plan: dv.DesktopPlan | None = None, addres
 
 
 def run_soft(run: DesktopRun | None, plan: dv.DesktopPlan | None = None) -> bool:
-    """The caption takes the soft (amber) tone: something was refused, failed or cancelled, a step needs the owner's
-    OK on a card, or nothing opened, was found or waits."""
+    """The run is not simply done (Live's CHECK): something was refused, failed or cancelled, a step needs the owner's
+    OK on a card, or nothing opened, was found or waits. On the HUD's caption (hard rule 17) only ``run_waits`` is
+    amber - a decision waits -, and the rest coral."""
     if run is None or not run.results:
         return True
     if run.not_done() or (plan is not None and plan.refused()):
         return True
-    if any(result.tier == dv.CARD for result in run.waiting()):
+    if run_waits(run):
         return True
     return not (run.done() or run.found() or run.waiting())
+
+
+def run_waits(run: DesktopRun | None) -> bool:
+    """A step waits for the owner's OK on a NEEDS YOUR OK card (a CARD-tier step held): a decision waits (amber)."""
+    return run is not None and any(result.tier == dv.CARD for result in run.waiting())
 
 
 _STATUS_WORDS = {DONE: "opened", WAITING: "waiting for you", FOUND: "found", REFUSED: "refused", FAILED: "failed",

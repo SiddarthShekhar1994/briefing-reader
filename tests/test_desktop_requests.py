@@ -523,8 +523,16 @@ class HudBarTests(DesktopRequestApp):
         settle()
         self.answered()
         self.assertEqual(self.hud().caption_text(), DISABLED_MESSAGE)
+        self.assertEqual(self.hud().caption._status_tone, hud.TONE_ERROR)    # noqa: SLF001 - not done: coral (P1.R)
         self.assertEqual(bar.text(), ESSAY)                                  # not taken: the words stay
         self.assertEqual(self.fake.opened_methods(), ["open_folder"])
+        self.hud_key()
+        bar.clear_input()
+        QTest.keyClicks(bar.input, "what's on today?")                       # not a desktop request: Ask is off
+        QTest.keyClick(bar.input, Qt.Key.Key_Return)
+        settle()
+        self.assertEqual((self.hud().caption_text(), self.hud().caption._status_tone),   # noqa: SLF001
+                         (DISABLED_MESSAGE, hud.TONE_ERROR))
 
 
 class OneClickTests(DesktopRequestApp):
@@ -646,6 +654,141 @@ class NamesOnlyTests(DesktopRequestApp):
         labels = [field.label for field in task.steps[0].fields]
         self.assertNotIn("Memory given", labels)
         self.assertEqual(labels, ["You typed", "Route"])
+
+
+TURNED_OFF = "Jarvis on your desktop was turned off, sir - nothing was opened."
+STOPPED = "Stopped - nothing more was opened, sir."
+
+
+class TurnOffTests(DesktopRequestApp):
+    """P1.R (p1r-1; hard rule 15, SPEC 10.3): Settings > Desktop's Turn off stops desktop work at once - nothing opens
+    after it. A desktop planner run on its way is cancelled; every desktop job asks THE CONSENT GATE again right
+    before each OS call (fail-closed: the owner's OK gone by any way, or unreadable, stops it), and a Turn off after a
+    job started stops it for good - even when the owner turns it on again before the plan lands; a request being
+    looked up then starts no planner run, and a local route on its way opens nothing."""
+
+    def caption_tone(self) -> str:
+        return self.hud().caption._status_tone                                # noqa: SLF001 - its paint's tone
+
+    def test_turn_off_while_the_planner_runs_opens_nothing(self) -> None:
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.make_ask(GatedProcess(plan_stream(DESKTOP_PLAN), gate))
+        self.type_in_window(ESSAY)                                            # onto the HUD; the planner run waits
+        self.started()
+        self.back()                                                           # Bring Jarvis back meanwhile ...
+        self.c._on_desktop_turn_off()                                         # ... and Settings > Desktop > Turn off
+        settle()
+        self.assertFalse(self.desktop.consent_given())
+        gate.set()                                                            # the planner answers after all
+        self.finish()
+        self.assertEqual(self.fake.opened, [])                                # nothing opened after the Turn off
+        self.assertIn(ask_ui.CANCELLED_TEXT, self.reading.command_bar.status())   # its planner run was cancelled
+        self.assertEqual((self.desktop.results.entries(), self.desktop.overlay.cards()), ([], []))
+        self.enter_after_turn_on()
+
+    def enter_after_turn_on(self) -> None:
+        """Turned on again, the HUD shows nothing of that request."""
+        self.assertTrue(self.desktop.turn_on())
+        self.enter()
+        self.assertEqual(self.desktop.results.entries(), [])
+
+    def test_the_gate_is_asked_again_right_before_the_os_call(self) -> None:
+        """The owner's OK gone without the Turn off (the stored OK says no): nothing was cancelled, yet the carry-out
+        opens nothing - the executor asks the gate right before its OS call."""
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.make_ask(GatedProcess(plan_stream(DESKTOP_PLAN), gate))
+        self.enter()
+        self.type_on_hud(ESSAY)
+        self.started()
+        self.assertTrue(self.c._prefs_store().set_desktop_turned_on(False))  # noqa: SLF001 - the store says no
+        gate.set()
+        self.finish()
+        self.assertEqual(self.fake.opened, [])
+        self.assertEqual([(result.status, result.code) for result in self.desktop.last_run.results],
+                         [(dx.CANCELLED, dx.STOPPED)])
+        self.assertEqual(self.hud().caption_text(), STOPPED)
+        self.assertEqual(self.caption_tone(), hud.TONE_ERROR)                 # not done: coral (hard rule 17)
+        self.assertEqual(self.desktop.results.entries(), [])                  # no card either
+
+    def test_an_unreadable_ok_is_a_no_right_before_the_os_call(self) -> None:
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.make_ask(GatedProcess(plan_stream(DESKTOP_PLAN), gate))
+        self.enter()
+        self.type_on_hud(ESSAY)
+        self.started()
+        self.desktop._consent_store = mock.Mock(side_effect=RuntimeError("unreadable"))   # noqa: SLF001
+        gate.set()
+        with self.assertLogs("briefing_reader.desktop_ui", level="WARNING") as logs:
+            self.finish()
+        self.assertEqual(self.fake.opened, [])                                # fail-closed
+        self.assertIn("RuntimeError", "\n".join(logs.output))
+        self.assertNotIn("unreadable", "\n".join(logs.output))
+
+    def test_a_turn_off_stops_what_started_before_even_when_turned_on_again(self) -> None:
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.make_ask(GatedProcess(plan_stream(DESKTOP_PLAN), gate), plan_stream(DESKTOP_PLAN))
+        self.enter()
+        self.type_on_hud(ESSAY)
+        self.started()
+        self.assertTrue(self.desktop.turn_off())                              # the desktop's own Turn off ...
+        self.assertTrue(self.desktop.turn_on())                               # ... and on again before it lands
+        self.assertTrue(self.desktop.consent_given())
+        gate.set()
+        self.finish()
+        self.assertEqual(self.fake.opened, [])                                # the job from before: stopped for good
+        self.assertEqual(self.hud().caption_text(), STOPPED)
+        self.type_on_hud(ESSAY)                                               # a new request after the Turn on works
+        self.finish()
+        self.assertEqual(self.fake.opened, [("open_document", ESSAY_PATH)])
+
+    def test_a_request_being_looked_up_starts_no_planner_run(self) -> None:
+        self.make_ask(plan_stream(DESKTOP_PLAN))
+        context = self.desktop.context_source(ESSAY)
+        release, holding = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def slow(_words: str) -> object:                                      # looking this PC over takes a while
+            holding.set()
+            release.wait(5)
+            return context
+        self.desktop.context_source = slow
+        self.enter()
+        self.type_on_hud(ESSAY)
+        self.assertTrue(wait_for(holding.is_set))
+        self.c._on_desktop_turn_off()
+        release.set()
+        self.answered()
+        settle()
+        self.assertEqual(self.runs(), [])                                     # no planner run: nothing went out
+        self.assertEqual(self.hud().caption_text(), TURNED_OFF)
+        self.assertEqual(self.caption_tone(), hud.TONE_ERROR)
+        self.assertEqual(self.hud().bar.text(), ESSAY)                        # the words stay: Enter after Turn on
+        self.assertEqual(self.fake.opened, [])
+
+    def test_a_local_route_on_its_way_opens_nothing(self) -> None:
+        self.make_ask()
+        self.enter()
+        release, holding = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def hold(method: str, _argument: str) -> None:
+            if method == "known_folder" and not holding.is_set():             # the re-check right before the open
+                holding.set()
+                release.wait(5)
+        self.fake.on_call = hold
+        self.type_on_hud(DOWNLOADS_TYPED)
+        self.assertTrue(wait_for(holding.is_set))
+        self.c._on_desktop_turn_off()
+        release.set()
+        self.answered()
+        self.assertEqual(self.fake.opened, [])
+        self.assertEqual([result.status for result in self.desktop.last_run.results], [dx.CANCELLED])
+        self.assertEqual(self.hud().caption_text(), STOPPED)
+        self.assertEqual(self.desktop.results.entries(), [])
 
 
 if __name__ == "__main__":

@@ -392,8 +392,13 @@ class TierTests(unittest.TestCase):
             (open_app("a2"), "open my music app", None, (dv.ONE_CLICK, [dv.FLAG_NOT_NAMED])),
             (open_url(site="s1"), "open the portal", None, (dv.INSTANT, [])),    # a saved site
             (open_url("https://example.org/news"), "open https://example.org/news", None, (dv.INSTANT, [])),
-            (open_url("https://example.org/news"), "open example.org/news", None, (dv.INSTANT, [])),
-            (open_url("https://example.org/news"), "open www.example.org/news/", None, (dv.INSTANT, [])),
+            (open_url("https://example.org/news"), "open https://www.example.org/news/", None, (dv.INSTANT, [])),
+            # Typed without its https:// (P1.R, p1r-2: "logo.ai" may be a file's name): one click, its host shown.
+            (open_url("https://example.org/news"), "open example.org/news", None, (dv.ONE_CLICK, [dv.FLAG_BARE_HOST])),
+            (open_url("https://example.org/news"), "open www.example.org/news/", None,
+             (dv.ONE_CLICK, [dv.FLAG_BARE_HOST])),
+            (open_url("https://logo.ai"), "open logo.ai please", None, (dv.ONE_CLICK, [dv.FLAG_BARE_HOST])),
+            (open_url("https://logo.ai"), "open http://logo.ai", None, (dv.ONE_CLICK, [dv.FLAG_BARE_HOST])),
             (open_url("https://example.org/news"), "open the news", None, (dv.ONE_CLICK, [dv.FLAG_SUGGESTED])),
             (open_url("https://example.org/news"), "open example.org", None, (dv.ONE_CLICK, [dv.FLAG_SUGGESTED])),
         ]

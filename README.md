@@ -2184,7 +2184,8 @@ your OK on this PC (in `assistant.json`, as a yes/no only) and then does what yo
 asked - for a request you typed, your words stay in the bar and Enter sends
 them. Your OK counts only once it is saved: if it can't be saved, the card says
 so and nothing is on. **Settings > Desktop** shows "Your OK: Turned on" and has
-**Turn off**, which takes it back at once (the card shows again next time).
+**Turn off**, which takes it back at once (the card shows again next time):
+whatever was on its way stops there, and nothing opens after it.
 
 **The switch.** Three ways onto the desktop, each only from you:
 
@@ -2223,7 +2224,10 @@ and the app's name as its tag ("WORD"):
 The outline follows the window: it hides while you drag the window and comes
 back where you drop it, hides while the window is minimised, and goes when you
 close the window (the card stays) or when the card goes. Cards go when you ask
-for something else or go back to the window. File Explorer windows get no
+for something else or go back to the window. If you go back to the window
+before Jarvis has answered, his cards wait for you - nothing of them shows or
+runs in the meantime - and appear the next time you go onto the desktop (a step
+that waits for your click or OK keeps its card). File Explorer windows get no
 outline in this version.
 
 **One click, or your OK, first.** Some things wait on a card for your click,
@@ -2236,7 +2240,11 @@ and nothing opens until then:
   that is a document in your folders (the document opens, never the shortcut);
 - an app you didn't name exactly, a web address you didn't type (its site is
   shown) and a file whose name hides characters (spelled out on the card, such
-  as <U+202E>) get a cyan card with **Open**.
+  as <U+202E>) get a cyan card with **Open**;
+- so does a web address you typed without `https://` ("open youtube.com"),
+  since a name such as "logo.ai" can be a file's: when a file of that very name
+  is in your folders, Jarvis shows the file instead, and nothing goes to the
+  web.
 
 Every click checks the item again first - the very file the card showed, not a
 new search - and a file that changed since says "The file changed since I looked
@@ -2263,8 +2271,11 @@ hide_from_capture = true`; set it to `false` to show the HUD on a call).
 folders`: Desktop, Documents, Downloads, Pictures, Music and Videos by default);
 code folders - which covers the Jarvis project itself -, AppData, the Recycle
 Bin and files that look like keys or passwords are always left out. Only https
-web addresses on public sites open. Nothing on the desktop starts by itself,
-from an email, a file or an offer.
+web addresses on public sites open. Apps that turn on the camera or the
+microphone or record the screen (Camera, Sound Recorder, Snipping Tool, Xbox
+Game Bar, OBS ...) and the Start menu's Run are never opened, whatever you
+type. Nothing on the desktop starts by itself, from an email, a file or an
+offer.
 
 **LIVE** shows each desktop request as a DESKTOP task: the route ("on this PC -
 no planner run", or the planner), "Looked in 2 places: 214 files", the plan

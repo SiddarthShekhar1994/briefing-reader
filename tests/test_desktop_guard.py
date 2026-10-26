@@ -232,7 +232,11 @@ class NeverListTests(unittest.TestCase):
                  "Windows Security": "system", "Claude": "claude", "Bitwarden": "password_manager",
                  "1Password": "password_manager", "KeePassXC": "password_manager",
                  "Remote Desktop Connection": "remote", "TeamViewer": "remote", "Coinbase Wallet": "money",
-                 "Online Banking": "money", "App Installer": "installer", "Git CMD": "terminal", "cmd": "terminal"}
+                 "Online Banking": "money", "App Installer": "installer", "Git CMD": "terminal", "cmd": "terminal",
+                 # P1.R (p1r-8): the camera, the microphone and the screen are never opened.
+                 "Camera": "capture", "Sound Recorder": "capture", "Voice Recorder": "capture",
+                 "Snipping Tool": "capture", "Snip & Sketch": "capture", "Xbox Game Bar": "capture",
+                 "OBS Studio": "capture", "Steps Recorder": "capture"}
         for name, group in cases.items():
             self.assertEqual(guard.never_app(name), group, name)
         for group, phrases in guard.NEVER_APP_WORDS.items():

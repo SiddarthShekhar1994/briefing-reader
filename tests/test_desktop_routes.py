@@ -28,6 +28,7 @@ from briefing_reader.ask.routes import (
     RouteFlags,
     route,
 )
+from briefing_reader.desktop import guard
 from briefing_reader.desktop import routes as dr
 from briefing_reader.desktop import validate as dv
 from briefing_reader.desktop.context import AppItem, DesktopContext, SiteItem
@@ -130,19 +131,59 @@ class LocalRouteTests(unittest.TestCase):
         self.assertIsNone(self.local("open my downloads from yesterday"))     # not the folder itself: the planner
 
     def test_web_addresses(self) -> None:
-        cases = (("open https://example.org/news", "https://example.org/news"),
-                 ("open youtube.com", "https://youtube.com"), ("open bbc.co.uk/news", "https://bbc.co.uk/news"),
+        found = self.local("open https://example.org/news")                    # typed word for word: at once
+        self.assertEqual((found.kind, found.tier, found.target, found.flags),
+                         (dv.OPEN_URL, dv.INSTANT, "https://example.org/news", frozenset()))
+        self.assertEqual(self.local("open https://example.org/news", context=None), found)
+        cases = (("open youtube.com", "https://youtube.com"), ("open bbc.co.uk/news", "https://bbc.co.uk/news"),
                  ("open www.example.org", "https://www.example.org"))
         for text, url in cases:
-            with self.subTest(text=text):
+            with self.subTest(text=text):                                      # a bare address: on a click only
                 found = self.local(text)
-                self.assertEqual((found.kind, found.tier, found.target), (dv.OPEN_URL, dv.INSTANT, url))
+                self.assertEqual((found.kind, found.tier, found.target, found.flags),
+                                 (dv.OPEN_URL, dv.ONE_CLICK, url, frozenset({dv.FLAG_BARE_HOST})))
                 self.assertEqual(self.local(text, context=None), found)
         for text in ("open http://example.org/", "open https://localhost/admin", "open https://192.168.1.4/",
                      "open notes.md", "open setup.exe", "open ftp://example.org", "open javascript:alert(1)",
                      "open https://owner:secret@example.org/"):
             with self.subTest(text=text):
                 self.assertIsNone(self.local(text))                    # not on this PC: the planner, then the checks
+
+    def test_a_files_name_never_goes_to_the_web_without_a_click(self) -> None:
+        """P1.R (p1r-2): "open logo.ai" (an Illustrator file), "open song.ly" (LilyPond), "open track.it" (Impulse
+        Tracker) never open https://logo.ai at once: the file of that very name is found when the folders hold it (its
+        card shows it - never the web), else the web page waits on a card for the owner's click, its host shown. A
+        document's name (notes.md, report.pdf) is never a web address at all; only an https address typed word for
+        word, or a saved site, opens at once."""
+        disk = FakeIndex([FakeEntry(DOWNLOADS + "\\logo.ai", "logo.ai"), FakeEntry(DOWNLOADS + "\\Logo.AI old.png",
+                                                                                    "Logo.AI old.png"),
+                          FakeEntry(LING + "\\Song.LY", "Song.LY"), FakeEntry(LING + "\\notes.md", "notes.md")])
+        for text, name in (("open logo.ai", "logo.ai"), ("open song.ly", "Song.LY")):
+            with self.subTest(text=text):                                      # the file is in the folders
+                found = self.local(text, search=disk.search)
+                self.assertEqual((found.kind, found.tier), (dv.FIND_FILES, dv.INSTANT))
+                self.assertEqual([item.name for item in found.hits], [name])   # that very name only
+                self.assertIsNone(found.target)
+        for text, url in (("open logo.ai", "https://logo.ai"), ("open poster.ai", "https://poster.ai"),
+                          ("open track.it", "https://track.it"), ("open song.ly", "https://song.ly"),
+                          ("open bbc.co.uk", "https://bbc.co.uk"), ("open example.org", "https://example.org")):
+            for search in (FakeIndex([]).search, None):
+                with self.subTest(text=text, search=search is not None):      # no such file: a click first
+                    found = self.local(text, search=search)
+                    self.assertEqual((found.kind, found.tier, found.target, found.flags),
+                                     (dv.OPEN_URL, dv.ONE_CLICK, url, frozenset({dv.FLAG_BARE_HOST})))
+        for text in ("open notes.md", "open report.pdf", "open essay.docx", "open budget.xlsx", "open photo.jpg"):
+            with self.subTest(text=text):                                      # a document's name: never the web
+                self.assertIsNone(self.local(text, search=disk.search))
+        self.assertFalse(dr.WEB_ENDINGS & (guard.OPENABLE_TYPES | guard.SCRIPT_CAPABLE_TYPES))
+        for text in ("open https://logo.ai", "open https://www.bbc.co.uk/news"):
+            with self.subTest(text=text):                                      # typed word for word: at once
+                found = self.local(text, search=disk.search)
+                self.assertEqual((found.kind, found.tier, found.flags), (dv.OPEN_URL, dv.INSTANT, frozenset()))
+        portal = self.local("open the student portal", search=disk.search)    # a saved site: at once
+        self.assertEqual((portal.kind, portal.tier), (dv.OPEN_URL, dv.INSTANT))
+        self.assertEqual(dr.route_words(self.local("open logo.ai"), "sir"),
+                         "Understood: open a web page. Nothing was opened yet, sir.")
 
     def test_apps_and_saved_sites_by_their_whole_name(self) -> None:
         word, spotify, shell = self.context.apps

@@ -30,7 +30,10 @@ hook). It keeps the owner's rules:
   list's) emit ``consentNeeded(ENTRY_DOCK)`` instead of switching - the app shows that card in the window (the HUD
   key, a --hud start and a typed request show it too, through the app) - and ``request()`` and the result cards'
   clicks refuse. ``turn_on()`` stores the owner's Turn on (it counts only once saved), ``turn_off()`` (Settings >
-  Desktop) takes it back; ``consentChanged(bool)`` follows.
+  Desktop) takes it back; ``consentChanged(bool)`` follows. A Turn off stops what is on its way at once (P1.R): every
+  desktop job - a request being looked up, a card's click, a planner run's carry-out - asks the gate again before
+  each step and right before each OS call (``_Gate``: fail-closed, and set for good by a Turn off after the job
+  started), so nothing opens after it, and a request looked up meanwhile starts no planner run.
 * The bar's keyboard (SPEC 8.3): ``take_keyboard()`` (the HUD key) gives the HUD's bar the keyboard - at once, or as
   the HUD shows when the switch to it is on its way (hud_overlay.HudWindow.take_keyboard: the window that had it is
   remembered and gets it back after Enter or Esc in an empty bar); ``has_keyboard()`` says whether it has it (the next
@@ -77,11 +80,15 @@ hook). It keeps the owner's rules:
   the desktop thread right after it) float beside what they are about - "Opened LING essay draft.docx in Word.
   Nothing else changed." beside Word's window with a cyan bracket, its tag and a tether, the other matches as "Open
   this instead" rows; a held step's card with Open; what a find found. A new request takes the last ones away, and
-  so does leaving the HUD. A card's click (``clickRequested``) is carried out on the desktop thread
-  (desktop.service.click: the card's OWN item re-checked by desktop.executor.run_click, at most the tier the card
-  stood for) - one at a time, ``busy()`` meanwhile - and what came of it updates the cards, the caption
-  (``answered``) and LIVE ("Approved by your click 10:22 AM", each item and its result). Not now takes a card away
-  and carries nothing out. ``window_api``: the window seam the cards' winwatch uses (tests pass a fake; by default
+  so does leaving the HUD. Cards that come while Jarvis is not on the HUD - in the window, or with the switch back on
+  its way - are held as data only (no card window, no window followed meanwhile) and show when the HUD next shows:
+  a step that waits for the owner's click or OK keeps its card, as the words say (P1.R). A card's click
+  (``clickRequested``) is carried out on the desktop thread (desktop.service.click: the card's OWN item re-checked by
+  desktop.executor.run_click, at most the tier the card stood for) - one at a time, ``busy()`` meanwhile; one that
+  takes more than RESOLVE_TIMEOUT_S is stopped, so it opens nothing after "I stopped" - and what came of it updates
+  the cards, the caption (``answered``, in its tone: amber only while a decision waits, coral when it was not done -
+  hard rule 17) and LIVE ("Approved by your click 10:22 AM", each item and its result). Not now takes a card away and
+  carries nothing out. ``window_api``: the window seam the cards' winwatch uses (tests pass a fake; by default
   winwatch.default_api(), which does nothing while the tests run).
 
 Logs: statuses, durations, screen numbers, run ids, skill kinds, counts and refusal codes only - never what was
@@ -115,6 +122,7 @@ from .desktop import service as desktop_service
 from .desktop import winwatch
 from .desktop.context import DesktopContext
 from .desktop.worker import DesktopWorker
+from .hud import TONE_DONE, TONE_ERROR, TONE_WARN
 from .persona import clock_text, with_address
 
 logger = logging.getLogger(__name__)
@@ -130,6 +138,7 @@ TOO_LONG_TEXT = "Looking on this PC took too long, {sir} - I stopped."
 RESOLVE_TIMEOUT_S = 30.0                           # a request is waited for this long at most (then nothing opens)
 CARRY_OUT_TIMEOUT_S = 60.0                         # the Ask thread waits this long for a plan's steps at most
 CLICK_TOO_LONG_TEXT = "That took too long, {sir} - I stopped."
+TURNED_OFF_TEXT = "Jarvis on your desktop was turned off, {sir} - nothing was opened."   # a request on its way then
 # Where the owner asked to go onto the desktop from (the first-run card goes on to it after his Turn on).
 ENTRY_DOCK, ENTRY_KEY, ENTRY_START, ENTRY_REQUEST = "dock", "key", "start", "request"
 ENTRIES = (ENTRY_DOCK, ENTRY_KEY, ENTRY_START, ENTRY_REQUEST)
@@ -217,14 +226,42 @@ def _click_task(live: Any, button: str, run: Any, said: str, soft: bool, approve
 
 
 class _Either:
-    """Set as soon as any of its events is (the executor only asks ``is_set()`` before each step): the owner's Cancel
-    or the app giving up waiting."""
+    """Set as soon as any of its events is (the executor only asks ``is_set()`` before each step and right before each
+    OS call): the owner's Cancel, the app giving up waiting, or THE CONSENT GATE's no (``_Gate``)."""
 
-    def __init__(self, *events: threading.Event | None) -> None:
+    def __init__(self, *events: Any) -> None:
         self._events = [event for event in events if event is not None]
 
     def is_set(self) -> bool:
         return any(event.is_set() for event in self._events)
+
+
+class _Gate:
+    """THE CONSENT GATE as a job's stop (P1.R): set once the owner's Turn off came after the job started
+    (``turned_off``: an event the Turn off sets - a Turn on again later does not undo it), and whenever the gate,
+    asked anew each time (``allowed``: DesktopController.consent_given), says no - fail-closed: anything failing is a
+    no. The executor asks it before each step and right before each OS call."""
+
+    def __init__(self, allowed: Callable[[], bool], turned_off: threading.Event) -> None:
+        self._allowed = allowed
+        self._turned_off = turned_off
+
+    def is_set(self) -> bool:
+        if self._turned_off.is_set():
+            return True
+        try:
+            return self._allowed() is not True
+        except Exception:  # noqa: BLE001 - unknown: no
+            return True
+
+
+def run_tone(run: Any, plan: Any = None) -> str:
+    """The caption's tone for what a run came to (hard rule 17): amber (TONE_WARN) only while a decision waits - a
+    step held for the owner's OK on a NEEDS YOUR OK card -; coral (TONE_ERROR) when something was refused, failed or
+    cancelled, or nothing was carried out (desktop.executor.run_soft); else the done tone."""
+    if desktop_executor.run_waits(run):
+        return TONE_WARN
+    return TONE_ERROR if desktop_executor.run_soft(run, plan) else TONE_DONE
 
 
 class _Bridge(QObject):
@@ -257,9 +294,11 @@ class DesktopController(QObject):
     """See the module docstring."""
 
     hudChanged = Signal(bool)          # True: Jarvis went onto the desktop HUD; False: back in the window
-    # A request handled without the planner: Jarvis's own words, whether they take the soft tone, the owner's words
-    # and whether they were taken (handled on this PC: they leave the bar; not handled: they stay).
-    answered = Signal(str, bool, str, bool)
+    # A request handled without the planner: Jarvis's own words, their tone (hard rule 17: TONE_DONE; TONE_WARN -
+    # amber - only while a decision waits; TONE_ERROR - coral - when it was not done: refused, failed, stopped, too
+    # long, turned off), the owner's words and whether they were taken (handled on this PC: they leave the bar; not
+    # handled: they stay).
+    answered = Signal(str, str, str, bool)
     # A request for the planner: its job (ask.desktop_mode.DesktopJob; None when the planner may not run) and the
     # owner's words.
     plannerNeeded = Signal(object, str)
@@ -296,9 +335,16 @@ class DesktopController(QObject):
                                                    parent=self)
         self.results.clickRequested.connect(self._on_card_click)
         self._click_seq = 0
-        # The click being carried out: (number, card entry, key, the windows before it, the button's words).
-        self._clicking: tuple[int, Any, str, frozenset[int], str] | None = None
+        # The click being carried out: (number, card entry, key, the windows before it, the button's words, its stop -
+        # set when the app stops waiting: nothing opens for it any more).
+        self._clicking: tuple[int, Any, str, frozenset[int], str, threading.Event] | None = None
+        self._stopped_click: tuple[int, Any, str, frozenset[int], str, threading.Event] | None = None
         self._before: frozenset[int] = frozenset()           # the windows as the last request started
+        # Set by the owner's Turn off (then a fresh one): every desktop job started before it opens nothing more.
+        self._turned_off = threading.Event()
+        # A request's result cards that came while Jarvis was not on the HUD (in the window, or the switch back on its
+        # way): (its run, the windows before it) - data only, shown when the HUD next shows.
+        self._held: tuple[Any, frozenset[int]] | None = None
         # Desktop requests (P1.8): the desktop thread and its service, made at the first request; the backend made
         # there (``backend_factory``; the real one by default). ``context_source(words)``: the tests' stand-in for
         # this PC's candidates (None: this PC's, from the desktop thread).
@@ -309,8 +355,9 @@ class DesktopController(QObject):
         self._bridge.resolved.connect(self._on_resolved, Qt.ConnectionType.QueuedConnection)
         self._bridge.clicked.connect(self._on_clicked, Qt.ConnectionType.QueuedConnection)
         self._request_seq = 0
-        # The request being resolved: (number, words, planner, run id, its stop - set when the app stops waiting).
-        self._looking: tuple[int, str, bool, str, threading.Event] | None = None
+        # The request being resolved: (number, words, planner, run id, its stop - set when the app stops waiting -,
+        # THE CONSENT GATE as it stood when it started: set once the owner turns it off).
+        self._looking: tuple[int, str, bool, str, threading.Event, _Gate] | None = None
         self._resolve_timer = QTimer(self)
         self._resolve_timer.setSingleShot(True)
         self._resolve_timer.timeout.connect(self._on_resolve_timeout)
@@ -437,10 +484,21 @@ class DesktopController(QObject):
 
     def turn_off(self) -> bool:
         """Settings > Desktop's Turn off: the owner's OK goes (for this run even when it could not be saved; False
-        then). Nothing desktop-side works again until he turns it on: the result cards go now."""
+        then). Nothing desktop-side works again until he turns it on, and what is on its way stops at once: every job
+        started before it - a request being looked up, a card's click, a planner run's carry-out - opens nothing more
+        (its gate is set: the executor asks it right before each OS call), a request looked up meanwhile starts no
+        planner run, and the result cards - those waiting for the HUD too - go now."""
+        turned_off, self._turned_off = self._turned_off, threading.Event()
+        turned_off.set()
         self.results.clear()
+        self._held = None
         self.pending, self.found = (), ()
         return self._store_consent(False)
+
+    def _gate(self) -> _Gate:
+        """THE CONSENT GATE as a new job's stop: asked anew right before each of its OS calls, and set for good by a
+        Turn off after the job started (``turn_off``)."""
+        return _Gate(lambda: self.consent_given(), self._turned_off)
 
     def _store_consent(self, on: bool) -> bool:
         if self._shut:
@@ -511,6 +569,7 @@ class DesktopController(QObject):
             logger.info("Desktop: switching to the HUD (%d ms)", self._flight.total_ms())
         else:
             logger.info("Desktop: on the HUD (instant switch)")
+            self._show_held()                                # the HUD shows: the cards that waited show with it
         self.hudChanged.emit(True)
         return True
 
@@ -718,6 +777,7 @@ class DesktopController(QObject):
         self.overlay.show_on(self._flight_screen)
         logger.info("Desktop: on the HUD")
         self._keyboard_on_show()
+        self._show_held()
 
     def _window_back(self) -> None:
         """Back to the window: its frame is whole in the flight - the window shows there, under the flight (at
@@ -729,6 +789,7 @@ class DesktopController(QObject):
         recorded = self._return_screen
         self._hud = False
         self._left_frame = None                              # the way back's fallback: no longer needed
+        self.results.clear()                                 # nothing of the HUD's - no card, no hook - in the window
         self.reading.hold_screens(None)
         if recorded is not None:
             self.reading.set_tab(recorded)
@@ -762,6 +823,7 @@ class DesktopController(QObject):
                     if not self.overlay.is_shown():
                         self.overlay.show_on(self._flight_screen)
                     self._keyboard_on_show()
+                    self._show_held()
             elif self._hud:
                 if self.overlay.is_shown():
                     self.overlay.hide(release=False)
@@ -834,13 +896,14 @@ class DesktopController(QObject):
             logger.info("Desktop: a request was refused (not turned on)")
             return False
         self.results.clear()
+        self._held = None                                    # the last request's cards that waited for the HUD too
         self._before = self.results.snapshot()               # the window an open brings is the one not among these
         worker, service = self._ensure_worker()
         self._request_seq += 1
-        seq, run_id, stop = self._request_seq, desktop_mode.new_run_id(), threading.Event()
-        self._looking = (seq, words, bool(planner), run_id, stop)
+        seq, run_id, stop, gate = self._request_seq, desktop_mode.new_run_id(), threading.Event(), self._gate()
+        self._looking = (seq, words, bool(planner), run_id, stop, gate)
         future = worker.submit(service.resolve, words, planner=bool(planner), override=self.context_source,
-                               run_id=run_id, cancel=stop)
+                               run_id=run_id, cancel=_Either(stop, gate))
         bridge = self._bridge
         future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done))
         self._resolve_timer.start(int(RESOLVE_TIMEOUT_S * 1000))
@@ -850,19 +913,22 @@ class DesktopController(QObject):
     def _on_resolve_timeout(self) -> None:
         """The desktop thread took too long (a search or the shell hanging): the app stops waiting - nothing opens for
         that request any more (its stop is set), the words stay, and the next request may come. A card's click that
-        took too long: the app stops waiting for it (its OS call, if any, completes on the desktop thread)."""
+        took too long likewise: its stop is set, so it opens nothing from now on (only an OS call already in flight
+        completes - and should one have, its end still says so: ``_on_clicked``)."""
         clicking, self._clicking = self._clicking, None
         if clicking is not None and not self._shut:
-            logger.warning("Desktop: a card's click took more than %d s; stopped waiting", int(RESOLVE_TIMEOUT_S))
-            self.answered.emit(with_address(CLICK_TOO_LONG_TEXT, self._address), True, "", False)
+            clicking[5].set()
+            self._stopped_click = clicking
+            logger.warning("Desktop: a card's click took more than %d s; stopped", int(RESOLVE_TIMEOUT_S))
+            self.answered.emit(with_address(CLICK_TOO_LONG_TEXT, self._address), TONE_ERROR, "", False)
         looking, self._looking = self._looking, None
         if looking is None or self._shut:
             return
-        _seq, words, _planner, run_id, stop = looking
+        _seq, words, _planner, run_id, stop, _gate = looking
         stop.set()
         logger.warning("Desktop %s: the desktop thread took more than %d s; stopped waiting", run_id,
                        int(RESOLVE_TIMEOUT_S))
-        self.answered.emit(with_address(TOO_LONG_TEXT, self._address), True, words, False)
+        self.answered.emit(with_address(TOO_LONG_TEXT, self._address), TONE_ERROR, words, False)
 
     def _on_resolved(self, seq: int, future: Future) -> None:
         """The desktop thread resolved request ``seq``: a local route carried out (``answered`` with Jarvis's words;
@@ -873,7 +939,7 @@ class DesktopController(QObject):
             return
         self._looking = None
         self._resolve_timer.stop()
-        _seq, words, planner, run_id, _stop = looking
+        _seq, words, planner, run_id, _stop, gate = looking
         if self._shut:
             return
         try:
@@ -884,7 +950,11 @@ class DesktopController(QObject):
             logger.error("Desktop %s: the request could not be resolved (%s)", run_id, type(exc).__name__)
             resolved = desktop_service.Resolved(desktop_service.UNAVAILABLE, run_id)
         if resolved.kind == desktop_service.LOCAL:
-            self._answer_local(resolved, words)
+            self._answer_local(resolved, words)              # what came of it (stopped, if turned off meanwhile)
+        elif gate.is_set():
+            # Turned off (or the gate says no) while it was looked up: no planner run - nothing goes out.
+            logger.info("Desktop %s: turned off meanwhile; no planner run", run_id)
+            self.answered.emit(with_address(TURNED_OFF_TEXT, self._address), TONE_ERROR, words, False)
         elif resolved.kind == desktop_service.PLANNER:
             job = None
             if planner:
@@ -895,36 +965,68 @@ class DesktopController(QObject):
             self.plannerNeeded.emit(job, words)
         else:
             logger.info("Desktop %s: Jarvis can't look on this PC now; nothing was done", run_id)
-            self.answered.emit(with_address(UNAVAILABLE_TEXT, self._address), True, words, False)
+            self.answered.emit(with_address(UNAVAILABLE_TEXT, self._address), TONE_ERROR, words, False)
 
     def _answer_local(self, resolved: Any, words: str) -> None:
         """A local route carried out on the desktop thread: kept (``last_route``, ``last_run``, ``pending``,
-        ``found``), its LIVE task, the log line (kinds, statuses and codes) and Jarvis's words (``answered``)."""
+        ``found``), its LIVE task, the log line (kinds, statuses and codes), Jarvis's words (``answered``) and its
+        result cards (``_show_or_hold``)."""
         found, run = resolved.route, resolved.run
         self.last_route = found
         self._keep(run)
         if found.code:
-            said, soft = desktop_routes.route_words(found, self._address), True
+            said, soft, tone = desktop_routes.route_words(found, self._address), True, TONE_ERROR
             logger.info("Desktop %s: local route %s (%s)", resolved.run_id, found.kind, found.code)
         else:
             said = desktop_executor.run_words(run, None, self._address)
-            soft = desktop_executor.run_soft(run)
+            soft, tone = desktop_executor.run_soft(run), run_tone(run)
             logger.info("Desktop %s: local route %s: %s (%.2f s)", resolved.run_id, found.kind,
                         run.statuses_text() if run is not None else "nothing", resolved.seconds)
         _local_task(self.live, words, found, run, said, soft)
-        self.answered.emit(said, soft, words, True)
-        if run is not None and self._hud:
+        self.answered.emit(said, tone, words, True)
+        self._show_or_hold(run)
+
+    def _leaving(self) -> bool:
+        """The switch back to the window is on its way (``is_hud()`` stays true until the window shows)."""
+        flight = self._flight
+        return self._switching and flight is not None and flight.direction() == alive.TO_WINDOW
+
+    def _show_or_hold(self, run: Any) -> None:
+        """A request's result cards (``run.shown``): on the HUD - from the switch to it on - they show now; in the
+        window, or with the switch back on its way, they are held as data only (no card window, no window followed
+        meanwhile) and show when the HUD next shows (``_show_held``) - a step that waits for the owner's click or OK
+        keeps its card, as the words say. None once the gate says no (Turn off)."""
+        if run is None or self._shut or not getattr(run, "shown", ()) or not self.consent_given():
+            return
+        if self._hud and not self._leaving():
             self.results.show_run(run, self._before)
+            return
+        self._held = (run, self._before)
+        logger.info("Desktop %s: %d result card(s) wait for the HUD", getattr(run, "run_id", "") or "-",
+                    len(run.shown))
+
+    def _show_held(self) -> None:
+        """The HUD's windows have just shown (the instant swap, or the flight's handover): the result cards that
+        waited for it show with them - unless a request typed meanwhile took them away."""
+        held, self._held = self._held, None
+        if held is None or self._shut or not self._hud or not self.consent_given():
+            return
+        run, before = held
+        shown = self.results.show_run(run, before)
+        logger.info("Desktop %s: %d result card(s) that waited show on the HUD", getattr(run, "run_id", "") or "-",
+                    shown)
 
     def _carry_out_for(self, context: DesktopContext) -> Callable[..., Any]:
         """The planner's way to carry its checked plan out: on the desktop thread, with this request's candidates for
         D5's other matches. The Ask thread waits for it - at most CARRY_OUT_TIMEOUT_S (TimeoutError) - and passes the
-        request's Cancel on as it comes: no new step starts after either."""
+        request's Cancel on as it comes: no new step starts after either. THE CONSENT GATE is asked again right before
+        each OS call (fail-closed), and a Turn off after this job was made stops it for good (``_gate``)."""
         worker, service = self._ensure_worker()
+        gate = self._gate()
 
         def carry_out(plan: Any, words: str, cancel: threading.Event | None = None) -> Any:
             stop = threading.Event()
-            future = worker.submit(service.carry_out, plan, words, context, _Either(stop, cancel))
+            future = worker.submit(service.carry_out, plan, words, context, _Either(stop, cancel, gate))
             try:
                 return future.result(timeout=CARRY_OUT_TIMEOUT_S)
             except FutureTimeout:
@@ -960,9 +1062,10 @@ class DesktopController(QObject):
         worker, service = self._ensure_worker()
         before = self.results.snapshot()
         self._click_seq += 1
-        seq = self._click_seq
-        self._clicking = (seq, entry, key, before, button)
-        future = worker.submit(service.click, click)
+        seq, stop = self._click_seq, threading.Event()
+        self._clicking = (seq, entry, key, before, button, stop)
+        # Its stop (the app stops waiting) and THE CONSENT GATE, asked again right before its OS call.
+        future = worker.submit(service.click, click, _Either(stop, self._gate()))
         bridge = self._bridge
         future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done, "clicked"))
         self._resolve_timer.start(int(RESOLVE_TIMEOUT_S * 1000))
@@ -971,32 +1074,44 @@ class DesktopController(QObject):
 
     def _on_clicked(self, seq: int, future: Future) -> None:
         """A card's click was carried out on the desktop thread: the cards follow what came of it, the caption says
-        Jarvis's words for it and LIVE gets its task ("Approved by your click ...")."""
+        Jarvis's words for it and LIVE gets its task ("Approved by your click ..."). One that took too long was
+        stopped (``_on_resolve_timeout``: "I stopped"); its late end is heard only when an OS call already in flight
+        did open something after all - then the caption says what opened, so its words stay true."""
         clicking = self._clicking
-        if clicking is None or clicking[0] != seq:
-            return
-        self._clicking = None
-        self._resolve_timer.stop()
+        late = clicking is None or clicking[0] != seq
+        if late:
+            clicking = self._stopped_click
+            if clicking is None or clicking[0] != seq:
+                return
+            self._stopped_click = None
+        else:
+            self._clicking = None
+            self._resolve_timer.stop()
         if self._shut:
             return
-        _seq, entry, key, before, button = clicking
+        _seq, entry, key, before, button, _stop = clicking
         try:
             run = future.result()
         except CancelledError:
             return
         except Exception as exc:  # noqa: BLE001 - a bug on the desktop thread: nothing was done
             logger.error("Desktop: a card's click could not be carried out (%s)", type(exc).__name__)
-            self.answered.emit(with_address(UNAVAILABLE_TEXT, self._address), True, "", False)
+            if not late:
+                self.answered.emit(with_address(UNAVAILABLE_TEXT, self._address), TONE_ERROR, "", False)
             return
+        if late and not (run is not None and run.done()):
+            logger.info("Desktop: a stopped click ended with nothing opened")
+            return                                           # "I stopped" stays true
         said = desktop_executor.run_words(run, None, self._address)
         soft = desktop_executor.run_soft(run)
-        logger.info("Desktop %s: a card's click came to %s (%.2f s)", getattr(run, "run_id", "") or "-",
-                    run.statuses_text() if run is not None else "nothing", getattr(run, "seconds", 0.0))
-        if self._hud:
+        logger.info("Desktop %s: a card's click came to %s (%.2f s)%s", getattr(run, "run_id", "") or "-",
+                    run.statuses_text() if run is not None else "nothing", getattr(run, "seconds", 0.0),
+                    " after it was stopped" if late else "")
+        if self._hud and not self._leaving():
             self.results.apply_click(entry, key, run, before)
         _click_task(self.live, button, run, said, soft, clock_text(datetime.now(), self._hour24))
         if said:
-            self.answered.emit(said, soft, "", False)
+            self.answered.emit(said, run_tone(run), "", False)
 
     def _keep(self, run: Any) -> None:
         """What came of a request, in memory: the run, its steps held for the owner's click and what its finds
@@ -1023,8 +1138,7 @@ class DesktopController(QObject):
         logger.info("Desktop %s: plan kept, %d step(s) passed, %d refused; %s", plan.run_id or "-",
                     len(plan.accepted()), len(plan.refused()),
                     run.statuses_text() if run is not None else "nothing carried out")
-        if run is not None and self._hud and not self._shut:
-            self.results.show_run(run, self._before)
+        self._show_or_hold(run)                              # in the window meanwhile: they wait for the HUD
         return str(getattr(outcome, "message", "") or "")
 
     # ---- the chips and the neighbours ------------------------------------------------------------------
@@ -1077,8 +1191,11 @@ class DesktopController(QObject):
         looking, self._looking = self._looking, None
         if looking is not None:
             looking[4].set()                                 # a request being resolved opens nothing now
-        self._clicking = None
+        clicking, self._clicking, self._stopped_click = self._clicking, None, None
+        if clicking is not None:
+            clicking[5].set()                                # ... nor a card's click
         self._resolve_timer.stop()
+        self._held = None
         self.results.clear()                                 # the cards, their brackets, hooks and timers go
         if self._worker is not None:
             self._worker.stop()                              # the job running ends as it is; nothing new starts

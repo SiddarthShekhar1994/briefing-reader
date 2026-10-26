@@ -17,8 +17,10 @@ every name is invented.
 from __future__ import annotations
 
 import os
+import threading
 import unittest
 from datetime import date, datetime
+from types import SimpleNamespace
 from unittest import mock
 
 from PySide6.QtCore import QRect, Qt
@@ -26,7 +28,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import desktop_results, hud_overlay
+from briefing_reader import ask_ui, desktop_results, desktop_ui, dock, holo, hud, hud_overlay
 from briefing_reader.desktop import backend as dbk
 from briefing_reader.desktop import executor as dx
 from briefing_reader.desktop import results as dr
@@ -34,11 +36,11 @@ from briefing_reader.desktop import validate as dv
 from briefing_reader.desktop import winwatch as ww
 from briefing_reader.desktop.context import AppItem, FileItem, Place
 from briefing_reader.desktop.executor import StepResult
-from tests.ask_fakes import plan_stream
+from tests.ask_fakes import GatedProcess, plan_stream
 from tests.desktop_fakes import (DOCS, DOWNLOADS, EDGE_EXE, EXCEL_EXE, LING, WORD_EXE, FakeWinApi, desktop_context,
                                  tags)
 from tests.test_desktop_executor import ExecutorCase
-from tests.test_desktop_requests import DesktopRequestApp
+from tests.test_desktop_requests import DOWNLOADS_TYPED, DesktopRequestApp
 from tests.ui_fakes import fonts, settle, wait_for
 
 ESSAY = LING + "\\LING essay draft.docx"
@@ -227,6 +229,13 @@ class WaitingCardTests(ResultsCase):
                           dr.SUGGESTED_NOTE))                                     # the host shown (SPEC 2.1)
         self.assertEqual(self.present(dx.DesktopRun("t6", (StepResult(1, dv.OPEN_URL, dv.ONE_CLICK, dx.WAITING,
                                                                       target="ms-settings:privacy"),))), ())
+        bare = self.waiting("https://logo.ai", dv.OPEN_URL, flags=frozenset({dv.FLAG_BARE_HOST}))   # P1.R, p1r-2
+        text = dr.card_text(bare)
+        self.assertEqual((text.kicker, text.title, text.meta, text.note, text.tone),
+                         (f"WEB PAGE {DOT} YOUR CLICK OPENS IT", "logo.ai", "https://logo.ai", dr.BARE_HOST_NOTE,
+                          dr.CYAN))                                               # typed with no https://: one click
+        self.assertEqual(dr.BARE_HOST_NOTE,
+                         "You typed it without https://, so it opens only on your click. Check the site first.")
 
     def test_a_shortcut_shows_its_real_target_and_opens_only_a_document_in_the_folders(self) -> None:
         self.fake.links[LINK.casefold()] = ESSAY
@@ -402,7 +411,7 @@ MACRO_PLAN = {"say": "Here is the grades workbook.",
 WORD_RECT = (20, 150, 330, 400)                    # the pretend Word window (physical = logical: one 1x screen)
 
 
-class ResultFlowTests(DesktopRequestApp):
+class ResultFlowCase(DesktopRequestApp):
     """DesktopRequestApp (tests.test_desktop_requests: the HUD over a recording seam, the fake backend and invented
     candidates, the planner faked) with the result cards' window seam over pretend windows: Word's window appears
     when the essay opens (as Windows would show it)."""
@@ -447,6 +456,32 @@ class ResultFlowTests(DesktopRequestApp):
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
         self.assertTrue(wait_for(lambda: not self.desktop.busy()), "the click was carried out")
         settle()
+
+    def hold_on(self, method: str) -> tuple[threading.Event, threading.Event]:
+        """The desktop thread holds at the backend's ``method`` (once) until the test lets it go: (holding, release)."""
+        release, holding = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        previous = self.fake.on_call
+
+        def slow(called: str, argument: str) -> None:
+            if called == method and not holding.is_set():
+                holding.set()
+                release.wait(10)
+            if previous is not None:
+                previous(called, argument)
+        self.fake.on_call = slow
+        return holding, release
+
+    def click_too_long(self, entry: desktop_results.CardEntry, holding: threading.Event) -> None:
+        with mock.patch.object(desktop_ui, "RESOLVE_TIMEOUT_S", 0.2):
+            QTest.mouseClick(entry.window.buttons()["open"], Qt.MouseButton.LeftButton)
+            self.assertTrue(wait_for(holding.is_set))
+            self.assertTrue(wait_for(lambda: self.hud().caption_text() == "That took too long, sir - I stopped."))
+        self.assertFalse(self.desktop.busy())
+
+
+class ResultFlowTests(ResultFlowCase):
+    """The result cards in the app (P1.9) and, P1.R, a click that takes too long or meets the owner's Turn off."""
 
     def test_d5_the_card_beside_word_with_the_bracket_its_tag_and_the_tether(self) -> None:
         self.make_flow(plan_stream(DESKTOP_PLAN))
@@ -619,6 +654,31 @@ class ResultFlowTests(DesktopRequestApp):
         self.assertEqual(self.cards(), [entry])
         self.assertEqual(self.hud().caption_text(), "Showed the file in its folder, sir.")
 
+    def test_a_files_name_shows_the_file_and_a_bare_address_waits_for_a_click(self) -> None:
+        """P1.R (p1r-2) in the app: "open logo.ai" with the owner's Documents\\logo.ai shows that file's card - its
+        name never goes to the web -; "open example.org" waits on a cyan card, its host shown, until his Open."""
+        self.make_flow()
+        self.fake.make_file(DOCS + "\\logo.ai", b"x" * 300)
+        self.type_on_hud("open logo.ai")
+        self.answered()
+        (found,) = self.cards()
+        content = found.window.content()
+        self.assertEqual((content.kicker, [(row.title, row.action) for row in content.rows]),
+                         (f"FOUND {DOT} 1 FILE", [("logo.ai", "Show in folder")]))
+        self.assertEqual(self.hud().caption_text(), "Found 1 matching file, sir.")
+        self.assertEqual(self.fake.opened, [])
+        self.type_on_hud("open example.org")
+        self.answered()
+        (page,) = self.cards()
+        content = page.window.content()
+        self.assertEqual((content.kicker, content.title, content.note, content.tone),
+                         (f"WEB PAGE {DOT} YOUR CLICK OPENS IT", "example.org", dr.BARE_HOST_NOTE,
+                          hud_overlay.TONE_CYAN))
+        self.assertEqual(self.hud().caption_text(), "A web page waits for your click - nothing was opened, sir.")
+        self.assertEqual(self.fake.opened, [])                                 # nothing left the PC yet
+        self.click(page, "open")
+        self.assertEqual(self.fake.opened, [("open_url", "https://example.org")])
+
     def test_without_the_owners_ok_a_click_does_nothing(self) -> None:
         self.make_flow(plan_stream(MACRO_PLAN))
         self.ask_on_hud("open my Grades macro workbook")
@@ -629,6 +689,255 @@ class ResultFlowTests(DesktopRequestApp):
         self.assertFalse(self.desktop.busy())
         self.assertEqual(len(self.fake.calls), calls)
         self.assertEqual(self.fake.opened, [])
+
+    def test_a_click_that_takes_too_long_is_stopped_and_never_opens_after(self) -> None:
+        """P1.R (p1r-4): the click carries its stop - set when the app gives up waiting - so a slow disk before the OS
+        call never opens the file after "I stopped"; the card still waits for the owner's OK."""
+        self.make_flow(plan_stream(MACRO_PLAN))
+        self.ask_on_hud("open my Grades macro workbook")
+        entry = self.cards()[0]
+        tasks = len(self.desktop_tasks())
+        holding, release = self.hold_on("known_folder")                      # the click's fresh look: slow
+        self.click_too_long(entry, holding)
+        release.set()
+        self.desktop._worker.submit(lambda: None).result(timeout=10)         # noqa: SLF001 - the stopped click ended
+        settle()
+        self.assertEqual(self.fake.opened, [])                                # nothing opened after "I stopped"
+        self.assertEqual(self.hud().caption_text(), "That took too long, sir - I stopped.")
+        self.assertEqual(self.hud().caption._status_tone, hud.TONE_ERROR)     # noqa: SLF001 - coral: not done
+        self.assertEqual(self.cards(), [entry])                               # its card still waits for his OK
+        self.assertEqual(len(self.desktop_tasks()), tasks)                    # nothing was carried out
+        self.click(entry, "open")                                             # his Open again: now it opens
+        self.assertEqual(self.fake.opened, [("open_script_document", MACRO)])
+
+    def test_a_stopped_click_whose_os_call_was_in_flight_says_what_opened(self) -> None:
+        """P1.R (p1r-4): only an OS call already in flight completes - and then the caption says what opened, so its
+        words stay true."""
+        self.make_flow(plan_stream(MACRO_PLAN))
+        self.ask_on_hud("open my Grades macro workbook")
+        holding, release = self.hold_on("open_script_document")             # Windows is slow to open it
+        self.click_too_long(self.cards()[0], holding)
+        release.set()
+        self.assertTrue(wait_for(lambda: self.hud().caption_text() == "Opened the file, sir."))
+        self.assertEqual(self.fake.opened, [("open_script_document", MACRO)])
+        (opened,) = self.cards()
+        self.assertTrue(opened.window.content().kicker.startswith(f"OPENED IN EXCEL {DOT} "))
+
+    def test_a_cards_click_on_its_way_opens_nothing_after_turn_off(self) -> None:
+        """P1.R (p1r-1): a click on its way when the owner turns Jarvis on your desktop off opens nothing."""
+        self.make_flow(plan_stream(MACRO_PLAN))
+        self.ask_on_hud("open my Grades macro workbook")
+        holding, release = self.hold_on("known_folder")
+        QTest.mouseClick(self.cards()[0].window.buttons()["open"], Qt.MouseButton.LeftButton)
+        self.assertTrue(wait_for(holding.is_set))
+        self.c._on_desktop_turn_off()                                         # Settings > Desktop > Turn off
+        release.set()
+        self.assertTrue(wait_for(lambda: not self.desktop.busy()))
+        settle()
+        self.assertEqual(self.fake.opened, [])
+        self.assertEqual(self.cards(), [])                                    # the Turn off took the cards away
+        self.assertEqual(self.hud().caption_text(), "Stopped - nothing more was opened, sir.")
+
+
+class HeldCardsTests(ResultFlowCase):
+    """P1.R (p1r-3, p1r-6): a request's cards that come while Jarvis is not on the HUD - the switch back on its way, or
+    back in the window - are held as data only (no card window, no window followed, no bracket meanwhile) and show
+    when the HUD next shows: a step that waits for the owner's click or OK keeps its card there, as the words say. A
+    new request, or the Turn off, takes them away. Motion on: the switch flies (its clock the test's)."""
+
+    MOTION = holo.MOTION_LIVELY
+
+    def make_flying(self, *runs: object) -> None:
+        self.make_ask(*runs, desktop_window_api=self.winapi)
+        self.now = [1000.0]
+        self.t0 = self.now[0]
+        self.desktop.set_flight_clock(lambda: self.now[0])
+
+    def start(self, click: object) -> None:
+        self.now[0] += 10.0
+        self.t0 = self.now[0]
+        QTest.mouseClick(click, Qt.MouseButton.LeftButton)
+        self.assertIsNotNone(self.desktop.flight())
+        settle()
+
+    def land(self) -> None:
+        flight = self.desktop.flight()
+        self.assertIsNotNone(flight)
+        self.now[0] = self.t0 + flight.total_ms() / 1000.0
+        flight.tick()
+        settle()
+        self.assertIsNone(self.desktop.flight())
+
+    def fly_in(self) -> None:
+        self.start(self.reading.dock.button(dock.DESKTOP))
+        self.land()
+        self.assert_on_hud()
+
+    def fly_back(self) -> None:
+        self.start(self.hud().back_button)
+        self.land()
+        self.assertFalse(self.desktop.is_hud())
+        self.assertTrue(self.window.isVisible())
+
+    def nothing_of_the_hud(self) -> None:
+        self.assertEqual((self.cards(), self.desktop.overlay.cards(), self.winapi.live_hooks()), ([], [], 0))
+        self.assertEqual([layer.brackets() for layer in self.desktop.overlay.layers()],
+                         [() for _layer in self.desktop.overlay.layers()])
+
+    def test_an_answer_during_the_switch_back_waits_for_the_hud_with_no_card_or_hook_meanwhile(self) -> None:
+        self.make_flying()
+        self.winapi.add(77, pid=4242, exe=EDGE_EXE, rect=(200, 150, 1000, 650), front=True)   # Edge's window
+        self.fly_in()
+        holding, release = self.hold_on("open_url")
+        self.type_on_hud("open https://www.example.org")
+        self.assertTrue(wait_for(holding.is_set))
+        self.start(self.hud().back_button)                                    # Bring Jarvis back: the switch flies
+        release.set()                                                         # the answer comes on the way back
+        self.assertTrue(wait_for(lambda: not self.desktop.busy()))
+        settle()
+        self.assertTrue(self.desktop.is_switching() and self.desktop.is_hud())   # still on its way back
+        self.nothing_of_the_hud()                                             # no hidden card, no hook
+        self.land()
+        self.assertFalse(self.desktop.is_hud())
+        self.nothing_of_the_hud()                                             # nothing left running in the window
+        self.assertEqual(self.fake.opened, [("open_url", "https://www.example.org")])
+        self.fly_in()                                                         # later: the Dock's Desktop again
+        (entry,) = self.cards()                                               # what it found waited for the HUD
+        self.assertTrue(entry.window.isVisible())
+        self.assertTrue(entry.window.content().kicker.startswith(f"WEB PAGE {DOT} OPENED IN EDGE"))
+        self.assertTrue(entry.found() and entry.following())                  # its window followed only now
+        self.fly_back()
+        self.nothing_of_the_hud()                                             # and gone again with the HUD
+
+    def test_a_plan_that_lands_in_the_window_keeps_its_waiting_card_for_the_hud(self) -> None:
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.make_flying(GatedProcess(plan_stream(MACRO_PLAN), gate))
+        self.fly_in()
+        self.type_on_hud("open my Grades macro workbook")
+        self.started()                                                        # the planner run is on its way ...
+        self.fly_back()                                                       # ... and the owner went back
+        gate.set()
+        self.finish()
+        words = "A file that can run macros or scripts needs your OK first - nothing was opened, sir."
+        self.assertEqual(self.reading.command_bar.status(), words)            # the window's bar says it waits ...
+        self.assertEqual(self.reading.command_bar._tone, hud.TONE_WARN)       # noqa: SLF001 - a decision: amber
+        self.assertEqual([result.status for result in self.desktop.pending], [dx.WAITING])
+        self.nothing_of_the_hud()
+        self.assertEqual(self.fake.opened, [])
+        self.fly_in()                                                         # ... and its card waits on the HUD
+        (entry,) = self.cards()
+        content = entry.window.content()
+        self.assertEqual((content.kicker, content.tone), (f"EXCEL WORKBOOK {DOT} NEEDS YOUR OK",
+                                                          hud_overlay.TONE_AMBER))
+        self.assertTrue(entry.window.isVisible())
+        self.click(entry, "open")                                             # his OK, now
+        self.assertEqual(self.fake.opened, [("open_script_document", MACRO)])
+
+    def test_a_new_request_or_the_turn_off_takes_the_waiting_cards_away(self) -> None:
+        gates = (threading.Event(), threading.Event())
+        for gate in gates:
+            self.addCleanup(gate.set)
+        self.make_flying(*(GatedProcess(plan_stream(MACRO_PLAN), gate) for gate in gates))
+        for gate in gates:
+            self.fly_in()
+            self.type_on_hud("open my Grades macro workbook")
+            self.started()
+            self.fly_back()
+            gate.set()
+            self.finish()
+            if gate is gates[0]:
+                self.now[0] += 10.0
+                self.t0 = self.now[0]
+                self.type_in_window(DOWNLOADS_TYPED)                          # a new request: onto the HUD, then ...
+                self.land()
+                self.answered()
+                self.assertEqual([entry.card.skill for entry in self.cards()], [dv.OPEN_FOLDER])   # ... its own only
+                self.fly_back()
+            else:
+                self.c._on_desktop_turn_off()                                 # Settings > Desktop > Turn off
+                self.assertTrue(self.desktop.turn_on())
+                self.fly_in()
+                self.assertEqual(self.cards(), [])
+        self.assertEqual(self.fake.opened, [("open_folder", DOWNLOADS)])
+
+
+class CaptionToneTests(ResultFlowCase):
+    """P1.R (p1r-7; hard rule 17): the HUD's caption is amber only while a decision waits - a step on a NEEDS YOUR OK
+    card - and coral for what was not done: a failure, a refusal, a stop, too long, busy, Ask off; else the done
+    tone (a cyan one-click card is no decision in amber)."""
+
+    def tone(self) -> tuple[str, str]:
+        line = self.hud().caption
+        return line._status_tone, line._color().name().upper()               # noqa: SLF001 - its paint
+
+    def test_the_tone_of_each_outcome(self) -> None:
+        def run(*results: StepResult) -> dx.DesktopRun:
+            return dx.DesktopRun("t9", tuple(results))
+
+        card = StepResult(1, dv.OPEN_FILE, dv.CARD, dx.WAITING)               # a NEEDS YOUR OK card waits
+        click = StepResult(2, dv.OPEN_URL, dv.ONE_CLICK, dx.WAITING)          # a cyan card waits for a click
+        opened = StepResult(3, dv.OPEN_FILE, dv.INSTANT, dx.DONE)
+        failed = StepResult(4, dv.OPEN_FILE, dv.INSTANT, dx.FAILED, dx.OS_FAILED)
+        stopped = StepResult(5, dv.OPEN_FILE, dv.INSTANT, dx.CANCELLED, dx.STOPPED)
+        cases = ((run(card), hud.TONE_WARN), (run(opened, card, failed), hud.TONE_WARN),
+                 (run(click), hud.TONE_DONE), (run(opened), hud.TONE_DONE), (run(opened, click), hud.TONE_DONE),
+                 (run(opened, failed), hud.TONE_ERROR), (run(stopped), hud.TONE_ERROR), (run(), hud.TONE_ERROR),
+                 (None, hud.TONE_ERROR))
+        for value, tone in cases:
+            with self.subTest(run=value):
+                self.assertEqual(desktop_ui.run_tone(value), tone)
+                self.assertEqual(dx.run_waits(value), tone == hud.TONE_WARN)
+
+        def plan(accepted: int, refused: int) -> SimpleNamespace:
+            return SimpleNamespace(accepted=lambda: (object(),) * accepted, refused=lambda: (object(),) * refused)
+
+        outcomes = ((SimpleNamespace(brief=None, desktop_run=None), hud.TONE_ERROR),             # no plan
+                    (SimpleNamespace(brief=plan(1, 0), desktop_run=run(card)), hud.TONE_WARN),
+                    (SimpleNamespace(brief=plan(1, 0), desktop_run=run(opened)), hud.TONE_DONE),
+                    (SimpleNamespace(brief=plan(1, 1), desktop_run=run(opened)), hud.TONE_ERROR),  # one refused
+                    (SimpleNamespace(brief=plan(0, 2), desktop_run=None), hud.TONE_ERROR),         # all refused
+                    (SimpleNamespace(brief=plan(1, 0), desktop_run=None), hud.TONE_DONE))          # only checked
+        for outcome, tone in outcomes:
+            with self.subTest(outcome=outcome):
+                self.assertEqual(ask_ui._desktop_tone(outcome), tone)                         # noqa: SLF001
+
+    def test_amber_only_while_a_decision_waits_coral_for_what_was_not_done(self) -> None:
+        self.make_flow(plan_stream(MACRO_PLAN), plan_stream(DESKTOP_PLAN), plan_stream(DESKTOP_PLAN))
+        amber, coral, done = (hud.TONE_WARN, holo.AMBER_TX2), (hud.TONE_ERROR, holo.ALERT_TX), (hud.TONE_DONE,
+                                                                                                holo.INK_1)
+        self.ask_on_hud("open my Grades macro workbook")
+        self.assertEqual(self.tone(), amber)                                  # a NEEDS YOUR OK card waits
+        self.fake.open_errors["open_document"] = OSError(5, "Access is denied")
+        self.ask_on_hud(WORDS)
+        self.assertEqual(self.hud().caption_text(), "Windows couldn't open the file, sir.")
+        self.assertEqual(self.tone(), coral)                                  # a failure
+        self.fake.open_errors.clear()
+        self.ask_on_hud(WORDS)
+        self.assertEqual(self.tone(), done)                                   # it opened
+        self.fake.open_errors["open_folder"] = OSError(5, "Access is denied")
+        for typed, words in (("open Downloads", "Windows couldn't open your Downloads folder, sir."),
+                             ("volume 30", "I can't change the volume yet, sir - nothing was changed.")):
+            self.type_on_hud(typed)
+            self.answered()
+            self.assertEqual((self.hud().caption_text(), self.tone()), (words, coral))   # failed / refused
+        self.type_on_hud("open example.org")
+        self.answered()
+        self.assertEqual(self.tone(), done)                                   # a cyan one-click card: no amber
+        holding, release = self.hold_on("open_url")                           # the desktop thread busy ...
+        self.type_on_hud("open https://www.example.org")
+        self.assertTrue(wait_for(holding.is_set))
+        QTest.keyClick(self.hud().bar.input, Qt.Key.Key_Return)               # ... Enter again meanwhile
+        settle()
+        self.assertEqual((self.hud().caption_text(), self.tone()), (desktop_ui.BUSY_TEXT, coral))
+        release.set()
+        self.answered()
+        with mock.patch.object(desktop_ui, "RESOLVE_TIMEOUT_S", 0.2):         # one that takes too long
+            holding, release = self.hold_on("known_folder")
+            self.type_on_hud("open Downloads")
+            self.assertTrue(wait_for(lambda: "took too long" in self.hud().caption_text()))
+        self.assertEqual(self.tone(), coral)
+        release.set()
 
 
 if __name__ == "__main__":

@@ -133,6 +133,31 @@ class LocalRouteTests(ServiceCase):
         resolved = self.resolve("open http://news.example.org/")               # not https: the planner's
         self.assertEqual(resolved.kind, ds.PLANNER)
 
+    def test_a_bare_address_that_is_a_files_name_never_goes_to_the_web(self) -> None:
+        """P1.R (p1r-2): the owner's Illustrator file Documents\\logo.ai - "open logo.ai" finds it (its card shows it)
+        and nothing goes to the web; with no such file the page waits on its card for his click, its host shown."""
+        self.fake.make_file(DOCS + "\\logo.ai", b"x" * 300)
+        resolved = self.resolve("open logo.ai")
+        self.assertEqual((resolved.kind, resolved.route.kind), (ds.LOCAL, dv.FIND_FILES))
+        (result,) = resolved.run.results
+        self.assertEqual((result.status, [item.path for item in result.found]), (dx.FOUND, [DOCS + "\\logo.ai"]))
+        (card,) = resolved.run.shown
+        self.assertEqual((card.kind, [row.name for row in card.rows], [row.action for row in card.rows]),
+                         ("found", ["logo.ai"], ["show"]))                  # a type Jarvis never opens: shown
+        self.assertEqual(self.fake.opened, [])
+        self.assertEqual(dx.run_words(resolved.run), "Found 1 matching file, sir.")
+        for typed, host in (("open poster.ai", "poster.ai"), ("open example.org", "example.org")):
+            with self.subTest(typed=typed):
+                resolved = self.resolve(typed)
+                self.assertEqual((resolved.kind, resolved.route.kind), (ds.LOCAL, dv.OPEN_URL))
+                self.assertEqual([(result.status, result.tier) for result in resolved.run.results],
+                                 [(dx.WAITING, dv.ONE_CLICK)])
+                (card,) = resolved.run.shown
+                self.assertEqual((card.kind, card.host, card.address), ("waiting", host, "https://" + host))
+                self.assertIn(dv.FLAG_BARE_HOST, card.flags)
+                self.assertEqual(self.fake.opened, [])                       # nothing left the PC
+        self.assertEqual(dx.run_words(resolved.run), "A web page waits for your click - nothing was opened, sir.")
+
     def test_find_words_lists_the_files_with_all_of_them(self) -> None:
         resolved = self.resolve("find LING essay")
         self.assertEqual((resolved.kind, resolved.route.kind), (ds.LOCAL, dv.FIND_FILES))

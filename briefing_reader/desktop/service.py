@@ -13,9 +13,13 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
   - first in the places his words name -, the Recent items, the files changed in the days his words say, the
   Start-menu apps his words name, within SPEC 4.1's caps; names only reach the planner);
 * ``carry_out(plan, words, context, cancel)``: a planner's checked plan carried out (desktop.executor);
-* ``click(click)``: the owner's click on a result card (P1.9: desktop.results.Click - the card's own item, re-checked
-  and carried out by executor.run_click);
+* ``click(click, cancel)``: the owner's click on a result card (P1.9: desktop.results.Click - the card's own item,
+  re-checked and carried out by executor.run_click);
 * ``find(query)``: a find_files step's search.
+
+Each job's ``cancel`` (anything with ``is_set()``) holds the app's stop and THE CONSENT GATE (desktop_ui: the owner's
+Turn off): the executor asks it before each step and right before each OS call - once it is set nothing opens, and
+nothing more is looked at.
 
 Every run that comes back carries its result cards (``DesktopRun.shown``: desktop.results.present, made here right
 after the run - the other matches and the found items re-checked first, the app a file opened in read from the
@@ -28,14 +32,13 @@ Public API
 ``LOCAL``, ``PLANNER``, ``UNAVAILABLE``; ``Resolved(kind, run_id, route, run, context, seconds)``;
 ``DesktopService(folders=, extra_folders=, excluded=, backend_factory=, sites=, clock=, now=, hour24=)``:
 ``backend()``, ``scope(fresh=)``, ``apps(fresh=)``, ``tree()``, ``route_context()``, ``resolve(words, planner=,
-override=, run_id=)``, ``context_for(words)``, ``carry_out(plan, words, context, cancel)``, ``click(click)``,
-``find(query)``, ``executor()``; ``days_in(words)``; ``RECENT_FILES``.
+override=, run_id=, cancel=)``, ``context_for(words)``, ``carry_out(plan, words, context, cancel)``, ``click(click,
+cancel)``, ``find(query)``, ``executor()``; ``days_in(words)``; ``RECENT_FILES``.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -173,11 +176,13 @@ class DesktopService:
 
     def resolve(self, words: str, *, planner: bool = True,
                 override: Callable[[str], DesktopContext] | None = None, run_id: str = "",
-                cancel: threading.Event | None = None) -> Resolved:
+                cancel: Any = None) -> Resolved:
         """A typed desktop request (see the module docstring). ``override(words)``: a context to use instead of this
         PC's (the tests' invented ones); ``planner``: whether the planner may run (Ask on); ``cancel``: once set (the
-        app stopped waiting), a local route opens nothing."""
+        app stopped waiting, or the owner's Turn off), a local route opens nothing and nothing more is looked at."""
         started = self._clock()
+        if cancel is not None and cancel.is_set():
+            return Resolved(UNAVAILABLE, run_id)            # stopped before it began: nothing looked at
         executor = self.executor()
         if executor is None:
             return Resolved(UNAVAILABLE, run_id)
@@ -192,6 +197,8 @@ class DesktopService:
             return Resolved(LOCAL, run_id, found, run, seconds=round(self._clock() - started, 3))
         if not planner:
             return Resolved(PLANNER, run_id, seconds=round(self._clock() - started, 3))
+        if cancel is not None and cancel.is_set():
+            return Resolved(UNAVAILABLE, run_id)            # stopped: no context is built
         try:
             context = override(words) if override is not None else self.context_for(words)
         except Exception as exc:  # noqa: BLE001 - the planner is then told of nothing
@@ -238,7 +245,7 @@ class DesktopService:
         return context
 
     def carry_out(self, plan: dv.DesktopPlan, words: str, context: DesktopContext | None,
-                  cancel: threading.Event | None = None) -> DesktopRun:
+                  cancel: Any = None) -> DesktopRun:
         """A planner's checked plan carried out (desktop.executor), the files it was shown kept for D5's other
         matches."""
         executor = self.executor()
@@ -247,18 +254,24 @@ class DesktopService:
         others = context.files if isinstance(context, DesktopContext) else ()
         return self._shown(executor.run_plan(plan, words=words, others_from=others, cancel=cancel), executor, words)
 
-    def click(self, click: desktop_results.Click) -> DesktopRun:
+    def click(self, click: desktop_results.Click, cancel: Any = None) -> DesktopRun:
         """The owner's click on a result card (desktop.results.Click): the card's own item re-checked and carried out
-        (executor.run_click; the click stands for at most ``click.granted``), with the cards of what came of it."""
+        (executor.run_click; the click stands for at most ``click.granted``), with the cards of what came of it;
+        ``cancel``: once set (the app stopped waiting, or the owner's Turn off), it opens nothing - asked right before
+        its OS call."""
         executor = self.executor()
         if executor is None or not isinstance(click, desktop_results.Click):
             return DesktopRun(getattr(click, "run_id", ""))
         run = executor.run_click(click.skill, click.target, granted=click.granted, run_id=click.run_id,
-                                 flags=click.flags, via=click.via, words=click.words, others_from=click.others_from)
+                                 flags=click.flags, via=click.via, words=click.words, others_from=click.others_from,
+                                 cancel=cancel)
         return self._shown(run, executor, click.words)
 
     def _shown(self, run: DesktopRun, executor: Executor, words: str) -> DesktopRun:
-        """``run`` with its result cards (desktop.results.present), made now - right after it."""
+        """``run`` with its result cards (desktop.results.present), made now - right after it; none to make (nothing
+        opened, waits or was found: refused, failed or stopped) - nothing more is looked at."""
+        if not (run.done() or run.waiting() or run.found()):
+            return run
         try:
             cards = desktop_results.present(run, executor=executor, scope=self.scope(), backend=executor.backend,
                                             now=self._now(), words=words, hour24=self._hour24)

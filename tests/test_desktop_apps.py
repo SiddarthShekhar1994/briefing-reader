@@ -10,8 +10,11 @@ import tempfile
 import unittest
 
 from briefing_reader.desktop import apps, guard
+from briefing_reader.desktop import executor as dx
+from briefing_reader.desktop import validate as dv
 from briefing_reader.desktop.backend import AppEntry
-from briefing_reader.desktop.context import AppItem
+from briefing_reader.desktop.context import AppItem, Place
+from briefing_reader.desktop.refs import APP, PLACE, RefIndex
 from tests.desktop_fakes import START_MENU, FakeDesktopBackend
 
 GUID = "{6D809377-6AF0-444B-8957-A3773F02200E}"
@@ -106,6 +109,79 @@ class LoadAndMatchTests(unittest.TestCase):
         self.assertEqual(guard.never_app("Administrative Tools"), "system")
         self.assertEqual(guard.never_app("Jarvis"), "jarvis")
         self.assertEqual(guard.never_app("Briefing reader"), "jarvis")
+
+
+SYSTEM = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}"     # FOLDERID_System, as AppsFolder lists its programs
+# The apps that turn on the camera, the microphone or a screen recorder (SPEC 2.4's "Other"), and the Start menu's Run:
+# (Start-menu name, AppsFolder id, the exe it runs or "") and the never-open group each is in.
+CAPTURE_APPS = ((("Camera", "Microsoft.WindowsCamera_8wekyb3d8bbwe!App", "WindowsCamera.exe"), "capture"),
+                (("Sound Recorder", "Microsoft.WindowsSoundRecorder_8wekyb3d8bbwe!App", "SoundRec.exe"), "capture"),
+                (("Voice Recorder", "Microsoft.WindowsSoundRecorder_8wekyb3d8bbwe!App", "VoiceRecorder.exe"),
+                 "capture"),
+                (("Snipping Tool", "Microsoft.ScreenSketch_8wekyb3d8bbwe!App", "SnippingTool.exe"), "capture"),
+                (("Snip & Sketch", "Microsoft.ScreenSketch_8wekyb3d8bbwe!App", "ScreenSketch.exe"), "capture"),
+                (("Xbox Game Bar", "Microsoft.XboxGamingOverlay_8wekyb3d8bbwe!App", "GameBar.exe"), "capture"),
+                (("OBS Studio", GUID + "\\obs-studio\\bin\\64bit\\obs64.exe", "obs64.exe"), "capture"),
+                (("Steps Recorder", SYSTEM + "\\psr.exe", "psr.exe"), "capture"),
+                (("Run", "Microsoft.Windows.Shell.RunDialog", ""), "terminal"))
+
+
+class CaptureAppsTests(unittest.TestCase):
+    """P1.R (p1r-8): no request opens the camera, the microphone or a screen recorder, nor the Start menu's Run. Each
+    is on the never-open list by its name, by its id read as words and by its exe, so the Start menu's list leaves it
+    out, a planner's step naming it is refused whatever the owner's words hold ("open my Camera Roll" - a folder, not
+    the Camera app) and the executor refuses it again right before a launch."""
+
+    def test_each_app_by_its_name_its_id_and_its_exe(self) -> None:
+        for (name, app_id, exe), group in CAPTURE_APPS:
+            with self.subTest(app=name):
+                self.assertEqual(apps.never(name, app_id), group)
+                self.assertEqual(apps.never("Contoso Helper", app_id), group)        # its id alone says it
+                if name != "Run":                                                    # "Run" alone names no app
+                    self.assertEqual(guard.never_app(name), group)                   # its name alone says it
+                if exe:
+                    self.assertEqual(guard.never_app("Contoso Helper", "C:\\Tools\\" + exe), group)   # its exe
+                    self.assertEqual(guard.never_app("Contoso Helper", exe.upper(), target=True), group)
+        for name in ("Photos", "Microsoft Clock", "Media Player", "Calculator", "Paint"):
+            self.assertEqual(guard.never_app(name), "", name)                        # other apps still open
+
+    def test_the_start_menu_leaves_them_out(self) -> None:
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        fake = FakeDesktopBackend(tmp.name)
+        fake.apps = [AppEntry(app_id, name) for (name, app_id, _exe), _group in CAPTURE_APPS] + [
+            AppEntry("Microsoft.Windows.Photos_8wekyb3d8bbwe!App", "Photos")]
+        listed = apps.load(fake)
+        self.assertEqual([app.name for app in listed.apps], ["Photos"])
+        self.assertEqual(listed.left_out, len(CAPTURE_APPS))
+
+    def test_a_planned_step_naming_one_is_refused_whatever_the_words_say(self) -> None:
+        roll = "C:\\Users\\Owner\\OneDrive\\Pictures\\Camera Roll"
+        for (name, app_id, exe), _group in CAPTURE_APPS:
+            refs = RefIndex("t")
+            refs.issue(PLACE, Place(roll, ("Pictures", "Camera Roll")), "Pictures > Camera Roll")
+            refs.issue(APP, AppItem(app_id, name, exe), name)
+            answer = dv.DesktopAnswer("", "", (dv.PlannedStep("open_app", "x", frozenset({"skill", "why", "app"}),
+                                                              app="a1"),))
+            for words in ("open my Camera Roll", "show me the camera roll photos", f"open {name}",
+                          f"launch the {name} app"):
+                with self.subTest(app=name, words=words):
+                    (step,) = dv.check_plan(answer, refs, words).steps
+                    self.assertEqual((step.tier, step.code), (dv.NEVER, dv.APP_NOT_APPROVED))
+
+    def test_the_executor_refuses_a_launch_right_before_it(self) -> None:
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        fake = FakeDesktopBackend(tmp.name)
+        for (name, app_id, exe), _group in CAPTURE_APPS:
+            item = AppItem(app_id, name, exe)
+            executor = dx.Executor(fake, scope=lambda: None, apps=lambda item=item: [item])   # as if listed
+            for granted in (dv.ONE_CLICK, dv.CARD):
+                with self.subTest(app=name, granted=granted):
+                    run = executor.run_click(dv.OPEN_APP, item, granted=granted)
+                    self.assertEqual([(result.status, result.code) for result in run.results],
+                                     [(dx.REFUSED, dv.APP_NOT_APPROVED)])
+        self.assertEqual(fake.opened, [])                                            # nothing launched
 
 
 if __name__ == "__main__":

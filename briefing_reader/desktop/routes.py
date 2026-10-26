@@ -5,13 +5,18 @@ no route below takes goes to the planner (MODE_DESKTOP). Every pattern is a case
 whitespace-collapsed text, in the style of ask.routes (an optional leading "jarvis," / "please", an optional trailing
 "." or "!"):
 
-* Phase 1 (``route`` returns the step it stands for; the tier is INSTANT - the owner named the thing exactly):
+* Phase 1 (``route`` returns the step it stands for; the tier is INSTANT - the owner named the thing exactly - but
+  for a bare web address):
   - "open|start|launch <app name>": an app of the context's Start-menu list whose name the words give exactly
-    (case and spacing aside), never one on the never-open list (guard.never_app);
+    (case and spacing aside), never one on the never-open list (desktop.apps.never_item: by its name, id and exe);
   - "open|show (me) (my|the) <known folder> (folder)": Desktop, Documents, Downloads, Pictures, Music or Videos (the
     place is the context's when it lists that root);
-  - "open <https address>" or a bare web address with a common web ending ("open youtube.com"; https added), on a
-    public host (guard.url_problem), or "open <saved site name>" (a context site's title exactly);
+  - "open <https address>" typed word for word, on a public host (guard.url_problem), or "open <saved site name>" (a
+    context site's title exactly);
+  - a bare web address with a common web ending ("open youtube.com"; https added, a public host) never opens at
+    once (SPEC 2.1: only an https address typed word for word or a saved site does): a file of that very name in the
+    folders allowed is found instead ("open logo.ai": the Illustrator file - its name never goes to the web), else
+    the web page waits on a card for the owner's click, its host shown (ONE_CLICK, validate.FLAG_BARE_HOST);
   - "find|where is|where's <words>": when the local search (``search``: desktop.index on the desktop thread) finds
     at least one file with every word in its name.
 * Phase 2 (recognised, answered NOT_YET, nothing done): "volume <n>|up|down|mute|unmute", "louder", "quieter",
@@ -45,6 +50,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..persona import with_address
+from . import apps as desktop_apps
 from . import guard
 from . import validate as dv
 from .context import DesktopContext, Place
@@ -52,8 +58,10 @@ from .paths import ROOT_LABELS
 
 # The known folders by the words the owner uses for them (paths.ROOT_LABELS' keys are the [desktop] folders names).
 KNOWN_FOLDER_WORDS = {label.casefold(): key for key, label in ROOT_LABELS.items()}
-# The web endings a bare address may have ("open youtube.com"); file types that are also endings (.md, .py, .sh,
-# .ps ...) are not among them, so "open notes.md" stays a file.
+# The web endings a bare address may have ("open youtube.com"); the document types (.md, .pdf ...: SPEC 2.3) and
+# other file types that are also endings (.py, .sh, .ps ...) are not among them, so "open notes.md" stays a file. Some
+# here are file types too (.ai, .ly, .it ...): that is why a bare address never opens at once - a file of that very
+# name is found instead, else the web page waits for the owner's click.
 WEB_ENDINGS = frozenset({"com", "org", "net", "edu", "gov", "uk", "io", "co", "us", "ca", "au", "nz", "ie", "eu",
                          "de", "fr", "nl", "es", "it", "jp", "in", "info", "app", "dev", "ai", "me", "tv", "ly",
                          "gg", "fm", "news", "online", "site", "tech", "blog"})
@@ -136,10 +144,10 @@ def desktop_request(text: Any) -> bool:
 
 @dataclass(frozen=True)
 class LocalRoute:
-    """A request handled on this PC: the skill it stands for (``kind``), its tier (INSTANT; "" for a NOT_YET one),
-    its refusal code ("" or NOT_YET), what it is about (an AppItem, a Place - None when the context does not list
-    that root -, an https address, a SiteItem) and, for a find, the files found (``hits``) and the words looked for.
-    Memory only."""
+    """A request handled on this PC: the skill it stands for (``kind``), its tier (INSTANT, ONE_CLICK for a bare web
+    address; "" for a NOT_YET one), its refusal code ("" or NOT_YET), what it is about (an AppItem, a Place - None
+    when the context does not list that root -, an https address, a SiteItem) and, for a find, the files found
+    (``hits``) and the words looked for; ``flags``: why its tier went up (validate.FLAG_BARE_HOST). Memory only."""
 
     kind: str
     tier: str = ""
@@ -148,6 +156,7 @@ class LocalRoute:
     hits: tuple[Any, ...] = field(default=(), repr=False)
     words: str = field(default="", repr=False)
     folder: str = ""                                # a known folder's key ("downloads") for open_folder
+    flags: frozenset[str] = frozenset()
 
     def __repr__(self) -> str:
         return f"LocalRoute({self.kind}{', ' + self.code if self.code else ''})"
@@ -161,6 +170,18 @@ def _root_place(context: DesktopContext | None, label: str) -> Place | None:
     if context is None:
         return None
     return next((place for place in context.places if len(place.parts) == 1 and _same(place.parts[0], label)), None)
+
+
+def _named_files(name: str, search: Callable[[Sequence[str]], Sequence[Any]] | None) -> tuple[Any, ...]:
+    """The files the local search finds whose whole name is ``name`` (case aside): "logo.ai" in Documents."""
+    words = [word for word in guard.words(name, camel=False) if word]
+    if search is None or not words:
+        return ()
+    try:
+        found = list(search(words))
+    except Exception:  # noqa: BLE001 - no file found: the web page then, on the owner's click
+        return ()
+    return tuple(item for item in found if _same(str(getattr(item, "name", "")), name))
 
 
 def route(text: Any, context: DesktopContext | None = None, *,
@@ -179,18 +200,23 @@ def route(text: Any, context: DesktopContext | None = None, *,
         return LocalRoute(dv.OPEN_FOLDER, dv.INSTANT, target=_root_place(context, ROOT_LABELS[key]), folder=key)
     match = _OPEN_URL_RE.fullmatch(text)
     if match and not guard.url_problem(match.group("url")):
-        return LocalRoute(dv.OPEN_URL, dv.INSTANT, target=match.group("url"))
+        return LocalRoute(dv.OPEN_URL, dv.INSTANT, target=match.group("url"))      # typed word for word
     match = _OPEN_HOST_RE.fullmatch(text)
     if match and match.group("end").casefold() in WEB_ENDINGS:
         url = "https://" + match.group("host") + (match.group("path") or "")
         if not guard.url_problem(url):
-            return LocalRoute(dv.OPEN_URL, dv.INSTANT, target=url)
+            host = match.group("host")
+            named = () if match.group("path") else _named_files(host, search)
+            if named:                                   # a file of that very name: the file, never the web (D5)
+                return LocalRoute(dv.FIND_FILES, dv.INSTANT, hits=named,
+                                  words=" ".join(guard.words(host, camel=False)))
+            return LocalRoute(dv.OPEN_URL, dv.ONE_CLICK, target=url, flags=frozenset({dv.FLAG_BARE_HOST}))
     if context is not None:
         match = _OPEN_APP_RE.fullmatch(text)
         if match:
             name = match.group("name")
             app = next((app for app in context.apps if _same(app.name, name)), None)
-            if app is not None and not guard.never_app(app.name, app.exe):
+            if app is not None and not desktop_apps.never_item(app):
                 return LocalRoute(dv.OPEN_APP, dv.INSTANT, target=app)
         match = _OPEN_SITE_RE.fullmatch(text)
         if match:
