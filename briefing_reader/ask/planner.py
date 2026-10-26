@@ -3245,6 +3245,9 @@ def _mode_target(request: ModeRequest) -> Any:
     return job.meeting_id if isinstance(job, meeting_summary.MeetingJob) else None
 
 
+_SUSPECT_NOUNS = {"f": "file name", "d": "folder name", "a": "app name", "s": "site name"}   # by a ref's first letter
+
+
 @_quiet()
 def _desktop_given(live: LiveTask, job: Any, prompt: Any) -> None:
     """What the desktop planner is given (SPEC 10.1): where Jarvis looked, how many places, files, apps and sites
@@ -3267,10 +3270,16 @@ def _desktop_given(live: LiveTask, job: Any, prompt: Any) -> None:
                               _count_words(shown["apps_left_out"], "app") if shown["apps_left_out"] else "") if part]
     if left:
         step.field("Left out to fit", ", ".join(left))
-    suspects = len(prompt.refs.suspects())
+    suspect_ids = prompt.refs.suspects()
+    suspects = len(suspect_ids)
     if suspects:
-        step.field("Names that read like instructions",
-                   f"{suspects} - treated as data; used only when your own words name them")
+        nouns: dict[str, int] = {}
+        for ref_id in suspect_ids:                     # SPEC 10.1: "1 file name looked like instructions - ..."
+            noun = _SUSPECT_NOUNS.get(ref_id[:1], "name")
+            nouns[noun] = nouns.get(noun, 0) + 1
+        what = desktop_mode.and_words([_count_words(count, noun) for noun, count in nouns.items()])
+        step.field("Read like instructions", f"{what} looked like instructions - treated as data; used only when "
+                                             f"your own words name {'it' if suspects == 1 else 'them'}")
     step.done(STATUS_WARN if suspects or left else STATUS_OK,
               summary=f"{_count_words(len(prompt.refs), 'item')} by id, names only")
 

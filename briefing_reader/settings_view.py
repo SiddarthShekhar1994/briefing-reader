@@ -24,7 +24,8 @@ Public API
 
 ``desktop_rows(config, turned_on=False)``, ``DESKTOP_GROUP`` / ``DESKTOP_TITLE`` / ``DESKTOP_NOTE`` / ``DESKTOP_HOW``
     Settings > Desktop, added (``add_group``) only while [desktop] is on: its values and whether the owner turned it
-    on on its first-run card ("Not turned on yet" until then).
+    on on its first-run card ("Your OK": "Turned on", or "Not turned on yet"); its own part under the rows
+    (desktop_view.DesktopSettingsPanel) has Turn off, which takes the OK back - the only thing it changes.
 
 ``effective_hud_key(config)``
     The HUD key that can work: [desktop] hud_key, or "" while the keyboard shortcut ([hotkey] enabled) is off (no
@@ -79,10 +80,10 @@ MOTION_WINDOWS_OFF = "Off - Windows' animations are turned off"
 DESKTOP_GROUP = "desktop"
 DESKTOP_TITLE = "Desktop"
 DESKTOP_NOTE = "Jarvis works on your desktop only when you ask, in the folders and apps you allow."
-DESKTOP_HOW = ("Jarvis on your desktop is turned on or off with [desktop] in config.toml (or JARVIS_DESKTOP_ENABLED "
-               "in .env), then a restart. Nothing on this screen changes a setting.")
+DESKTOP_HOW = ("Jarvis on your desktop is switched on or off with [desktop] in config.toml (or JARVIS_DESKTOP_ENABLED "
+               "in .env), then a restart. The one thing you can change here is your OK: Turn off takes it back.")
 NOT_TURNED_ON = "Not turned on yet"
-TURNED_ON = "Turned on - you clicked Turn on"
+TURNED_ON = "Turned on"
 NO_HUD_KEY_SHORTCUT_OFF = "No key while the keyboard shortcut is off - the Dock's Desktop switches"
 _DESKTOP_FOLDERS = {"desktop": "Desktop", "documents": "Documents", "downloads": "Downloads", "pictures": "Pictures",
                     "music": "Music", "videos": "Videos"}

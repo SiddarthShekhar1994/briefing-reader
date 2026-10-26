@@ -20,11 +20,17 @@ The methods:
   and ``start_menu_apps`` (the Start menu's apps: shell:AppsFolder's names and ids).
 * Opening (P1.8; SPEC 2.1, 2.3 and 5.5): ``open_document`` (ShellExecuteExW "open", for a document type of SPEC 2.3
   only), ``show_in_folder`` and ``open_folder`` (SHOpenFolderAndSelectItems: never a command line), ``launch_app``
-  (an AppsFolder item, with no arguments) and ``open_url`` (an https address on a public host only). desktop.executor
-  re-checks every target just before; each open is guarded here once more (hard rule 6) by the NEVER list's own
-  rules: a path that is not a plain local path on a fixed drive, a type that is not a document, an app id or an
-  address that is not of its shape raises ValueError and nothing is asked of Windows. No open passes arguments,
-  asks for another verb than "open" or turns the zone checks off.
+  (an AppsFolder item, with no arguments) and ``open_url`` (an https address on a public host only). P1.9 adds
+  ``open_script_document`` (the same open, for a document that can run macros or scripts only - desktop.executor asks
+  for it only after the owner's click on that file's NEEDS YOUR OK card). desktop.executor re-checks every target just
+  before; each open is guarded here once more (hard rule 6) by the NEVER list's own rules: a path that is not a plain
+  local path on a fixed drive, a type that is not of that open's kind, an app id or an address that is not of its
+  shape raises ValueError and nothing is asked of Windows. No open passes arguments, asks for another verb than
+  "open" or turns the zone checks off.
+* For the result cards (P1.9): ``app_for`` - the app Windows opens a file type or the https protocol with (its
+  friendly name and its exe, from the associations only: AssocQueryStringW; nothing is opened or read) - and
+  ``link_target`` - the path a shortcut names (IShellLink Load and GetPath, never Resolve: nothing is searched or
+  started), so its card can show the real target before anything opens (SPEC 2.4).
 
 No method is ever named for something on the NEVER list (guard.NEVER_CAPABILITIES): there is no delete, no close, no
 shell command, no send. Logs carry folder keys, counts and exception types (with a winerror) only, never a path, a
@@ -35,10 +41,12 @@ Public API
 ``DesktopBackend`` (Protocol): ``known_folder(name)``, ``final_path(path)``, ``file_info(path)``, ``exists(path)``,
 ``drive_type(drive)``, ``file_id(path)``, ``list_folder(path, limit=)``, ``search_index(sql, timeout_s=,
 max_rows=)``, ``recent_items(limit=)``, ``start_menu_apps(limit=)``, ``open_document(path)``,
-``show_in_folder(path)``, ``open_folder(path)``, ``launch_app(app_id)``, ``open_url(url)``.
+``open_script_document(path)``, ``show_in_folder(path)``, ``open_folder(path)``, ``launch_app(app_id)``,
+``open_url(url)``, ``app_for(kind)``, ``link_target(path)``.
 ``FileInfo(attributes, reparse_tag, is_dir)``, ``FileIdentity(volume, file_id, size, mtime_ns, is_dir)``
 (``same_item(other)``), ``DirEntry(name, is_dir, attributes, reparse_tag, size, mtime_ns)``, ``IndexRow(path, name,
-size, modified, attributes, is_dir)``, ``AppEntry(app_id, name)``; ``KNOWN_FOLDERS`` (name -> KNOWNFOLDERID),
+size, modified, attributes, is_dir)``, ``AppEntry(app_id, name)``, ``AppInfo(name, exe)``; ``app_kind(kind)`` (what
+``app_for`` may be asked); ``KNOWN_FOLDERS`` (name -> KNOWNFOLDERID),
 ``ROOT_FOLDERS`` (the six folders the owner chose: D2); the FILE_ATTRIBUTE_*, IO_REPARSE_TAG_* and DRIVE_* values the
 checks use; ``link_tag(tag)`` (a symbolic link, a junction or an app execution alias), ``cloud_tag(tag)`` (OneDrive).
 ``Win32Backend()``; ``RealBackendInTests``; ``TEST_GUARD_ENV``, ``real_backend_blocked()``; ``APPS_FOLDER`` (the
@@ -52,6 +60,7 @@ import functools
 import logging
 import ntpath
 import os
+import re
 import stat
 import threading
 import time
@@ -118,6 +127,12 @@ _INDEX_PROVIDER = "Provider=Search.CollatorDSO;Extended Properties='Application=
 INDEX_COLUMNS = ("System.ItemPathDisplay", "System.FileName", "System.Size", "System.DateModified",
                  "System.FileAttributes")
 MAX_LISTED = 10_000                             # entries of one folder a listing reads at most
+# The associations (AssocQueryStringW): the open verb's app, by its friendly name and its exe.
+_ASSOCF_INIT_IGNOREUNKNOWN = 0x00000400
+_ASSOCF_IS_PROTOCOL = 0x00001000
+_ASSOCSTR_EXECUTABLE = 2
+_ASSOCSTR_FRIENDLYAPPNAME = 4
+_KIND_RE = re.compile(r"\.[A-Za-z0-9]{1,16}")
 
 
 class RealBackendInTests(RuntimeError):
@@ -225,6 +240,20 @@ class AppEntry:
     name: str = field(repr=False)
 
 
+@dataclass(frozen=True)
+class AppInfo:
+    """The app Windows opens a file type (or the https protocol) with: its friendly name ("Word"; "" unknown) and its
+    exe's path ("" unknown). Shown on a result card and used to find its window - never logged."""
+
+    name: str = field(default="", repr=False)
+    exe: str = field(default="", repr=False)
+
+
+def app_kind(kind: Any) -> bool:
+    """What ``app_for`` may be asked: a file type (".docx") or "https" - never a path or a name."""
+    return isinstance(kind, str) and (kind == "https" or bool(_KIND_RE.fullmatch(kind)))
+
+
 def link_tag(tag: int) -> bool:
     """A symbolic link, a junction (mount point) or an app execution alias: never followed or used."""
     return int(tag) in LINK_TAGS
@@ -283,6 +312,11 @@ class DesktopBackend(Protocol):
         """Open the document ``path`` with its app (ShellExecuteExW "open"; SPEC 2.3's types only)."""
         ...
 
+    def open_script_document(self, path: str) -> None:
+        """Open a document that can run macros or scripts (guard.SCRIPT_CAPABLE_TYPES only) with its app - asked for
+        only after the owner's click on its NEEDS YOUR OK card."""
+        ...
+
     def show_in_folder(self, path: str) -> None:
         """Show ``path`` selected in its folder (SHOpenFolderAndSelectItems)."""
         ...
@@ -297,6 +331,16 @@ class DesktopBackend(Protocol):
 
     def open_url(self, url: str) -> None:
         """Open the https address ``url`` in the default browser."""
+        ...
+
+    def app_for(self, kind: str) -> AppInfo | None:
+        """The app Windows opens ``kind`` with - a file type (".docx") or "https" (the default browser) -, from the
+        associations only (nothing is opened or read); None when Windows names none, or for anything else."""
+        ...
+
+    def link_target(self, path: str) -> str:
+        """The path the shortcut ``path`` (a .lnk on a fixed drive) names, read without resolving it - nothing is
+        searched or started; "" when it names no path. OSError when it can't be read."""
         ...
 
 
@@ -460,6 +504,11 @@ class Win32Backend:
         _shell_open(path)
 
     @_real
+    def open_script_document(self, path: str) -> None:
+        self._last_guard("open_script_document", path)
+        _shell_open(path)
+
+    @_real
     def show_in_folder(self, path: str) -> None:
         self._last_guard("show_in_folder", path)
         _com_ready()
@@ -490,6 +539,23 @@ class Win32Backend:
         self._last_guard("open_url", url)
         _shell_open(url)
 
+    # ---- for the result cards ----------------------------------------------------------------------------
+
+    @_real
+    def app_for(self, kind: str) -> AppInfo | None:
+        if not app_kind(kind):
+            return None
+        name = _assoc_string(kind, _ASSOCSTR_FRIENDLYAPPNAME)
+        exe = _assoc_string(kind, _ASSOCSTR_EXECUTABLE)
+        if exe and _exe_problem(exe):
+            exe = ""                                 # not a plain exe path (a packaged app's alias ...): no window match
+        return AppInfo(name, exe) if name or exe else None
+
+    @_real
+    def link_target(self, path: str) -> str:
+        self._last_guard("link_target", path)
+        return _link_path(path)
+
     def _last_guard(self, method: str, target: str) -> None:
         """The last guard before the shell is asked (``open_problem``, and a path's drive a fixed one): ValueError
         and nothing is asked of Windows."""
@@ -499,15 +565,26 @@ class Win32Backend:
             raise ValueError("refused by the last guard")
 
 
-_PATH_OPENS = frozenset({"open_document", "show_in_folder", "open_folder"})
+_PATH_OPENS = frozenset({"open_document", "open_script_document", "show_in_folder", "open_folder", "link_target"})
+# Each path method's own kind of file (guard.open_kind): anything else is refused before Windows is asked.
+_PATH_KINDS = {"open_document": guard.OPEN_DOCUMENT, "open_script_document": guard.OPEN_SCRIPT,
+               "link_target": guard.OPEN_SHORTCUT}
+
+
+def _exe_problem(exe: str) -> str:
+    """Why an association's exe is no plain exe path to find a window by ("" when it is one)."""
+    from .paths import lexical_problem                # late: paths imports this module
+
+    return lexical_problem(exe) or ("type" if guard.suffix(exe) != "exe" else "")
 
 
 def open_problem(method: str, target: Any) -> str:
     """Why an open may not ask the shell for ``target`` ("" when it may; pure - the open methods' last guard, made
     again after desktop.executor's re-check): a path that is not a plain absolute local one (paths.lexical_problem),
-    a document whose type does not open at once (guard.open_kind), an app id not of an AppsFolder id's shape
-    (desktop.apps.app_id_problem), an address that is not https on a public host (guard.url_problem), or an unknown
-    method."""
+    a file that is not of the method's kind (guard.open_kind: open_document a document that opens at once,
+    open_script_document one that can run macros or scripts, link_target a shortcut), an app id not of an AppsFolder
+    id's shape (desktop.apps.app_id_problem), an address that is not https on a public host (guard.url_problem), or
+    an unknown method."""
     from .apps import app_id_problem
     from .paths import lexical_problem
 
@@ -517,7 +594,8 @@ def open_problem(method: str, target: Any) -> str:
         problem = lexical_problem(target)
         if problem:
             return problem
-        if method == "open_document" and guard.open_kind(target) != guard.OPEN_DOCUMENT:
+        kind = _PATH_KINDS.get(method)
+        if kind is not None and guard.open_kind(target) != kind:
             return "type"
         return ""
     if method == "launch_app":
@@ -559,6 +637,41 @@ def _shell_open(target: str) -> None:
                              nShow=SW_SHOWNORMAL)
     except pywintypes.error as exc:
         raise OSError(0, "the shell could not open it", None, int(getattr(exc, "winerror", 0) or 0)) from None
+
+
+def _assoc_string(kind: str, what: int) -> str:
+    """AssocQueryStringW for the "open" verb of a file type (".docx") or of the https protocol: the app's friendly
+    name or its exe; "" when Windows has none (unknown types are not answered with "Unknown application")."""
+    import ctypes
+    from ctypes import wintypes
+
+    shlwapi = ctypes.WinDLL("shlwapi")
+    query = shlwapi.AssocQueryStringW
+    query.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPWSTR,
+                      ctypes.POINTER(wintypes.DWORD)]
+    query.restype = ctypes.c_long                    # an HRESULT, checked by hand
+    flags = _ASSOCF_INIT_IGNOREUNKNOWN | (_ASSOCF_IS_PROTOCOL if kind == "https" else 0)
+    size = wintypes.DWORD(1024)
+    buffer = ctypes.create_unicode_buffer(size.value)
+    if query(flags, what, kind, OPEN_VERB, buffer, ctypes.byref(size)) != 0:
+        return ""
+    return buffer.value.strip()
+
+
+def _link_path(path: str) -> str:
+    """The path a shortcut names: IShellLink's Load (read only) and GetPath - never Resolve(), which could search the
+    disk or the network for a moved target."""
+    _com_ready()
+    import pythoncom
+    from win32com.shell import shell
+
+    link = pythoncom.CoCreateInstance(shell.CLSID_ShellLink, None, pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink)
+    try:
+        link.QueryInterface(pythoncom.IID_IPersistFile).Load(path, 0)      # STGM_READ
+        target, _found = link.GetPath(0)
+    except pythoncom.com_error as exc:
+        raise OSError(0, "the shortcut could not be read", None, int(getattr(exc, "hresult", 0) or 0)) from None
+    return target if isinstance(target, str) else ""
 
 
 def _index_row(values: dict[str, Any]) -> IndexRow:

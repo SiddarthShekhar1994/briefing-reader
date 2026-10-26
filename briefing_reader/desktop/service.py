@@ -13,17 +13,23 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
   - first in the places his words name -, the Recent items, the files changed in the days his words say, the
   Start-menu apps his words name, within SPEC 4.1's caps; names only reach the planner);
 * ``carry_out(plan, words, context, cancel)``: a planner's checked plan carried out (desktop.executor);
+* ``click(click)``: the owner's click on a result card (P1.9: desktop.results.Click - the card's own item, re-checked
+  and carried out by executor.run_click);
 * ``find(query)``: a find_files step's search.
+
+Every run that comes back carries its result cards (``DesktopRun.shown``: desktop.results.present, made here right
+after the run - the other matches and the found items re-checked first, the app a file opened in read from the
+associations).
 
 Logs carry counts, durations and exception types only.
 
 Public API
 ==========
 ``LOCAL``, ``PLANNER``, ``UNAVAILABLE``; ``Resolved(kind, run_id, route, run, context, seconds)``;
-``DesktopService(folders=, extra_folders=, excluded=, backend_factory=, sites=, clock=, now=)``: ``backend()``,
-``scope(fresh=)``, ``apps(fresh=)``, ``tree()``, ``route_context()``, ``resolve(words, planner=, override=,
-run_id=)``, ``context_for(words)``, ``carry_out(plan, words, context, cancel)``, ``find(query)``, ``executor()``;
-``days_in(words)``; ``RECENT_FILES``.
+``DesktopService(folders=, extra_folders=, excluded=, backend_factory=, sites=, clock=, now=, hour24=)``:
+``backend()``, ``scope(fresh=)``, ``apps(fresh=)``, ``tree()``, ``route_context()``, ``resolve(words, planner=,
+override=, run_id=)``, ``context_for(words)``, ``carry_out(plan, words, context, cancel)``, ``click(click)``,
+``find(query)``, ``executor()``; ``days_in(words)``; ``RECENT_FILES``.
 """
 
 from __future__ import annotations
@@ -32,12 +38,13 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
 from . import apps as desktop_apps
 from . import guard, paths
+from . import results as desktop_results
 from . import routes as desktop_routes
 from . import validate as dv
 from .backend import DesktopBackend
@@ -86,7 +93,7 @@ class DesktopService:
     def __init__(self, *, folders: Sequence[str], extra_folders: Sequence[str] = (), excluded: Sequence[str] = (),
                  backend_factory: Callable[[], DesktopBackend], sites: Sequence[SiteItem] = (),
                  clock: Callable[[], float] = time.monotonic,
-                 now: Callable[[], datetime] | None = None) -> None:
+                 now: Callable[[], datetime] | None = None, hour24: bool = False) -> None:
         self._folders = tuple(folders)
         self._extra = tuple(extra_folders)
         self._excluded = tuple(str(path) for path in excluded if path)
@@ -94,6 +101,7 @@ class DesktopService:
         self._sites = tuple(site for site in sites if isinstance(site, SiteItem))
         self._clock = clock
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._hour24 = bool(hour24)
         self._backend: DesktopBackend | None = None
         self._backend_failed = False
         self._scope: tuple[float, paths.Scope] | None = None
@@ -180,7 +188,7 @@ class DesktopService:
             routes_context = DesktopContext()
         found = desktop_routes.route(words, routes_context, search=self._route_search)
         if found is not None:
-            run = executor.run_route(found, words=words, run_id=run_id, cancel=cancel)
+            run = self._shown(executor.run_route(found, words=words, run_id=run_id, cancel=cancel), executor, words)
             return Resolved(LOCAL, run_id, found, run, seconds=round(self._clock() - started, 3))
         if not planner:
             return Resolved(PLANNER, run_id, seconds=round(self._clock() - started, 3))
@@ -237,7 +245,28 @@ class DesktopService:
         if executor is None:
             return DesktopRun(plan.run_id)
         others = context.files if isinstance(context, DesktopContext) else ()
-        return executor.run_plan(plan, words=words, others_from=others, cancel=cancel)
+        return self._shown(executor.run_plan(plan, words=words, others_from=others, cancel=cancel), executor, words)
+
+    def click(self, click: desktop_results.Click) -> DesktopRun:
+        """The owner's click on a result card (desktop.results.Click): the card's own item re-checked and carried out
+        (executor.run_click; the click stands for at most ``click.granted``), with the cards of what came of it."""
+        executor = self.executor()
+        if executor is None or not isinstance(click, desktop_results.Click):
+            return DesktopRun(getattr(click, "run_id", ""))
+        run = executor.run_click(click.skill, click.target, granted=click.granted, run_id=click.run_id,
+                                 flags=click.flags, via=click.via, words=click.words, others_from=click.others_from)
+        return self._shown(run, executor, click.words)
+
+    def _shown(self, run: DesktopRun, executor: Executor, words: str) -> DesktopRun:
+        """``run`` with its result cards (desktop.results.present), made now - right after it."""
+        try:
+            cards = desktop_results.present(run, executor=executor, scope=self.scope(), backend=executor.backend,
+                                            now=self._now(), words=words, hour24=self._hour24)
+        except Exception as exc:  # noqa: BLE001 - no cards: the caption still says what happened
+            logger.warning("Desktop %s: the result cards could not be made (%s)", run.run_id or "-",
+                           type(exc).__name__)
+            cards = ()
+        return replace(run, shown=cards)
 
     def find(self, query: FindQuery) -> tuple[Any, ...]:
         """A find_files step's search: the files (or, for kind "folder", the folders) its words find, checked."""

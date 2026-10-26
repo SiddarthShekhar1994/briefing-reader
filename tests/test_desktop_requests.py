@@ -247,10 +247,17 @@ class RoutingTests(DesktopRequestApp):
         self.make_ask()
         window_bar = self.reading.command_bar
         with mock.patch.object(self.desktop, "consent_given", return_value=False):
-            self.type_in_window(ESSAY)
+            self.type_in_window(ESSAY)                       # not turned on yet: the first-run card instead (P1.9)
         self.assertFalse(self.desktop.is_hud())
         self.assertTrue(self.window.isVisible())
         self.assertEqual(window_bar.text(), ESSAY)                           # not taken: the words stay
+        self.assertIn(ui.DESKTOP_OFF_TEXT, window_bar.status())
+        self.assertTrue(self.c._desktop_consent_card.is_open())
+        self.c._desktop_consent_card.close_card()
+        with mock.patch.object(QApplication, "activeModalWidget", return_value=self.window):
+            self.type_in_window(ESSAY)                       # a dialog waits for an answer: not now
+        self.assertFalse(self.desktop.is_hud())
+        self.assertEqual(window_bar.text(), ESSAY)
         self.assertIn(ask_ui.DESKTOP_NOT_NOW_TEXT, window_bar.status())
         self.assertEqual(self.runs(), [])
         self.assertEqual(self.fake.calls, [])

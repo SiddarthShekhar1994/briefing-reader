@@ -1,7 +1,8 @@
 """Fakes for the desktop feature's tests: a backend over a temporary folder that records every call, and the
-stand-ins Phase 1 needs (an index, a window watcher, a clock); ``tags(text)`` spells text in invisible tag
-characters. None of them reaches the real desktop: the real backend cannot even be constructed while the tests run
-(tests/__init__.py sets backend.TEST_GUARD_ENV).
+stand-ins Phase 1 needs (an index, the window seam desktop.winwatch uses - ``FakeWinApi`` over pretend windows -, a
+clock); ``tags(text)`` spells text in invisible tag characters. None of them reaches the real desktop: the real
+backend and the real window seam cannot even be constructed while the tests run (tests/__init__.py sets
+backend.TEST_GUARD_ENV).
 
 FakeDesktopBackend keeps a pretend disk inside ``base`` (a TemporaryDirectory): the pretend C: drive is
 ``base\\C``, D: is ``base\\D`` and so on. Paths going in and coming out are pretend ones
@@ -14,8 +15,11 @@ OSError, and is still recorded in ``calls`` - so a test can show it was never as
 P1.8's methods: ``list_folder`` lists the pretend disk (or a ``listings`` entry: a made-up folder of any size, for
 the walk's caps), ``search_index`` answers ``index_rows`` (None: there is no index - OSError, so the walk runs; the
 SQL asked is kept in ``queries``), ``recent_items`` answers ``recent`` and ``start_menu_apps`` answers ``apps``. The
-opens (``open_document``, ``show_in_folder``, ``open_folder``, ``launch_app``, ``open_url``) open nothing: each is
-recorded in ``opened`` (method, target), or raises ``open_errors[method]``. Every call's thread name is kept in
+opens (``open_document``, ``open_script_document``, ``show_in_folder``, ``open_folder``, ``launch_app``,
+``open_url``) open nothing: each is recorded in ``opened`` (method, target), or raises ``open_errors[method]``.
+P1.9's: ``app_for`` answers ``associations`` (a file type or "https" -> backend.AppInfo; Word for .docx, Excel for
+.xlsx and Edge for https by default, invented install paths) and ``link_target`` answers ``links`` (a shortcut's
+pretend path -> the pretend path it names; OSError for one that is not there). Every call's thread name is kept in
 ``threads`` (the desktop worker's "desktop" thread in the app).
 """
 
@@ -35,6 +39,12 @@ from typing import Any
 from briefing_reader.desktop import backend as dbk
 
 OWNER = "C:\\Users\\Owner"
+WORD_EXE = "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE"     # invented install paths
+EXCEL_EXE = "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE"
+EDGE_EXE = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+ASSOCIATIONS = {".docx": dbk.AppInfo("Word", WORD_EXE), ".docm": dbk.AppInfo("Word", WORD_EXE),
+                ".xlsx": dbk.AppInfo("Excel", EXCEL_EXE), ".xlsm": dbk.AppInfo("Excel", EXCEL_EXE),
+                ".pdf": dbk.AppInfo("Microsoft Edge", EDGE_EXE), "https": dbk.AppInfo("Microsoft Edge", EDGE_EXE)}
 KNOWN = {
     "profile": OWNER,
     "desktop": OWNER + "\\OneDrive\\Desktop",
@@ -77,6 +87,8 @@ class FakeDesktopBackend:
         self.apps: list[dbk.AppEntry] = []         # the Start menu
         self.opened: list[tuple[str, str]] = []    # (open method, target) of every open asked for
         self.open_errors: dict[str, BaseException] = {}   # an open method -> what it raises
+        self.associations: dict[str, dbk.AppInfo] = dict(ASSOCIATIONS)    # a type or "https" -> its app
+        self.links: dict[str, str] = {}            # normcased pretend shortcut path -> the pretend path it names
         self.on_call: Callable[[str, str], None] | None = None   # called before each method (a test's hook)
         for path in self.known.values():
             self.make_dir(path)
@@ -247,6 +259,9 @@ class FakeDesktopBackend:
     def open_document(self, path: str) -> None:
         self._open("open_document", path)
 
+    def open_script_document(self, path: str) -> None:
+        self._open("open_script_document", path)
+
     def show_in_folder(self, path: str) -> None:
         self._open("show_in_folder", path)
 
@@ -258,6 +273,17 @@ class FakeDesktopBackend:
 
     def open_url(self, url: str) -> None:
         self._open("open_url", url)
+
+    def app_for(self, kind: str) -> dbk.AppInfo | None:
+        self._record("app_for", kind)
+        return self.associations.get(kind) if dbk.app_kind(kind) else None
+
+    def link_target(self, path: str) -> str:
+        self._record("link_target", path)
+        target = self.links.get(ntpath.normcase(self._unalias(path)))
+        if target is None or not os.path.lexists(self.real(path)):
+            raise OSError(2, "no such shortcut")
+        return target
 
 
 class FakeClock:
@@ -395,38 +421,173 @@ def desktop_context(*, files: Any = None, apps: Any = None, sites: Any = None, p
                           default_sites if sites is None else tuple(sites), looked_in=4, found=8)
 
 
-class FakeWinWatch:
-    """A window watcher stand-in (until P1.9 builds desktop/winwatch.py): windows are (hwnd, pid, exe, rect) the test
-    sets in ``windows``; ``follow(hwnd, callback)`` registers a callback the test fires with ``emit(hwnd, event)``.
-    Nothing reaches a real window."""
+DISPLAY1 = "\\\\.\\DISPLAY1"
+DISPLAY2 = "\\\\.\\DISPLAY2"
 
-    def __init__(self) -> None:
-        self.windows: dict[int, dict[str, Any]] = {}
-        self.followed: dict[int, Callable[[str], None]] = {}
+
+@dataclass
+class FakeWindow:
+    """A pretend top-level window (nothing real): its process, thread, exe, frame (physical px) and state."""
+
+    hwnd: int
+    pid: int
+    tid: int
+    exe: str
+    rect: Any                              # winwatch.Rect
+    visible: bool = True
+    minimised: bool = False
+    owned: bool = False
+    tool: bool = False
+    cloaked: bool = False
+
+
+class FakeWinApi:
+    """desktop.winwatch's OS seam over pretend windows (nothing real is reached): ``add(...)`` puts a window at the top
+    of the z-order (``front=True`` also makes it the foreground window), ``remove`` / ``move`` / ``set`` change it,
+    ``monitors_now`` is what monitors() answers (one 1920 x 1200 DISPLAY1 by default). ``hook`` records each hook
+    (``hooks``: handle -> (low, high, pid, tid, callback)) and ``fire(event, hwnd, object_id=0, child_id=0)`` delivers
+    a WinEvent the way Windows would: to every hook whose range holds it and whose process and thread are the
+    window's. ``calls`` records every call (name, argument); ``broken`` names methods that raise OSError."""
+
+    def __init__(self, *, own_pid: int = 4000, monitors: list[Any] | None = None) -> None:
+        from briefing_reader.desktop.winwatch import Monitor, Rect
+
+        self.own = own_pid
+        self.wins: dict[int, FakeWindow] = {}
+        self.order: list[int] = []             # z-order, the top first
+        self.front = 0
+        self.monitors_now = list(monitors) if monitors is not None else [
+            Monitor(DISPLAY1, Rect(0, 0, 1920, 1200))]
+        self.hooks: dict[int, tuple[int, int, int, int, Callable[..., None]]] = {}
+        self.unhooked: list[int] = []
         self.calls: list[tuple[str, Any]] = []
+        self.broken: set[str] = set()
+        self.exe_unreadable: set[int] = set()  # pids whose exe can't be read
+        self.hookable = True
+        self._next_hook = 900
 
-    def add(self, hwnd: int, pid: int, exe: str, rect: tuple[int, int, int, int]) -> None:
-        self.windows[hwnd] = {"pid": pid, "exe": exe, "rect": rect}
+    # ---- the test's side -------------------------------------------------------------------------
 
-    def find(self, *, pid: int | None = None, exe: str | None = None) -> list[int]:
-        self.calls.append(("find", (pid, exe)))
-        return [hwnd for hwnd, info in self.windows.items()
-                if (pid is None or info["pid"] == pid) and (exe is None or info["exe"].casefold() == exe.casefold())]
+    def add(self, hwnd: int, *, pid: int, exe: str = "", rect: tuple[int, int, int, int] = (100, 100, 800, 600),
+            tid: int | None = None, front: bool = False, **state: Any) -> FakeWindow:
+        from briefing_reader.desktop.winwatch import Rect
 
-    def rect(self, hwnd: int) -> tuple[int, int, int, int] | None:
-        self.calls.append(("rect", hwnd))
-        info = self.windows.get(hwnd)
-        return info["rect"] if info else None
+        window = FakeWindow(hwnd, pid, tid if tid is not None else pid * 10 + 1, exe, Rect(*rect), **state)
+        self.wins[hwnd] = window
+        if hwnd in self.order:
+            self.order.remove(hwnd)
+        self.order.insert(0, hwnd)
+        if front:
+            self.front = hwnd
+        return window
 
-    def follow(self, hwnd: int, callback: Callable[[str], None]) -> None:
-        self.calls.append(("follow", hwnd))
-        self.followed[hwnd] = callback
+    def remove(self, hwnd: int) -> None:
+        self.wins.pop(hwnd, None)
+        if hwnd in self.order:
+            self.order.remove(hwnd)
+        if self.front == hwnd:
+            self.front = 0
 
-    def unfollow(self, hwnd: int) -> None:
-        self.calls.append(("unfollow", hwnd))
-        self.followed.pop(hwnd, None)
+    def move(self, hwnd: int, rect: tuple[int, int, int, int]) -> None:
+        from briefing_reader.desktop.winwatch import Rect
 
-    def emit(self, hwnd: int, event: str) -> None:
-        callback = self.followed.get(hwnd)
-        if callback is not None:
-            callback(event)
+        self.wins[hwnd].rect = Rect(*rect)
+
+    def set(self, hwnd: int, **state: Any) -> None:
+        for key, value in state.items():
+            setattr(self.wins[hwnd], key, value)
+
+    def fire(self, event: int, hwnd: int, object_id: int = 0, child_id: int = 0) -> int:
+        """Deliver a WinEvent of ``hwnd`` (its process and thread) to the hooks that would get it; how many got it."""
+        window = self.wins.get(hwnd)
+        pid, tid = (window.pid, window.tid) if window is not None else (0, 0)
+        delivered = 0
+        for low, high, hook_pid, hook_tid, callback in list(self.hooks.values()):
+            if low <= event <= high and hook_pid in (0, pid) and hook_tid in (0, tid):
+                callback(event, hwnd, object_id, child_id)
+                delivered += 1
+        return delivered
+
+    def live_hooks(self) -> int:
+        return len(self.hooks)
+
+    def _call(self, name: str, argument: Any = None) -> None:
+        self.calls.append((name, argument))
+        if name in self.broken:
+            raise OSError(5, "refused")
+
+    # ---- winwatch.WinApi ---------------------------------------------------------------------------
+
+    def windows(self) -> list[int]:
+        self._call("windows")
+        return list(self.order)
+
+    def window_process(self, hwnd: int) -> tuple[int, int]:
+        self._call("window_process", hwnd)
+        window = self.wins.get(hwnd)
+        return (window.pid, window.tid) if window is not None else (0, 0)
+
+    def process_exe(self, pid: int) -> str:
+        self._call("process_exe", pid)
+        if pid in self.exe_unreadable:
+            return ""
+        return next((window.exe for window in self.wins.values() if window.pid == pid), "")
+
+    def visible(self, hwnd: int) -> bool:
+        self._call("visible", hwnd)
+        window = self.wins.get(hwnd)
+        return window is not None and window.visible
+
+    def minimised(self, hwnd: int) -> bool:
+        self._call("minimised", hwnd)
+        window = self.wins.get(hwnd)
+        return window is not None and window.minimised
+
+    def owned(self, hwnd: int) -> bool:
+        self._call("owned", hwnd)
+        window = self.wins.get(hwnd)
+        return window is not None and window.owned
+
+    def tool_window(self, hwnd: int) -> bool:
+        self._call("tool_window", hwnd)
+        window = self.wins.get(hwnd)
+        return window is not None and window.tool
+
+    def cloaked(self, hwnd: int) -> bool:
+        self._call("cloaked", hwnd)
+        window = self.wins.get(hwnd)
+        return window is None or window.cloaked
+
+    def frame_bounds(self, hwnd: int) -> Any:
+        self._call("frame_bounds", hwnd)
+        window = self.wins.get(hwnd)
+        return window.rect if window is not None else None
+
+    def is_window(self, hwnd: int) -> bool:
+        self._call("is_window", hwnd)
+        return hwnd in self.wins
+
+    def foreground(self) -> int:
+        self._call("foreground")
+        return self.front
+
+    def monitors(self) -> list[Any]:
+        self._call("monitors")
+        return list(self.monitors_now)
+
+    def hook(self, low: int, high: int, pid: int, tid: int, callback: Callable[..., None]) -> int:
+        self._call("hook", (low, high, pid, tid))
+        if not self.hookable:
+            return 0
+        self._next_hook += 1
+        self.hooks[self._next_hook] = (low, high, pid, tid, callback)
+        return self._next_hook
+
+    def unhook(self, handle: int) -> bool:
+        self._call("unhook", handle)
+        self.unhooked.append(handle)
+        return self.hooks.pop(handle, None) is not None
+
+    def own_pid(self) -> int:
+        self._call("own_pid")
+        return self.own

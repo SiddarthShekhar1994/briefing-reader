@@ -3742,6 +3742,9 @@ MEMORY_NOT_KEPT_TEXT = "Not kept."
 MEMORY_PUSHED_TEXT = "No longer pending - add it in MEMORY."
 MEMORY_NO_MATCH_TEXT = "I have no note about that, {sir}."
 MEMORY_DUPLICATE_HUD = "I already have that, {sir}."    # the desktop HUD's words for a duplicate (never the note)
+# A desktop request typed before the owner's Turn on (the first-run card shows; the words stay in the bar), and after it.
+DESKTOP_OFF_TEXT = "Jarvis on your desktop isn't turned on yet - nothing was done"
+DESKTOP_TURNED_ON_TEXT = "Jarvis on your desktop is on. Press Enter to ask again, {sir}."
 MEMORY_SEVERAL_TEXT = "Which note, {sir}? I've opened MEMORY with the matches."
 # Who gets the notes.
 MEMORY_GIVEN_TO = "every Ask, plan, brief and draft"
@@ -4894,7 +4897,12 @@ class AppController(QObject):
     would, its cards go to Approvals and the HUD's caption says only Jarvis's own words. A desktop request typed
     there (or in the window's bar, which goes onto the HUD first) goes to the desktop thread (desktop_ui: its local
     route opens on this PC, anything else is ONE desktop planner run whose checked plan is carried out through the
-    desktop thread; ``desktop_backend()`` makes that thread's backend - the real one by default).
+    desktop thread; ``desktop_backend()`` makes that thread's backend - the real one by default); what came of it
+    floats beside the window it opened as result cards (desktop_results; ``desktop_window_api``: the window seam
+    their winwatch uses - None: winwatch's default). Before the owner's Turn on (THE CONSENT GATE, stored in
+    assistant.json), the Dock's and the Find list's Desktop, the HUD key, a --hud start and a typed desktop request
+    show the first-run "Jarvis on your desktop" card in the window instead (desktop_view.ConsentCard); Settings >
+    Desktop shows "Your OK" and has Turn off.
     """
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
@@ -4916,7 +4924,8 @@ class AppController(QObject):
                  snapshot_factory: Callable[[Any], Any] | None = None,
                  desktop_factory: Callable[[Any], Any] | None = None,
                  desktop_launch: bool = False,
-                 desktop_backend: Callable[[], Any] | None = None) -> None:
+                 desktop_backend: Callable[[], Any] | None = None,
+                 desktop_window_api: Any = None) -> None:
         super().__init__()
         self.config = config
         self.client = client
@@ -4925,6 +4934,11 @@ class AppController(QObject):
         # The desktop's backend (made on the desktop thread at the first desktop request; None: the real one, which
         # refuses to be made while the tests run - they pass a fake).
         self._desktop_backend = desktop_backend
+        # The window seam the result cards' winwatch uses (None: desktop.winwatch's default - nothing while the tests
+        # run; tests and the harness pass a fake over pretend windows).
+        self._desktop_window_api = desktop_window_api
+        self._desktop_consent_card: Any = None        # the first-run "Jarvis on your desktop" card (made at first use)
+        self._desktop_settings: Any = None            # Settings > Desktop's own part (Turn off)
         self._snapshot_factory = snapshot_factory   # tests: a fake page snapshotter (no web engine)
         self.expected_run = _normalize_run(expected_run)
         self.now_mode = bool(now_mode)
@@ -5477,6 +5491,7 @@ class AppController(QObject):
                 self._start_fetch(self.expected_run)
             if not (self._desktop_launch and self._start_on_hud()):
                 self.open_assistant(ask_requested=self.ask_mode)
+                self._start_consent()
             self._begin_greeting(wait=True)
             return
         if self._classic():
@@ -8885,11 +8900,14 @@ class AppController(QObject):
 
     def _init_desktop(self, factory: Callable[[Any], Any] | None = None) -> None:
         """[desktop] on: the Dock's Desktop with the HUD key's "<key> switches" line (none while [hotkey] is off: no
-        key can be registered then), the Find list's Desktop, Settings > Desktop (read only; "Not turned on yet"
-        until the first-run card exists) and the HUD (``desktop``: desktop_ui.DesktopController; the Dock's Desktop
-        and the Find list's go onto it). Off: ``desktop`` is None - no Desktop surface, no HUD window, no hook.
-        With the HUD, the application's aboutToQuit is heard (``_on_about_to_quit``: Windows ending the session
-        while on the HUD)."""
+        key can be registered then), the Find list's Desktop, Settings > Desktop (its values read only, "Your OK" -
+        Turned on or Not turned on yet - and Turn off once it is on: desktop_view.DesktopSettingsPanel) and the HUD
+        (``desktop``: desktop_ui.DesktopController; the Dock's Desktop and the Find list's go onto it - before the
+        owner's Turn on, the first-run "Jarvis on your desktop" card shows instead: ``_show_desktop_consent``). Off:
+        ``desktop`` is None - no Desktop surface, no HUD window, no hook, no card. With the HUD, the application's
+        aboutToQuit is heard (``_on_about_to_quit``: Windows ending the session while on the HUD)."""
+        from .desktop_view import DesktopSettingsPanel
+
         self.desktop: Any = None
         desktop = getattr(self.config, "desktop", None)
         if not getattr(desktop, "enabled", False):
@@ -8897,10 +8915,15 @@ class AppController(QObject):
         reading = self.window.reading
         hud_key = settings_view.effective_hud_key(self.config)
         reading.set_desktop_available(True, describe_combo(hud_key) if hud_key else "")
+        self._desktop_settings = DesktopSettingsPanel()
+        self._desktop_settings.turnOffClicked.connect(self._on_desktop_turn_off)
         reading.settings_page.add_group(settings_view.DESKTOP_GROUP, settings_view.DESKTOP_TITLE,
                                         note=settings_view.DESKTOP_NOTE, how=settings_view.DESKTOP_HOW,
-                                        rows=lambda: settings_view.desktop_rows(self.config))
+                                        rows=lambda: settings_view.desktop_rows(
+                                            self.config, turned_on=self._desktop_turned_on()),
+                                        extra=self._desktop_settings)
         self.desktop = self._create_desktop(factory)
+        self._sync_desktop_settings()
         app = QCoreApplication.instance()
         if self.desktop is not None and app is not None:
             app.aboutToQuit.connect(self._on_about_to_quit)
@@ -8921,10 +8944,13 @@ class AppController(QObject):
                           hud_overlay.CHIP_REC: SCREEN_MEETINGS},
             home_screen=SCREEN_HOME, may_enter=self._may_enter_hud, bring_forward=bring_forward_on_click,
             address=self.config.assistant.address, live=self.live,
-            backend_factory=getattr(self, "_desktop_backend", None), parent=self)
+            backend_factory=getattr(self, "_desktop_backend", None), consent_store=self._prefs_store,
+            window_api=getattr(self, "_desktop_window_api", None), parent=self)
         controller.hudChanged.connect(self._on_hud_changed)
         controller.answered.connect(self._on_desktop_answered)
         controller.plannerNeeded.connect(self._on_desktop_planner)
+        controller.consentNeeded.connect(self._show_desktop_consent)
+        controller.consentChanged.connect(lambda _on: self._sync_desktop_settings())
         meetings = getattr(self, "meetings", None)
         if meetings is not None:
             meetings.pillCreated.connect(controller.set_rec_pill)
@@ -8943,6 +8969,97 @@ class AppController(QObject):
         desktop = getattr(self, "desktop", None)
         return desktop is not None and desktop.is_hud()
 
+    # ---- the first-run "Jarvis on your desktop" card (hard rule 15; SPEC 10.3) ---------------------------------
+
+    def _desktop_turned_on(self) -> bool:
+        """The owner's OK is stored (THE CONSENT GATE: desktop_ui.DesktopController.consent_given; fail-closed)."""
+        desktop = getattr(self, "desktop", None)
+        return desktop is not None and desktop.consent_given()
+
+    def _show_desktop_consent(self, entry: str) -> None:
+        """Before the owner's Turn on, the Dock's Desktop (and the Find list's), the HUD key, a --hud start and a typed
+        desktop request show the first-run card in the window instead (desktop_view.ConsentCard, over the screen
+        shown). It never brings the window forward by itself: the Dock and the Find list are clicked in it, the HUD
+        key and a --hud start bring it forward as the window key does (the owner's own key) before this, and a request
+        is typed in it. Nothing is stored until his Turn on."""
+        desktop = getattr(self, "desktop", None)
+        window = self.window
+        if desktop is None or self._shut_down or not window.isVisible() or not window.is_reading_view():
+            logger.info("Desktop: the first-run card waits (the window is not up)")
+            return
+        reading = window.reading
+        card = self._desktop_consent_card
+        if card is None:
+            from .desktop_view import ConsentCard
+
+            card = ConsentCard(reading)
+            card.turnOnClicked.connect(self._on_consent_turn_on)
+            card.notNowClicked.connect(self._on_consent_not_now)
+            window.visibilityChanged.connect(self._on_window_visibility_for_desktop)
+            self._desktop_consent_card = card
+        reading.find_overlay.close_list(restore_focus=False)
+        card.open_card(entry)
+        logger.info("Desktop: the first-run card shows (%s)", entry)
+
+    def _on_consent_turn_on(self, entry: str) -> None:
+        """The owner's Turn on: stored first (it counts only once saved - else the card says so and nothing is on),
+        then on to what he asked for: the switch to the HUD (the Dock's Desktop, the HUD key, a --hud start - never
+        the bar's keyboard: the HUD key or a click in the bar gives it that), or for a typed request its words wait in
+        the bar for his Enter (nothing is carried out on this click)."""
+        from .desktop_ui import ENTRY_KEY, ENTRY_REQUEST, ENTRY_START
+        from .desktop_view import NOT_SAVED_TEXT
+
+        desktop = getattr(self, "desktop", None)
+        card = self._desktop_consent_card
+        if desktop is None or card is None:
+            return
+        if not desktop.turn_on():
+            card.set_problem(NOT_SAVED_TEXT)
+            return
+        card.close_card()
+        self._sync_desktop_settings()
+        if entry == ENTRY_REQUEST:
+            if self.ask is not None:
+                self.ask.show_note(with_address(DESKTOP_TURNED_ON_TEXT, self.config.assistant.address),
+                                   hud.TONE_DONE)
+            return
+        if entry in (ENTRY_KEY, ENTRY_START):
+            self._reading_for_hud()
+        if not desktop.enter_hud():
+            logger.info("Desktop: turned on, but the HUD could not open now")
+
+    def _on_consent_not_now(self, entry: str) -> None:
+        """Not now: nothing is stored or started (the next Desktop shows the card again)."""
+        logger.info("Desktop: the first-run card was put away (Not now, %s); nothing is on", entry)
+
+    def _on_window_visibility_for_desktop(self) -> None:
+        """The window was hidden or minimised while the first-run card showed: it goes, as Not now."""
+        card = self._desktop_consent_card
+        window = self.window
+        if card is not None and card.is_open() and (not window.isVisible() or window.isMinimized()):
+            card.close_card(restore_focus=False)
+            self._on_consent_not_now(card.entry())
+
+    def _on_desktop_turn_off(self) -> None:
+        """Settings > Desktop's Turn off: the owner's OK goes (for this run even when it couldn't be saved - then the
+        panel says it will be on again after a restart)."""
+        from .desktop_view import TURN_OFF_NOT_SAVED_TEXT
+
+        desktop = getattr(self, "desktop", None)
+        if desktop is None:
+            return
+        saved = desktop.turn_off()
+        self._sync_desktop_settings("" if saved else TURN_OFF_NOT_SAVED_TEXT)
+
+    def _sync_desktop_settings(self, problem: str = "") -> None:
+        """Settings > Desktop as the owner's OK is now: "Your OK" and its panel (Turn off while it is on)."""
+        panel = self._desktop_settings
+        if panel is not None and shiboken6.isValid(panel):
+            panel.set_state(self._desktop_turned_on(), problem)
+        settings = self.window.reading.settings_page
+        if settings.current_group() == settings_view.DESKTOP_GROUP:
+            settings.refresh()
+
     def _desktop_activation(self) -> None:
         """The HUD key ([desktop] hud_key: the hotkey agent's "desktop" message, or --hud into a running app), by SPEC
         9's second table:
@@ -8952,8 +9069,8 @@ class AppController(QObject):
         * the HUD, the bar with the keyboard: back to the window, on the screen it would have had, else Home;
         * the HUD, the bar without it: the bar takes the keyboard (on the way in: as the HUD shows; on the way back:
           nothing);
-        * not turned on yet (THE CONSENT GATE's no): the window comes forward as for the window key - P1.9 PLUGS IN
-          HERE: on its first-run "Jarvis on your desktop" card;
+        * not turned on yet (THE CONSENT GATE's no): the window comes forward as for the window key, on its first-run
+          "Jarvis on your desktop" card (``_show_desktop_consent``);
         * the window, in any state (in front, behind, minimised, hidden, the classic prompt, a hidden wait for a run):
           the assistant screen comes up - not shown - then the HUD, and the bar takes the keyboard (as soon as it
           shows). If the HUD cannot open (a dialog waits for an answer), the window comes forward instead.
@@ -8980,8 +9097,11 @@ class AppController(QObject):
                 logger.info("The HUD key on the way back to the window: nothing more")
             return
         if not desktop.consent_given():
+            from .desktop_ui import ENTRY_KEY
+
             logger.info("The HUD key: Jarvis on your desktop is not turned on yet; the window comes forward")
             self._open_activation(ask=False)
+            self._show_desktop_consent(ENTRY_KEY)
             return
         self._reading_for_hud()
         if desktop.enter_hud():
@@ -9004,8 +9124,8 @@ class AppController(QObject):
     def _start_on_hud(self) -> bool:
         """--hud: the HUD key started Jarvis (SPEC 9's "App not running" row). Once the assistant screen is up - the
         window never shown - Jarvis goes onto the HUD while [desktop] is on and turned on. False: the window opens as
-        for --open - [desktop] off, not turned on yet (P1.9 PLUGS IN HERE: the window opens on the first-run "Jarvis
-        on your desktop" card), a setup error to show (the window says what is missing) or the HUD could not open."""
+        for --open - [desktop] off, not turned on yet (then on the first-run "Jarvis on your desktop" card:
+        ``_start_consent``), a setup error to show (the window says what is missing) or the HUD could not open."""
         desktop = self.desktop
         if desktop is None or not desktop.consent_given() or self.startup_error:
             logger.info("Started by the HUD key, but %s: the window opens",
@@ -9018,6 +9138,15 @@ class AppController(QObject):
             return True
         logger.info("Started by the HUD key, but the HUD could not open: the window opens")
         return False
+
+    def _start_consent(self) -> None:
+        """--hud before the owner's Turn on: the window opened as for --open, on the first-run card (none while a
+        setup error is what the window must say first)."""
+        desktop = self.desktop
+        if self._desktop_launch and desktop is not None and not self.startup_error and not desktop.consent_given():
+            from .desktop_ui import ENTRY_START
+
+            self._show_desktop_consent(ENTRY_START)
 
     def _on_hud_submit_without_ask(self, text: str) -> None:
         """Enter in the HUD's bar while Ask is off ([ask] enabled = false): a desktop request still goes to the
@@ -9048,9 +9177,11 @@ class AppController(QObject):
         HUD first (``enter_hud``: the window hidden, never closed) and the request continues there: it leaves the
         window's bar at once (R23: take_request - Up there brings it back) and goes on in the HUD's bar, now Ask's, as
         if typed there - so it leaves that bar too as it is handled (Up brings it back there) and comes back to it
-        when refused before any run (give_back); a draft the HUD's bar already holds is never replaced. When the HUD
-        can't open now (a dialog waits, a switch on its way, not turned on yet) or the last desktop request is still
-        being looked up, nothing runs, the bar says so and the words stay where they were typed. On the HUD the
+        when refused before any run (give_back); a draft the HUD's bar already holds is never replaced. Before the
+        owner's Turn on, the first-run card shows instead, the bar says Jarvis on your desktop isn't turned on yet and
+        the words stay (Enter again once it is on). When the HUD can't open now (a dialog waits, a switch on its way)
+        or the last desktop request is still being looked up, nothing runs, the bar says so and the words stay where
+        they were typed. On the HUD the
         request goes to the desktop thread (desktop_ui.request; the caption says "Looking on this PC..."): a local
         route is carried out there and answered (``_on_desktop_answered``: taken from the bar), anything else comes
         back as the planner's job for ONE desktop planner run (``_on_desktop_planner``), which takes the words from
@@ -9067,6 +9198,12 @@ class AppController(QObject):
             return None
         if not self._hud_active():
             window_bar = self.window.reading.command_bar
+            if not desktop.consent_given():
+                from .desktop_ui import ENTRY_REQUEST
+
+                ask.show_note(DESKTOP_OFF_TEXT, hud.TONE_WARN)     # the words stay: Enter again after Turn on
+                self._show_desktop_consent(ENTRY_REQUEST)
+                return None
             if not desktop.enter_hud():
                 ask.show_note(DESKTOP_NOT_NOW_TEXT, hud.TONE_WARN)
                 return None

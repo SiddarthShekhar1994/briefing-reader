@@ -33,6 +33,7 @@ from briefing_reader.config import ActionsConfig, CalendarConfig, load_config
 from briefing_reader.gcal import RESPONSES, ChangeResult, EventBrief, EventChanged, EventDetails, EventGone,     EventResult, Guest
 from briefing_reader.gmail import SentMail
 from briefing_reader.notion_client import FixtureSession, NotionClient, fetch_briefing
+from briefing_reader.prefs import PREFS_FILE, AssistantPrefs
 from tests.ask_fakes import FakeRunner, plan_stream
 
 PDT = timezone(timedelta(hours=-7))
@@ -585,8 +586,12 @@ class AppHarness:
     windows (a test passes hud_overlay.create with a fake native seam; None: hud_overlay.create, whose
     seam makes no OS call while the tests run); ``desktop_backend()`` makes the desktop thread's backend
     (a test passes a tests.desktop_fakes fake; None: the real one, which refuses to be made while the tests
-    run - a desktop request then says Jarvis can't look on this PC). close() shuts the desktop controller
-    down (its thread ends).
+    run - a desktop request then says Jarvis can't look on this PC); ``desktop_window_api`` is the window
+    seam of the result cards' winwatch (tests.desktop_fakes.FakeWinApi; None: winwatch's default, which
+    does nothing while the tests run). ``desktop_consent``: the owner's Turn on on the first-run card is
+    in the prefs already, as an earlier run would have left it (the default while [desktop] is on: the
+    desktop tests test what comes after it; the consent tests pass False). close() shuts the desktop
+    controller down (its thread ends).
     ``launch`` (models.LAUNCH_*; None: derived as the app derives it) and ``desktop_launch`` (--hud)
     reach the controller for a test that calls its start()."""
 
@@ -596,7 +601,8 @@ class AppHarness:
                  max_per_hour: int = 20, config_extra: str = "", snapshot_factory: Any = None,
                  clock: HarnessClock | None = None, productivity: bool = False, prod_extra: str = "",
                  prod_inline: bool = True, desktop_factory: Any = None, launch: str | None = None,
-                 desktop_launch: bool = False, prepare: Any = None, desktop_backend: Any = None) -> None:
+                 desktop_launch: bool = False, prepare: Any = None, desktop_backend: Any = None,
+                 desktop_window_api: Any = None, desktop_consent: bool = True) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -623,6 +629,8 @@ class AppHarness:
         live_config = self.config.live
         self.snapshots = FakeSnapshotter(keep_text=live_config.text,
                                          max_per_run=max(0, min(4, self.config.research.max_fetches)))
+        if desktop_consent and getattr(self.config.desktop, "enabled", False):
+            AssistantPrefs(self.config.data_dir / PREFS_FILE).set_desktop_turned_on(True)
         if prepare is not None:
             prepare(self.config)
         with mock.patch.object(ui, "BriefingPlayer", FakePlayer), mock.patch.object(ui, "PROD_INLINE", prod_inline):
@@ -633,7 +641,7 @@ class AppHarness:
                                       run_state=run_state, voice_factory=lambda _controller: self.voice,
                                       snapshot_factory=snapshot_factory or (lambda _controller: self.snapshots),
                                       desktop_factory=desktop_factory, launch=launch, desktop_launch=desktop_launch,
-                                      desktop_backend=desktop_backend)
+                                      desktop_backend=desktop_backend, desktop_window_api=desktop_window_api)
         self.c._start_fetch = lambda *args, **kwargs: None   # never Notion: the page is handed over below
         test.addCleanup(self.close)
 

@@ -9,12 +9,16 @@ the first start after the update); ``"live_window": {"x", "y", "w", "h"}`` and
 when Jarvis quit (written once the pop-out has been used); ``"prod_hint_shown":
 true`` once the productivity bundle's one-time "minimize instead of Done" entry
 was shown (R34); ``"followups_off": true`` while the follow-up list is turned off on
-this PC (its section's "Turn off on this PC"). Ids, numbers and booleans only: never any
+this PC (its section's "Turn off on this PC"); ``"desktop_turned_on": true`` once the
+owner clicked Turn on on the first-run "Jarvis on your desktop" card (Settings >
+Desktop's Turn off takes it away again). Ids, numbers and booleans only: never any
 text (the LIVE view's steps are never saved).
 
 The file is written atomically (temporary file + ``os.replace``); a missing,
 corrupt or unwritable file counts as the defaults and never stops the app
-(a failed write is logged and kept in memory for this run).
+(a failed write is logged and kept in memory for this run) - except the desktop
+OK, which is fail-closed: it counts only once it is saved (a Turn on that could
+not be written is undone in memory too), and anything but a stored ``true`` is no.
 
 Qt-free; standard library only.
 """
@@ -43,7 +47,7 @@ class AssistantPrefs:
         self.path = Path(path)
         self._lock = threading.Lock()
         (self._muted, self._recent, self._adopted, self._live_window, self._live_popped,
-         self._prod_hint, self._followups_off) = _load(self.path)
+         self._prod_hint, self._followups_off, self._desktop_on) = _load(self.path)
 
     @property
     def muted(self) -> bool:
@@ -116,6 +120,24 @@ class AssistantPrefs:
             self._followups_off = bool(off)
             return self._save_locked()
 
+    @property
+    def desktop_turned_on(self) -> bool:
+        """The owner clicked Turn on on the first-run "Jarvis on your desktop" card and it was saved (until Settings >
+        Desktop's Turn off). Anything else - never clicked, a file that could not be read, a value that is not
+        ``true`` - is no."""
+        with self._lock:
+            return self._desktop_on is True
+
+    def set_desktop_turned_on(self, on: bool) -> bool:
+        """The owner's Turn on (True) or Turn off (False); True when it was saved. Fail-closed: a Turn on that could
+        not be saved is undone at once (it never counts unsaved); a Turn off counts for this run even unsaved."""
+        with self._lock:
+            self._desktop_on = bool(on)
+            saved = self._save_locked()
+            if not saved and self._desktop_on:
+                self._desktop_on = False                  # never on unsaved
+            return saved
+
     def remember_greeting(self, greeting_id: str) -> bool:
         """Add ``greeting_id`` as the most recent greeting (the oldest beyond 5 is forgotten)."""
         if not isinstance(greeting_id, str) or not _GREETING_ID_RE.fullmatch(greeting_id):
@@ -139,6 +161,8 @@ class AssistantPrefs:
             values["prod_hint_shown"] = True
         if self._followups_off:
             values["followups_off"] = True
+        if self._desktop_on is True:
+            values["desktop_turned_on"] = True
         return _write_atomic(self.path, json.dumps(values, indent=2) + "\n")
 
 
@@ -159,8 +183,8 @@ def _live_rect(value: object) -> tuple[int, int, int, int] | None:
 
 
 
-_Loaded = tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool, bool, bool]
-_DEFAULTS: _Loaded = (False, [], False, None, False, False, False)
+_Loaded = tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool, bool, bool, bool]
+_DEFAULTS: _Loaded = (False, [], False, None, False, False, False, False)
 
 
 def _load(path: Path) -> _Loaded:
@@ -186,7 +210,7 @@ def _load(path: Path) -> _Loaded:
     return (muted, recent[-RECENT_GREETINGS_MAX:], data.get("answers_adopted") is True,
             _live_rect(window) if isinstance(window := data.get("live_window"), dict) else None,
             data.get("live_popped_out") is True, data.get("prod_hint_shown") is True,
-            data.get("followups_off") is True)
+            data.get("followups_off") is True, data.get("desktop_turned_on") is True)
 
 
 def _write_atomic(path: Path, data: str) -> bool:

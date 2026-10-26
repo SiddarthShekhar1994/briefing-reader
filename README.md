@@ -2160,6 +2160,120 @@ only - never the transcript, the summary, a title (typed or the calendar's), a
 name or an address. LIVE may show the run's steps; the transcript stays in
 memory there.
 
+### Jarvis on your desktop (the HUD)
+
+Jarvis can work on your desktop: in this version he **opens** the files, apps,
+folders and web addresses you name and **finds** files for you. Tidying files,
+music, volume, timers and screenshots, and filling forms in apps you allow come
+in later versions.
+
+**Turning it on.** It is off in the public `config.toml` (`[desktop] enabled =
+false`). Turn it on for this PC with the line `JARVIS_DESKTOP_ENABLED=true` in
+`.env`, then restart Jarvis. Even then **nothing works until you say so**: the
+first time you click **Desktop** in the Dock (or press the HUD key, or type a
+desktop request), Jarvis shows a card instead, "Jarvis on your desktop" (DESKTOP
+· NEEDS YOUR OK). It says plainly what he will do in this version:
+
+- "I open files, apps, folders and sites you name."
+- "I only work in the folders and apps you allow."
+- "To plan, file, folder and app names go to your Claude plan. They're never
+  kept in logs."
+
+**Not now** turns nothing on (the card comes back next time); **Turn on** stores
+your OK on this PC (in `assistant.json`, as a yes/no only) and then does what you
+asked - for a request you typed, your words stay in the bar and Enter sends
+them. Your OK counts only once it is saved: if it can't be saved, the card says
+so and nothing is on. **Settings > Desktop** shows "Your OK: Turned on" and has
+**Turn off**, which takes it back at once (the card shows again next time).
+
+**The switch.** Three ways onto the desktop, each only from you:
+
+- click **Desktop** in the Dock (or Ctrl+8, or "Desktop" in the Find list);
+- press the **HUD key**, **Ctrl+Alt+H** (`[desktop] hud_key`). **Ctrl+Alt+J**
+  still opens or brings forward the window as before. On the HUD, Ctrl+Alt+H
+  lets you type in its bar; pressed again, it brings the window back;
+- type a desktop request in the window's command bar ("open my LING essay",
+  "open Downloads", "find my budget spreadsheet"): Jarvis goes onto the HUD and
+  carries on there. A request counts as a desktop one when it opens something,
+  or finds a file, folder, document, spreadsheet and the like; anything else
+  stays a normal Ask.
+
+The window folds into the orb, the orb flies to the top of your screen and a
+slim command bar opens with chips under it ("Briefing ready", "2 need your
+OK", REC while a meeting records). A chip, **Bring Jarvis back** (also in the
+tray menu) or the window key bring the window back on that screen. The window is
+only hidden meanwhile, never closed. The HUD never takes your typing by itself:
+only the HUD key or a click in its bar gives the bar the keyboard, and Enter or
+Esc hands it back. Your motion setting applies (calm is slower; off switches at
+once).
+
+**Opening things (your choice, D5).** What you name exactly opens straight away:
+an app from your Start menu, one of your folders, an https address you typed. A
+file's **best match opens at once** too, and a card appears beside the window it
+opened, joined to it by a thin cyan line, with a cyan outline round that window
+and the app's name as its tag ("WORD"):
+
+- "OPENED IN WORD · 10:21 AM", the file's name, where it is and when it was
+  edited, and "Opened LING essay draft.docx in Word. Nothing else changed.";
+- **Show in folder**;
+- the other matches as **Open this instead** rows. Each one is checked again
+  before it is offered (still where it was, unchanged, in your folders), and a
+  name that reads like instructions is never offered.
+
+The outline follows the window: it hides while you drag the window and comes
+back where you drop it, hides while the window is minimised, and goes when you
+close the window (the card stays) or when the card goes. Cards go when you ask
+for something else or go back to the window. File Explorer windows get no
+outline in this version.
+
+**One click, or your OK, first.** Some things wait on a card for your click,
+and nothing opens until then:
+
+- a file that **can run macros or scripts** (docm, xlsm, pptm, the old doc, xls
+  and ppt, local html, htm and svg) gets an amber NEEDS YOUR OK card: **Not
+  now** or **Open**;
+- a **shortcut** (.lnk) shows where it really leads first, and opens only when
+  that is a document in your folders (the document opens, never the shortcut);
+- an app you didn't name exactly, a web address you didn't type (its site is
+  shown) and a file whose name hides characters (spelled out on the card, such
+  as <U+202E>) get a cyan card with **Open**.
+
+Every click checks the item again first - the very file the card showed, not a
+new search - and a file that changed since says "The file changed since I looked
+- left as it is, sir." **Not now** takes the card away. Programs, installers and
+scripts that turn up in a search are never opened: only shown in their folder.
+
+**What your Claude Code sees (D6).** Simple requests ("open Downloads", "open
+Spotify", "open youtube.com", and a find whose every word is in a file's name,
+such as "find Budget 2026.xlsx") are handled on this PC without Claude at all;
+what a find finds shows as a card with **Open** on each file (**Show in folder**
+for a type Jarvis never opens). Anything else is
+one planner run of your own Claude
+Code (no API key, no paid API, counted like any Ask): it gets the **names** of
+files, folders and apps that might match, as ids, and plans with those - never
+paths, file contents, what you typed into other apps or screenshots. Names
+written by other people are marked as data, never instructions. Jarvis checks
+every step of the plan himself before anything opens.
+
+**Hidden from screen sharing (D7).** The HUD, its cards and outlines are left
+out of screenshots, recordings and screen sharing (`[desktop]
+hide_from_capture = true`; set it to `false` to show the HUD on a call).
+
+**Safe by design.** Jarvis looks only in the folders you allow (`[desktop]
+folders`: Desktop, Documents, Downloads, Pictures, Music and Videos by default);
+code folders - which covers the Jarvis project itself -, AppData, the Recycle
+Bin and files that look like keys or passwords are always left out. Only https
+web addresses on public sites open. Nothing on the desktop starts by itself,
+from an email, a file or an offer.
+
+**LIVE** shows each desktop request as a DESKTOP task: the route ("on this PC -
+no planner run", or the planner), "Looked in 2 places: 214 files", the plan
+checked step by step ("1 file name looked like instructions - treated as
+data"), each item carried out and its result, and for a card's click "Approved
+by your click 10:22 AM" with what it did. On the HUD LIVE never opens by itself.
+**Logs** carry run ids, kinds, counts, statuses and refusal codes only - never a
+file name, a path, a window title, an app's name or what you typed.
+
 ## TODAY and DEADLINES
 
 The **Day view** (click the header clock; Esc closes it) shows your day.
@@ -3476,8 +3590,10 @@ goes into `config.toml`); `JARVIS_ASK_ENABLED`, `JARVIS_RESEARCH_ENABLED` and
 `JARVIS_PRODUCTIVITY_ENABLED` (`true` or `false`) turn Ask, [web
 research](#web-research) and the productivity bundle ([Memory](#memory-the-memory-tab))
 on or off for this PC, whatever `[ask] enabled`, `[research] enabled` and
-`[productivity] enabled` say. Variables already set in the environment win over
-`.env`.
+`[productivity] enabled` say; `JARVIS_DESKTOP_ENABLED` does the same for
+[Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) (`[desktop] enabled`),
+which then still waits for your **Turn on** on its first-run card. Variables
+already set in the environment win over `.env`.
 
 **`google_client_secret.json`** (next to this README, optional): the Google OAuth
 client for calendar actions (setup step 8).
@@ -3584,6 +3700,12 @@ log. Changes apply the next time the app starts.
 | `[productivity] scan_days`, `scan_every_minutes`, `scan_max_threads` | `14`, `30`, `150` | How far back (3-14 days), how often while visible (15-240 minutes) and how many threads per account (20-300) the header scan reads. |
 | `[productivity] waiting_after_hours`, `owed_after_days` | `20`, `3` | When a thread is listed as waiting on you (1-72 hours) or owed to you (1-13 days). |
 | `[productivity] followups_shown` | `6` | Rows per kind before "+N more" (1-20). |
+| `[desktop] enabled` | `false` | [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud): the Dock's Desktop, the HUD key and desktop requests. Turn it on for this PC with `JARVIS_DESKTOP_ENABLED=true` in `.env` (it overrides this key both ways); nothing works until you click **Turn on** on its first-run card. |
+| `[desktop] folders` | all six | The folders Jarvis may look in: any of `"desktop"`, `"documents"`, `"downloads"`, `"pictures"`, `"music"`, `"videos"`. |
+| `[desktop] extra_folders` | `[]` | More folders, each a full path under your user folder (the same checks apply). |
+| `[desktop] hide_from_capture` | `true` | Leave the HUD, its cards and outlines out of screenshots and screen sharing. |
+| `[desktop] hud_key` | `"ctrl+alt+h"` | The HUD key (switches between the window and the HUD; never the `[hotkey] combo`). |
+| `[desktop] screenshots_dir`, `undo_days`, `apps` | `""`, `7`, `false` | For later versions (screenshots, Undo for file changes, work inside apps); nothing uses them yet. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than

@@ -20,6 +20,15 @@ fed back to Claude). An open_file that opens keeps the request's other matches (
 "Open this instead" rows, P1.9). The rate caps hold again per request (MAX_OPENS opens, MAX_URLS web pages: SPEC
 2.1), and a cancel stops before the next step: one OS call in flight completes, no new one starts.
 
+A click on a result card's button (P1.9, ``run_click``) goes the same way with the card's OWN item - the resolved
+target and the identity it was shown with, never an id resolved again against a newer index (verified review note)
+- re-checked as before any OS call; the click stands for at most ``granted`` (ONE_CLICK: a cyan card's Open, an "Open
+this instead" row, Show in folder; CARD: an amber NEEDS YOUR OK card's Open). A step whose tier, from the item as it
+is now, is above that is held again (WAITING) and nothing opens. A document that can run macros or scripts opens
+only on a CARD click (backend.open_script_document); a shortcut never opens itself: its card's Open opens the
+document it names (``via``: the shortcut is re-checked and its target read again first - it must still name that
+document, unchanged).
+
 A target that changed since it was listed is left as it is (``CHANGED``: SPEC 5.3's "Changed since - left as it
 is"); an OS call that fails is FAILED with its winerror. ``run_words`` is Jarvis's own sentence for a run (the HUD's
 caption): kinds and counts - a known folder's own label at most - never a name, a path, a title or an address.
@@ -30,9 +39,10 @@ Public API
 ==========
 Statuses ``DONE``, ``WAITING``, ``FOUND``, ``REFUSED``, ``FAILED``, ``CANCELLED``; codes ``CHANGED``, ``OS_FAILED``,
 ``GUARD``, ``STOPPED`` (and desktop.validate's NEVER codes); ``StepResult``; ``DesktopRun`` (``done()``,
-``waiting()``, ``found()``, ``not_done()``, ``counts()``, ``statuses_text()``); ``FindQuery``; ``Executor(backend,
-scope=, apps=, find=, clock=)`` (``run_plan(plan, words=, others_from=, cancel=)``, ``run_route(route, words=,
-run_id=)``); ``run_words(run, plan=None, address=)``; ``run_soft(run, plan=None)``; ``describe(result)``;
+``waiting()``, ``found()``, ``not_done()``, ``counts()``, ``statuses_text()``; ``shown``: what the result cards show
+of it - desktop.results, P1.9); ``FindQuery``; ``Executor(backend, scope=, apps=, find=, clock=)`` (``run_plan(plan,
+words=, others_from=, cancel=)``, ``run_route(route, words=, run_id=)``, ``run_click(skill, target, granted=, ...)``,
+``recheck(item)``); ``run_words(run, plan=None, address=)``; ``run_soft(run, plan=None)``; ``describe(result)``;
 ``status_words(result)``; ``WAITING_NOUNS``; ``MAX_OTHERS``.
 """
 
@@ -100,11 +110,13 @@ class StepResult:
 
 @dataclass(frozen=True)
 class DesktopRun:
-    """What a request's steps came to (memory only): every result in order and how long it took."""
+    """What a request's steps came to (memory only): every result in order and how long it took; ``shown``: what
+    its result cards show (desktop.results.present, made on the desktop thread right after the run)."""
 
     run_id: str = ""
     results: tuple[StepResult, ...] = ()
     seconds: float = 0.0
+    shown: tuple[Any, ...] = field(default=(), repr=False)
 
     def of(self, *statuses: str) -> tuple[StepResult, ...]:
         return tuple(result for result in self.results if result.status in statuses)
@@ -232,6 +244,55 @@ class Executor:
         self._log(run)
         return run
 
+    # ---- a click on a result card (P1.9) ---------------------------------------------------------------
+
+    def run_click(self, skill: str, target: Any, *, granted: str, run_id: str = "", flags: frozenset[str] = frozenset(),
+                  via: FileItem | None = None, words: str = "", others_from: Sequence[FileItem] = (),
+                  cancel: Any = None) -> DesktopRun:
+        """The owner's click on a card's button, as the module docstring says: ``target`` the card's own item (with
+        its identity), ``granted`` what the click stands for at most (ONE_CLICK or CARD; never more), ``flags`` why
+        the card asked (kept on the result), ``via`` the shortcut whose target ``target`` is, ``words`` and
+        ``others_from`` the candidates of D5's other matches when a file opens."""
+        started = self._clock()
+        self._cancel = cancel
+        granted = granted if granted in (dv.ONE_CLICK, dv.CARD) else dv.ONE_CLICK
+        flags = frozenset(flags)
+        code = self._check_link(via, target) if via is not None else ""
+        if cancel is not None and cancel.is_set():
+            result = StepResult(0, skill, dv.INSTANT, CANCELLED, STOPPED, flags, target)
+        elif code:
+            logger.info("Desktop guard: refused %s %s", skill, code)
+            result = StepResult(0, skill, dv.CARD, REFUSED, code, flags, via)
+        else:
+            result = self._open(0, skill, dv.INSTANT, flags, target, "", _Caps(), granted=granted)
+            if skill == dv.OPEN_FILE and result.status == DONE and isinstance(target, FileItem):
+                result = _with_others(result, _others(target, words, others_from))
+        run = DesktopRun(run_id, (result,), round(self._clock() - started, 3))
+        self._log(run)
+        return run
+
+    def recheck(self, item: Any) -> bool:
+        """A listed file or folder (with the identity it was listed with) is still where it was, unchanged, inside the
+        scope as it is now and never secret-shaped - the check before any OS call on it; True when it passes."""
+        if isinstance(item, Place):
+            return not self._check_item(item, folder=True)[0]
+        if isinstance(item, FileItem):
+            return not self._check_item(item, folder=False)[0]
+        return False
+
+    def _check_link(self, via: Any, target: Any) -> str:
+        """A shortcut's card: the shortcut is still the one shown (re-checked) and still names ``target``'s path."""
+        code, _verdict = self._check_item(via, folder=False)
+        if code:
+            return code
+        if guard.open_kind(via.name) != guard.OPEN_SHORTCUT or not isinstance(target, FileItem):
+            return dv.BLOCKED_TYPE
+        try:
+            named = self.backend.link_target(via.path)
+        except (OSError, ValueError):
+            return CHANGED
+        return "" if _key(named) == _key(target.path) else CHANGED
+
     # ---- one step -----------------------------------------------------------------------------------
 
     def _found(self, number: int, tier: str, query: FindQuery) -> StepResult:
@@ -245,9 +306,9 @@ class Executor:
         return StepResult(number, dv.FIND_FILES, tier, FOUND, found=found)
 
     def _open(self, number: int, skill: str, tier: str, flags: frozenset[str], target: Any, folder: str,
-              caps: _Caps) -> StepResult:
-        """Re-check ``target`` for ``skill`` (the module docstring), then - INSTANT - its one OS call, or - ONE_CLICK,
-        CARD - hold it."""
+              caps: _Caps, *, granted: str = dv.INSTANT) -> StepResult:
+        """Re-check ``target`` for ``skill`` (the module docstring), then - its tier no higher than ``granted`` (a
+        step: INSTANT; a card's click: what the click stands for) - its one OS call, or else hold it (WAITING)."""
         def refused(code: str, shown: Any = target) -> StepResult:
             logger.info("Desktop guard: refused %s %s", skill, code)
             return StepResult(number, skill, tier, REFUSED, code, frozenset(flags), shown, folder)
@@ -257,16 +318,21 @@ class Executor:
             if code:
                 return refused(code)
             tier, flags = _file_tier(verdict.path, tier, flags)
-            if tier == dv.INSTANT and guard.open_kind(ntpath.basename(verdict.path)) != guard.OPEN_DOCUMENT:
+            kind = guard.open_kind(ntpath.basename(verdict.path))
+            if tier == dv.INSTANT and kind != guard.OPEN_DOCUMENT:
                 return refused(dv.BLOCKED_TYPE)
-            if guard.open_kind(ntpath.basename(verdict.path)) in (guard.OPEN_BLOCKED, guard.OPEN_OTHER):
+            if kind in (guard.OPEN_BLOCKED, guard.OPEN_OTHER):
                 return refused(dv.BLOCKED_TYPE)
-            return self._act(number, skill, tier, flags, target, folder, caps, "open_document", verdict.path)
+            if kind == guard.OPEN_SHORTCUT:              # never opened itself: its card opens what it names
+                return StepResult(number, skill, tier, WAITING, "", frozenset(flags), target, folder)
+            method = "open_script_document" if kind == guard.OPEN_SCRIPT else "open_document"
+            return self._act(number, skill, tier, flags, target, folder, caps, method, verdict.path, granted)
         if skill == dv.SHOW_IN_FOLDER:
             code, verdict = self._check_item(target, folder=False)
             if code:
                 return refused(code)
-            return self._act(number, skill, tier, flags, target, folder, caps, "show_in_folder", verdict.path)
+            return self._act(number, skill, tier, flags, target, folder, caps, "show_in_folder", verdict.path,
+                             granted)
         if skill == dv.OPEN_FOLDER:
             if folder:
                 code, verdict, target = self._check_root(folder)
@@ -274,24 +340,26 @@ class Executor:
                 code, verdict = self._check_item(target, folder=True)
             if code:
                 return refused(code)
-            return self._act(number, skill, tier, flags, target, folder, caps, "open_folder", verdict.path)
+            return self._act(number, skill, tier, flags, target, folder, caps, "open_folder", verdict.path, granted)
         if skill == dv.OPEN_APP:
             code, app = self._check_app(target)
             if code:
                 return refused(code)
-            return self._act(number, skill, tier, flags, app, folder, caps, "launch_app", app.app_id)
+            return self._act(number, skill, tier, flags, app, folder, caps, "launch_app", app.app_id, granted)
         if skill == dv.OPEN_URL:
             url = target.url if isinstance(target, SiteItem) else target
             problem = guard.url_problem(url)
             if problem:
                 return refused(dv.SHAPE if problem == guard.URL_SCHEME else dv.SITE_NOT_APPROVED)
-            return self._act(number, skill, tier, flags, target, folder, caps, "open_url", url)
+            return self._act(number, skill, tier, flags, target, folder, caps, "open_url", url, granted)
         return refused(dv.NOT_YET)
 
     def _act(self, number: int, skill: str, tier: str, flags: frozenset[str], target: Any, folder: str,
-             caps: _Caps, method: str, argument: str) -> StepResult:
-        if tier != dv.INSTANT:
+             caps: _Caps, method: str, argument: str, granted: str = dv.INSTANT) -> StepResult:
+        if dv.TIERS.index(tier) > dv.TIERS.index(granted):
             return StepResult(number, skill, tier, WAITING, "", frozenset(flags), target, folder)
+        if method == "open_script_document" and granted != dv.CARD:
+            return StepResult(number, skill, dv.CARD, WAITING, "", frozenset(flags), target, folder)
         if self._cancel is not None and self._cancel.is_set():          # asked again right before the OS call
             return StepResult(number, skill, tier, CANCELLED, STOPPED, frozenset(flags), target, folder)
         if not caps.take(skill):

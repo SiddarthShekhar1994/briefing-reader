@@ -41,12 +41,15 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
 
 ``ResultCard``
     A result floating beside the thing it is about (DesktopB ``.glass``): the kicker with its dot, the title, a meta
-    line, a row of buttons (NoFocus; a click emits ``buttonClicked(key)``) with a mono tag at its right ("2 OTHER
-    MATCHES") and a note. ``set_content(CardContent)``; tones ``TONE_CYAN`` (Jarvis points at something),
-    ``TONE_AMBER`` (a decision waits), ``TONE_DONE``. ``place_beside(target, area=None, avoid=())`` puts it beside a
-    global rect, never over it and clear of ``avoid`` (the HUD), kept inside the work area (ui._keep_on_screen's
-    rule); ``cut_texts()``; ``glow()`` (its ``Glow``, global); ``shapeChanged()`` when it moves, changes size or
-    tone.
+    line, a row of buttons (NoFocus; a click emits ``buttonClicked(key)``; ``CardButton.right`` ones sit at the row's
+    right end, as DesktopB puts the commit after "Not now") with a mono tag at its right ("2 OTHER MATCHES"), the
+    items it offers (``CardRow``: a name over a meta line with a NoFocus link-style button - "Open this instead" -
+    emitting the row's key; ``row_buttons()``) and a note - last, or with ``note_first`` right under the meta (what
+    happened, before the actions: "Opened LING essay draft.docx in Word. Nothing else changed."). The card never
+    takes the focus. ``set_content(CardContent)``; tones ``TONE_CYAN`` (Jarvis points at something), ``TONE_AMBER``
+    (a decision waits), ``TONE_DONE``. ``place_beside(target, area=None, avoid=())`` puts it beside a global rect,
+    never over it and clear of ``avoid`` (the HUD), kept inside the work area (ui._keep_on_screen's rule);
+    ``cut_texts()``; ``glow()`` (its ``Glow``, global); ``shapeChanged()`` when it moves, changes size or tone.
 
 ``DecorLayer``
     One per QScreen, sized to its geometry, also ``WindowTransparentForInput``: the outer shadows and glows under the
@@ -1260,6 +1263,18 @@ class CardButton:
     key: str
     text: str
     variant: str = holo.GHOST          # holo.GO for the one thing to do ("Open"); GHOST for the rest
+    right: bool = False                # at the row's right end (DesktopB: "Not now" left, the commit right)
+
+
+@dataclass(frozen=True)
+class CardRow:
+    """One item a card offers under its buttons ("Open this instead", a found file): its name, a meta line and the
+    link-style button that acts on it (``key``: what ``buttonClicked`` says)."""
+
+    key: str
+    title: str
+    meta: str = ""
+    action: str = ""
 
 
 @dataclass(frozen=True)
@@ -1272,6 +1287,8 @@ class CardContent:
     note: str = ""                     # the last line ("Opened in Word. Nothing else changed.")
     note_tone: str = TONE_DONE         # its colour: done (mint), cyan (ink-3) or amber
     tone: str = TONE_CYAN
+    rows: tuple[CardRow, ...] = ()     # under the buttons, each with its own button
+    note_first: bool = False           # the note right under the meta (what happened), before the buttons
 
 
 class ResultCard(_OverlayWindow):
@@ -1283,6 +1300,9 @@ class ResultCard(_OverlayWindow):
     TITLE_LINES = 2
     META_LINES = 2
     NOTE_LINES = 2
+    ROW_HEIGHT = 54                    # an offered item: its name (20 px, its button beside it) over its meta line
+    ROW_NAME_TOP = 4                   # ... the name's line from the row's top hairline
+    ROW_META_TOP = 30                  # ... and the meta line's, the whole width (18 px)
 
     def __init__(self, *, native: HudNative | None = None, hide_from_capture: bool = True) -> None:
         super().__init__(HUD_FLAGS, native, hide_from_capture)
@@ -1290,8 +1310,10 @@ class ResultCard(_OverlayWindow):
         self.setWindowTitle("Jarvis")
         self._content = CardContent("", "")
         self._buttons: dict[str, holo.HoloButton] = {}
+        self._row_buttons: dict[str, holo.HoloButton] = {}
         self._title_font = hud.body_font(18, 500)
         self._meta_font = hud.body_font(13)
+        self._row_meta_font = hud.body_font(12)
         self._kicker_font = hud.mono_font(10, 500, 0.22)           # DesktopB .kick
         self._tag_font = hud.mono_font(10, 500, 0.2)
         self._rows: dict[str, QRectF] = {}
@@ -1303,23 +1325,33 @@ class ResultCard(_OverlayWindow):
     def buttons(self) -> dict[str, holo.HoloButton]:
         return dict(self._buttons)
 
+    def row_buttons(self) -> dict[str, holo.HoloButton]:
+        """The rows' buttons by their keys (in order)."""
+        return dict(self._row_buttons)
+
     def set_content(self, content: CardContent) -> None:
         self._content = content
-        for button in self._buttons.values():
+        for button in [*self._buttons.values(), *self._row_buttons.values()]:
             button.hide()
             button.deleteLater()
-        self._buttons = {}
+        self._buttons, self._row_buttons = {}, {}
         for spec in content.buttons:
-            button = holo.HoloButton(spec.text, spec.variant, parent=self)
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)       # a click never moves the focus here
-            button.setAccessibleName(spec.text)
-            button.clicked.connect(partial(self.buttonClicked.emit, spec.key))
-            button.show()
-            self._buttons[spec.key] = button
+            self._buttons[spec.key] = self._new_button(spec.key, spec.text, spec.variant, holo.SIZE_MD, spec.text)
+        for row in content.rows:
+            self._row_buttons[row.key] = self._new_button(row.key, row.action, holo.LINK_CYAN, holo.SIZE_SM,
+                                                          f"{row.action}: {row.title}")
         self.setAccessibleName(content.title)
         self.setAccessibleDescription(" ".join(part for part in (content.kicker, content.meta, content.note) if part))
         self._relayout()
         self.shapeChanged.emit()                        # its tone (and its size) may have changed
+
+    def _new_button(self, key: str, text: str, variant: str, size: int, name: str) -> holo.HoloButton:
+        button = holo.HoloButton(text, variant, size=size, parent=self)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)           # a click never moves the focus here
+        button.setAccessibleName(name)
+        button.clicked.connect(partial(self.buttonClicked.emit, key))
+        button.show()
+        return button
 
     def glow(self) -> Glow:
         """Its outer shadow and glow (global; Switch.dc.html .glass, amber for a decision): the DecorLayer under it
@@ -1336,7 +1368,8 @@ class ResultCard(_OverlayWindow):
         self.shapeChanged.emit()
 
     def _relayout(self) -> None:
-        """Rows top to bottom; the card's height follows them."""
+        """Rows top to bottom - the kicker, the title, the meta line, the note when it comes first, the buttons (the
+        tag at their right), the offered items, else the note last; the card's height follows them."""
         content = self._content
         pad_v, pad_h = CARD_PAD
         inner = CARD_WIDTH - 2 * pad_h
@@ -1352,24 +1385,60 @@ class ResultCard(_OverlayWindow):
             y += 4
             rows["meta"] = QRectF(pad_h, y, inner, 20 * len(meta))
             y += 20 * len(meta)
+        note = self._wrap(content.note, self._meta_font, self.NOTE_LINES)
+        if note and content.note_first:
+            y += 8
+            rows["note"] = QRectF(pad_h, y, inner, 20 * len(note))
+            y += 20 * len(note)
         if self._buttons or content.tag:
             y += 14
             margin = holo.HoloButton.MARGIN
             x = pad_h - margin
-            for button in self._buttons.values():
+            right = CARD_WIDTH - pad_h + margin
+            specs = {spec.key: spec for spec in content.buttons}
+            for key, button in self._buttons.items():
                 hint = button.sizeHint()
+                if specs[key].right:
+                    continue
                 button.setGeometry(round(x), round(y) - margin, hint.width(), hint.height())
                 x += hint.width() - 2 * margin + holo.BUTTON_GAP
+            for key, button in reversed(list(self._buttons.items())):
+                hint = button.sizeHint()
+                if not specs[key].right:
+                    continue
+                right -= hint.width()
+                button.setGeometry(round(right), round(y) - margin, hint.width(), hint.height())
+                right += 2 * margin - holo.BUTTON_GAP
             rows["buttons"] = QRectF(pad_h, y, inner, holo.SIZE_MD)
             y += holo.SIZE_MD
-        note = self._wrap(content.note, self._meta_font, self.NOTE_LINES)
-        if note:
+        if content.rows:
+            y += 12
+            margin = holo.HoloButton.MARGIN
+            for index, row in enumerate(content.rows):
+                box = QRectF(pad_h, y, inner, self.ROW_HEIGHT)
+                rows[f"row:{index}"] = box
+                button = self._row_buttons.get(row.key)
+                if button is not None:                   # on the name's line, at the right
+                    hint = button.sizeHint()
+                    middle = box.top() + self.ROW_NAME_TOP + 10
+                    button.setGeometry(round(box.right() + margin - hint.width()), round(middle - hint.height() / 2),
+                                       hint.width(), hint.height())
+                y += self.ROW_HEIGHT
+        if note and not content.note_first:
             y += 12
             rows["note"] = QRectF(pad_h, y, inner, 20 * len(note))
             y += 20 * len(note)
         self._rows = rows
         self.setFixedSize(CARD_WIDTH, math.ceil(y + pad_v))
         self.update()
+
+    def _row_room(self, key: str) -> float:
+        """The width a row's name and meta may take: up to its button, with a 12 px gap."""
+        box = self._rows.get(key, QRectF())
+        button = self._row_buttons.get(key)
+        if button is None:
+            return box.width()
+        return max(40.0, button.geometry().left() + holo.HoloButton.MARGIN - 12 - box.left())
 
     def _wrap(self, text: str, font: Any, lines: int) -> list[str]:
         """``text`` in at most ``lines`` lines of the card's inner width, the last one cut with an ellipsis."""
@@ -1379,7 +1448,7 @@ class ResultCard(_OverlayWindow):
         return self._wrap(self._content.title, self._title_font, self.TITLE_LINES) or [""]
 
     def row_rect(self, name: str) -> QRectF:
-        """A row's rect ("kicker", "title", "meta", "buttons", "note"); empty when it is not shown."""
+        """A row's rect ("kicker", "title", "meta", "buttons", "note", "row:0" ...); empty when it is not shown."""
         return QRectF(self._rows.get(name, QRectF()))
 
     def place_beside(self, target: QRect, area: QRect | None = None, avoid: Sequence[QRect] = ()) -> QRect:
@@ -1428,11 +1497,23 @@ class ResultCard(_OverlayWindow):
             if text and not _whole(text, self._wrap(text, font, lines), font, inner):
                 cut.append(name)
         if self._buttons or content.tag:
-            right = max((button.geometry().right() - holo.HoloButton.MARGIN for button in self._buttons.values()),
-                        default=CARD_PAD[1])
+            specs = {spec.key: spec for spec in content.buttons}
+            left = [button for key, button in self._buttons.items() if not specs[key].right]
+            right_side = [button for key, button in self._buttons.items() if specs[key].right]
+            right = max((button.geometry().right() - holo.HoloButton.MARGIN for button in left), default=CARD_PAD[1])
+            limit = min((button.geometry().left() + holo.HoloButton.MARGIN - holo.BUTTON_GAP for button in right_side),
+                        default=CARD_WIDTH - CARD_PAD[1])
             tag = QFontMetricsF(self._tag_font).horizontalAdvance(content.tag.upper()) if content.tag else 0.0
-            if right + (12 + tag if tag else 0) > CARD_WIDTH - CARD_PAD[1]:
+            if right + (12 + tag if tag else 0) > limit or (right_side and min(
+                    button.geometry().left() for button in right_side) + holo.HoloButton.MARGIN < CARD_PAD[1]):
                 cut.append("buttons")
+        names = QFontMetricsF(self._meta_font)
+        metas = QFontMetricsF(self._row_meta_font)
+        for index, row in enumerate(content.rows):
+            key = f"row:{index}"
+            if names.horizontalAdvance(row.title) > self._row_room(key) \
+                    or metas.horizontalAdvance(row.meta) > self.row_rect(key).width():
+                cut.append(key)
         return cut
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
@@ -1490,8 +1571,32 @@ class ResultCard(_OverlayWindow):
                 painter.setPen(QColor(holo.INK_4))
                 painter.drawText(row, int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
                                  content.tag.upper())
+            self._paint_rows(painter, tone, ink, align)
         finally:
             painter.end()
+
+    def _paint_rows(self, painter: QPainter, tone: str, ink: QColor, align: int) -> None:
+        """The offered items (DesktopB .prow): a hairline above each, its name (cut with an ellipsis in the middle
+        before the row's button) over its meta line (the whole width)."""
+        names, metas = QFontMetricsF(self._meta_font), QFontMetricsF(self._row_meta_font)
+        amber = tone == TONE_AMBER
+        for index, row in enumerate(self._content.rows):
+            key = f"row:{index}"
+            box = self.row_rect(key)
+            if box.isEmpty():
+                continue
+            room = self._row_room(key)
+            painter.setPen(QPen(holo.alpha(ink, 0.16), 1.0))
+            painter.drawLine(QPointF(box.left(), box.top() + 0.5), QPointF(box.right(), box.top() + 0.5))
+            painter.setFont(self._meta_font)
+            painter.setPen(QColor(holo.AMBER_TX if amber else holo.INK_1))
+            painter.drawText(QRectF(box.left(), box.top() + self.ROW_NAME_TOP, room, 20), align,
+                             names.elidedText(row.title, Qt.TextElideMode.ElideMiddle, room))
+            if row.meta:
+                painter.setFont(self._row_meta_font)
+                painter.setPen(QColor(holo.AMBER_TX2 if amber else holo.INK_3))
+                painter.drawText(QRectF(box.left(), box.top() + self.ROW_META_TOP, box.width(), 18), align,
+                                 metas.elidedText(row.meta, Qt.TextElideMode.ElideRight, box.width()))
 
 # --------------------------------------------------------------------------
 # The decor layer (one per screen)
@@ -1971,11 +2076,12 @@ class HudOverlay(QObject):
         self._cards.append(card)
         return card
 
-    def show_card(self, card: ResultCard, target: QRect, area: QRect | None = None) -> QRect:
-        """Place ``card`` beside ``target`` (global), clear of the HUD's bar and chips, and show it while the HUD
-        shows (from now on it shows with the HUD, its shadow under it)."""
-        avoid = [self.hud.occupied_rect()] if self._shown or self.hud.area().isValid() else []
-        rect = card.place_beside(target, area, avoid)
+    def show_card(self, card: ResultCard, target: QRect, area: QRect | None = None,
+                  avoid: Sequence[QRect] = ()) -> QRect:
+        """Place ``card`` beside ``target`` (global), clear of the HUD's bar and chips (and of ``avoid``: the other
+        cards), and show it while the HUD shows (from now on it shows with the HUD, its shadow under it)."""
+        clear = [self.hud.occupied_rect()] if self._shown or self.hud.area().isValid() else []
+        rect = card.place_beside(target, area, [*clear, *avoid])
         if card in self._cards and card not in self._placed:
             self._placed.append(card)
         if self._shown:

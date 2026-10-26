@@ -125,8 +125,9 @@ class DesktopRunTests(PlannerTestCase):
         fields = {field.label: field.value for field in given.fields}
         self.assertEqual(fields["Looked in"], "4 places: 8 files")
         self.assertEqual(fields["Given"], "4 places, 8 files, 3 apps, 1 site - names only, never paths or contents")
-        self.assertEqual(fields["Names that read like instructions"],
-                         "1 - treated as data; used only when your own words name them")
+        self.assertEqual(fields["Read like instructions"],          # SPEC 10.1's wording
+                         "1 file name looked like instructions - treated as data; used only when your own words "
+                         "name it")
         self.assertEqual(given.status, live.STATUS_WARN)
         self.assertIn("LING essay draft.docx", "\n".join(block.text for block in run.blocks))   # the stdin, as given
         self.assertEqual([item.text for item in checked.items],

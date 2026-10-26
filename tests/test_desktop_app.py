@@ -1,7 +1,8 @@
 """Tests for the desktop feature's switch in the app (P1.1): [desktop] off shows no Desktop surface anywhere; on, the
-Dock's Desktop slot (with the HUD key's line), the Find list's Desktop and Settings > Desktop (read only, "Not
-turned on yet") appear, and a click on Desktop asks for the HUD (desktopRequested) - the screen and the Dock's
-current slot stay as they were, and the window is hidden for the HUD (P1.4; tests/test_desktop_hud.py has the rest).
+Dock's Desktop slot (with the HUD key's line), the Find list's Desktop and Settings > Desktop (its values read only;
+"Your OK": "Not turned on yet" until the first-run card's Turn on - tests/test_desktop_consent.py has that card - then
+"Turned on") appear, and a click on Desktop asks for the HUD (desktopRequested) - the screen and the Dock's current
+slot stay as they were, and the window is hidden for the HUD (P1.4; tests/test_desktop_hud.py has the rest).
 
 Qt runs offscreen in this process and shows nothing; the real desktop backend is never constructed.
 """
@@ -28,8 +29,8 @@ def setUpModule() -> None:
 
 
 class DesktopSwitchTests(unittest.TestCase):
-    def make(self, extra: str = DESKTOP_ON) -> AppHarness:
-        harness = AppHarness(self, ask=True, config_extra=extra)
+    def make(self, extra: str = DESKTOP_ON, *, consent: bool = True) -> AppHarness:
+        harness = AppHarness(self, ask=True, config_extra=extra, desktop_consent=consent)
         harness.reading(autoplay=False)
         self.reading = harness.c.window.reading
         return harness
@@ -78,7 +79,8 @@ class DesktopSwitchTests(unittest.TestCase):
         self.assertEqual(harness.c.state, state)
 
     def test_settings_shows_the_desktop_group_read_only(self) -> None:
-        self.make(DESKTOP_ON + "undo_days = 1\nextra_folders = ['C:\\Users\\Owner\\Uni']\napps = true\n")
+        self.make(DESKTOP_ON + "undo_days = 1\nextra_folders = ['C:\\Users\\Owner\\Uni']\napps = true\n",
+                  consent=False)
         settings = self.reading.settings_page
         self.assertIn(settings_view.DESKTOP_GROUP, settings.group_buttons)
         settings.select_group(settings_view.DESKTOP_GROUP)

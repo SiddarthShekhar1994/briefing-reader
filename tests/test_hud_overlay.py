@@ -24,8 +24,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import (QAbstractAnimation, QCoreApplication, QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt,
-                            QTimer)
+from PySide6.QtCore import (QAbstractAnimation, QCoreApplication, QEvent, QObject, QPoint, QPointF, QRect, QRectF,
+                            QSize, Qt, QTimer)
 from PySide6.QtGui import QFontMetricsF, QGuiApplication, QImage, QPainter, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
@@ -45,6 +45,15 @@ OPEN_RESULT = CardContent(f"FILE {DOT} WORD DOCUMENT", "Essay draft.docx",
                           (CardButton("open", "Open", holo.GO), CardButton("folder", "Show in folder")),
                           tag="2 other matches", note="Opening something changes nothing, so it happens on one click.",
                           note_tone=hud_overlay.TONE_CYAN)
+D5_RESULT = CardContent(f"OPENED IN WORD {DOT} 10:21 AM", "LING essay draft.docx",
+                        f"Documents \u203a Uni \u203a LING {DOT} edited yesterday, 9:14 PM",
+                        (CardButton("folder", "Show in folder"),), tag="2 other matches",
+                        note="Opened LING essay draft.docx in Word. Nothing else changed.",
+                        rows=(hud_overlay.CardRow("row:0", "LING essay draft (old).docx",
+                                                  f"Downloads {DOT} edited 12 Oct", "Open this instead"),
+                              hud_overlay.CardRow("row:1", "LING reading list.pdf",
+                                                  f"Documents \u203a Uni \u203a LING {DOT} edited 2 Oct",
+                                                  "Open this instead")), note_first=True)
 HUD_NAMES = {"JarvisHud", "JarvisResult", "JarvisDecor"}
 _app: QApplication | None = None
 
@@ -785,6 +794,51 @@ class CardTests(_OverlayTest):
                                      "changed.", tone=hud_overlay.TONE_DONE))
         self.assertEqual(card.buttons(), {})
         self.assertTrue(card.row_rect("buttons").isEmpty())
+        self.assertEqual(card.cut_texts(), [])
+
+    def test_the_d5_card_note_first_then_show_in_folder_then_open_this_instead_rows(self) -> None:
+        """P1.9: what happened right under the meta, then the buttons and the tag, then the rows - each with its own
+        NoFocus link button, emitting the row's key; the meta line has the whole width."""
+        overlay = self.overlay()
+        card = overlay.new_card()
+        card.set_content(D5_RESULT)
+        names = ("kicker", "title", "meta", "note", "buttons", "row:0", "row:1")
+        rows = [card.row_rect(name) for name in names]
+        self.assertTrue(all(not row.isEmpty() for row in rows))
+        self.assertEqual([row.top() for row in rows], sorted(row.top() for row in rows))
+        self.assertEqual(card.height(), round(rows[-1].bottom() + hud_overlay.CARD_PAD[0]))
+        self.assertEqual(card.cut_texts(), [])
+        self.assertEqual(list(card.row_buttons()), ["row:0", "row:1"])
+        for key, button in card.row_buttons().items():
+            self.assertEqual(button.focusPolicy(), Qt.FocusPolicy.NoFocus)
+            self.assertEqual(button.text(), "Open this instead")
+            self.assertTrue(card.row_rect(key).contains(QRectF(button.geometry()).center()))
+        self.assertEqual(card.row_buttons()["row:1"].accessibleName(), "Open this instead: LING reading list.pdf")
+        keys: list[str] = []
+        card.buttonClicked.connect(keys.append)
+        overlay.show_on(None)
+        overlay.show_card(card, QRect(20, 300, 200, 120))
+        settle()
+        QTest.mouseClick(card.row_buttons()["row:1"], Qt.MouseButton.LeftButton)
+        QTest.mouseClick(card.buttons()["folder"], Qt.MouseButton.LeftButton)
+        self.assertEqual(keys, ["row:1", "folder"])
+        self.assertIsNone(QApplication.focusWidget())                        # nothing took the focus
+        long = CardContent("OPENED IN WORD", "x.docx", rows=(hud_overlay.CardRow(
+            "row:0", "A very long file name that goes on and on and on and on.docx", "Downloads", "Open this instead"),))
+        card.set_content(long)
+        self.assertEqual(card.cut_texts(), ["row:0"])                        # cut in the middle: said, never hidden
+        self.assertEqual(card.row_buttons().keys(), {"row:0"})
+
+    def test_a_right_button_sits_at_the_rows_right_end(self) -> None:
+        card = self.overlay().new_card()
+        card.set_content(CardContent("EXCEL WORKBOOK \u00b7 NEEDS YOUR OK", "Grades macro.xlsm",
+                                     buttons=(CardButton("dismiss", "Not now", holo.AMBER_GHOST),
+                                              CardButton("open", "Open", holo.AMBER_COMMIT, right=True)),
+                                     tone=hud_overlay.TONE_AMBER))
+        buttons = card.buttons()
+        margin = holo.HoloButton.MARGIN
+        self.assertEqual(buttons["dismiss"].geometry().left() + margin, hud_overlay.CARD_PAD[1])
+        self.assertEqual(buttons["open"].geometry().right() + 1 - margin, hud_overlay.CARD_WIDTH - hud_overlay.CARD_PAD[1])
         self.assertEqual(card.cut_texts(), [])
 
     def test_beside_its_target_never_over_it_and_clear_of_the_hud(self) -> None:

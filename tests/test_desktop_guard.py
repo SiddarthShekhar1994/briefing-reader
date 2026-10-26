@@ -556,10 +556,13 @@ _REAL_CALLS = {
     "recent_items": ((), {"limit": 5}),
     "start_menu_apps": ((), {}),
     "open_document": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "open_script_document": (("C:\\Users\\Owner\\Downloads\\a.xlsm",), {}),
     "show_in_folder": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
     "open_folder": (("C:\\Users\\Owner\\Downloads",), {}),
     "launch_app": (("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",), {}),
     "open_url": (("https://www.example.org/",), {}),
+    "app_for": ((".docx",), {}),
+    "link_target": (("C:\\Users\\Owner\\Downloads\\a.lnk",), {}),
 }
 
 
@@ -589,7 +592,8 @@ class RealBackendMethodTests(unittest.TestCase):
             return trapped
 
         patches = [mock.patch.object(dbk, helper, trap(helper, getattr(dbk, helper)))
-                   for helper in ("_shell_known_folder", "_final_path_name", "_shell_open", "_com_ready")]
+                   for helper in ("_shell_known_folder", "_final_path_name", "_shell_open", "_com_ready",
+                                  "_assoc_string", "_link_path")]
         patches += [mock.patch.object(os, "lstat", trap("os.lstat", os.lstat)),
                     mock.patch.object(os, "scandir", trap("os.scandir", os.scandir)),
                     mock.patch.object(os.path, "realpath", trap("os.path.realpath", os.path.realpath)),
@@ -659,6 +663,22 @@ class RealBackendMethodTests(unittest.TestCase):
     def test_open_url_raises_under_the_guard(self) -> None:
         self.call_refused("open_url")
 
+    def test_open_script_document_raises_under_the_guard(self) -> None:
+        self.call_refused("open_script_document")
+
+    def test_app_for_raises_under_the_guard(self) -> None:
+        self.call_refused("app_for")
+
+    def test_link_target_raises_under_the_guard(self) -> None:
+        self.call_refused("link_target")
+
+    def test_app_for_is_asked_only_a_type_or_https(self) -> None:
+        for kind in (".docx", ".PDF", ".xlsm", "https"):
+            self.assertTrue(dbk.app_kind(kind), kind)
+        for kind in ("docx", "C:\\Users\\Owner\\Essay.docx", "Essay.docx", ".do cx", "http", "ms-settings", "",
+                     None, ".docx\\..\\x", "." + "a" * 17):
+            self.assertFalse(dbk.app_kind(kind), ascii(kind))
+
     def test_called_unbound_it_raises_too(self) -> None:
         for name, (args, kwargs) in _REAL_CALLS.items():
             with self.subTest(method=name), self.assertRaises(dbk.RealBackendInTests):
@@ -667,15 +687,23 @@ class RealBackendMethodTests(unittest.TestCase):
     def test_the_opens_last_guard(self) -> None:
         """open_problem: the opens' own last check (made after the executor's), pure - nothing is asked of Windows."""
         good = {"open_document": "C:\\Users\\Owner\\Downloads\\Essay.docx",
+                "open_script_document": "C:\\Users\\Owner\\Downloads\\Grades.xlsm",     # after its card's click
                 "show_in_folder": "C:\\Users\\Owner\\Downloads\\setup.exe",      # shown, never opened
                 "open_folder": "C:\\Users\\Owner\\Downloads",
                 "launch_app": "{6D809377-6AF0-444B-8957-A3773F02200E}\\Microsoft VS Code\\Code.exe",
-                "open_url": "https://portal.example.edu/home"}
+                "open_url": "https://portal.example.edu/home",
+                "link_target": "C:\\Users\\Owner\\Downloads\\Spotify.lnk"}
         for method, target in good.items():
             self.assertEqual(dbk.open_problem(method, target), "", method)
         bad = [("open_document", "C:\\Users\\Owner\\Downloads\\setup.exe"),
                ("open_document", "C:\\Users\\Owner\\Downloads\\Grades.xlsm"),
                ("open_document", "C:\\Users\\Owner\\Downloads\\Spotify.lnk"),
+               ("open_script_document", "C:\\Users\\Owner\\Downloads\\Essay.docx"),       # its own kind only
+               ("open_script_document", "C:\\Users\\Owner\\Downloads\\setup.exe"),
+               ("open_script_document", "C:\\Users\\Owner\\Downloads\\run.hta"),
+               ("open_script_document", "\\\\server\\share\\Grades.xlsm"),
+               ("link_target", "C:\\Users\\Owner\\Downloads\\Essay.docx"),
+               ("link_target", "\\\\server\\share\\Spotify.lnk"),
                ("open_document", "C:\\Users\\Owner\\Downloads\\Report.pdf.exe"),
                ("open_document", "\\\\server\\share\\Essay.docx"),
                ("open_document", "\\\\?\\C:\\Users\\Owner\\Essay.docx"),
