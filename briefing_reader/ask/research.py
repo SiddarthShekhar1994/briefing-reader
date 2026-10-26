@@ -230,7 +230,9 @@ def build_research_prompt(question: str, *, hint: str, now: datetime, time_zone:
     """The research run's whole stdin. These parameters are everything it can hold: no context,
     no config, no briefing, no address (isolation; a test pins the signature). ``question`` is
     cleaned like the planner's <command> (one line, no control or invisible character, "<" / ">"
-    as "\u2039" / "\u203a", at most 500 characters), ``hint`` like a data field (at most 200)."""
+    as "\u2039" / "\u203a", at most context.COMMAND_CAP characters: the owner's words, as long as
+    an Ask's), ``hint`` like a data field (at most 200). The run's own caps (searches, page reads,
+    turns, the answer's size) do not depend on the question's length."""
     parts = [f"<today>\n{now_line(now, time_zone)}\n</today>", f"<limits>\n{limits_text(limits)}\n</limits>"]
     shown_hint = hint_text(hint)
     if shown_hint:

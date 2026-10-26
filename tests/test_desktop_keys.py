@@ -833,8 +833,7 @@ class AskBarTests(KeyApp):
             with self.subTest(typed=typed):
                 self.type_on_hud(typed)
                 self.assertEqual(self.hud().caption_text(), said)          # Jarvis's own words: never the note
-                self.assertEqual(self.hud().bar.text(), "" if said != "I already have that, sir." else typed)
-                self.hud().bar.clear_input()
+                self.assertEqual(self.hud().bar.text(), "")    # taken: the words left the bar (Up brings them back)
         self.back()
         self.assertIn("lab opens at 9", self.reading.command_bar.status())  # the window's bar quotes it, as before
         said = "\n".join(text for _who, _when, text, _sub in self.reading.conversation.entries())

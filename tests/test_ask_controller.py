@@ -133,6 +133,8 @@ class AskControllerTests(unittest.TestCase):
         c.player.state = "playing"
         submit(c)
         self.assertTrue(c.ask.busy and bar.is_running())
+        self.assertEqual(bar.text(), "")                               # accepted: the words left the bar at once
+        self.assertEqual(bar.last_request(), COMMAND)                  # ... and Up brings them back
         self.assertTrue(wait_for(lambda: c.player.state == "paused"))   # the briefing pauses once planning starts
         self.assertTrue(wait_for(lambda: c.ask.stage() == ask_planner.STAGE_PLANNING))
         self.assertTrue(bar.status().startswith("Planning..."))
@@ -144,7 +146,7 @@ class AskControllerTests(unittest.TestCase):
         gate.set()
         self.assertTrue(wait_for(lambda: not c.ask.busy))
         self.assertEqual((bar.status(), bar.tone()), (SAY, hud.TONE_DONE))
-        self.assertEqual(bar.text(), "")                               # cleared after an answer
+        self.assertEqual(bar.text(), "")                               # the answer never puts it back
         self.assertFalse(bar.is_running())
         self.assertNotEqual(c.window.reading.state_label.text(), ui.ASK_PLANNING_LABEL)
         reading = c.window.reading
@@ -187,7 +189,8 @@ class AskControllerTests(unittest.TestCase):
         self.assertTrue(process.killed)
         self.assertEqual(bar.status(), ask_ui.CANCELLED_TEXT)
         self.assertFalse([action for action in c._actions if action.source == SOURCE_ASK])
-        self.assertEqual(bar.text(), COMMAND)                          # the draft stays
+        self.assertEqual(bar.text(), "")                               # it left the bar when it was accepted ...
+        self.assertEqual(bar.last_request(), COMMAND)                  # ... and Up brings it back to edit
 
     def test_a_timeout_shows_why_and_proposes_nothing(self) -> None:
         clock = FakeClock()
@@ -325,20 +328,28 @@ class AskControllerTests(unittest.TestCase):
                 self.assertEqual(len(app.factory.runner.started), started)
                 self.assertNotEqual(c.window.reading.state_label.text(), ui.ASK_PLANNING_LABEL)
                 self.assertIn(words, bar.status())
-                self.assertEqual(bar.text(), "one more request")      # the draft stays
+                self.assertEqual(bar.text(), "one more request")      # refused before any run: the words come back
 
-    def test_a_question_back_or_nothing_to_propose_keeps_the_draft(self) -> None:
+    def test_a_question_back_or_nothing_to_propose_leaves_the_bar_and_up_brings_it_back(self) -> None:
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
         app = self.make(plan(say="", question="Which Friday did you mean?", lines=()),
                         plan(say="I couldn't find that meeting.", lines=()), plan(lines=(CAL_LINE,)))
         c, bar = app.c, self.bar(app)
         for expected in ("Which Friday did you mean?", "I couldn't find that meeting."):
             submit(c, "move the sync to Friday")
+            self.assertEqual(bar.text(), "")                           # accepted: gone from the bar at once
             self.assertTrue(wait_for(lambda: not c.ask.busy))
             self.assertEqual(bar.status(), expected)
-            self.assertEqual(bar.text(), "move the sync to Friday")   # edit it and press Enter again
+            self.assertEqual(bar.text(), "")                           # an answer never fills it again
+            bar.focus_input()
+            QTest.keyClick(bar.input, Qt.Key.Key_Up)                   # Up: the words back, to edit and send again
+            self.assertEqual(bar.text(), "move the sync to Friday")
+            bar.clear_input()
         submit(c, "block two hours on Tuesday")
         self.assertTrue(wait_for(lambda: not c.ask.busy))
-        self.assertEqual(bar.text(), "")                               # a card to decide: cleared
+        self.assertEqual(bar.text(), "")
 
     def test_the_idle_bar_says_when_a_limit_is_reached(self) -> None:
         app = AppHarness(self, runs=(plan(lines=(CAL_LINE,)),), max_per_hour=1)
@@ -390,7 +401,8 @@ class AskControllerTests(unittest.TestCase):
         self.assertNotIn("((", status)
         self.assertTrue(wait_for(lambda: bar.link() == "Allow work mail"))
         self.assertTrue(bar.link_shown())                              # beside the note, even compact
-        self.assertEqual(bar.text(), "find Ana's budget email")
+        self.assertEqual(bar.text(), "")                               # a planner run answered: Up brings it back
+        self.assertEqual(bar.last_request(), "find Ana's budget email")
 
     def test_no_mail_sign_in_while_an_ask_runs(self) -> None:
         reader = FakeReader("work", problem=(PROBLEM_SCOPE, "Google did not allow reading email for the work account"))
@@ -631,6 +643,31 @@ class AskLiveTests(unittest.TestCase):
         self.assertEqual(c.ask.last_task_id, task.id)
         self.assertTrue(all(step.status != live.STATUS_RUNNING for step in task.steps))
 
+    def test_no_word_limit_end_to_end(self) -> None:
+        """The bar takes the whole request (no 500-character stop any more); the planner gets its first
+        COMMAND_CAP characters and "Your request" says so; the bar is clear for the next one."""
+        from briefing_reader.ask.context import COMMAND_CAP
+
+        app = self.make(plan(lines=(CAL_LINE,)))
+        c, bar = app.c, self.bar(app)
+        stream = self.stream_of(app)
+        words = " ".join(f"item{number}" for number in range(2_600))          # about 19,000 characters
+        self.assertGreater(len(words), COMMAND_CAP)
+        bar.set_text(words)
+        self.assertEqual(bar.text(), words)                                    # all of it in the field
+        bar.input.returnPressed.emit()
+        settle()
+        self.assertEqual(bar.text(), "")
+        self.assertTrue(wait_for(lambda: not c.ask.busy, 10))
+        (task,) = self.asks(stream)
+        request = task.steps[0]
+        typed = {field.label: field.value for field in request.fields}["You typed"]
+        self.assertTrue(typed.startswith(words[:500]))                         # (LIVE shows a long field cut)
+        self.assertIn("Jarvis uses the first 12,000 characters", [note.text for note in request.notes])
+        stdin = app.factory.runner.started[0].stdin
+        sent = stdin.split("<command>\n", 1)[1].split("\n</command>", 1)[0]
+        self.assertEqual(sent, words[:COMMAND_CAP].rstrip())
+
     def test_refused_submits_create_no_task(self) -> None:
         gate = threading.Event()
         app = self.make(GatedProcess(plan(), gate))
@@ -767,7 +804,7 @@ class WebResearchControllerTests(unittest.TestCase):
         self.assertTrue(bar.meta().startswith("2 SOURCE CARDS + 1 PROPOSAL UNDER ASK \u00b7 "), bar.meta())
         # The runs left that count here: web research (6 an hour), not only the planner's 20.
         self.assertTrue(bar.meta().endswith("5 WEB RESEARCH RUNS LEFT THIS HOUR"), bar.meta())
-        self.assertEqual(bar.text(), "")                                 # cards to decide: cleared
+        self.assertEqual(bar.text(), "")                                 # it left the bar when it was accepted
         self.assertEqual(len(app.factory.runner.started), 1)            # one run: the research
         self.assertEqual(c.ask.last_task_id, task.id)
 
@@ -823,7 +860,7 @@ class WebResearchControllerTests(unittest.TestCase):
         self.assertEqual(by_kind[live.RESEARCH_RUN].status, live.STATUS_CANCELLED)
         self.assertEqual(bar.status(), ask_ui.CANCELLED_TEXT)
         self.assertFalse([action for action in c._actions if action.source == SOURCE_ASK])
-        self.assertEqual(bar.text(), WEB_COMMAND)
+        self.assertEqual((bar.text(), bar.last_request()), ("", WEB_COMMAND))   # cancelled: Up brings it back
 
     def test_research_off_is_refused_amber_and_blocked(self) -> None:
         app = AppHarness(self, config_extra="\n[research]\nenabled = false\n")
@@ -838,7 +875,7 @@ class WebResearchControllerTests(unittest.TestCase):
         self.assertEqual((task.status, task.summary), (live.STATUS_BLOCKED, ask_planner.RESEARCH_OFF_MESSAGE))
         self.assertEqual((bar.status(), bar.tone()), (ask_planner.RESEARCH_OFF_MESSAGE, hud.TONE_WARN))
         self.assertFalse(app.factory.runner.started)
-        self.assertEqual(bar.text(), WEB_COMMAND)
+        self.assertEqual(bar.text(), WEB_COMMAND)                        # refused before any run: back in the bar
 
     def test_the_research_cap_is_blocked_and_amber(self) -> None:
         app = self.make(stream("research_too_many_searches"))
@@ -905,7 +942,7 @@ PLAN_LINE = "Calendar: Work on: Read chapter 4 | 2026-10-04 15:00-16:00 | | | Fo
 
 
 class PlanModeControllerTests(unittest.TestCase):
-    """submit_mode (the productivity bundle): a typed plan route clears the bar on success, a
+    """submit_mode (the productivity bundle): a typed plan route clears the bar as it starts, a
     click-started run never touches it (R23); the mode's status line and LIVE task kind."""
 
     def make(self, *runs) -> AppHarness:
@@ -924,6 +961,7 @@ class PlanModeControllerTests(unittest.TestCase):
         c, bar = app.c, app.c.window.reading.command_bar
         submit(c, "plan my day")
         self.assertEqual(c.ask.running_kind, live.TASK_PLAN)
+        self.assertEqual(bar.text(), "")                                # typed: gone from the bar at once
         self.assertTrue(wait_for(lambda: bar.status().startswith(ask_ui.MODE_STATUS[MODE_PLAN])))
         gate.set()
         self.assertTrue(wait_for(lambda: not c.ask.busy, 10))

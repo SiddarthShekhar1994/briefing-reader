@@ -578,7 +578,8 @@ class AppHarness:
     ``clock``: a HarnessClock (default: fixed at NOW) for the app, the planner and the bundle.
     ``productivity``: the bundle on ([productivity] enabled plus ``prod_extra`` keys, unless
     ``config_extra`` has the table already); ``prod_inline``: its reads run on the GUI thread
-    (deterministic tests). close() stops the bundle's timer and thread.
+    (deterministic tests). ``prepare(config)`` runs before the controller is made (a test puts a file in
+    its data folder, as an earlier run would have left it). close() stops the bundle's timer and thread.
 
     The desktop HUD ([desktop] enabled in ``config_extra``): ``desktop_factory(config)`` makes its
     windows (a test passes hud_overlay.create with a fake native seam; None: hud_overlay.create, whose
@@ -592,7 +593,7 @@ class AppHarness:
                  max_per_hour: int = 20, config_extra: str = "", snapshot_factory: Any = None,
                  clock: HarnessClock | None = None, productivity: bool = False, prod_extra: str = "",
                  prod_inline: bool = True, desktop_factory: Any = None, launch: str | None = None,
-                 desktop_launch: bool = False) -> None:
+                 desktop_launch: bool = False, prepare: Any = None) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -619,6 +620,8 @@ class AppHarness:
         live_config = self.config.live
         self.snapshots = FakeSnapshotter(keep_text=live_config.text,
                                          max_per_run=max(0, min(4, self.config.research.max_fetches)))
+        if prepare is not None:
+            prepare(self.config)
         with mock.patch.object(ui, "BriefingPlayer", FakePlayer), mock.patch.object(ui, "PROD_INLINE", prod_inline):
             self.c = ui.AppController(self.config, self.client, expected_run="AM", now_mode=False, volume=0.0,
                                       now_func=self.clock.now, calendar_factory=lambda _cfg: self.calendars,

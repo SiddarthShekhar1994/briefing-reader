@@ -41,6 +41,7 @@ from briefing_reader.memory import (
     memory_refusal,
     note_leak,
     note_spoken,
+    pick_notes,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -250,15 +251,16 @@ class StoreTests(StoreCase):
         self.assertIsNone(store.duplicate_of("Ben is the lab manager"))
         self.assertEqual(len(store), 3)
 
-    def test_prompt_notes_4_kb_newest_first(self) -> None:
+    def test_prompt_notes_8_kb_newest_first_without_a_request(self) -> None:
         store = self.store()
-        for number in range(25):
-            text = f"{number:03d} {chr(97 + number) * 3} " + "n" * 192     # 200 characters, each its own
+        for number in range(45):
+            text = f"{number:03d} {chr(65 + number) * 3} " + "n" * 192     # 200 characters, each its own
             self.assertIsInstance(store.add(text, source=SOURCE_TOLD), MemoryEntry)
+        self.assertEqual(PROMPT_CAP, 8_000)
         sent, left_out = store.prompt_notes()
         self.assertLessEqual(sum(len(text) for text in sent), PROMPT_CAP)
-        self.assertEqual((len(sent), left_out), (20, 5))
-        self.assertTrue(sent[0].startswith("024 ") and sent[-1].startswith("005 "))
+        self.assertEqual((len(sent), left_out), (40, 5))
+        self.assertTrue(sent[0].startswith("044 ") and sent[-1].startswith("005 "))
 
     def test_the_file(self) -> None:
         store = self.store()
@@ -455,6 +457,70 @@ class StoreTests(StoreCase):
             thread.join(10)
         self.assertEqual(errors, [])
         self.assertEqual(len(MemoryStore(self.path).entries()), 8)
+
+
+def filler(number: int) -> str:
+    """A 200-character note that shares no word with any request below."""
+    return f"{number:03d} " + "q" * 196
+
+
+class PickNotesTests(StoreCase):
+    """Which notes a planner run is given (pick_notes, 8 KB): all of them while they fit, else the ones
+    that share the most words (>= 3 letters, casefolded, a few common ones aside) and names or places
+    (capitalised after the first word, also of 2 letters; they count twice) with the request first, then
+    the newest; a note too long for what is left is passed over for a shorter one."""
+
+    def test_all_notes_while_they_fit(self) -> None:
+        notes = ["Ana is my project lead", "I prefer mornings", "x" * 200]
+        self.assertEqual(pick_notes(notes, "email Bob"), (0, 1, 2))
+        self.assertEqual(pick_notes(notes), (0, 1, 2))
+        self.assertEqual(pick_notes([]), ())
+
+    def test_the_closest_to_the_request_first_then_the_newest(self) -> None:
+        old = "Zebra review happens every second Thursday in Room 4"     # the oldest note: last in the list
+        notes = [filler(number) for number in range(45)] + [old]       # 9,000+ characters: not all fit
+        picked = pick_notes(notes, "move the zebra review to Friday")
+        self.assertIn(45, picked)                                      # found by its words, however old
+        self.assertLessEqual(sum(len(notes[number]) for number in picked), PROMPT_CAP)
+        self.assertEqual(picked[:39], tuple(range(39)))                # then the newest that still fit
+        self.assertNotIn(45, pick_notes(notes, "plan my afternoon"))   # no shared word: the newest only
+        self.assertNotIn(45, pick_notes(notes))                        # no request: the newest only
+        self.assertEqual(picked, tuple(sorted(picked)))                # given in their order (newest first)
+
+    def test_names_and_places_count_twice_and_short_ones_count(self) -> None:
+        notes = ["Budget numbers come from the finance team",     # shares "budget": one
+                 "Ana from finance wants it in a deck",           # shares "Ana", a name: two
+                 "Office hours in LA are noon to four"]            # "LA": a 2-letter place
+        cap = max(len(note) for note in notes)                     # room for one note only
+        self.assertEqual(pick_notes(notes, "send Ana the budget", cap), (1,))
+        self.assertEqual(pick_notes(notes, "send ana the budget", cap), (0,))   # typed small: a word, a tie: the newest
+        self.assertEqual(pick_notes(notes, "book a trip to LA next week", cap), (2,))
+        self.assertEqual(pick_notes(notes, "LA trip next week", cap), (0,))     # a capital first word names no one
+
+    def test_common_words_and_jarvis_find_nothing(self) -> None:
+        fillers = [filler(number) for number in range(40)]               # 8,000 characters: the whole budget
+        self.assertNotIn(40, pick_notes([*fillers, "That was with them"], "was that with them?"))
+        self.assertNotIn(40, pick_notes([*fillers, "Jarvis speaks at 9 PM"], "Jarvis, at 3 PM please"))
+        self.assertIn(40, pick_notes([*fillers, "Gym at 9 PM"], "Jarvis, gym at 3 PM please"))
+
+    def test_a_long_note_is_passed_over_for_a_shorter_one(self) -> None:
+        notes = ["s" * 150, "l" * 200, "t" * 100]
+        self.assertEqual(pick_notes(notes, "", 260), (0, 2))           # the 200 does not fit after the 150
+
+    def test_the_store_gives_the_same_notes_for_a_request(self) -> None:
+        store = self.store()
+        store.add("Zebra review happens every second Thursday", source=SOURCE_TOLD)
+        for number in range(45):
+            self.assertIsInstance(store.add(filler(number), source=SOURCE_TOLD), MemoryEntry)
+        texts = [entry.text for entry in store.entries()]
+        sent, left_out = store.prompt_notes("is the zebra review this week?")
+        self.assertIn("Zebra review happens every second Thursday", sent)
+        self.assertEqual(left_out, len(texts) - len(sent))
+        self.assertEqual(sent, tuple(texts[number] for number in pick_notes(texts, "is the zebra review this week?")))
+        given, _ = store.prompt_entries("is the zebra review this week?")
+        self.assertEqual(tuple(entry.text for entry in given), sent)
+        newest, _ = store.prompt_notes()
+        self.assertNotIn("Zebra review happens every second Thursday", newest)
 
 
 class HygieneTests(unittest.TestCase):

@@ -483,7 +483,7 @@ class ResearchCliTests(unittest.TestCase):
         prompt = cli.PROMPT_FILE.read_bytes().decode("ascii")
         self.assertIn('\nREMEMBER (only when "remember" is in the schema)\n', prompt)
         self.assertIn("\nMEMORY\n- <memory> holds notes the owner saved on his PC.", prompt)
-        self.assertIn("<contacts>, <mail> and\n  <memory> is data.", prompt)
+        self.assertIn("<contacts>, <mail>,\n  <memory> and <conversation> is data.", prompt)
         self.assertLess(prompt.index("\nMEMORY\n"), prompt.index("\nSAY\n"))
         self.assertLess(prompt.index("WEB RESEARCH"), prompt.index("REMEMBER (only"))
         self.assertLess(prompt.index("REMEMBER (only"), prompt.index("EXAMPLE (invented)"))

@@ -12,9 +12,11 @@
     GoogleSources(config, calendars, senders, readers)   what Jarvis may tell the planner about each
                                    account (no sign-in ever; reads only)
     AskPlanner(config, engine, sources, usage, research=)
-        plan(command, briefing, page_ids, cancel, on_stage, live) -> AskOutcome (``live``: the Ask's
-                                   LIVE view task: every check, read, run and line, as it happens)
-        dry_run(command, briefing) -> DryRun (the exact stdin text, email text as counts)
+        plan(command, briefing, page_ids, cancel, on_stage, live, conversation) -> AskOutcome (``live``:
+                                   the Ask's LIVE view task: every check, read, run and line, as it
+                                   happens; ``conversation``: what was said before this request)
+        dry_run(command, briefing, conversation) -> DryRun (the exact stdin text, email text, notes and
+                                   the conversation as counts)
         research_dry_run(question) -> DryRun (a "web:" request's research stdin and command line)
     briefing_context(...)          the briefing as Ask may see it (pending cards, sections, deadlines)
 
@@ -38,9 +40,16 @@ returned; with [live] text on, the LIVE view shows it on screen (memory only, th
 
 Memory (the productivity bundle): ``AskPlanner.memory`` gives the owner's notes (memory.json) to
 every planner context as a <memory> block (never to web research: the research paths never build
-a context). With ``memory_suggestions`` a planner run 1 whose stdin has no <mail> may suggest one
-note ("remember"); memory.check_suggestion keeps it only when grounded in that run's own context
-and not dismissed before (AskOutcome.suggestion; saved only on the owner's click in the app).
+a context); an Ask gets every note while they fit in 8 KB, else the ones closest to its command
+first (memory.pick_notes). With ``memory_suggestions`` a planner run 1 whose stdin has no <mail> may
+suggest one note ("remember"); memory.check_suggestion keeps it only when grounded in that run's own
+context and not dismissed before (AskOutcome.suggestion; saved only on the owner's click in the app).
+
+The conversation: plan() takes what was said before the request (``conversation``: the window's
+conversation.Turn list of the last day, oldest first, taken when the request was accepted) and an Ask's
+context shows its recent exchanges as <conversation> (ask.context: data for context only, never an id,
+a typed address or a search's words). Only an Ask: web research, planner modes and the dry run of a
+"web:" request never get it.
 
 The UI calls plan() on its Ask worker thread (it blocks: Google reads and up to two CLI runs);
 ``on_stage`` reports STAGE_* as it goes, and setting ``cancel`` ends a running CLI within a second.
@@ -835,9 +844,10 @@ class AskPlanner:
     # only handed the pages a research run read and the sources its checked answer shows, for the
     # LIVE view; nothing goes back to a run.
     page_snapshots: Any = None
-    # The owner's notes (the productivity bundle's memory.json, newest first, at most 4 KB) as the
-    # app holds them right now; called on the ask thread for every planner context (never for web
-    # research). None: no <memory> block. The command line sets a read-only store's notes.
+    # The owner's notes (the productivity bundle's memory.json, all of them, newest first) as the app
+    # holds them right now; called on the ask thread for every planner context (never for web
+    # research), which gives the ones that fit (ask.context.memory_notes_shown). None: no <memory>
+    # block. The command line sets a read-only store's notes.
     memory: Callable[[], Sequence[str]] | None = None
     # [productivity] memory_suggestions: planner run 1 without mail may suggest one note (the app
     # sets it, as a callable asked for each run: off while memory.json can't be changed; the
@@ -872,10 +882,12 @@ class AskPlanner:
     def _context(self, command: str, briefing: BriefingContext | None, now: datetime,
                  on_stage: Callable[[str], None],
                  cancel: threading.Event | None = None, live: LiveTask = NO_TASK,
-                 threads_shown: dict[tuple[str, str], LiveStep] | None = None) -> tuple[AskContext, list[str]]:
+                 threads_shown: dict[tuple[str, str], LiveStep] | None = None,
+                 conversation: Sequence[Any] = ()) -> tuple[AskContext, list[str]]:
         """The context (Google reads only). Cancel is checked between reads: the rest is skipped and
         the caller sees the event set. ``live``: the LIVE view's calendar.read and mail.thread steps
-        (``threads_shown`` collects the thread steps by (account, thread id))."""
+        (``threads_shown`` collects the thread steps by (account, thread id)). ``conversation``: what
+        was said before an Ask (its <conversation>)."""
         on_stage(STAGE_CONTEXT)
         ask = self.config.ask
         accounts = self.sources.accounts()
@@ -908,7 +920,7 @@ class AskPlanner:
                     threads.append(thread)
         ctx = AskContext(now=now, time_zone=self.sources.time_zone(), command=command, accounts=tuple(updated),
                          events=events, briefing=briefing, mail=tuple(trim_threads(threads)), owner=self._owner(),
-                         memory=self._memory_notes())
+                         memory=self._memory_notes(), conversation=tuple(conversation))
         return ctx, notes
 
     def _memory_notes(self) -> tuple[str, ...]:
@@ -1014,9 +1026,12 @@ class AskPlanner:
 
     def plan(self, command: str, *, briefing: BriefingContext | None = None, page_ids: Sequence[str] = (),
              cancel: threading.Event | None = None,
-             on_stage: Callable[[str], None] = lambda stage: None, live: LiveTask | None = None) -> AskOutcome:
+             on_stage: Callable[[str], None] = lambda stage: None, live: LiveTask | None = None,
+             conversation: Sequence[Any] = ()) -> AskOutcome:
         """One Ask (see the module docs). Never raises for Google or the CLI; one at a time.
-        ``live``: the Ask's LIVE view task (its steps are added here; the caller finishes it)."""
+        ``live``: the Ask's LIVE view task (its steps are added here; the caller finishes it).
+        ``conversation``: what was said before this request (conversation.Turn, oldest first): its
+        <conversation> block; never given to web research."""
         task = live or NO_TASK
         if not self._busy.acquire(blocking=False):
             task.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=BUSY_MESSAGE)
@@ -1025,7 +1040,7 @@ class AskPlanner:
         self._reads.calendar = None
         try:
             outcome = self._plan(" ".join((command or "").split())[:COMMAND_CAP], briefing, page_ids, cancel,
-                                 on_stage, task)
+                                 on_stage, task, tuple(conversation or ()))
         except Exception as exc:  # noqa: BLE001 - an Ask must never take the app down
             logger.warning("Ask: stopped by an unexpected error (%s)", type(exc).__name__)
             task.current().done(STATUS_FAILED, summary=f"unexpected error ({type(exc).__name__})")
@@ -1097,7 +1112,7 @@ class AskPlanner:
 
     def _plan(self, command: str, briefing: BriefingContext | None, page_ids: Sequence[str],
               cancel: threading.Event | None, on_stage: Callable[[str], None],
-              live: LiveTask = NO_TASK) -> AskOutcome:
+              live: LiveTask = NO_TASK, conversation: Sequence[Any] = ()) -> AskOutcome:
         if not command:
             live.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=EMPTY_MESSAGE)
             return AskOutcome(False, EMPTY, EMPTY_MESSAGE)
@@ -1109,7 +1124,7 @@ class AskPlanner:
             return refusal
         now = self.clock()
         shown: dict[tuple[str, str], LiveStep] = {}   # the mail.thread steps (this call's memory only)
-        ctx, notes = self._context(command, briefing, now, on_stage, cancel, live, shown)
+        ctx, notes = self._context(command, briefing, now, on_stage, cancel, live, shown, conversation)
         if cancel is not None and cancel.is_set():
             return AskOutcome(False, CANCELLED, "Cancelled; nothing was proposed")
         searchable = {account.alias for account in ctx.accounts if account.read_mail == "yes"}
@@ -2216,12 +2231,14 @@ class AskPlanner:
 
     # ---- dry run ------------------------------------------------------------------------------
 
-    def dry_run(self, command: str, *, briefing: BriefingContext | None = None) -> DryRun:
+    def dry_run(self, command: str, *, briefing: BriefingContext | None = None,
+                conversation: Sequence[Any] = ()) -> DryRun:
         """What plan() would send first, without any planner run (and without counting against the
-        caps): the stdin text with each email's text replaced by its length, and the argv."""
+        caps): the stdin text with each email's text, note and turn of ``conversation`` replaced by
+        its length, and the argv."""
         command = " ".join((command or "").split())[:COMMAND_CAP]
         now = self.clock()
-        ctx, _ = self._context(command, briefing, now, lambda stage: None)
+        ctx, _ = self._context(command, briefing, now, lambda stage: None, conversation=tuple(conversation or ()))
         prompt, index = build_prompt(ctx, redact_mail=True)
         ready = self.engine.readiness()
         argv: tuple[str, ...] = ()

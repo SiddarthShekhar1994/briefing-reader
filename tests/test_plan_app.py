@@ -7,8 +7,8 @@ result the focus moves to the next plan card only from the finished card or the 
 a text field or a dialog, and a key press right after that move never approves (R1 / R25); results
 are spoken without the title (R27); a created block notes the to-do it serves and the next plan
 leaves it out (R28); LIVE opened by the run gives way to JARVIS (R33); a question gets its hint
-(R46); the bar is cleared only by a typed run (R23). Qt runs offscreen; fakes only; every title is
-invented.
+(R46); only a typed run takes its words out of the bar, as it starts (R23). Qt runs offscreen; fakes
+only; every title is invented.
 """
 
 from __future__ import annotations
@@ -129,7 +129,7 @@ class PlanFlowTests(PlanAppCase):
                                  "your OK, sir.")
         self.assertFalse(persona.claims_done(spoken))
         self.assertTrue(all(MARK not in said for said in app.voice.texts()))
-        self.assertEqual(self.reading.command_bar.text(), "")             # typed: cleared (R23)
+        self.assertEqual(self.reading.command_bar.text(), "")             # typed: it left the bar (R23)
         newest = self.reading.activity.entries()[0]
         self.assertEqual((newest[1], newest[2]), (hud.TAG_ASK, "Plan: 2 blocks proposed"))
         stdin = app.factory.runner.started[0].stdin
@@ -151,7 +151,8 @@ class PlanFlowTests(PlanAppCase):
         self.assertEqual(newest[2], "Plan: no run (nothing needs time)")   # words, never the reason word
         task = next(task for task in self.c.live.snapshot() if task.kind == live.TASK_PLAN)
         self.assertEqual(task.summary, "no planner run (nothing needs time)")
-        self.assertEqual(self.reading.command_bar.text(), "plan my day")   # the draft stays
+        bar = self.reading.command_bar
+        self.assertEqual((bar.text(), bar.last_request()), ("", "plan my day"))   # answered: Up brings it back
 
     def test_a_question_gets_its_hint(self) -> None:
         """R46."""

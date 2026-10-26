@@ -157,14 +157,16 @@ Widgets
         ``set_empty_text``); ``add_group_header(title, count)`` puts a
         ``GroupHeader`` ("ASK \u00b7 2") before the cards added after it
         (``group_headers()``).
-    ``CommandBar``: Ask Jarvis's typed bar: a chamfered field (at most
-        ``COMMAND_MAX_LENGTH`` characters, plain text, ``COMMAND_PLACEHOLDER``)
+    ``CommandBar``: Ask Jarvis's typed bar: a chamfered field (as long as
+        QLineEdit takes, ``COMMAND_MAX_LENGTH``; plain text, ``COMMAND_PLACEHOLDER``)
         with its Ask button, a status line (``set_status(text, TONE_*)``, two
         lines, the whole text on hover) and a meta line with an optional link
         (``set_meta``, ``set_link(text, tooltip)``). Signals ``submitted(str)``
         (Enter or Ask, whitespace collapsed, never while running or empty),
         ``cancelRequested`` (Cancel or Esc while ``set_running(True)``),
         ``linkClicked`` and ``statusDismissed`` (Esc in an empty idle field);
+        ``take_request(text)`` clears an accepted request at once and Up in the
+        empty field brings it back (Down clears it again);
         ``set_compact(True)`` for narrow or short screens; ``focus_input()``.
         Its height never changes with its texts.
     ``ActivityLog``: ``add(tag, message, sub="", when=None)`` newest first,
@@ -249,10 +251,11 @@ Widgets
         check, warn triangle, blocked octagon, failed cross, cancelled dash);
         ``live_status_color(status)``.
     ``ConversationLog``: Jarvis's conversation, oldest first, never elided
-        (``add(role, text, when=, tone=, sub=, link_text=, link_id=) -> id``,
-        ``update(id, ...)``, ``entries()``, ``clear()``, ``set_hour24``;
-        roles ``ROLE_JARVIS`` / ``ROLE_YOU``; ``linkClicked(link_id)``); it
-        follows the newest entry unless the owner scrolled in the last 4 s.
+        (``add(role, text, when=, stamp=, tone=, sub=, link_text=, link_id=) -> id``,
+        ``update(id, ...)``, ``entries()``, ``kept_entries()``, ``clear()``,
+        ``set_hour24``; roles ``ROLE_JARVIS`` / ``ROLE_YOU``; ``linkClicked(link_id)``,
+        ``changed`` when what an entry says changes); it follows the newest
+        entry unless the owner scrolled in the last 4 s.
     ``HudChip(text, color)``: small chamfered tag (e.g. "2 NEED YOUR OK").
     ``FlowLayout(h_spacing, v_spacing)``: wrapping row for buttons, so a
         narrow column gets two rows instead of a wider window.
@@ -7379,7 +7382,7 @@ TONE_GOOD = "good"          # an approved card that was carried out (green; the 
 TONES = (TONE_IDLE, TONE_WORKING, TONE_DONE, TONE_WARN, TONE_ERROR, TONE_GOOD)
 _TONE_COLORS = {TONE_IDLE: TEXT_MUTED, TONE_WORKING: ACCENT, TONE_DONE: TEXT_BODY, TONE_WARN: AMBER,
                 TONE_ERROR: RED, TONE_GOOD: GREEN}
-COMMAND_MAX_LENGTH = 500
+COMMAND_MAX_LENGTH = 32_767         # QLineEdit's own limit: no word limit of Jarvis's (Ask: context.COMMAND_CAP)
 COMMAND_PLACEHOLDER = "Ask Jarvis - nothing happens without your OK"
 # Shorter placeholders for a narrower field: the longest that fits is shown (never cut).
 COMMAND_PLACEHOLDERS = (COMMAND_PLACEHOLDER, "Ask Jarvis - needs your OK", "Ask - needs your OK", "Ask Jarvis")
@@ -7718,8 +7721,14 @@ class CommandBar(QWidget):
     meta lines fold away (the field's placeholder and tooltip say it) unless a link is to be
     shown, so the transcript below keeps its room; anything else the bar says brings them back.
     Otherwise the bar's height changes only with ``set_compact``, never with its texts. The field
-    takes at most COMMAND_MAX_LENGTH characters and never reads its text as HTML. Nothing here
-    plans or runs anything.
+    takes as much as QLineEdit holds (COMMAND_MAX_LENGTH) and never reads its text as HTML.
+
+    The bar's owner says when Jarvis accepted a request typed here (``take_request(text)``: an Ask
+    or a typed mode started, a shortcut was taken): the field is cleared at once - the words are in
+    the conversation - while it still holds exactly them. Up in the empty field (nothing running)
+    brings the last accepted request back to edit and send again; Down clears it again while it is
+    unchanged. ``give_back(text)``: a request refused before anything ran comes back into the field
+    while it is still empty. Nothing here plans or runs anything.
     """
 
     submitted = Signal(str)
@@ -7743,6 +7752,7 @@ class CommandBar(QWidget):
         self._holo = False           # the hologram pill (set_holo): no meta line, only what needs the owner
         self._hud = False            # the desktop HUD's row (set_hud): no status line either
         self._typing = False
+        self._last_request = ""      # the last request accepted from here, as typed (Up brings it back)
         self.input = _CommandInput()
         self.field = _CommandField(self.input)
         self.send_button = _SendButton()
@@ -7858,7 +7868,28 @@ class CommandBar(QWidget):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
         if watched is self.input and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
             QTimer.singleShot(0, self._sync_typing)
+        keypad = Qt.KeyboardModifier.KeypadModifier   # an arrow key may carry it; any other modifier: not ours
+        if watched is self.input and event.type() == QEvent.Type.KeyPress \
+                and (event.modifiers() | keypad) == keypad \
+                and event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and self._recall(event.key() == Qt.Key.Key_Up):
+            event.accept()
+            return True
         return super().eventFilter(watched, event)
+
+    def _recall(self, up: bool) -> bool:
+        """Up in the empty field brings the last accepted request back (the cursor at its end); Down
+        clears it again while it is unchanged. Never while a request runs (the field is read only).
+        True when the key did that."""
+        if self._running or not self._last_request:
+            return False
+        if up and not self.input.text():
+            self.input.setText(self._last_request)
+            self.input.end(False)
+            return True
+        if not up and self.input.text() == self._last_request:
+            self.input.clear()
+            return True
+        return False
 
     def _sync_typing(self, *_args: Any) -> None:
         if not shiboken6.isValid(self):
@@ -7952,6 +7983,33 @@ class CommandBar(QWidget):
 
     def clear_input(self) -> None:
         self.input.clear()
+
+    def take_request(self, text: str) -> bool:
+        """Jarvis accepted the request ``text`` (whitespace collapsed, as ``submitted`` gave it): while
+        the field still holds exactly those words it is cleared at once - they are in the conversation
+        - and Up in the empty field brings them back. False (nothing changes) when the field holds other
+        words: the request came from elsewhere (a click), and what the owner typed stays."""
+        words = " ".join((text or "").split())
+        if not words or self.text() != words:
+            return False
+        self._last_request = self.input.text()
+        self.input.clear()
+        return True
+
+    def last_request(self) -> str:
+        """The last request accepted from this field, as typed ("" before the first)."""
+        return self._last_request
+
+    def give_back(self, text: str) -> bool:
+        """The request ``text`` that left the field (take_request) was refused before anything ran (a
+        limit, Claude Code not ready): its words come back to send again later - only into an empty
+        field, so nothing typed since is ever replaced. False when nothing changed."""
+        words = " ".join((text or "").split())
+        if self._running or self.input.text() or not words or " ".join(self._last_request.split()) != words:
+            return False
+        self.input.setText(self._last_request)
+        self.input.end(False)
+        return True
 
     def focus_input(self) -> None:
         self.input.setFocus(Qt.FocusReason.ShortcutFocusReason)
@@ -8639,9 +8697,10 @@ _LINK_NAME_CHARS = 120      # a link's accessible name: the entry's first line, 
 
 class _ConversationEntry(QWidget):
     """One entry: "JARVIS  2:41 PM", the text (plain, wrapped, never cut, selectable), an optional
-    sub line and an optional link."""
+    sub line and an optional link. ``contentChanged`` when its text or tone changes."""
 
     linkClicked = Signal(str)
+    contentChanged = Signal()
 
     def __init__(self, entry_id: int, role: str, stamp: str, text: str, tone: str, sub: str,
                  link_text: str, link_id: str, sub_filter: Callable[[str], str] | None = None) -> None:
@@ -8651,6 +8710,9 @@ class _ConversationEntry(QWidget):
         self._sub_filter = sub_filter
         self.role = role if role in _ROLE_TEXT else ROLE_JARVIS
         self.stamp = stamp
+        self.when: datetime | None = None    # when it was said (ConversationLog.add; kept on this PC with it)
+        self.kept = True                     # False: shown only, never kept on this PC (ConversationLog.add)
+        self.context = True                  # False: kept, never given to Ask (a web research's exchange)
         self._link_id = link_id
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -8707,6 +8769,7 @@ class _ConversationEntry(QWidget):
 
     def set_content(self, *, text: str | None = None, sub: str | None = None, tone: str | None = None,
                     link_text: str | None = None, link_id: str | None = None) -> None:
+        before = (self.text_label.text(), self._tone)
         if text is not None:
             self.text_label.setText(text)
         if tone is not None:
@@ -8723,6 +8786,8 @@ class _ConversationEntry(QWidget):
             self.link_button.setText(link_text)
             self.link_button.setVisible(bool(link_text))
         self._update_accessible()
+        if (self.text_label.text(), self._tone) != before:
+            self.contentChanged.emit()
 
     def _update_accessible(self) -> None:
         role, stamp, text, _sub = self.entry
@@ -8746,10 +8811,16 @@ class ConversationLog(QScrollArea):
     is taller than the view, to its top (its "JARVIS  2:41 PM" header first), so a long reply is
     read from its first line and never shows up cut off at the top. ``follow_from(entry_id)`` does
     the same for a group of entries posted together (a question and its choices): while they do not
-    all fit, the view starts at that entry, until the next ``add`` or the owner's scroll. Memory only.
+    all fit, the view starts at that entry, until the next ``add`` or the owner's scroll.
+    ``changed`` says what the entries say changed (an entry added, gone, cleared, or its text, tone or
+    ``context`` updated; never for a link or a sub line): the app keeps ``kept_entries()`` on this PC
+    (conversation.ConversationStore) - every entry but those added with ``keep=False`` (a memory
+    shortcut's words and answers: notes reach Ask only through <memory>) - and gives Ask those not
+    marked ``context=False`` (a web research's request and answer). The widget keeps nothing.
     """
 
     linkClicked = Signal(str)
+    changed = Signal()
     MAX_ENTRIES = 100
     SCROLL_HOLD_S = 4.0
 
@@ -8784,13 +8855,24 @@ class ConversationLog(QScrollArea):
         for entry in self._entries:
             entry.set_sub_filter(sub_filter)
 
-    def add(self, role: str, text: str, *, when: datetime | str | None = None, tone: str = TONE_DONE,
-            sub: str = "", link_text: str = "", link_id: str = "") -> int:
-        stamp = when if isinstance(when, str) else format_time(when or datetime.now(), hour24=self._hour24)
+    def add(self, role: str, text: str, *, when: datetime | str | None = None, stamp: str = "",
+            tone: str = TONE_DONE, sub: str = "", link_text: str = "", link_id: str = "", keep: bool = True,
+            context: bool = True) -> int:
+        """A new entry, newest; its id. ``when``: when it was said (shown as the time; a str is shown
+        as it is), ``stamp``: shown instead of that time (an entry of an earlier day); ``keep`` False:
+        shown only (never in ``kept_entries``); ``context`` False: kept, but never given to Ask (a web
+        research's request or answer)."""
+        moment = when if isinstance(when, datetime) else None
+        if not stamp:
+            stamp = when if isinstance(when, str) else format_time(moment or datetime.now(), hour24=self._hour24)
         entry = self._make_entry(self._next_id, role, stamp, text, tone, sub, link_text, link_id,
                                  sub_filter=self._sub_filter)
+        entry.when = moment
+        entry.kept = bool(keep)
+        entry.context = bool(context)
         self._next_id += 1
         entry.linkClicked.connect(self.linkClicked)
+        entry.contentChanged.connect(self.changed)
         self._layout.insertWidget(self._layout.count() - 1, entry)   # before the stretch
         self._entries.append(entry)
         while len(self._entries) > self.MAX_ENTRIES:
@@ -8801,6 +8883,7 @@ class ConversationLog(QScrollArea):
         self.empty_label.hide()
         self._anchor = 0
         self._follow_newest()
+        self.changed.emit()
         return entry.entry_id
 
     def _make_entry(self, *args: Any, **kwargs: Any) -> _ConversationEntry:
@@ -8815,15 +8898,19 @@ class ConversationLog(QScrollArea):
         self._follow_newest()
 
     def update(self, *args: Any, text: str | None = None, sub: str | None = None,  # type: ignore[override]
-               tone: str | None = None, link_text: str | None = None, link_id: str | None = None) -> Any:
-        """``update(entry_id, text=, sub=, tone=, link_text=, link_id=)`` changes an entry (False when
-        it is gone: beyond MAX_ENTRIES, or cleared). Without an entry id it is QWidget.update()."""
+               tone: str | None = None, link_text: str | None = None, link_id: str | None = None,
+               context: bool | None = None) -> Any:
+        """``update(entry_id, text=, sub=, tone=, link_text=, link_id=, context=)`` changes an entry (False
+        when it is gone: beyond MAX_ENTRIES, or cleared). Without an entry id it is QWidget.update()."""
         if len(args) != 1 or not isinstance(args[0], int) or isinstance(args[0], bool):
             return super().update(*args)
         entry = self.entry(args[0])
         if entry is None:
             return False
         entry.set_content(text=text, sub=sub, tone=tone, link_text=link_text, link_id=link_id)
+        if context is not None and bool(context) != entry.context:
+            entry.context = bool(context)
+            self.changed.emit()
         self._follow_newest()
         return True
 
@@ -8837,14 +8924,23 @@ class ConversationLog(QScrollArea):
         """(role, time, text, sub), oldest first."""
         return [entry.entry for entry in self._entries]
 
+    def kept_entries(self) -> list[tuple[str, datetime | None, str, str, bool]]:
+        """(role, when it was said or None, text, tone, given to Ask) of the entries the app keeps on this
+        PC (not those added with ``keep=False``), oldest first."""
+        return [(entry.role, entry.when, entry.entry[2], entry.tone(), entry.context) for entry in self._entries
+                if entry.kept]
+
     def clear(self) -> None:
         for entry in self._entries:
             self._layout.removeWidget(entry)
             entry.hide()
             entry.deleteLater()
+        had = bool(self._entries)
         self._entries = []
         self._anchor = 0
         self.empty_label.show()
+        if had:
+            self.changed.emit()
 
     def following(self) -> bool:
         """The view keeps the newest entry in sight."""
@@ -8915,8 +9011,9 @@ MEMORY_DELETE_TEXT = "Delete"
 MEMORY_UNDO_TEXT = "Undo"
 MEMORY_SHOW_ALL_TEXT = "Show all"
 MEMORY_DELETED_TEXT = "Deleted."
-MEMORY_NOT_SENT_TEXT = "NOT SENT"
-MEMORY_NOT_SENT_TIP = "Past the 4 KB your Claude gets with each request: not sent until newer notes go"
+MEMORY_NOT_SENT_TEXT = "SENT WHEN RELEVANT"
+MEMORY_NOT_SENT_TIP = ("Past the 8 KB of notes your Claude gets with each request: sent only with a request that "
+                       "shares its words, names or places")
 MEMORY_EMPTY_TEXT = 'No notes yet. Add one above, or type "remember that ..." in the bar.'
 MEMORY_FILTER_TEXT = 'Showing notes with "{words}"'
 MEMORY_READ_ONLY_TEXT = ("memory.json can't be read, so Jarvis won't change it. Fix or delete the file, then "
@@ -8936,7 +9033,7 @@ class MemoryRowInfo:
     id: str
     text: str
     meta: str                    # "TOLD . OCT 10" (+ " . EDITED")
-    sent: bool = True            # False: past the 4 KB prompt cap (NOT SENT)
+    sent: bool = True            # False: past the 8 KB prompt cap (SENT WHEN RELEVANT)
     deleted: bool = False        # the "Deleted. Undo" placeholder for 10 s after Delete
 
     def __repr__(self) -> str:   # never the note

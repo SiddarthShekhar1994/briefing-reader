@@ -1,11 +1,12 @@
 """Tests for Ask Jarvis's command bar (hud.CommandBar) and its place in the reading screen.
 
 Enter submits the text with its whitespace collapsed (an empty field or a running request submits
-nothing), Esc clears the field or cancels a running request, the field takes at most 500
-characters and reads nothing as HTML, the button reads Ask / Cancel, the status line keeps its
-height whatever it says, the compact bar (narrow or short screens) keeps the controls' room, and
-Space typed in the bar is a space while Space elsewhere still plays and pauses. Qt runs offscreen
-with the bundled fonts and shows nothing; every text is invented.
+nothing), Esc clears the field or cancels a running request, the field takes as much as QLineEdit
+holds and reads nothing as HTML, an accepted request leaves the field at once and Up brings it back
+(Down clears it again; a refused one comes back into an empty field only), the button reads Ask /
+Cancel, the status line keeps its height whatever it says, the compact bar (narrow or short screens)
+keeps the controls' room, and Space typed in the bar is a space while Space elsewhere still plays
+and pauses. Qt runs offscreen with the bundled fonts and shows nothing; every text is invented.
 """
 
 from __future__ import annotations
@@ -109,13 +110,71 @@ class CommandBarTests(unittest.TestCase):
         QTest.keyClick(self.bar.input, Qt.Key.Key_Escape)
         self.assertEqual(dismissed, [1])
 
-    def test_the_field_takes_at_most_500_characters(self) -> None:
+    def test_the_field_takes_as_much_as_qlineedit_holds(self) -> None:
+        """No word limit of Jarvis's: QLineEdit's own 32,767 characters (Ask uses the first
+        ask.context.COMMAND_CAP, and its LIVE step says so)."""
+        from briefing_reader.ask.context import COMMAND_CAP
+
         self.assertEqual(self.bar.input.maxLength(), hud.COMMAND_MAX_LENGTH)
-        self.assertEqual(hud.COMMAND_MAX_LENGTH, 500)
-        self.bar.set_text("x" * 700)
-        self.assertEqual(len(self.bar.input.text()), 500)
+        self.assertEqual(hud.COMMAND_MAX_LENGTH, 32_767)
+        self.assertGreater(hud.COMMAND_MAX_LENGTH, COMMAND_CAP)
+        long_text = " ".join(f"word{number}" for number in range(3_000))     # about 26,000 characters
+        self.type("")
+        self.bar.input.insert(long_text)                                     # as a paste
+        self.assertEqual(self.bar.input.text(), long_text)
+        QTest.keyClick(self.bar.input, Qt.Key.Key_Return)
+        self.assertEqual(self.submitted, [long_text])                        # whole, nothing cut
+        self.bar.set_text("x" * 40_000)
+        self.assertEqual(len(self.bar.input.text()), 32_767)
         self.assertIn(self.bar.input.placeholderText(), hud.COMMAND_PLACEHOLDERS)   # the longest that fits
         self.assertIn("nothing happens without your OK", hud.COMMAND_PLACEHOLDER)
+
+    def test_an_accepted_request_leaves_the_field_and_up_brings_it_back(self) -> None:
+        self.type("  move my   sync to Friday  ")
+        QTest.keyClick(self.bar.input, Qt.Key.Key_Return)
+        self.assertEqual(self.submitted, ["move my sync to Friday"])
+        self.assertFalse(self.bar.take_request("something else"))           # not what the field holds: kept
+        self.assertEqual(self.bar.input.text(), "  move my   sync to Friday  ")
+        self.assertTrue(self.bar.take_request("move my sync to Friday"))    # accepted: gone at once
+        self.assertEqual((self.bar.input.text(), self.bar.last_request()), ("", "  move my   sync to Friday  "))
+        QTest.keyClick(self.bar.input, Qt.Key.Key_Up)                       # Up: back, as typed, to edit
+        self.assertEqual(self.bar.input.text(), "  move my   sync to Friday  ")
+        self.assertEqual(self.bar.input.cursorPosition(), len("  move my   sync to Friday  "))
+        QTest.keyClick(self.bar.input, Qt.Key.Key_Down)                     # Down: gone again
+        self.assertEqual(self.bar.input.text(), "")
+        QTest.keyClick(self.bar.input, Qt.Key.Key_Up)
+        QTest.keyClicks(self.bar.input, " and tell Ana")                      # edited: Down leaves it
+        QTest.keyClick(self.bar.input, Qt.Key.Key_Down)
+        self.assertEqual(self.bar.input.text(), "  move my   sync to Friday   and tell Ana")
+        QTest.keyClick(self.bar.input, Qt.Key.Key_Up)                       # Up only fills an empty field
+        self.assertEqual(self.bar.input.text(), "  move my   sync to Friday   and tell Ana")
+
+    def test_no_recall_while_a_request_runs_or_before_the_first(self) -> None:
+        self.bar.focus_input()
+        QTest.keyClick(self.bar.input, Qt.Key.Key_Up)                       # nothing to bring back yet
+        self.assertEqual(self.bar.input.text(), "")
+        self.type("block two hours on Tuesday")
+        self.assertTrue(self.bar.take_request("block two hours on Tuesday"))
+        self.bar.set_running(True)                                         # read only while it runs
+        QTest.keyClick(self.bar.input, Qt.Key.Key_Up)
+        self.assertEqual(self.bar.input.text(), "")
+        self.bar.set_running(False)
+        QTest.keyClick(self.bar.input, Qt.Key.Key_Up)
+        self.assertEqual(self.bar.input.text(), "block two hours on Tuesday")
+
+    def test_a_refused_request_comes_back_only_into_an_empty_field(self) -> None:
+        self.type("plan my week")
+        self.assertTrue(self.bar.take_request("plan my week"))
+        self.assertFalse(self.bar.give_back("another request"))             # not the request that left
+        self.bar.set_running(True)
+        self.assertFalse(self.bar.give_back("plan my week"))                # never while it runs
+        self.bar.set_running(False)
+        self.assertTrue(self.bar.give_back("plan my week"))
+        self.assertEqual(self.bar.input.text(), "plan my week")
+        self.bar.clear_input()
+        QTest.keyClicks(self.bar.input, "a new draft")
+        self.assertFalse(self.bar.give_back("plan my week"))                # what was typed since stays
+        self.assertEqual(self.bar.input.text(), "a new draft")
 
     def test_markup_is_plain_text_everywhere(self) -> None:
         self.bar.set_status(IMG + " moved", hud.TONE_DONE)

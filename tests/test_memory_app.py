@@ -106,7 +106,7 @@ class RememberTests(MemoryAppCase):
         self.assertFalse(app.factory.runner.started)
         self.assertEqual(self.reading.command_bar.text(), "")
         self.assertIn("1 note", self.view.status())
-        self.assertIn("0.0 of 4 KB sent", self.view.status())
+        self.assertIn("0.0 of 8 KB sent", self.view.status())
         # Undo: gone again, the entry says so and loses its link.
         entry.link_button.click()
         settle()
@@ -535,20 +535,21 @@ class MemoryFileTests(MemoryAppCase):
 
 
 class MemoryPageStateTests(MemoryAppCase):
-    """MEMORY's page states: NOT SENT past the 4 KB, the write-failure banner, an open edit that keeps
-    its draft while rows move, refusals under the note they are about."""
+    """MEMORY's page states: SENT WHEN RELEVANT past the 8 KB, the write-failure banner, an open edit that
+    keeps its draft while rows move, refusals under the note they are about."""
 
-    def test_not_sent_past_4_kb_and_the_write_failure_banner(self) -> None:
+    def test_sent_when_relevant_past_8_kb_and_the_write_failure_banner(self) -> None:
         self.make()
         store = self.c.memory_store
-        for number in range(25):
-            store.add(f"{number:03d} {chr(97 + number) * 3} " + "n" * 192, source=SOURCE_TOLD)
+        for number in range(45):
+            store.add(f"{number:03d} {chr(65 + number) * 3} " + "n" * 192, source=SOURCE_TOLD)
         self.c._render_memory()
         rows = self.view.rows()
-        self.assertEqual(len(rows), 25)
-        self.assertEqual([row.not_sent_label.isVisibleTo(row) for row in rows], [False] * 20 + [True] * 5)
+        self.assertEqual(len(rows), 45)
+        self.assertEqual([row.not_sent_label.isVisibleTo(row) for row in rows], [False] * 40 + [True] * 5)
         self.assertEqual([row.info().text[:3] for row in rows[-5:]], ["004", "003", "002", "001", "000"])
-        self.assertIn(f"25 notes {ui.DOT} 4.0 of 4 KB sent.", self.view.status())
+        self.assertEqual(rows[-1].not_sent_label.text(), "SENT WHEN RELEVANT")
+        self.assertIn(f"45 notes {ui.DOT} 8.0 of 8 KB sent.", self.view.status())
         self.assertEqual(self.view.banner(), "")
         with mock.patch("briefing_reader.memory.os.replace", side_effect=OSError("disk full")), \
                 self.assertLogs("briefing_reader.memory", level="WARNING"):
@@ -707,9 +708,9 @@ class MemorySpeechAndLiveTests(MemoryAppCase):
 
         self.assertEqual(memory_words((), 0), "none")
         self.assertEqual(memory_words(("abc", "de"), 0), "2 notes, 5 characters")
-        self.assertEqual(memory_words(("abc",), 1), "1 note, 3 characters (1 not sent: over the 4 KB limit)")
-        self.assertEqual(memory_words(("x" * 200,) * 20, 3), "20 notes, 4,000 characters (3 not sent: over the "
-                                                              "4 KB limit)")
+        self.assertEqual(memory_words(("abc",), 1), "1 note, 3 characters (1 not sent: over the 8 KB limit)")
+        self.assertEqual(memory_words(("x" * 200,) * 40, 3), "40 notes, 8,000 characters (3 not sent: over the "
+                                                              "8 KB limit)")
 
 
 class MemoryPageKeyboardTests(unittest.TestCase):

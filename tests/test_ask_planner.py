@@ -65,7 +65,8 @@ features = ["calendar", "gmail_send", "gmail_read"]
 """
 
 
-PLANNER_BLOCKS = ("<now>", "<owner>", "<accounts>", "<calendar>", "<briefing>", "<contacts>", "<mail>", "<command>")
+PLANNER_BLOCKS = ("<now>", "<owner>", "<accounts>", "<calendar>", "<briefing>", "<contacts>", "<mail>", "<command>",
+                  "<memory>", "<conversation>")
 
 
 def assert_isolated(case: unittest.TestCase, runner: FakeRunner) -> None:
@@ -2187,6 +2188,19 @@ class MemoryPlannerTests(PlannerTestCase):
         self.write_config(CONFIG)                                    # the bundle off: no notes, no shortcut
         self.assertIsNone(commands.cli_memory(self.config))
 
+    def test_an_ask_gets_the_notes_closest_to_its_command(self) -> None:
+        """Every note while they fit in 8 KB, else the closest to the command first (the oldest note
+        here), then the newest; LIVE's "Your request" counts the same notes (memory.prompt_notes)."""
+        old = "Zq7memo the Zebra review is every second Thursday"
+        notes = tuple(f"note {number:03d} " + "w" * 191 for number in range(45)) + (old,)
+        run = {"say": SAY, "lines": [MOVE_LINE]}
+        ask = self.make(plan_stream(run), plan_stream(run))
+        ask.memory = lambda: notes
+        self.assertTrue(ask.plan("is the zebra review this week?").ok)
+        self.assertIn(f"- {old}\n", self.stdin(0))
+        self.assertTrue(ask.plan(COMMAND).ok)
+        self.assertNotIn("Zq7memo", self.stdin(1))                     # nothing shared: the newest only
+
     def test_the_command_line_takes_a_too_deep_memory_file_as_unreadable(self) -> None:
         from briefing_reader.memory import MEMORY_FILE
 
@@ -2200,6 +2214,143 @@ class MemoryPlannerTests(PlannerTestCase):
         assert notes is not None
         self.assertEqual(notes(), ())
         self.assertEqual(path.read_bytes(), raw)
+
+
+TALK = "Zq7talk"
+
+
+def talk() -> tuple[Any, ...]:
+    from briefing_reader.conversation import ROLE_JARVIS, ROLE_YOU, Turn
+
+    return (Turn(ROLE_YOU, "what's on tomorrow?", NOW - timedelta(minutes=20)),
+            Turn(ROLE_JARVIS, f"{TALK} Tomorrow you have Project sync at 2 PM.", NOW - timedelta(minutes=19)))
+
+
+class ConversationPlannerTests(PlannerTestCase):
+    """What was said before an Ask (plan(conversation=)): its <conversation> block in run 1 and run 2,
+    never in web research (forced or handed over) and never in a planner mode; the dry run shows its
+    sizes; the logs hold counts only; the owner's words reach the planner up to COMMAND_CAP."""
+
+    def task(self) -> live.LiveTask:
+        self.stream = live.LiveStream()
+        return self.stream.task(live.TASK_ASK, "request")
+
+    def test_both_runs_of_an_ask_get_it(self) -> None:
+        from briefing_reader.ask.context import CONVERSATION_NOTE
+
+        self.reader.found = ["thr0000777"]
+        ask = self.make(plan_stream(MailTests.SEARCH),
+                        plan_stream({"say": "I've drafted a reply.", "lines": [MailTests.REPLY_FROM_MAIL]}))
+        outcome = ask.plan("reply to Ana's budget email saying it's confirmed", conversation=talk())
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual(outcome.runs, 2)
+        block = ("<conversation>\nowner | 2026-10-07 09:10 | what's on tomorrow?\n"
+                 f"jarvis | 2026-10-07 09:11 | {TALK} Tomorrow you have Project sync at 2 PM.\n"
+                 f"{CONVERSATION_NOTE}\n</conversation>\n<command>\n")
+        for number in (0, 1):
+            with self.subTest(run=number):
+                self.assertIn(block, self.stdin(number))
+
+    def test_without_one_the_stdin_is_as_before(self) -> None:
+        run = {"say": SAY, "lines": [MOVE_LINE]}
+        ask = self.make(plan_stream(run), plan_stream(run))
+        self.assertTrue(ask.plan(COMMAND).ok)
+        self.assertTrue(ask.plan(COMMAND, conversation=()).ok)
+        self.assertEqual(self.stdin(1), self.stdin(0))
+        self.assertNotIn("<conversation>", self.stdin(0))
+
+    def test_web_research_never_gets_it(self) -> None:
+        for command, runs in ((FORCED_COMMAND, (stream("research_success"),)),
+                              (ROUTED_COMMAND, (plan_stream(WEB_PLAN), stream("research_success")))):
+            with self.subTest(command=command):
+                ask = self.make(*runs)
+                outcome = ask.plan(command, conversation=talk(), live=self.task())
+                self.assertTrue(outcome.ok, outcome)
+                research = self.runner.started[-1]
+                for marker in (TALK.casefold(), "<conversation>", "what's on tomorrow"):
+                    self.assertNotIn(marker, research.stdin.casefold())
+                    self.assertNotIn(marker, " ".join(research.argv).casefold())
+                question = FORCED_QUESTION if command == FORCED_COMMAND else command
+                self.assertTrue(research.stdin.startswith(research_golden(question)[:60]))
+                if command == ROUTED_COMMAND:
+                    self.assertIn("<conversation>", self.stdin(0))     # the planner run did get it
+
+    def test_planner_modes_never_get_it(self) -> None:
+        import inspect
+
+        for name in ("plan_mode", "plan_dry_run"):
+            self.assertNotIn("conversation", inspect.signature(getattr(AskPlanner, name)).parameters)
+
+    def test_the_dry_run_shows_sizes_only(self) -> None:
+        ask = self.make()
+        dry = ask.dry_run(COMMAND, conversation=talk())
+        self.assertIn("owner | 2026-10-07 09:10 | [text: 19 characters]\n", dry.prompt)
+        self.assertNotIn(TALK, dry.prompt)
+        self.assertEqual(dry.counts["conversation"], 1)
+        self.assertEqual(self.runner.started, [])
+
+    def test_the_logs_hold_counts_only(self) -> None:
+        ask = self.make(plan_stream({"say": SAY, "lines": [MOVE_LINE]}))
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+            self.assertTrue(ask.plan(COMMAND, conversation=talk()).ok)
+        text = "\n".join(logs.output)
+        self.assertNotIn(TALK.casefold(), text.casefold())
+        self.assertNotIn("what's on tomorrow", text)
+        self.assertRegex(text, r"Ask: context of \d+ characters \(events \d+, threads \d+, addresses \d+, "
+                               r"conversation 1;")
+
+    def test_the_owners_words_up_to_the_cap(self) -> None:
+        from briefing_reader.ask.context import COMMAND_CAP
+
+        run = {"say": SAY, "lines": []}
+        ask = self.make(plan_stream(run), plan_stream(run))
+        words = " ".join(f"point{number}" for number in range(1_500))[:COMMAND_CAP].rstrip()
+        words += "z" * (COMMAND_CAP - len(words))
+        self.assertEqual(len(words), 12_000)
+        self.assertTrue(ask.plan(words).ok)
+        self.assertIn(f"<command>\n{words}\n</command>\n", self.stdin(0))
+        self.assertTrue(ask.plan(words + " and one more thing").ok)
+        self.assertIn(f"<command>\n{words}\n</command>\n", self.stdin(1))   # the first 12,000 only
+
+    def test_a_long_web_question_fits_the_research_run(self) -> None:
+        from briefing_reader.ask.context import COMMAND_CAP
+
+        question = ("is this true " + "according to the report " * 600)[:COMMAND_CAP - len("web: ")].strip()
+        ask = self.make(stream("research_success"))
+        outcome = ask.plan(f"web: {question}", live=self.task())
+        self.assertTrue(outcome.ok, outcome)
+        research = self.runner.started[-1].stdin
+        self.assertIn(f"<question>\n{question}\n</question>\n", research)   # whole
+        self.assertLess(len(research), COMMAND_CAP + 1_000)                 # and nothing else grew
+        self.assertEqual(len(self.runner.started), 1)
+
+    def test_the_command_line_reads_it_read_only(self) -> None:
+        from datetime import datetime
+
+        from briefing_reader.conversation import CONVERSATION_FILE, ConversationStore, Turn
+
+        path = self.config.data_dir / CONVERSATION_FILE
+        ConversationStore(path, clock=lambda: NOW).save(talk())
+        raw = path.read_bytes()
+        self.assertEqual(commands.cli_conversation(self.config, clock=lambda: NOW), talk())
+        self.assertEqual(commands.cli_conversation(self.config, clock=lambda: NOW + timedelta(days=2)), ())   # a day
+        # The dry run reads it on this PC's clock: what the app kept in the last day.
+        now = datetime.now().astimezone()
+        fresh = tuple(Turn(item.role, item.text, now - (NOW - item.at)) for item in talk())
+        ConversationStore(path, clock=lambda: now).save(fresh)
+        raw = path.read_bytes()
+        self.make()
+        environ = dict(self.environ, JARVIS_CLAUDE_EXE=str(self.exe.path))
+        out = io.StringIO()
+        self.assertEqual(commands.ask_dry_run(COMMAND, self.config, out, briefing=None, environ=environ,
+                                              runner=self.runner, sources=self.sources), 0)
+        text = out.getvalue()
+        self.assertRegex(text, r"\nowner \| \d{4}-\d\d-\d\d \d\d:\d\d \| \[text: 19 characters\]\n")
+        self.assertIn("\n</conversation>\n<command>\n", text)
+        self.assertNotIn(TALK, text)
+        self.assertEqual(path.read_bytes(), raw)                            # read only
+        self.write_config(CONFIG.replace("enabled = true", "enabled = false", 1))
+        self.assertEqual(commands.cli_conversation(self.config), ())
 
 
 

@@ -26,7 +26,7 @@ Public API
 
 ``NoteRow``
     One note: its text (Sora 15, selectable), the readout meta (``TOLD - OCT 10``, ``SUGGESTED``,
-    ``EDITED``; ``NOT SENT`` past the 4 KB) and Edit (ghost) / Delete (danger ghost), which show while the
+    ``EDITED``; ``SENT WHEN RELEVANT`` past the 8 KB) and Edit (ghost) / Delete (danger ghost), which show while the
     pointer is on the row or the keyboard is on one of them (they keep their place, so nothing moves under
     the pointer, and Tab reaches them). Edit opens a field (Enter or Save saves, Esc or Cancel cancels);
     after Delete the row reads "Deleted." with Undo while the controller keeps it.

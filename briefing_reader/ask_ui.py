@@ -1,6 +1,6 @@
 """Ask Jarvis in the app: the command bar's controller and the thread its planner runs on.
 
-    AskController(config, planner, bar, *, context, blocked, calendars, live, parent)
+    AskController(config, planner, bar, *, context, blocked, calendars, live, conversation, parent)
         start()           checks Claude Code (no model request) and which accounts' mail Ask can read,
                           on the "ask" thread; the header chip and the bar follow
         submit(text)      one Ask (the bar's Enter / Ask): planner.plan() on the "ask" thread
@@ -21,7 +21,8 @@
         outcomeReady(object)         planner.AskOutcome of a finished Ask that was not cancelled
         askStarted(int, str)         an Ask was accepted and queued (seq, the request as typed, whitespace
                                      collapsed); never for a refused Enter (busy, empty, blocked). The
-                                     app shows the request in its conversation; it is never logged
+                                     app shows the request in its conversation (and the bar is cleared
+                                     at once: bar.take_request); it is never logged
         askCancelled(int)            the Ask ``seq`` was cancelled: nothing was proposed
         chipChanged(str, str)        the header's ``claude`` chip: planner.CHIP_* and its tooltip
         mailSignInRequested(str)     the bar's link: sign this account in again so Ask may read its mail
@@ -37,26 +38,40 @@ live.LiveStream): each accepted Ask is a LIVE view task, from "Your request" (as
 the planner's steps to "Answer and cards" (ask.cards), finished when the outcome is handed over
 (or cancelled, or Jarvis closes); ``last_task_id`` is the last finished one. ``context()`` (GUI thread)
 gives the briefing as Ask may see it and the briefing cards' ids; ``blocked()`` a reason not to start
-now (a Google sign-in is open). Nothing here logs the request, the planner's text, the context or an
+now (a Google sign-in is open). ``conversation()`` (GUI thread) gives what was said before (the window's
+conversation.Turn list of the last day): taken as an Ask is accepted - before its own words join it -
+and handed to planner.plan() for its <conversation> block; "Your request" says how many earlier
+exchanges that is (ask.context.conversation_exchanges: a count only). Never for web research or a
+planner mode. Nothing here logs the request, the planner's text, the context, the conversation or an
 address: counts, kinds and durations only. One Ask at a time; a run that is cancelled or ends after
 shutdown proposes nothing.
+
+The bar (R23): a request typed there that Jarvis accepts - an Ask or a typed mode is queued, a memory
+or follow-ups shortcut is taken - leaves the bar at once (bar.take_request: its words are in the
+conversation; Up in the empty bar brings them back). One that is not accepted (busy, blocked, empty,
+Jarvis closing) keeps its words, and one the planner refuses before any run (a limit, Claude Code not
+ready, web research off) gets them back while the bar is still empty (bar.give_back). An outcome never
+clears the bar, so nothing typed later is wiped, and a click-started run (an offer, a choice) never
+touches what the owner may be typing.
 
 Typed routes (the productivity bundle, ``route_flags``): after the stop and empty checks and when the
 text does not start with "web:", ask.routes.route() decides; a memory route is handed to the app
 (``memoryRequested``) before the busy and blocked checks. The bar emits only while idle (it is
 read-only while a request runs), so in practice a memory route arrives when nothing runs; MEMORY's
-own Add field saves a note meanwhile. ``memory()`` (the notes the planner would get and how many
-were left out) adds "Memory given" to each Ask's "Your request" step. A plan route ("plan my day")
+own Add field saves a note meanwhile. ``memory(command)`` (the notes the planner would get for the
+request - every note while they fit, else the closest to it first - and how many were left out) adds
+"Memory given" to each Ask's "Your request" step. A plan route ("plan my day")
 goes through the busy and blocked checks and starts a planner mode run: submit_mode(request, words)
 (also what a click on an offer calls) runs planner.plan_mode() on the ask thread with
 ``mode_inputs()`` (the app's to-dos and deadlines, read on the GUI thread) as a LIVE task of the
 mode's own kind (live.TASK_PLAN) whose first step is "Your request" (live.MODE_REQUEST). Its
 outcome comes through ``outcomeReady`` like an Ask's (AskOutcome.mode set). Only a run typed into
-the bar ever clears the bar's text (R23): a click-started run leaves what the owner was typing.
-A prep route ("prep me for my 2 PM") is a planner mode run the same way (live.TASK_PREP): its words
-only pick the meeting (ModeRequest.target) and never reach Claude. A follow-up draft (live.TASK_NUDGE)
-is only ever click-started (a FOLLOW-UPS row, a brief's "Draft a nudge", "Tell Jarvis what to say"):
-submit_mode with ModeRequest(MODE_NUDGE, ...), so it never clears the bar.
+the bar ever clears the bar's text, as it starts (R23): a click-started run leaves what the owner
+was typing. A prep route ("prep me for my 2 PM") is a planner mode run the same way
+(live.TASK_PREP): its words only pick the meeting (ModeRequest.target) and never reach Claude. A
+follow-up draft (live.TASK_NUDGE) is only ever click-started (a FOLLOW-UPS row, a brief's "Draft a
+nudge", "Tell Jarvis what to say"): submit_mode with ModeRequest(MODE_NUDGE, ...), so it never clears
+the bar.
 
 A desktop request (ask.routes ROUTE_DESKTOP, only while [desktop] is on: clear desktop verbs) goes to the
 app first (``desktop_request(text)``): from the window's bar Jarvis goes onto the HUD, where the request
@@ -95,7 +110,7 @@ from . import hud
 from .actions import is_web_open, link_host
 from .ask import desktop_mode
 from .ask import planner as ask_planner
-from .ask.context import COMMAND_CAP
+from .ask.context import COMMAND_CAP, MEMORY_PROMPT_CAP, conversation_exchanges
 from .ask.modes import (MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES,
                         ORIGIN_AUTO, ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs, ModeRequest)
 from .ask.research import forced_question
@@ -214,6 +229,7 @@ class _PlanJob:
     page_ids: tuple[str, ...]
     cancel: threading.Event
     live: Any = None                    # the Ask's LiveTask (None: no LIVE view; the planner gets no keyword)
+    conversation: tuple[Any, ...] = dataclasses.field(default=(), repr=False)   # said before (never "web:")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -238,11 +254,12 @@ class _Running:
     task: LiveTask = NO_TASK            # the Ask's LIVE view task
     kind: str = TASK_ASK                # TASK_WEB: a request that starts with "web:" (web research only);
                                         # a planner mode's own task kind (live.TASK_PLAN)
-    typed: bool = True                  # typed into the bar: only then is the bar cleared on success (R23)
+    typed: bool = True                  # typed into the bar (its words left the bar as it started, R23)
     mode: str = ""                      # a planner mode's run (ask.modes.MODE_PLAN); "" for an Ask
-    clear_text: str = ""                # a click-started run: the typed words that led to it, cleared on success
-                                        # only while the bar still holds exactly them (R23)
-    bar: Any = None                     # the bar bound when it started (its words are the ones cleared; set_bar)
+    bar: Any = None                     # the bar bound when it started (set_bar: the HUD's or the window's)
+    # A typed request's words (memory only, never logged): back to the empty bar when it is refused
+    # before any planner run.
+    words: str = dataclasses.field(default="", repr=False)
 
 
 class _AskBridge(QObject):
@@ -310,7 +327,10 @@ class _AskWorker:
         def on_stage(stage: str) -> None:
             self._emit("stage", job.seq, stage)
 
-        extra = {"live": job.live} if job.live is not None else {}   # a planner without the keyword keeps working
+        # Only what there is: a planner without these keywords keeps working.
+        extra: dict[str, Any] = {"live": job.live} if job.live is not None else {}
+        if job.conversation:
+            extra["conversation"] = job.conversation
         outcome = self._planner.plan(job.text, briefing=job.briefing, page_ids=job.page_ids, cancel=job.cancel,
                                      on_stage=on_stage, **extra)
         self._emit("planned", job.seq, outcome)
@@ -353,9 +373,10 @@ class AskController(QObject):
                  monotonic: Callable[[], float] = time.monotonic,
                  live: LiveStream | None = None,
                  route_flags: Callable[[], RouteFlags] | None = None,
-                 memory: Callable[[], tuple[Sequence[str], int]] | None = None,
+                 memory: Callable[[str], tuple[Sequence[str], int]] | None = None,
                  mode_inputs: Callable[[], ModeInputs] | None = None,
                  desktop_request: Callable[[str], Any] | None = None,
+                 conversation: Callable[[], Sequence[Any]] | None = None,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
@@ -363,7 +384,8 @@ class AskController(QObject):
         self.bar = bar
         self.live = live
         self._route_flags = route_flags or RouteFlags
-        self._memory = memory                 # (the notes the planner gets, how many left out); None: off
+        self._memory = memory                 # (the notes the planner gets for a command, how many out); None: off
+        self._conversation = conversation     # what was said before (conversation.Turn); None: no <conversation>
         self._mode_inputs = mode_inputs or ModeInputs   # the app's to-dos and deadlines (GUI thread)
         # A typed desktop request (ROUTE_DESKTOP; [desktop] on): the app takes it onto the HUD and answers a local
         # route there (None), or hands back the planner's job (ask.desktop_mode.DesktopJob). None: no desktop.
@@ -538,10 +560,12 @@ class AskController(QObject):
             found = self._route(text)
             if found.kind in MEMORY_ROUTES:
                 logger.info("Ask: a typed %s shortcut (no planner run)", found.kind)
+                self.bar.take_request(text)   # taken: the words leave the bar (the app shows them)
                 self.memoryRequested.emit(found, text)
                 return
             if found.kind == ROUTE_FOLLOWUPS:
                 logger.info("Ask: a typed %s shortcut (no planner run)", found.kind)
+                self.bar.take_request(text)
                 self.followupsRequested.emit(text)
                 return
         if found.kind == ROUTE_PLAN:
@@ -573,13 +597,20 @@ class AskController(QObject):
         briefing, page_ids = self._context()
         self._seq += 1
         kind = TASK_WEB if forced_question(text) is not None else TASK_ASK
+        # What was said before this request (its own words join the conversation with askStarted): an
+        # Ask's only - web research gets none.
+        earlier = self._earlier() if kind == TASK_ASK else ()
         task = _request_task(self.live, text, briefing, kind=kind,
-                             memory=self._memory_given() if kind == TASK_ASK else None)
-        running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind, bar=self.bar)
+                             memory=self._memory_given(text[:COMMAND_CAP]) if kind == TASK_ASK else None,
+                             conversation=len(conversation_exchanges(earlier))
+                             if kind == TASK_ASK and self._conversation is not None else None)
+        running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind, words=text,
+                           bar=self.bar)
         self._running = running
         logger.info("Ask %d started", running.seq)
         self._worker.put(_PlanJob(running.seq, text, briefing, tuple(page_ids), running.cancel,
-                                  live=task if task is not NO_TASK else None))
+                                  live=task if task is not NO_TASK else None, conversation=earlier))
+        self.bar.take_request(text)          # accepted: the words leave the bar at once (Up brings them back)
         self.askStarted.emit(running.seq, text)
         self.bar.set_running(True)
         self._put_meta(RUNNING_META)
@@ -589,14 +620,14 @@ class AskController(QObject):
         # busyChanged(True) waits for the first stage: an Ask the planner refuses (Claude Code
         # missing or signed out, a limit) never pauses the briefing.
 
-    def submit_mode(self, request: ModeRequest, words: str, *, clear_text: str = "") -> bool:
+    def submit_mode(self, request: ModeRequest, words: str) -> bool:
         """A planner mode run (the productivity bundle: a typed "plan my day", or a click on an offer):
         the same stop / busy / blocked guards as an Ask, then planner.plan_mode() on the ask thread.
         ``words``: what the owner typed (or the link's words for a click), shown as "Your request" and
-        in the conversation; never logged. ``clear_text``: for a click-started run, the typed words
-        that led to it (a prep's choices): on success the bar is cleared only while it still holds
-        exactly them, so what the owner typed since stays (R23). False when it did not start (the
-        status line says why, and keeps saying so for NOTICE_S seconds; nothing is queued)."""
+        in the conversation; never logged. A typed run (``request.typed_route``) takes its words out of
+        the bar as it starts; a click-started one never touches the bar (R23). False when it did not
+        start (the status line says why, and keeps saying so for NOTICE_S seconds; nothing is queued,
+        and the bar keeps its words)."""
         if self._stop.is_set():
             return False
         if self._running is not None:
@@ -622,14 +653,19 @@ class AskController(QObject):
             inputs = ModeInputs()
         self._seq += 1
         kind = MODE_TASKS.get(request.mode, TASK_ASK)
-        task = _mode_task(self.live, request, words, kind=kind,   # a summary or a desktop plan gets no notes
-                          memory=None if request.mode in (MODE_MEETING, MODE_DESKTOP) else self._memory_given())
+        # A mode's notes are the newest that fit (it has no command to pick them by); a summary or a desktop
+        # plan gets none.
+        task = _mode_task(self.live, request, words, kind=kind,
+                          memory=None if request.mode in (MODE_MEETING, MODE_DESKTOP) else self._memory_given(""))
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind,
-                           typed=request.typed_route, mode=request.mode, clear_text=clear_text, bar=self.bar)
+                           typed=request.typed_route, mode=request.mode, words=words if request.typed_route else "",
+                           bar=self.bar)
         self._running = running
         logger.info("Ask %d started (mode %s, %s)", running.seq, request.mode, request.origin)
         self._worker.put(_ModeJob(running.seq, request, inputs, briefing, tuple(page_ids), running.cancel,
                                   live=task if task is not NO_TASK else None))
+        if request.typed_route:
+            self.bar.take_request(words)     # typed: its words leave the bar at once; a click never touches it
         self.askStarted.emit(running.seq, words)
         self.bar.set_running(True)
         self._put_meta(RUNNING_META)
@@ -665,25 +701,34 @@ class AskController(QObject):
             logger.warning("Ask: a typed shortcut could not be read (%s)", type(exc).__name__)
             return NO_ROUTE
 
-    def _memory_given(self) -> tuple[Sequence[str], int] | None:
-        """(the notes the planner gets, how many were left out) for "Your request"; None while off."""
+    def _memory_given(self, command: str) -> tuple[Sequence[str], int] | None:
+        """(the notes the planner gets for ``command``, how many were left out) for "Your request"; None
+        while off."""
         if self._memory is None:
             return None
         try:
-            return self._memory()
+            return self._memory(command)
         except Exception:  # noqa: BLE001 - only what the LIVE step shows
             return None
 
-    def show_note(self, text: str, tone: str = hud.TONE_DONE, *, clear: bool = False,
-                  hud_text: str | None = None) -> None:
-        """A memory shortcut's answer in the status line (``clear``: the typed words are done with;
-        ``hud_text``: what the desktop HUD's bar says instead - Jarvis's own words, never a note).
-        Never while a request runs (the bar belongs to it then)."""
+    def _earlier(self) -> tuple[Any, ...]:
+        """What was said before the request being accepted (conversation.Turn, oldest first); () without the
+        conversation or when it can't be had (the Ask goes on without it)."""
+        if self._conversation is None:
+            return ()
+        try:
+            return tuple(self._conversation())
+        except Exception as exc:  # noqa: BLE001 - an Ask without its conversation is still an Ask
+            logger.warning("Ask: the conversation could not be read (%s)", type(exc).__name__)
+            return ()
+
+    def show_note(self, text: str, tone: str = hud.TONE_DONE, *, hud_text: str | None = None) -> None:
+        """A shortcut's answer in the status line (its typed words left the bar when it was taken; ``hud_text``:
+        what the desktop HUD's bar says instead - Jarvis's own words, never a note). Never while a request runs
+        (the bar belongs to it then)."""
         if self._running is not None or self._stop.is_set():
             return
         self._status(text, tone, hud_text=hud_text)
-        if clear:
-            self.bar.clear_input()
 
     def cancel(self) -> None:
         running = self._running
@@ -748,27 +793,24 @@ class AskController(QObject):
             # A mode with no run is amber, but a brief of Jarvis's own is an answer (it stays as done).
             soft = (outcome.question and not outcome.cards) or (bool(getattr(outcome, "note_kind", ""))
                                                                 and getattr(outcome, "brief", None) is None)
-            done = any(not card.error for card in outcome.cards) or getattr(outcome, "brief", None) is not None
             if getattr(outcome, "mode", "") == MODE_DESKTOP:
-                # A desktop plan: Jarvis's own words for it; the request stays in the bar to rephrase when no step
-                # passed (a question back, everything refused).
+                # A desktop plan: Jarvis's own words for it (amber when no step passed: a question back,
+                # everything refused).
                 plan = getattr(outcome, "brief", None)
                 soft = plan is None or desktop_mode.plan_tone_warn(plan)
-                done = plan is not None and bool(plan.accepted())
+            # The bar is never touched here: a typed request left it as it started (Up brings it back),
+            # and a click-started run never touches what the owner may be typing (R23).
             self._status(self._answer(outcome), hud.TONE_WARN if soft else hud.TONE_DONE, keep_link=keep_link,
                          hud_text=self._hud_answer(outcome))
-            typed_in = running.bar if running.bar is not None and shiboken6.isValid(running.bar) else self.bar
-            if done and (running.typed or (running.clear_text and typed_in.text() == running.clear_text)):
-                # A question back, choices or nothing to propose keep the draft to edit; a click-started
-                # run (an offer, a choice) never touches what the owner may be typing (R23): a choice
-                # clears only the very words that led to it, still untouched in the bar - the bar it
-                # started from, should the desktop HUD have come or gone meanwhile (set_bar).
-                typed_in.clear_input()
         else:
             if outcome.kind == LIMIT:
                 self._limit_message = outcome.message
             tone = hud.TONE_WARN if outcome.kind in _SOFT_KINDS else hud.TONE_ERROR
             self._status(outcome.message or "Ask failed; nothing was proposed", tone)
+            if running.typed and running.words and not outcome.runs:
+                # Refused before any planner run (a limit, Claude Code not ready, web research off):
+                # nothing was asked, so the words come back to the empty bar to send again later.
+                self.bar.give_back(running.words)
         self._show_meta(outcome, web=running.kind == TASK_WEB)
         if running.busy_sent:
             self.busyChanged.emit(False)
@@ -1024,21 +1066,27 @@ def _briefing_words(briefing: Any) -> str:
 
 
 def memory_words(notes: Sequence[str], left_out: int) -> str:
-    """"3 notes, 412 characters (1 not sent: over the 4 KB limit)", or "none", for "Memory given"."""
+    """"3 notes, 412 characters (1 not sent: over the 8 KB limit)", or "none", for "Memory given"."""
     if not notes and not left_out:
         return "none"
     text = f"{_plural(len(notes), 'note')}, {sum(len(note) for note in notes):,} characters"
     if left_out:
-        text += f" ({left_out} not sent: over the 4 KB limit)"
+        text += f" ({left_out} not sent: over the {MEMORY_PROMPT_CAP // 1000} KB limit)"
     return text
+
+
+def conversation_words(exchanges: int) -> str:
+    """"3 earlier exchanges" (a count only, never what was said), or "none", for "Conversation given"."""
+    return _plural(exchanges, "earlier exchange") if exchanges else "none"
 
 
 @quiet(NO_TASK)
 def _request_task(live: LiveStream | None, text: str, briefing: Any, *, kind: str = TASK_ASK,
-                  memory: tuple[Sequence[str], int] | None = None) -> LiveTask:
+                  memory: tuple[Sequence[str], int] | None = None, conversation: int | None = None) -> LiveTask:
     """A new Ask's LIVE view task and its "Your request" step (NO_TASK without the LIVE view).
     ``kind`` TASK_WEB: a "web:" request (web research only: nothing is read from the accounts).
-    ``memory``: (the notes the planner gets, how many left out) while memory is on."""
+    ``memory``: (the notes the planner gets, how many left out) while memory is on. ``conversation``:
+    how many earlier exchanges the planner gets (None: no conversation is kept)."""
     if live is None:
         return NO_TASK
     task = live.task(kind, text)
@@ -1050,9 +1098,11 @@ def _request_task(live: LiveStream | None, text: str, briefing: Any, *, kind: st
         fields = [("You typed", text), ("Briefing given", _briefing_words(briefing))]
         if memory is not None:
             fields.append(("Memory given", memory_words(*memory)))
+        if conversation is not None:
+            fields.append(("Conversation given", conversation_words(conversation)))
     step = task.step(ASK_REQUEST, "Your request", fields=fields)
     if len(text) > COMMAND_CAP:
-        step.note(f"Jarvis uses the first {COMMAND_CAP} characters")
+        step.note(f"Jarvis uses the first {COMMAND_CAP:,} characters")
     step.done(STATUS_OK)
     return task
 
