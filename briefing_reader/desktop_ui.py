@@ -53,13 +53,21 @@ hook). It keeps the owner's rules:
   close goes through and from then on nothing switches or comes forward; a switch on its way stops at once.
 * ``shutdown()`` (Jarvis closing, next to the meetings') stops a switch on its way and hides and deletes the HUD's
   windows.
-* Desktop requests (P1.7; SPEC 3): ``route_request(words)`` - a request typed on the HUD's bar that ask.routes calls
-  a desktop request - gives a local route (desktop.routes: handled on this PC, no planner run; ``answer_local``
-  says it in Jarvis's own words, with its LIVE task "Handled on this PC") or the planner's job
-  (ask.desktop_mode.DesktopJob: a run id and the request's candidates, ``context_for`` - P1.8 PLUGS IN HERE with
-  ``context_source`` and ``search``; until then none). The planner's checked plan comes back through the app
-  (``report_plan``: kept in memory as ``last_plan``, counts in the log). Nothing is opened or changed in this part:
-  the caption says what was understood and that nothing was opened yet; P1.8 carries the steps out.
+* Desktop requests (P1.7, P1.8; SPEC 3 and 6.4): ``request(words, planner=)`` - a request typed on the HUD's bar
+  that ask.routes calls a desktop request - goes to the "desktop" thread (desktop.worker: searches and opens off the
+  GUI thread, one at a time; desktop.service does the work there, its backend made there at the first request -
+  ``backend_factory``, the real Win32Backend in the app, which refuses to be made while the tests run). There it is
+  resolved: a local route (desktop.routes: "open Downloads", "open <app>", "open <https address>", "find <words>")
+  is carried out at once - re-checked right before its OS call (desktop.executor) - and comes back by signal
+  (``answered``: Jarvis's own words for what happened, with its LIVE task "Handled on this PC"); anything else comes
+  back as the planner's job (``plannerNeeded``: ask.desktop_mode.DesktopJob with this PC's candidates - names only
+  reach the planner - and ``carry_out``, through which the Ask thread has the checked plan carried out on the
+  desktop thread). Meanwhile ``busy()`` is true and a second request is refused. ``context_source(words)``, when
+  set, stands in for this PC's candidates (the tests' invented ones).
+* What came of a request (``report_plan`` for the planner's outcome, or a local route) is kept in memory:
+  ``last_plan``, ``last_run`` (desktop.executor.DesktopRun), ``pending`` (the ONE-CLICK and CARD steps held for the
+  owner's click - P1.9 makes their cards) and ``found`` (what a find found - P1.9's list). INSTANT steps have
+  opened by then (owner decision D5: a file's best match opens at once; the other matches are kept with it).
 
 Logs: statuses, durations, screen numbers, run ids, skill kinds, counts and refusal codes only - never what was
 typed, a name or a path.
@@ -68,8 +76,11 @@ typed, a name or a path.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable, Mapping
+from concurrent.futures import CancelledError, Future
+from concurrent.futures import TimeoutError as FutureTimeout
 from typing import Any
 
 import shiboken6
@@ -81,8 +92,11 @@ from . import alive, dock, holo, hud_overlay
 from . import live as live_events
 from . import orb as orb_mod
 from .ask import desktop_mode
+from .desktop import executor as desktop_executor
 from .desktop import routes as desktop_routes
+from .desktop import service as desktop_service
 from .desktop.context import DesktopContext
+from .desktop.worker import DesktopWorker
 from .persona import with_address
 
 logger = logging.getLogger(__name__)
@@ -91,6 +105,19 @@ BRING_BACK_TEXT = hud_overlay.BRING_BACK_TEXT      # the HUD's button and the tr
 HUD_CAPTION = "On your desktop, {sir}."            # the HUD's caption line as it opens
 NO_ORB_PX = 112                                    # a window with no orb shown: the flight's orb comes from its centre
                                                    # at Switch.dc.html's side size
+LOOKING_TEXT = "Looking on this PC..."             # the caption while a request is resolved on the desktop thread
+BUSY_TEXT = "Jarvis is still looking on this PC; try again in a moment"   # a second request meanwhile
+UNAVAILABLE_TEXT = "I can't look on this PC right now, {sir} - nothing was opened."
+TOO_LONG_TEXT = "Looking on this PC took too long, {sir} - I stopped."
+RESOLVE_TIMEOUT_S = 30.0                           # a request is waited for this long at most (then nothing opens)
+CARRY_OUT_TIMEOUT_S = 60.0                         # the Ask thread waits this long for a plan's steps at most
+
+
+def _real_backend() -> Any:
+    """The app's backend: the real one (on the desktop thread; it refuses to be made while the tests run)."""
+    from .desktop.backend import Win32Backend
+
+    return Win32Backend()
 
 
 def show_window(window: Any) -> None:
@@ -118,9 +145,11 @@ LOCAL_ROUTE_TEXT = "on this PC - no planner run"
 
 
 @live_events.quiet(None)
-def _local_task(live: Any, words: str, found: Any, said: str) -> Any:
-    """A local route's LIVE task (TASK_DESKTOP; never opens LIVE by itself): what was typed, the route ("on this PC")
-    and its skill, and Jarvis's words - never a name of an app, a file or a site. None without the LIVE view."""
+def _local_task(live: Any, words: str, found: Any, run: Any, said: str, soft: bool) -> Any:
+    """A local route's LIVE task (TASK_DESKTOP; never opens LIVE by itself): what was typed and the route ("on this
+    PC"), the step carried out (its skill, tier, status and code: "Carrying it out"), and its skill, check and
+    Jarvis's words - never a name of an app, a file or a site, a path or an address. Finished. None without the LIVE
+    view."""
     if live is None:
         return None
     task = live.task(live_events.TASK_DESKTOP, words or "Desktop request")
@@ -129,12 +158,41 @@ def _local_task(live: Any, words: str, found: Any, said: str) -> Any:
     step = task.step(live_events.DESKTOP_REQUEST, "Your request", fields=[("You typed", words or "-"),
                                                                           ("Route", LOCAL_ROUTE_TEXT)])
     step.done(live_events.STATUS_OK, summary="handled on this PC")
+    if run is not None and run.results and not found.code:
+        desktop_mode.run_step(task, run)
+    summary = "not yet possible" if found.code else desktop_mode.run_summary(run)
     result = task.step(live_events.DESKTOP_PLAN, "What Jarvis does with it",
                        fields=[("Step", found.kind), ("Check", f"refused: {found.code}" if found.code else found.tier),
                                ("Jarvis says", said)])
-    result.done(live_events.STATUS_WARN if found.code else live_events.STATUS_OK,
-                summary="not yet possible" if found.code else "nothing was opened yet")
+    result.done(live_events.STATUS_WARN if soft else live_events.STATUS_OK, summary=summary)
+    task.finish(live_events.STATUS_WARN if soft else live_events.STATUS_OK, summary="handled on this PC - " + summary)
     return task
+
+
+class _Either:
+    """Set as soon as any of its events is (the executor only asks ``is_set()`` before each step): the owner's Cancel
+    or the app giving up waiting."""
+
+    def __init__(self, *events: threading.Event | None) -> None:
+        self._events = [event for event in events if event is not None]
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
+
+
+class _Bridge(QObject):
+    """The desktop thread's results, delivered on the GUI thread (connected queued)."""
+
+    resolved = Signal(int, object)          # the request's number, the Future of its desktop_service.Resolved
+
+
+def _deliver(bridge: _Bridge, seq: int, future: Future) -> None:
+    """A Future's end (on the desktop thread, or at once) as the bridge's signal - never after the bridge is gone."""
+    try:
+        if shiboken6.isValid(bridge):
+            bridge.resolved.emit(seq, future)
+    except RuntimeError:                    # the app is closing: nobody waits for it any more
+        pass
 
 
 def is_blank(pixmap: QPixmap, step: int = 16) -> bool:
@@ -151,13 +209,20 @@ class DesktopController(QObject):
     """See the module docstring."""
 
     hudChanged = Signal(bool)          # True: Jarvis went onto the desktop HUD; False: back in the window
+    # A request handled without the planner: Jarvis's own words, whether they take the soft tone, the owner's words
+    # and whether they were taken (handled on this PC: they leave the bar; not handled: they stay).
+    answered = Signal(str, bool, str, bool)
+    # A request for the planner: its job (ask.desktop_mode.DesktopJob; None when the planner may not run) and the
+    # owner's words.
+    plannerNeeded = Signal(object, str)
 
     def __init__(self, config: Any, window: Any, overlay: hud_overlay.HudOverlay, *,
                  chip_screens: Mapping[str, int], home_screen: int,
                  may_enter: Callable[[], bool] | None = None,
                  bring_forward: Callable[[Any], None] | None = None,
                  address: str = "sir", flight_clock: Callable[[], float] | None = None,
-                 live: Any = None, parent: QObject | None = None) -> None:
+                 live: Any = None, backend_factory: Callable[[], Any] | None = None,
+                 parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self.window = window
@@ -170,13 +235,26 @@ class DesktopController(QObject):
         self._bring_forward = bring_forward or show_window
         self._address = address
         self._caption = with_address(HUD_CAPTION, address)
-        # Desktop requests (P1.7). P1.8 PLUGS IN HERE: ``context_source(words)`` gives a request's candidates
-        # (desktop.context.DesktopContext from the index, the Start menu and the scope) and ``search(words)`` the local
-        # search the find route asks; until then no candidates (the planner is told none) and no find route.
+        # Desktop requests (P1.8): the desktop thread and its service, made at the first request; the backend made
+        # there (``backend_factory``; the real one by default). ``context_source(words)``: the tests' stand-in for
+        # this PC's candidates (None: this PC's, from the desktop thread).
+        self._backend_factory = backend_factory or _real_backend
+        self._worker: DesktopWorker | None = None
+        self._service: desktop_service.DesktopService | None = None
+        self._bridge = _Bridge(self)
+        self._bridge.resolved.connect(self._on_resolved, Qt.ConnectionType.QueuedConnection)
+        self._request_seq = 0
+        # The request being resolved: (number, words, planner, run id, its stop - set when the app stops waiting).
+        self._looking: tuple[int, str, bool, str, threading.Event] | None = None
+        self._resolve_timer = QTimer(self)
+        self._resolve_timer.setSingleShot(True)
+        self._resolve_timer.timeout.connect(self._on_resolve_timeout)
         self.context_source: Callable[[str], Any] | None = None
-        self.search: Callable[[Any], Any] | None = None
-        self.last_plan: Any = None                           # the last checked plan (memory only; P1.8 carries it out)
+        self.last_plan: Any = None                           # the last checked plan (memory only)
         self.last_route: Any = None                          # the last local route answered on this PC
+        self.last_run: Any = None                            # what came of the last request (desktop.executor)
+        self.pending: tuple[Any, ...] = ()                   # its steps held for the owner's click (P1.9's cards)
+        self.found: tuple[Any, ...] = ()                     # what its finds found (P1.9's list)
         self._hud = False
         self._switching = False
         self._shut = False
@@ -610,62 +688,154 @@ class DesktopController(QObject):
                 and not self.overlay.is_shown()):
             flight.set_hud(self.overlay.flight_scene())
 
-    # ---- desktop requests (P1.7: understood and checked; P1.8 carries them out) --------------------------
+    # ---- desktop requests (P1.7: understood and checked; P1.8: found and opened) -------------------------
 
-    def context_for(self, words: str) -> DesktopContext:
-        """The candidates for a request (``context_source``; P1.8). None set, or one that fails: none (the failure
-        logged by its type only)."""
-        source = self.context_source
-        if source is None:
-            return DesktopContext()
+    def busy(self) -> bool:
+        """A request is being resolved on the desktop thread (its search, a local route's open): no other may start."""
+        return self._looking is not None
+
+    def join(self, timeout: float) -> None:
+        """Tests: wait for the desktop thread to end after shutdown()."""
+        if self._worker is not None:
+            self._worker.join(timeout)
+
+    def _ensure_worker(self) -> tuple[DesktopWorker, desktop_service.DesktopService]:
+        """The desktop thread and its service, made at the first request ([desktop] folders and extra_folders; the
+        Jarvis project and its data folder never a place)."""
+        if self._worker is None or self._service is None:
+            settings = getattr(self.config, "desktop", None)
+            excluded = [str(path) for path in (getattr(self.config, "project_root", None),
+                                               getattr(self.config, "data_dir", None)) if path]
+            self._service = desktop_service.DesktopService(
+                folders=tuple(getattr(settings, "folders", ()) or ()),
+                extra_folders=tuple(getattr(settings, "extra_folders", ()) or ()),
+                excluded=excluded, backend_factory=self._backend_factory)
+            self._worker = DesktopWorker()
+        return self._worker, self._service
+
+    def request(self, words: str, *, planner: bool = True) -> bool:
+        """A desktop request typed on the HUD (SPEC 3): it goes to the desktop thread (``busy`` meanwhile), which
+        carries a local route out or builds the planner's candidates; the answer comes back on the GUI thread
+        (``answered`` or ``plannerNeeded``). ``planner``: whether the planner may run (Ask on). False when it can't
+        go now (another is being resolved, Jarvis is closing)."""
+        if self._shut or self._quitting or self._looking is not None:
+            return False
+        worker, service = self._ensure_worker()
+        self._request_seq += 1
+        seq, run_id, stop = self._request_seq, desktop_mode.new_run_id(), threading.Event()
+        self._looking = (seq, words, bool(planner), run_id, stop)
+        future = worker.submit(service.resolve, words, planner=bool(planner), override=self.context_source,
+                               run_id=run_id, cancel=stop)
+        bridge = self._bridge
+        future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done))
+        self._resolve_timer.start(int(RESOLVE_TIMEOUT_S * 1000))
+        logger.info("Desktop %s: a request goes to the desktop thread", run_id)
+        return True
+
+    def _on_resolve_timeout(self) -> None:
+        """The desktop thread took too long (a search or the shell hanging): the app stops waiting - nothing opens for
+        that request any more (its stop is set), the words stay, and the next request may come."""
+        looking, self._looking = self._looking, None
+        if looking is None or self._shut:
+            return
+        _seq, words, _planner, run_id, stop = looking
+        stop.set()
+        logger.warning("Desktop %s: the desktop thread took more than %d s; stopped waiting", run_id,
+                       int(RESOLVE_TIMEOUT_S))
+        self.answered.emit(with_address(TOO_LONG_TEXT, self._address), True, words, False)
+
+    def _on_resolved(self, seq: int, future: Future) -> None:
+        """The desktop thread resolved request ``seq``: a local route carried out (``answered`` with Jarvis's words;
+        its LIVE task), the planner's job (``plannerNeeded``), or nothing could be looked at (``answered``, the
+        words left as they are)."""
+        looking = self._looking
+        if looking is None or looking[0] != seq:
+            return
+        self._looking = None
+        self._resolve_timer.stop()
+        _seq, words, planner, run_id, _stop = looking
+        if self._shut:
+            return
         try:
-            context = source(words)
-        except Exception as exc:  # noqa: BLE001 - the planner is then told of nothing
-            logger.warning("Desktop: the request's candidates could not be read (%s)", type(exc).__name__)
-            return DesktopContext()
-        return context if isinstance(context, DesktopContext) else DesktopContext()
-
-    def route_request(self, words: str) -> Any:
-        """A desktop request typed on the HUD (SPEC 3): a local route (desktop.routes.LocalRoute: handled on this PC,
-        no planner run - ``answer_local`` says it) or the planner's job (ask.desktop_mode.DesktopJob: a new run id and
-        the request's candidates)."""
-        context = self.context_for(words)
-        found = desktop_routes.route(words, context, search=self.search)
-        if found is not None:
-            return found
-        return desktop_mode.DesktopJob(desktop_mode.new_run_id(), context)
-
-    def answer_local(self, found: desktop_routes.LocalRoute, words: str = "") -> tuple[str, bool]:
-        """A local route answered on this PC: Jarvis's words for it (the HUD's caption) and whether they take the soft
-        tone (a later phase's request); its LIVE task ("Handled on this PC": the route and its skill, never a name);
-        the log line (the kind only). Nothing is opened or changed yet (P1.8 carries the step out)."""
-        run_id = desktop_mode.new_run_id()
-        self.last_route = found
-        said = desktop_routes.route_words(found, self._address)
-        task = _local_task(self.live, words, found, said)
-        if found.code:
-            logger.info("Desktop %s: local route %s (%s)", run_id, found.kind, found.code)
+            resolved = future.result()
+        except CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - a bug on the desktop thread: nothing was done
+            logger.error("Desktop %s: the request could not be resolved (%s)", run_id, type(exc).__name__)
+            resolved = desktop_service.Resolved(desktop_service.UNAVAILABLE, run_id)
+        if resolved.kind == desktop_service.LOCAL:
+            self._answer_local(resolved, words)
+        elif resolved.kind == desktop_service.PLANNER:
+            job = None
+            if planner:
+                context = resolved.context if isinstance(resolved.context, DesktopContext) else DesktopContext()
+                job = desktop_mode.DesktopJob(run_id, context, carry_out=self._carry_out_for(context))
+            logger.info("Desktop %s: no local route; %s (%.2f s)", run_id,
+                        "the planner's job" if job is not None else "the planner is off", resolved.seconds)
+            self.plannerNeeded.emit(job, words)
         else:
-            logger.info("Desktop %s: local route %s understood (%s); nothing opened yet", run_id, found.kind,
-                        found.tier)
-        if task is not None:
-            task.finish(live_events.STATUS_WARN if found.code else live_events.STATUS_OK,
-                        summary="handled on this PC - " + ("not yet possible" if found.code else
-                                                           "nothing opened yet"))
-        return said, bool(found.code)
+            logger.info("Desktop %s: Jarvis can't look on this PC now; nothing was done", run_id)
+            self.answered.emit(with_address(UNAVAILABLE_TEXT, self._address), True, words, False)
+
+    def _answer_local(self, resolved: Any, words: str) -> None:
+        """A local route carried out on the desktop thread: kept (``last_route``, ``last_run``, ``pending``,
+        ``found``), its LIVE task, the log line (kinds, statuses and codes) and Jarvis's words (``answered``)."""
+        found, run = resolved.route, resolved.run
+        self.last_route = found
+        self._keep(run)
+        if found.code:
+            said, soft = desktop_routes.route_words(found, self._address), True
+            logger.info("Desktop %s: local route %s (%s)", resolved.run_id, found.kind, found.code)
+        else:
+            said = desktop_executor.run_words(run, None, self._address)
+            soft = desktop_executor.run_soft(run)
+            logger.info("Desktop %s: local route %s: %s (%.2f s)", resolved.run_id, found.kind,
+                        run.statuses_text() if run is not None else "nothing", resolved.seconds)
+        _local_task(self.live, words, found, run, said, soft)
+        self.answered.emit(said, soft, words, True)
+
+    def _carry_out_for(self, context: DesktopContext) -> Callable[..., Any]:
+        """The planner's way to carry its checked plan out: on the desktop thread, with this request's candidates for
+        D5's other matches. The Ask thread waits for it - at most CARRY_OUT_TIMEOUT_S (TimeoutError) - and passes the
+        request's Cancel on as it comes: no new step starts after either."""
+        worker, service = self._ensure_worker()
+
+        def carry_out(plan: Any, words: str, cancel: threading.Event | None = None) -> Any:
+            stop = threading.Event()
+            future = worker.submit(service.carry_out, plan, words, context, _Either(stop, cancel))
+            try:
+                return future.result(timeout=CARRY_OUT_TIMEOUT_S)
+            except FutureTimeout:
+                stop.set()                                   # too long: no new step starts
+                raise TimeoutError("the desktop thread took too long") from None
+
+        return carry_out
+
+    def _keep(self, run: Any) -> None:
+        """What came of a request, in memory: the run, its steps held for the owner's click and what its finds
+        found (P1.9 shows them)."""
+        self.last_run = run
+        if run is None:
+            self.pending, self.found = (), ()
+            return
+        self.pending = tuple(run.waiting())
+        self.found = tuple(item for result in run.found() for item in result.found)
 
     def report_plan(self, outcome: Any) -> str:
-        """The planner's outcome for a desktop request (ui's _on_ask_outcome): the checked plan is kept (``last_plan``;
-        memory only - P1.8 carries it out) and Jarvis's own words for it come back (the bar's status already shows
-        them in the caption). Counts and codes only in the log."""
+        """The planner's outcome for a desktop request (ui's _on_ask_outcome): the checked plan and what came of it are
+        kept (``last_plan``, ``last_run``, ``pending``, ``found``; memory only) and Jarvis's own words for them come
+        back (the bar's status already shows them in the caption). Counts and codes only in the log."""
         plan = getattr(outcome, "brief", None)
         if not getattr(outcome, "ok", False) or plan is None:
             logger.info("Desktop %s: no plan (%s)", getattr(outcome, "target", "") or "-",
                         getattr(outcome, "kind", "error"))
             return str(getattr(outcome, "message", "") or "")
         self.last_plan = plan
-        logger.info("Desktop %s: plan kept, %d step(s) passed, %d refused; nothing opened yet (P1.8 opens)",
-                    plan.run_id or "-", len(plan.accepted()), len(plan.refused()))
+        run = getattr(outcome, "desktop_run", None)
+        self._keep(run)
+        logger.info("Desktop %s: plan kept, %d step(s) passed, %d refused; %s", plan.run_id or "-",
+                    len(plan.accepted()), len(plan.refused()),
+                    run.statuses_text() if run is not None else "nothing carried out")
         return str(getattr(outcome, "message", "") or "")
 
     # ---- the chips and the neighbours ------------------------------------------------------------------
@@ -706,15 +876,21 @@ class DesktopController(QObject):
     # ---- closing --------------------------------------------------------------------------------------
 
     def shutdown(self) -> None:
-        """Jarvis is closing (AppController.shutdown, next to the meetings'): a switch on its way stops at once and the
-        HUD's windows are hidden and deleted. The window is not touched here - the app hides it; nothing ever closes
-        it."""
+        """Jarvis is closing (AppController.shutdown, next to the meetings'): a switch on its way stops at once, the
+        desktop thread takes no new job (the one running ends as it is; the queued ones are cancelled) and the HUD's
+        windows are hidden and deleted. The window is not touched here - the app hides it; nothing ever closes it."""
         if self._shut:
             return
         self._keyboard_wanted = False
         if shiboken6.isValid(self.overlay.hud):
             self.overlay.hud.give_back_keyboard(True, "Jarvis closes")      # the window that had it gets it back
         self._shut = True
+        looking, self._looking = self._looking, None
+        if looking is not None:
+            looking[4].set()                                 # a request being resolved opens nothing now
+        self._resolve_timer.stop()
+        if self._worker is not None:
+            self._worker.stop()                              # the job running ends as it is; nothing new starts
         self._drop_flight()
         self._hud = False
         if shiboken6.isValid(self.reading):

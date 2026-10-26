@@ -109,8 +109,11 @@ the context's candidates, names only). The Ask's checks (no bundle cap: it count
 with its own prompt and schema and Ask's command line otherwise (no tools, no MCP, nothing saved, stdin
 only), its answer read strictly (desktop_mode.plan_from: refused whole when it does not fit), then every
 step checked by desktop.validate against this run's refs and the owner's typed words only (tiers, the NEVER
-list, intent and scope licensing, the suspect rule, the phase gate, the rate caps). Nothing is opened here:
-the outcome carries the checked plan (``brief``) and Jarvis's own words for it (``message``).
+list, intent and scope licensing, the suspect rule, the phase gate, the rate caps). The checked plan is then
+carried out through the desktop (DesktopJob.carry_out: the desktop thread re-checks each target right before its
+one OS call - INSTANT steps open, ONE-CLICK and CARD steps wait for the owner's click; the Ask thread waits for it),
+and the outcome carries the plan (``brief``), the run (``desktop_run``) and Jarvis's own words for them
+(``message``; desktop.executor.run_words - a plan only checked: desktop_mode.plan_words).
 """
 
 from __future__ import annotations
@@ -138,6 +141,7 @@ from ..live import (
     CALENDAR_READ,
     DESKTOP_FIND,
     DESKTOP_PLAN,
+    DESKTOP_STEP,
     DESKTOP_VALIDATE,
     MAIL_SEARCH,
     MAIL_THREAD,
@@ -210,6 +214,7 @@ from .stream import CANCELLED, OVERAGE, AskFailure, InitSummary, Plan, RunResult
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
 from .validate import LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, Cards, keep_valid, to_cards
 from . import dayplan, desktop_mode, meeting_summary, modes, prep
+from ..desktop import executor as desktop_executor
 from ..desktop import validate as desktop_validate
 from .modes import (MODE_DESKTOP, MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP,
                     MODE_USAGE, ModeInputs, ModeRequest)
@@ -795,6 +800,9 @@ class AskOutcome:
     # A follow-up draft's thread (ask.modes.ThreadTarget: memory only; the UI re-fetches its row after a
     # guard stop and finds the card's thread).
     target: Any = field(default=None, repr=False, compare=False)
+    # A desktop request's checked plan carried out (desktop.executor.DesktopRun: what opened, what waits for the
+    # owner's click, what was found or refused; memory only, never logged but its counts).
+    desktop_run: Any = field(default=None, repr=False, compare=False)
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
@@ -1544,9 +1552,10 @@ class AskPlanner:
         """A desktop request the owner typed (ModeRequest.payload: a desktop_mode.DesktopJob): the Ask's checks (Ask
         on, the caps, Claude Code ready - no bundle cap: it counts as an Ask run), the stdin from the job's context
         (names only; this run's refs), ONE planner run with its own prompt and schema, the answer read strictly and
-        every step checked by desktop.validate against this run's refs and the owner's typed words only. Nothing is
-        opened or changed here: the outcome carries the checked plan (``brief``: desktop.validate.DesktopPlan) and
-        Jarvis's own words for it (``message``)."""
+        every step checked by desktop.validate against this run's refs and the owner's typed words only, then the
+        accepted steps carried out on the desktop thread (job.carry_out; this thread waits): the outcome carries the
+        checked plan (``brief``: desktop.validate.DesktopPlan), the run (``desktop_run``: desktop.executor.DesktopRun)
+        and Jarvis's own words for them (``message``)."""
         job = request.payload
         if not isinstance(job, desktop_mode.DesktopJob):
             return AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
@@ -1571,14 +1580,17 @@ class AskPlanner:
             return AskOutcome(False, kind, failed.message if failed else "", runs=1 if result.started else 0,
                               init=result.init, stats=(result.stats,) if result.started else (), target=job.run_id)
         plan = desktop_validate.check_plan(answer, prompt.refs, request.typed, run_id=job.run_id)
-        words = desktop_mode.plan_words(plan, self._owner())
-        _desktop_validated(live, plan, words)
         logger.info("Desktop %s: plan checked, steps=%d (%s), refused=%d (%s)%s", job.run_id, len(plan.steps),
                     plan.skills_text() or "none", len(plan.refused()), plan.codes_text() or "none",
                     " (read from the planner's plain text)" if answer.via_fallback else "")
+        _desktop_validated(live, plan)
+        run = _desktop_carry_out(job, plan, request.typed, cancel)
+        words = (desktop_executor.run_words(run, plan, self._owner()) if run is not None and run.results
+                 else desktop_mode.plan_words(plan, self._owner()))
+        _desktop_carried_out(live, run, words, carried=job.carry_out is not None and bool(plan.accepted()))
         return AskOutcome(True, "ok", words, say=answer.say, question=answer.question,
                           refused=len(plan.refused()), runs=1, init=result.init, stats=(result.stats,), brief=plan,
-                          mode=MODE_DESKTOP, target=job.run_id)
+                          mode=MODE_DESKTOP, target=job.run_id, desktop_run=run)
 
     # ---- web research -------------------------------------------------------------------------
 
@@ -3247,7 +3259,7 @@ def _desktop_given(live: LiveTask, job: Any, prompt: Any) -> None:
         step.field("Looked in", f"{_count_words(context.looked_in, 'place')}: "
                                 f"{_count_words(context.found, 'file')}")
     else:
-        step.field("Looked in", "nothing yet - Jarvis's own search of this PC comes in a later part")
+        step.field("Looked in", "nowhere - no folder Jarvis may look in was found")
     step.field("Given", f"{_count_words(shown['places'], 'place')}, {_count_words(shown['files'], 'file')}, "
                         f"{_count_words(shown['apps'], 'app')}, {_count_words(shown['sites'], 'site')} - names only, "
                         "never paths or contents")
@@ -3264,9 +3276,9 @@ def _desktop_given(live: LiveTask, job: Any, prompt: Any) -> None:
 
 
 @_quiet()
-def _desktop_validated(live: LiveTask, plan: Any, words: str) -> None:
+def _desktop_validated(live: LiveTask, plan: Any) -> None:
     """"Checking the plan": each step with its skill and its tier or refusal code (never a name, a path or Claude's
-    text), then what Jarvis makes of it (desktop.plan): his own words, nothing opened yet."""
+    text)."""
     if not live.enabled:
         return
     step = live.step(DESKTOP_VALIDATE, "Checking the plan",
@@ -3285,8 +3297,34 @@ def _desktop_validated(live: LiveTask, plan: Any, words: str) -> None:
     if refused:
         summary += f" - {desktop_validate.reason_words(refused[0].code)}"
     step.done(STATUS_WARN if refused or not plan.accepted() else STATUS_OK, summary=summary)
+
+
+def _desktop_carry_out(job: Any, plan: Any, words: str, cancel: threading.Event | None) -> Any:
+    """The checked plan carried out on the desktop thread (job.carry_out; the Ask thread waits for it): the run, or
+    None when there is nothing to carry out, no way to (a plan only checked) or it could not be (logged by type)."""
+    carry_out = getattr(job, "carry_out", None)
+    if carry_out is None or not plan.accepted():
+        return None
+    try:
+        return carry_out(plan, words, cancel)
+    except Exception as exc:  # noqa: BLE001 - the desktop thread stopped (Jarvis closing) or took too long
+        logger.warning("Desktop %s: the plan could not be carried out (%s)", plan.run_id or "-", type(exc).__name__)
+        return None
+
+
+@_quiet()
+def _desktop_carried_out(live: LiveTask, run: Any, words: str, *, carried: bool) -> None:
+    """"Carrying it out" (desktop.step): each step with its skill, tier, status and code - never a name, a path or an
+    address -, then what Jarvis says (desktop.plan): his own words."""
+    if not live.enabled:
+        return
+    if run is not None and run.results:
+        desktop_mode.run_step(live, run)
+    elif carried:
+        step = live.step(DESKTOP_STEP, desktop_mode.RUN_STEP_TITLE)
+        step.done(STATUS_FAILED, summary="it could not be carried out - nothing was opened")
     result = live.step(DESKTOP_PLAN, "What Jarvis does with it", fields=[("Jarvis says", words)])
-    result.done(STATUS_OK, summary="nothing was opened yet")
+    result.done(STATUS_OK, summary=desktop_mode.run_summary(run))
 
 
 def mode_todos(pending: Sequence[ProposedAction], planned: Mapping[str, date] | None = None) -> tuple[Any, ...]:

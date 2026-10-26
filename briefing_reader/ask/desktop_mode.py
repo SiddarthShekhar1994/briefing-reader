@@ -24,17 +24,24 @@ context holds (SPEC 2.4). The rows are numbered by position and trimmed to the b
 <files> first, then <apps>; "[N more ... left out]"); only THEN is the run's RefIndex made, from the rows shown: a
 row cut to fit has no ref, so no step can name it.
 
-    DesktopJob(run_id, context)          ModeRequest.payload of a desktop run (memory only): its run id ("d7f3", the
-                                         logs' and Live's handle) and the context's candidates (desktop.context;
-                                         P1.8 builds them from this PC, the tests from fakes)
+    DesktopJob(run_id, context, carry_out)   ModeRequest.payload of a desktop run (memory only): its run id ("d7f3",
+                                         the logs' and Live's handle), the context's candidates (desktop.context:
+                                         built on the desktop thread from this PC - desktop.service -, the tests'
+                                         from fakes) and how the checked plan is carried out (the desktop thread's
+                                         executor, which the Ask thread waits for; None: checked only)
     build_prompt(now, request, context, zone=, run_id=)   DesktopPrompt(text, refs, shown)
     plan_from(value)                     the structured output checked strictly: a DesktopAnswer, or None when
                                          anything does not fit (a wrong type, a key outside SPEC 4.3's outline, a
                                          text or a list over its cap, more than 12 steps): the whole answer is refused
     read_desktop_result(event, init)     the run's answer: DesktopAnswer, or AskFailure (GARBLED "shape")
-    plan_words(plan, address)            Jarvis's own words for a checked plan (the HUD's caption): what was
-                                         understood - kinds and counts, never a name or Claude's text - and that
-                                         nothing was opened yet (P1.7 carries nothing out)
+    plan_words(plan, address)            Jarvis's own words for a checked plan that was not carried out (the HUD's
+                                         caption): what was understood - kinds and counts, never a name or Claude's
+                                         text - and that nothing was opened; why nothing was (every step refused,
+                                         not yet possible, the request unclear). A plan carried out is said by
+                                         desktop.executor.run_words.
+    run_step(task, run), run_summary(run)   a run in Live: its "Carrying it out" step (desktop.step: each step's
+                                         skill, tier, status and code - never a name, a path or an address) and
+                                         its counts ("1 opened, 1 waiting for you")
 
 Pure: nothing is logged here, and every repr names kinds and counts only.
 """
@@ -51,6 +58,8 @@ from datetime import date, datetime
 from typing import Any, NamedTuple, TypeVar
 from urllib.parse import urlsplit
 
+from .. import live as live_events
+from ..desktop import executor as dx
 from ..desktop import guard
 from ..desktop import validate as dv
 from ..desktop.context import DesktopContext, FileItem, Place, SiteItem, size_bucket
@@ -94,10 +103,14 @@ def new_run_id() -> str:
 
 @dataclass(frozen=True)
 class DesktopJob:
-    """One desktop request's job (memory only): its run id and the context's candidates."""
+    """One desktop request's job (memory only): its run id, the context's candidates and how its checked plan is
+    carried out (``carry_out(plan, words, cancel)`` -> desktop.executor.DesktopRun: on the desktop thread, which the
+    Ask thread waits for - the app's DesktopController gives it; None: the plan is only checked, nothing is
+    opened)."""
 
     run_id: str
     context: DesktopContext = field(default_factory=DesktopContext, repr=False)
+    carry_out: Callable[..., Any] | None = field(default=None, repr=False, compare=False)
 
     def __repr__(self) -> str:
         return f"DesktopJob({self.run_id}, {self.context.counts()})"
@@ -409,3 +422,41 @@ def plan_tone_warn(plan: dv.DesktopPlan) -> bool:
     """The words take the soft tone (the bar's TONE_WARN, as an Ask's question back does) when a step was refused or
     none was accepted; else the done tone."""
     return bool(plan.refused()) or not plan.accepted()
+
+
+# --------------------------------------------------------------------------
+# A run in Live ("Carrying it out": each step's skill, tier, status and code - never a name, a path or an address)
+# --------------------------------------------------------------------------
+
+RUN_STEP_TITLE = "Carrying it out"
+RUN_CHECKED_TEXT = ("each target right before Windows was asked: where it is, that it is the same item, and "
+                    "Jarvis's safety rules")
+# A step's status in Live (desktop.executor's statuses), and its words in the step's summary.
+_RUN_STATUS = {dx.DONE: (live_events.STATUS_OK, "DONE"), dx.FOUND: (live_events.STATUS_OK, "FOUND"),
+               dx.WAITING: (live_events.STATUS_WARN, "WAITING"), dx.REFUSED: (live_events.STATUS_BLOCKED, "REFUSED"),
+               dx.FAILED: (live_events.STATUS_FAILED, "FAILED"),
+               dx.CANCELLED: (live_events.STATUS_CANCELLED, "CANCELLED")}
+_RUN_WORDS = {dx.DONE: "opened", dx.FOUND: "found", dx.WAITING: "waiting for you", dx.REFUSED: "refused",
+              dx.FAILED: "failed", dx.CANCELLED: "cancelled"}
+
+
+def run_summary(run: dx.DesktopRun | None) -> str:
+    """"1 opened, 1 waiting for you" ("nothing was opened" when nothing was carried out)."""
+    if run is None or not run.results:
+        return "nothing was opened"
+    return ", ".join(f"{count} {_RUN_WORDS.get(status, status)}" for status, count in run.counts().items())
+
+
+def run_step(task: Any, run: dx.DesktopRun) -> None:
+    """Live's "Carrying it out" step (desktop.step) of ``run`` on ``task``: each step's line (desktop.executor
+    .describe: its skill, tier, status and code, the code in Jarvis's words as its note) - never a name, a path or an
+    address."""
+    try:
+        step = task.step(live_events.DESKTOP_STEP, RUN_STEP_TITLE, fields=[("Checked again", RUN_CHECKED_TEXT)])
+        for result in run.results:
+            status, text = _RUN_STATUS.get(result.status, (live_events.STATUS_WARN, ""))
+            step.item(dx.describe(result), status=status, status_text=text,
+                      note=dx.code_words(result.code) if result.code else "")
+        step.done(live_events.STATUS_WARN if dx.run_soft(run) else live_events.STATUS_OK, summary=run_summary(run))
+    except Exception:  # noqa: BLE001 - Live is only a view; never a reason for a desktop step to fail
+        pass

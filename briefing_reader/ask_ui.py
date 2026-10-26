@@ -75,12 +75,14 @@ the bar.
 
 A desktop request (ask.routes ROUTE_DESKTOP, only while [desktop] is on: clear desktop verbs) goes to the
 app first (``desktop_request(text)``): from the window's bar Jarvis goes onto the HUD, where the request
-continues; a local route is answered there on this PC (no planner run); anything else comes back as an
-ask.desktop_mode.DesktopJob and runs as ONE planner mode run (MODE_DESKTOP, live.TASK_DESKTOP, its first step
-desktop.request) - typed, so its words leave the bar as it starts (R23: the app takes a local route's words itself,
-and a request from the window's bar leaves it and goes on in the HUD's). It gets no notes and no conversation (owner
-decision D6: names only). Its answer on the bar is Jarvis's own words for the checked plan (AskOutcome.message), never
-Claude's say or question.
+continues on the desktop thread (desktop_ui; meanwhile the app's ``blocked`` refuses any other request); a local
+route is carried out there on this PC (no planner run); anything else comes back later as an
+ask.desktop_mode.DesktopJob, which the app runs through ``submit_mode`` as ONE planner mode run (MODE_DESKTOP,
+live.TASK_DESKTOP, its first step desktop.request) - typed, so its words leave the bar as it starts (R23: the app
+takes a local route's words itself, and a request from the window's bar leaves it and goes on in the HUD's). It gets
+no notes and no conversation (owner decision D6: names only). Its checked plan is carried out through the desktop
+thread before the run ends (AskOutcome.desktop_run), and its answer on the bar is Jarvis's own words for what came
+of it (AskOutcome.message), never Claude's say or question; a Cancel after something opened still says what did.
 
 Web research: a request that starts with "web:" (or "research:") is a WEB task (live.TASK_WEB;
 ``running_kind``) whose "Your request" says nothing is read from the accounts; the command still
@@ -121,6 +123,7 @@ from .ask.routes import (MEMORY_ROUTES, NO_ROUTE, ROUTE_DESKTOP, ROUTE_FOLLOWUPS
                          route)
 from .ask.stream import CANCELLED, LIMIT, RESEARCH_CAP
 from .config import Config
+from .desktop import executor as desktop_executor
 from .google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SIGNED_OUT, logged_alias
 from .persona import with_address
 from .live import (
@@ -678,9 +681,10 @@ class AskController(QObject):
 
     def _submit_desktop(self, text: str) -> None:
         """A typed desktop request (ROUTE_DESKTOP, SPEC 3): busy first (nothing switches while a request runs), then
-        the app's side - from the window's bar onto the HUD, where the request continues; a local route answered on
-        this PC with no planner run - and else ONE desktop planner run (MODE_DESKTOP) with the app's job, typed in the
-        bar now bound (the HUD's). Never logged: the words."""
+        the app's side - from the window's bar onto the HUD, where the request continues on the desktop thread; the
+        app answers a local route there and later hands ONE desktop planner run's job to ``submit_mode`` itself (None
+        comes back here) - or, when it hands a job back at once, ONE desktop planner run (MODE_DESKTOP) with it,
+        typed in the bar now bound (the HUD's). Never logged: the words."""
         if self._running is not None:
             self._status(BUSY_TEXT if self._running.cancel_requested else
                          "Jarvis is already planning; wait or Cancel it", hud.TONE_WARN)
@@ -779,7 +783,7 @@ class AskController(QObject):
         if outcome.caps is not None:
             self.caps = outcome.caps
             self.caps_at = self._monotonic()
-        if running.cancel_requested or outcome.kind == CANCELLED:
+        if (running.cancel_requested or outcome.kind == CANCELLED) and not _desktop_acted(outcome):
             logger.info("Ask %d: cancelled; nothing was proposed", seq)
             self._finish_task(running.task, outcome, cancelled=True)
             self._status(CANCELLED_TEXT, hud.TONE_IDLE)
@@ -796,10 +800,9 @@ class AskController(QObject):
             soft = (outcome.question and not outcome.cards) or (bool(getattr(outcome, "note_kind", ""))
                                                                 and getattr(outcome, "brief", None) is None)
             if getattr(outcome, "mode", "") == MODE_DESKTOP:
-                # A desktop plan: Jarvis's own words for it (amber when no step passed: a question back,
-                # everything refused).
-                plan = getattr(outcome, "brief", None)
-                soft = plan is None or desktop_mode.plan_tone_warn(plan)
+                # A desktop plan: Jarvis's own words for it and what came of it (amber when no step passed - a
+                # question back, everything refused -, a step was refused or failed, or one needs the owner's OK).
+                soft = _desktop_soft(outcome)
             # The bar is never touched here: a typed request left it as it started (Up brings it back),
             # and a click-started run never touches what the owner may be typing (R23).
             self._status(self._answer(outcome), hud.TONE_WARN if soft else hud.TONE_DONE, keep_link=keep_link,
@@ -1307,28 +1310,47 @@ def _prep_finish_words(outcome: Any) -> tuple[str, str]:
     return STATUS_OK, words
 
 
+def _desktop_soft(outcome: Any) -> bool:
+    """A desktop request's words take the soft tone: no plan, every step refused or none accepted, or - carried out -
+    a step refused, failed, cancelled or waiting for the owner's OK on a card (desktop.executor.run_soft)."""
+    plan = getattr(outcome, "brief", None)
+    if plan is None:
+        return True
+    run = getattr(outcome, "desktop_run", None)
+    if run is not None and run.results:
+        return desktop_executor.run_soft(run, plan)
+    return desktop_mode.plan_tone_warn(plan)
+
+
+def _desktop_acted(outcome: Any) -> bool:
+    """A desktop request that opened something before its Cancel took effect: its words say what happened (one OS
+    call in flight completes; nothing new starts after a cancel)."""
+    run = getattr(outcome, "desktop_run", None)
+    return getattr(outcome, "mode", "") == MODE_DESKTOP and run is not None and bool(run.done())
+
+
 def _desktop_meta(outcome: Any) -> list[str]:
-    """The meta line after a desktop plan: "desktop plan: 2 steps OK, 1 refused - nothing opened yet"."""
+    """The meta line after a desktop plan: "desktop plan: 2 steps OK, 1 refused - 1 opened, 1 waiting for you"."""
     plan = getattr(outcome, "brief", None)
     if plan is None:
         return ["desktop plan"]
     words = f"desktop plan: {_plural(len(plan.accepted()), 'step')} OK"
     if plan.refused():
         words += f", {len(plan.refused())} refused"
-    return [words + " - nothing opened yet"]
+    return [words + " - " + desktop_mode.run_summary(getattr(outcome, "desktop_run", None))]
 
 
 def _desktop_finish_words(outcome: Any) -> tuple[str, str]:
-    """A desktop request's LIVE task end: "plan checked: 2 steps OK - nothing opened yet"; CHECK when a step was
-    refused or none passed."""
+    """A desktop request's LIVE task end: "plan checked: 2 steps OK - 1 opened, 1 waiting for you"; CHECK when a step
+    was refused, failed or needs a card, or none passed."""
     plan = getattr(outcome, "brief", None)
     if plan is None:
         return STATUS_WARN, "no plan"
     words = f"plan checked: {_plural(len(plan.accepted()), 'step')} OK"
     if plan.refused():
         words += f", {len(plan.refused())} refused"
-    words += " - nothing opened yet"
-    return (STATUS_WARN if desktop_mode.plan_tone_warn(plan) else STATUS_OK), words
+    words += " - " + desktop_mode.run_summary(getattr(outcome, "desktop_run", None))
+    return (STATUS_WARN if _desktop_soft(outcome) else STATUS_OK), words
 
 
 def _meeting_finish_words(outcome: Any) -> tuple[str, str]:

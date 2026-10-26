@@ -1,5 +1,6 @@
 """Tests for the desktop feature's NEVER list and suspect scanner (briefing_reader.desktop.guard), the test guard on
-the real backend (briefing_reader.desktop.backend) and the no-shell grep over briefing_reader/desktop/.
+the real backend (briefing_reader.desktop.backend: its constructor and every one of its OS-touching methods, one test
+per method), the opens' last guard and the no-shell grep over briefing_reader/desktop/.
 
 Every constant in guard.NEVER_CONSTANTS has its own test here, named test_never_<constant in lower case>
 (test_every_never_constant_has_its_own_test checks that, and that no NEVER constant is left off the list).
@@ -8,14 +9,17 @@ Every constant in guard.NEVER_CONSTANTS has its own test here, named test_never_
 from __future__ import annotations
 
 import ast
+import ctypes
 import io
 import os
 import re
 import tempfile
+import threading
 import tokenize
 import unittest
 import uuid
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from briefing_reader import desktop
@@ -518,13 +522,6 @@ class BackendGuardTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {dbk.TEST_GUARD_ENV: ""}):
             self.assertFalse(dbk.real_backend_blocked())          # (checked only; never constructed here)
 
-    def test_only_the_known_folder_lookup_is_built(self) -> None:
-        for name, args in (("final_path", ("C:\\x",)), ("file_info", ("C:\\x",)), ("exists", ("C:\\x",)),
-                           ("drive_type", ("C:\\",))):
-            with self.subTest(method=name), self.assertRaises(NotImplementedError):
-                getattr(dbk.Win32Backend, name)(None, *args)       # called unbound: no backend is made
-        self.assertIsNone(dbk.Win32Backend.known_folder(None, "nowhere"))   # an unknown name asks Windows nothing
-
     def test_the_known_folders(self) -> None:
         self.assertEqual(dbk.ROOT_FOLDERS, ("desktop", "documents", "downloads", "pictures", "music", "videos"))
         for name, folder_id in dbk.KNOWN_FOLDERS.items():
@@ -544,6 +541,159 @@ class BackendGuardTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 fake.final_path("\\\\server\\share\\a.txt")          # never a network path
             self.assertEqual(fake.asked("final_path")[-1], "\\\\server\\share\\a.txt")
+
+
+# Every OS-touching method of the real backend, with arguments shaped like the app's.
+_REAL_CALLS = {
+    "known_folder": (("downloads",), {}),
+    "final_path": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "file_info": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "exists": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "drive_type": (("C:\\",), {}),
+    "file_id": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "list_folder": (("C:\\Users\\Owner\\Downloads",), {}),
+    "search_index": (("SELECT TOP 1 System.ItemPathDisplay FROM SystemIndex",), {"timeout_s": 1.0, "max_rows": 1}),
+    "recent_items": ((), {"limit": 5}),
+    "start_menu_apps": ((), {}),
+    "open_document": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "show_in_folder": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "open_folder": (("C:\\Users\\Owner\\Downloads",), {}),
+    "launch_app": (("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",), {}),
+    "open_url": (("https://www.example.org/",), {}),
+}
+
+
+def _public_methods(cls: type) -> set[str]:
+    return {name for name, value in vars(cls).items() if callable(value) and not name.startswith("_")}
+
+
+class RealBackendMethodTests(unittest.TestCase):
+    """SPEC's verified review note: EVERY OS-touching method of the real backend raises RealBackendInTests while the
+    test guard is on - not only its constructor - so a real backend made before the guard went on still reaches
+    nothing. One test per method. Each call goes to an instance whose constructor never ran (object.__new__: nothing
+    is ever constructed), and the OS entry points it could reach are booby-trapped for this thread meanwhile: the
+    guard must stop each call before any of them."""
+
+    def call_refused(self, name: str) -> None:
+        backend = object.__new__(dbk.Win32Backend)
+        args, kwargs = _REAL_CALLS[name]
+        caller = threading.current_thread()
+        reached: list[str] = []
+
+        def trap(label: str, original: Any) -> Any:
+            def trapped(*a: Any, **k: Any) -> Any:
+                if threading.current_thread() is caller:
+                    reached.append(label)
+                    raise AssertionError(f"the real backend reached {label}")
+                return original(*a, **k)
+            return trapped
+
+        patches = [mock.patch.object(dbk, helper, trap(helper, getattr(dbk, helper)))
+                   for helper in ("_shell_known_folder", "_final_path_name", "_shell_open", "_com_ready")]
+        patches += [mock.patch.object(os, "lstat", trap("os.lstat", os.lstat)),
+                    mock.patch.object(os, "scandir", trap("os.scandir", os.scandir)),
+                    mock.patch.object(os.path, "realpath", trap("os.path.realpath", os.path.realpath)),
+                    mock.patch.object(os.path, "lexists", trap("os.path.lexists", os.path.lexists)),
+                    mock.patch.object(ctypes, "WinDLL", trap("ctypes.WinDLL", ctypes.WinDLL))]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        with self.assertRaises(dbk.RealBackendInTests):
+            getattr(backend, name)(*args, **kwargs)
+        for patch in reversed(patches):
+            patch.stop()
+        self.assertEqual(reached, [])
+
+    def test_every_public_method_is_guarded_and_tested(self) -> None:
+        methods = _public_methods(dbk.Win32Backend)
+        self.assertEqual(methods, set(_REAL_CALLS))
+        self.assertEqual(methods, _public_methods(dbk.DesktopBackend))         # the Protocol: the same methods
+        self.assertLessEqual(methods, _public_methods(FakeDesktopBackend))     # ... and the fake has every one
+        for name in methods:
+            with self.subTest(method=name):
+                self.assertTrue(getattr(getattr(dbk.Win32Backend, name), "reaches_os", False))
+                self.assertTrue(callable(getattr(self, f"test_{name}_raises_under_the_guard", None)))
+
+    def test_known_folder_raises_under_the_guard(self) -> None:
+        self.call_refused("known_folder")
+
+    def test_final_path_raises_under_the_guard(self) -> None:
+        self.call_refused("final_path")
+
+    def test_file_info_raises_under_the_guard(self) -> None:
+        self.call_refused("file_info")
+
+    def test_exists_raises_under_the_guard(self) -> None:
+        self.call_refused("exists")
+
+    def test_drive_type_raises_under_the_guard(self) -> None:
+        self.call_refused("drive_type")
+
+    def test_file_id_raises_under_the_guard(self) -> None:
+        self.call_refused("file_id")
+
+    def test_list_folder_raises_under_the_guard(self) -> None:
+        self.call_refused("list_folder")
+
+    def test_search_index_raises_under_the_guard(self) -> None:
+        self.call_refused("search_index")
+
+    def test_recent_items_raises_under_the_guard(self) -> None:
+        self.call_refused("recent_items")
+
+    def test_start_menu_apps_raises_under_the_guard(self) -> None:
+        self.call_refused("start_menu_apps")
+
+    def test_open_document_raises_under_the_guard(self) -> None:
+        self.call_refused("open_document")
+
+    def test_show_in_folder_raises_under_the_guard(self) -> None:
+        self.call_refused("show_in_folder")
+
+    def test_open_folder_raises_under_the_guard(self) -> None:
+        self.call_refused("open_folder")
+
+    def test_launch_app_raises_under_the_guard(self) -> None:
+        self.call_refused("launch_app")
+
+    def test_open_url_raises_under_the_guard(self) -> None:
+        self.call_refused("open_url")
+
+    def test_called_unbound_it_raises_too(self) -> None:
+        for name, (args, kwargs) in _REAL_CALLS.items():
+            with self.subTest(method=name), self.assertRaises(dbk.RealBackendInTests):
+                getattr(dbk.Win32Backend, name)(None, *args, **kwargs)
+
+    def test_the_opens_last_guard(self) -> None:
+        """open_problem: the opens' own last check (made after the executor's), pure - nothing is asked of Windows."""
+        good = {"open_document": "C:\\Users\\Owner\\Downloads\\Essay.docx",
+                "show_in_folder": "C:\\Users\\Owner\\Downloads\\setup.exe",      # shown, never opened
+                "open_folder": "C:\\Users\\Owner\\Downloads",
+                "launch_app": "{6D809377-6AF0-444B-8957-A3773F02200E}\\Microsoft VS Code\\Code.exe",
+                "open_url": "https://portal.example.edu/home"}
+        for method, target in good.items():
+            self.assertEqual(dbk.open_problem(method, target), "", method)
+        bad = [("open_document", "C:\\Users\\Owner\\Downloads\\setup.exe"),
+               ("open_document", "C:\\Users\\Owner\\Downloads\\Grades.xlsm"),
+               ("open_document", "C:\\Users\\Owner\\Downloads\\Spotify.lnk"),
+               ("open_document", "C:\\Users\\Owner\\Downloads\\Report.pdf.exe"),
+               ("open_document", "\\\\server\\share\\Essay.docx"),
+               ("open_document", "\\\\?\\C:\\Users\\Owner\\Essay.docx"),
+               ("open_document", "C:Essay.docx"), ("open_document", "Essay.docx"),
+               ("open_document", "C:\\Users\\Owner\\Essay.docx:hidden"),
+               ("open_document", "C:\\Users\\Owner\\..\\Admin\\Essay.docx"),
+               ("show_in_folder", "\\\\server\\share\\a.txt"), ("open_folder", "D:folder"),
+               ("open_folder", "C:\\Users\\Owner\\Downloads. "),
+               ("launch_app", "shell:AppsFolder\\x"), ("launch_app", "C:\\Tools\\run.bat"),
+               ("launch_app", "{6D809377-6AF0-444B-8957-A3773F02200E}\\..\\cmd.exe"),
+               ("launch_app", "https://evil.example.com/app"), ("launch_app", ""),
+               ("open_url", "http://example.org/"), ("open_url", "file:///C:/x.html"),
+               ("open_url", "https://localhost/"), ("open_url", "https://192.168.1.1/"),
+               ("open_url", "ms-settings:privacy"), ("open_url", "javascript:alert(1)"),
+               ("delete", "C:\\Users\\Owner\\Downloads\\a.txt"), ("open_document", None)]
+        for method, target in bad:
+            with self.subTest(method=method, target=ascii(target)):
+                self.assertNotEqual(dbk.open_problem(method, target), "")
 
 
 if __name__ == "__main__":

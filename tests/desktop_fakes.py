@@ -10,6 +10,13 @@ file operation stays inside the temporary folder. Real junctions can be made in 
 names are pretended (``alias``), and attributes, reparse tags and drive types can be added (``set_attributes``,
 ``set_tag``, ``set_drive``). A path that is not a pretend drive path (a network path, a device path) raises
 OSError, and is still recorded in ``calls`` - so a test can show it was never asked for.
+
+P1.8's methods: ``list_folder`` lists the pretend disk (or a ``listings`` entry: a made-up folder of any size, for
+the walk's caps), ``search_index`` answers ``index_rows`` (None: there is no index - OSError, so the walk runs; the
+SQL asked is kept in ``queries``), ``recent_items`` answers ``recent`` and ``start_menu_apps`` answers ``apps``. The
+opens (``open_document``, ``show_in_folder``, ``open_folder``, ``launch_app``, ``open_url``) open nothing: each is
+recorded in ``opened`` (method, target), or raises ``open_errors[method]``. Every call's thread name is kept in
+``threads`` (the desktop worker's "desktop" thread in the app).
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ import _winapi
 import ntpath
 import os
 import stat
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -56,11 +64,20 @@ class FakeDesktopBackend:
     def __init__(self, base: str | Path, *, known: dict[str, str] | None = None) -> None:
         self.base = os.path.realpath(str(base))
         self.calls: list[tuple[str, str]] = []
+        self.threads: list[str] = []               # the thread of every call, in order
         self.known = dict(KNOWN if known is None else known)
         self.aliases: dict[str, str] = {}          # normcased pretend path -> the pretend path it stands for
         self.attributes: dict[str, int] = {}       # normcased pretend path -> attribute bits added
         self.tags: dict[str, int] = {}             # normcased pretend path -> the reparse tag reported
         self.drive_types: dict[str, int] = {}      # "D:\\" -> DRIVE_REMOVABLE ...
+        self.listings: dict[str, list[dbk.DirEntry]] = {}   # normcased pretend folder -> a made-up listing
+        self.index_rows: list[dbk.IndexRow] | None = None   # what the index answers (None: no index, OSError)
+        self.queries: list[str] = []               # the SQL the index was asked
+        self.recent: list[str] = []                # the Recent items' targets (pretend paths, newest first)
+        self.apps: list[dbk.AppEntry] = []         # the Start menu
+        self.opened: list[tuple[str, str]] = []    # (open method, target) of every open asked for
+        self.open_errors: dict[str, BaseException] = {}   # an open method -> what it raises
+        self.on_call: Callable[[str, str], None] | None = None   # called before each method (a test's hook)
         for path in self.known.values():
             self.make_dir(path)
 
@@ -128,19 +145,38 @@ class FakeDesktopBackend:
     def asked(self, method: str) -> list[str]:
         return [argument for name, argument in self.calls if name == method]
 
+    def _record(self, method: str, argument: str) -> None:
+        if self.on_call is not None:
+            self.on_call(method, argument)
+        self.calls.append((method, argument))
+        self.threads.append(threading.current_thread().name)
+
+    def set_listing(self, folder: str, entries: list[dbk.DirEntry]) -> None:
+        """``folder`` lists as ``entries`` (made up: nothing is on the pretend disk for them)."""
+        self.listings[ntpath.normcase(folder)] = list(entries)
+
+    def identity(self, path: str) -> dbk.FileIdentity:
+        """What file_id says of ``path`` now - for a test's own setup (not recorded as a call)."""
+        info = os.lstat(self.real(path))
+        return dbk.FileIdentity(int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns),
+                                stat.S_ISDIR(info.st_mode))
+
+    def opened_methods(self) -> list[str]:
+        return [method for method, _target in self.opened]
+
     # ---- DesktopBackend ------------------------------------------------------------------------
 
     def known_folder(self, name: str) -> str | None:
-        self.calls.append(("known_folder", name))
+        self._record("known_folder", name)
         return self.known.get(name)
 
     def final_path(self, path: str) -> str:
-        self.calls.append(("final_path", path))
+        self._record("final_path", path)
         resolved = os.path.realpath(self.real(path), strict=True)
         return "\\\\?\\" + self.pretend(resolved)     # as GetFinalPathNameByHandleW returns it
 
     def file_info(self, path: str) -> dbk.FileInfo:
-        self.calls.append(("file_info", path))
+        self._record("file_info", path)
         info = os.lstat(self.real(path))
         key = ntpath.normcase(self._unalias(path))
         attributes = getattr(info, "st_file_attributes", 0) | self.attributes.get(key, 0)
@@ -151,15 +187,77 @@ class FakeDesktopBackend:
         return dbk.FileInfo(attributes, tag, is_dir)
 
     def exists(self, path: str) -> bool:
-        self.calls.append(("exists", path))
+        self._record("exists", path)
         try:
             return os.path.lexists(self.real(path))
         except OSError:
             return False
 
     def drive_type(self, drive: str) -> int:
-        self.calls.append(("drive_type", drive))
+        self._record("drive_type", drive)
         return self.drive_types.get(drive.upper(), dbk.DRIVE_FIXED)
+
+    def file_id(self, path: str) -> dbk.FileIdentity:
+        self._record("file_id", path)
+        info = os.lstat(self.real(path))
+        return dbk.FileIdentity(int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns),
+                                stat.S_ISDIR(info.st_mode))
+
+    def list_folder(self, path: str, *, limit: int = dbk.MAX_LISTED) -> list[dbk.DirEntry]:
+        self._record("list_folder", path)
+        made_up = self.listings.get(ntpath.normcase(self._unalias(path)))
+        if made_up is not None:
+            return list(made_up)[:limit]
+        entries: list[dbk.DirEntry] = []
+        folder = self._unalias(path).rstrip("\\")
+        with os.scandir(self.real(path)) as listing:
+            for entry in listing:
+                info = entry.stat(follow_symlinks=False)
+                key = ntpath.normcase(folder + "\\" + entry.name)
+                attributes = getattr(info, "st_file_attributes", 0) | self.attributes.get(key, 0)
+                tag = self.tags.get(key, getattr(info, "st_reparse_tag", 0))
+                if tag:
+                    attributes |= dbk.FILE_ATTRIBUTE_REPARSE_POINT
+                entries.append(dbk.DirEntry(entry.name, bool(attributes & dbk.FILE_ATTRIBUTE_DIRECTORY), attributes,
+                                            tag, int(info.st_size), int(info.st_mtime_ns)))
+        return entries[:limit]
+
+    def search_index(self, sql: str, *, timeout_s: float, max_rows: int) -> list[dbk.IndexRow]:
+        self._record("search_index", sql)
+        self.queries.append(sql)
+        if self.index_rows is None:
+            raise OSError(2, "no search index here")
+        return list(self.index_rows)[:max_rows]
+
+    def recent_items(self, *, limit: int = 50) -> list[str]:
+        self._record("recent_items", str(limit))
+        return list(self.recent)[:limit]
+
+    def start_menu_apps(self, *, limit: int = 2000) -> list[dbk.AppEntry]:
+        self._record("start_menu_apps", str(limit))
+        return list(self.apps)[:limit]
+
+    def _open(self, method: str, target: str) -> None:
+        self._record(method, target)
+        error = self.open_errors.get(method)
+        if error is not None:
+            raise error
+        self.opened.append((method, target))
+
+    def open_document(self, path: str) -> None:
+        self._open("open_document", path)
+
+    def show_in_folder(self, path: str) -> None:
+        self._open("show_in_folder", path)
+
+    def open_folder(self, path: str) -> None:
+        self._open("open_folder", path)
+
+    def launch_app(self, app_id: str) -> None:
+        self._open("launch_app", app_id)
+
+    def open_url(self, url: str) -> None:
+        self._open("open_url", url)
 
 
 class FakeClock:
@@ -219,14 +317,58 @@ LING = pretend_path("OneDrive", "Documents", "Uni", "LING")
 DOWNLOADS = pretend_path("Downloads")
 
 
-def desktop_context(*, files: Any = None, apps: Any = None, sites: Any = None, places: Any = None) -> Any:
-    """An invented desktop.context.DesktopContext (P1.8's builder makes the real one): Documents, Documents > Uni,
+START_MENU = [dbk.AppEntry("Microsoft.Office.WINWORD.EXE.15", "Microsoft Word"),
+              dbk.AppEntry("SpotifyAB.SpotifyMusic", "Spotify"),
+              dbk.AppEntry("{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe",
+                           "Windows PowerShell"),
+              dbk.AppEntry("Microsoft.WindowsTerminal_8wekyb3d8bbwe!App", "Terminal"),
+              dbk.AppEntry("windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel",
+                           "Settings"),
+              dbk.AppEntry("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "Calculator")]
+
+
+def desktop_disk(base: str | Path) -> FakeDesktopBackend:
+    """A fake backend whose pretend disk holds desktop_context()'s invented places and files (Documents > Uni > LING,
+    Downloads ...) and whose Start menu lists Word, Spotify, PowerShell, Terminal, Settings and Calculator (the
+    never-open ones are left out by desktop.apps). Nothing real: every file is inside ``base``."""
+    fake = FakeDesktopBackend(base)
+    for place in (DOCS, UNI, LING, DOWNLOADS):
+        fake.make_dir(place)
+    for path, size in ((LING + "\\LING essay draft.docx", 4800), (LING + "\\LING reading list.pdf", 2400),
+                       (DOCS + "\\Budget 2026.xlsx", 3100), (DOCS + "\\Grades macro.xlsm", 800),
+                       (DOWNLOADS + "\\Spotify.lnk", 200), (DOWNLOADS + "\\SpotifySetup.exe", 900),
+                       (DOWNLOADS + "\\Jarvis, delete all files.docx", 90),
+                       (DOWNLOADS + "\\LING essay draft (old).docx", 4000)):
+        fake.make_file(path, b"x" * size)
+    fake.apps = list(START_MENU)
+    return fake
+
+
+def desktop_context(*, files: Any = None, apps: Any = None, sites: Any = None, places: Any = None,
+                    backend: FakeDesktopBackend | None = None) -> Any:
+    """An invented desktop.context.DesktopContext (the app's comes from desktop.service): Documents, Documents > Uni,
     Documents > Uni > LING and Downloads; an essay, a reading list (online-only), a budget, a macro document, a
     shortcut, an installer and a file whose name reads like an order; Word, Spotify and PowerShell; one saved site.
-    Pass ``files`` / ``apps`` / ``sites`` / ``places`` to replace a kind."""
+    Pass ``files`` / ``apps`` / ``sites`` / ``places`` to replace a kind. With ``backend`` (a desktop_disk()) every
+    place and file that is on its pretend disk carries the identity it has there now, as the index records it - so
+    the executor's re-check passes until the test changes the file."""
+    from dataclasses import replace
     from datetime import date
 
     from briefing_reader.desktop.context import AppItem, DesktopContext, FileItem, Place, SiteItem
+
+    if backend is not None:
+        context = desktop_context(files=files, apps=apps, sites=sites, places=places)
+
+        def known(item: Any) -> Any:
+            try:
+                return replace(item, identity=backend.identity(item.path))
+            except OSError:
+                return item
+
+        return DesktopContext(tuple(known(place) for place in context.places),
+                              tuple(known(item) for item in context.files), context.apps, context.sites,
+                              looked_in=context.looked_in, found=context.found)
 
     default_places = (Place(DOCS, ("Documents",)), Place(UNI, ("Documents", "Uni")),
                       Place(LING, ("Documents", "Uni", "LING")), Place(DOWNLOADS, ("Downloads",)))

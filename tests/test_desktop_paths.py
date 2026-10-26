@@ -402,6 +402,20 @@ class ExcludedTests(PathCase):
             with self.subTest(path=path):
                 self.assert_refused(path, paths.REFUSE_OUTSIDE, paths.R_OUTSIDE)
 
+    def test_a_name_ending_in_a_shell_class_id_is_never_a_place(self) -> None:
+        """P1.8: "Tools.{ED7BA470-...}" opens as Control Panel's view (a system place), "a.txt.{3050F4D8-...}" as
+        another type than it shows: never listed, opened or gone into."""
+        god = DOWNLOADS + "\\Tools.{ED7BA470-8E54-465E-825C-99712043E01C}"
+        self.backend.make_file(god + "\\inside.txt")
+        self.assert_refused(god, paths.REFUSE_EXCLUDED, paths.R_SHELL_FOLDER)
+        self.assert_refused(god + "\\inside.txt", paths.REFUSE_EXCLUDED, paths.R_SHELL_FOLDER)
+        odd = DOWNLOADS + "\\readme.txt.{3050f4d8-98b5-11cf-bb82-00aa00bdce0b}"
+        self.backend.make_file(odd)
+        self.assert_refused(odd, paths.REFUSE_EXCLUDED, paths.R_SHELL_FOLDER)
+        self.assertTrue(paths.shell_class_name("x.{ED7BA470-8E54-465E-825C-99712043E01C}"))
+        for name in ("Notes {draft}.docx", "{ED7BA470-8E54-465E-825C-99712043E01C}", "Budget.xlsx", "a.{1234}"):
+            self.assertFalse(paths.shell_class_name(name), name)
+
     def test_secret_files_are_never_touched(self) -> None:
         names = (".env", ".env.local", "server.pem", "server.KEY", "cert.pfx", "cert.p12", "putty.ppk", "id_rsa",
                  "id_rsa.pub", "id_ed25519", "Passwords.kdbx", "old.kdb", "credentials.json",

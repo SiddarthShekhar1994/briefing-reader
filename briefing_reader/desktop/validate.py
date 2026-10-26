@@ -49,7 +49,9 @@ Tiers ``INSTANT``, ``ONE_CLICK``, ``CARD``, ``NEVER`` (``TIERS``), ``promote(tie
 ``MAX_OPENS``, ``MAX_URLS``). Flags ``FLAG_*`` (why a tier went up). ``PlannedStep``, ``DesktopAnswer`` (the
 planner's answer as read), ``CheckedStep``, ``DesktopPlan`` (``accepted()``, ``refused()``, ``counts()``,
 ``skills_text()``, ``codes_text()``), ``check_plan(answer, refs, owner_words, run_id=, path_check=)``,
-``licensed_skills(words)``, ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url)``.
+``licensed_skills(words)``, ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url)``,
+``places_named(words, places)`` (the places scope licensing reads in the owner's words; desktop.index searches them
+first).
 
 Pure: nothing is logged, opened or read here, and every repr names skills, codes and counts only.
 """
@@ -461,6 +463,13 @@ def _named_place(tokens: Sequence[str], place: Place) -> bool:
         if (before and before[-1] in _PLACE_BEFORE) or (after and after[0] in _PLACE_AFTER):
             return True
     return False
+
+
+def places_named(owner_words: Any, places: Iterable[Place]) -> tuple[Place, ...]:
+    """The places the owner's words name to look in or work on ("in my LING folder", "from Downloads") - scope
+    licensing's places, which desktop.index searches first."""
+    tokens = _tokens(owner_words if isinstance(owner_words, str) else "")
+    return tuple(place for place in places if isinstance(place, Place) and _named_place(tokens, place))
 
 
 def _key(path: str) -> str:

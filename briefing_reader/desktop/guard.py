@@ -347,7 +347,8 @@ NEVER_APP_WORDS: dict[str, tuple[tuple[str, ...], ...]] = {
     "system": _phrases("registry editor", "control panel", "services", "task scheduler", "task manager", "settings",
                        "windows security", "group policy", "local security policy", "system configuration",
                        "computer management", "event viewer", "windows update", "bitlocker", "firewall",
-                       "device manager", "disk management", "environment variables"),
+                       "device manager", "disk management", "environment variables", "windows tools",
+                       "administrative tools"),
     "installer": _phrases("installer", "install", "setup", "uninstall", "app installer", "winget"),
     "claude": _phrases("claude", "claude code"),
     "password_manager": _phrases("1password", "bitwarden", "keepass", "keepassxc", "dashlane", "lastpass",
@@ -358,6 +359,7 @@ NEVER_APP_WORDS: dict[str, tuple[tuple[str, ...], ...]] = {
                       "revolut", "monzo"),
     "remote": _phrases("remote desktop", "remote desktop connection", "anydesk", "teamviewer", "rustdesk",
                        "parsec", "vnc", "quick assist", "vmware", "virtualbox", "hyper v", "virtual machine"),
+    "jarvis": _phrases("jarvis", "jarvis assistant", "briefing reader"),     # Jarvis's own: never opened again
 }
 NEVER_TARGET_WORDS: dict[str, tuple[tuple[str, ...], ...]] = {
     "ide": _phrases("visual studio", "visual studio code", "vs code", "vscode", "cursor", "windsurf", "pycharm",

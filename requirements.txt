@@ -4,8 +4,10 @@
 # There is deliberately no separate mp3 player package: audio is played with
 # QtMultimedia, which is part of PySide6 (PySide6 pulls in PySide6-Addons,
 # where QtMultimedia and its bundled FFmpeg backend live).
-# pyttsx3 brings comtypes and pywin32 on Windows (used for the offline voice).
+# pyttsx3 brings comtypes and pywin32 on Windows (used for the offline voice). Jarvis on your desktop uses
+# pywin32 itself (the Windows Search index, the Start menu, the Recent items' shortcuts, the shell's opens).
 requests>=2.31
+pywin32>=306
 edge-tts>=7.0
 pyttsx3>=2.99
 PySide6>=6.7

@@ -12,15 +12,17 @@ whitespace-collapsed text, in the style of ask.routes (an optional leading "jarv
     place is the context's when it lists that root);
   - "open <https address>" or a bare web address with a common web ending ("open youtube.com"; https added), on a
     public host (guard.url_problem), or "open <saved site name>" (a context site's title exactly);
-  - "find|where is|where's <words>": when the local search (``search``; P1.8's index) finds at least one file
-    with every word in its name.
+  - "find|where is|where's <words>": when the local search (``search``: desktop.index on the desktop thread) finds
+    at least one file with every word in its name.
 * Phase 2 (recognised, answered NOT_YET, nothing done): "volume <n>|up|down|mute|unmute", "louder", "quieter",
   "mute", "unmute", "pause|play|resume|next|skip|previous" (also "... the music" / "next song"), "timer <n>
   minutes", "remind me in <n> minutes ...", "screenshot", "focus (mode) for <n> minutes".
 
-``route_words(found, address)`` is Jarvis's own sentence for a route (the HUD's caption): what was understood and
-that nothing was opened yet - P1.8 carries the steps out - or that it can't be done yet. Never a name: an app's,
-a site's or a file's name is other people's text; only the known folders' own labels are said.
+The app carries a Phase 1 route out on the desktop thread (desktop.service, desktop.executor: re-checked right before
+its OS call) and says what came of it (desktop.executor.run_words). ``route_words(found, address)`` is Jarvis's own
+sentence for a route as understood - what it would do, and that nothing was opened yet (the --desktop-dry-run's
+words) - or that it can't be done yet (the HUD's caption for a later phase's request). Never a name: an app's, a
+site's or a file's name is other people's text; only the known folders' own labels are said.
 
 ``desktop_request(text)`` is ask.routes' ROUTE_DESKTOP test (clear desktop verbs only): the shapes above, an opening
 verb about something that is not Jarvis's own (mail, calendar, briefing, a screen), or a finding verb with a word that

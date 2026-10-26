@@ -583,7 +583,10 @@ class AppHarness:
 
     The desktop HUD ([desktop] enabled in ``config_extra``): ``desktop_factory(config)`` makes its
     windows (a test passes hud_overlay.create with a fake native seam; None: hud_overlay.create, whose
-    seam makes no OS call while the tests run). close() shuts the desktop controller down.
+    seam makes no OS call while the tests run); ``desktop_backend()`` makes the desktop thread's backend
+    (a test passes a tests.desktop_fakes fake; None: the real one, which refuses to be made while the tests
+    run - a desktop request then says Jarvis can't look on this PC). close() shuts the desktop controller
+    down (its thread ends).
     ``launch`` (models.LAUNCH_*; None: derived as the app derives it) and ``desktop_launch`` (--hud)
     reach the controller for a test that calls its start()."""
 
@@ -593,7 +596,7 @@ class AppHarness:
                  max_per_hour: int = 20, config_extra: str = "", snapshot_factory: Any = None,
                  clock: HarnessClock | None = None, productivity: bool = False, prod_extra: str = "",
                  prod_inline: bool = True, desktop_factory: Any = None, launch: str | None = None,
-                 desktop_launch: bool = False, prepare: Any = None) -> None:
+                 desktop_launch: bool = False, prepare: Any = None, desktop_backend: Any = None) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -629,7 +632,8 @@ class AppHarness:
                                       click_clock=_StepClock(), ask_factory=self.factory, ask_mode=ask_mode,
                                       run_state=run_state, voice_factory=lambda _controller: self.voice,
                                       snapshot_factory=snapshot_factory or (lambda _controller: self.snapshots),
-                                      desktop_factory=desktop_factory, launch=launch, desktop_launch=desktop_launch)
+                                      desktop_factory=desktop_factory, launch=launch, desktop_launch=desktop_launch,
+                                      desktop_backend=desktop_backend)
         self.c._start_fetch = lambda *args, **kwargs: None   # never Notion: the page is handed over below
         test.addCleanup(self.close)
 
@@ -661,6 +665,7 @@ class AppHarness:
             c.meetings.shutdown()       # a recording stops and is saved; the pill goes
         if getattr(c, "desktop", None) is not None:
             c.desktop.shutdown()        # the HUD's windows go
+            c.desktop.join(5)           # ... and the desktop thread ends
         if c._snapshots is not None:
             c._snapshots.shutdown()   # a real snapshotter (a harness's) closes its hidden view
         for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._send_hold_timer, c._undo_timer,

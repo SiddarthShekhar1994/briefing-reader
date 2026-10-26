@@ -4,7 +4,9 @@ One run at most, on Ask's own command line (no tools, no MCP, nothing saved, std
 and schema; never "remember"; counted as an Ask run under the Ask caps and the one-at-a-time lock; the stdin gives
 names only (owner decision D6: no notes, no conversation, no accounts or mail); the answer read strictly; every step
 checked against this run's refs and the owner's words; Live shows codes and counts, never a name outside the stdin
-block; the log carries ids, kinds, counts and codes only. claude.exe is never started (tests.ask_fakes.FakeRunner);
+block; the log carries ids, kinds, counts and codes only. P1.8: the checked plan is carried out through the job's
+carry_out (here a fake: the desktop thread's own tests are tests/test_desktop_executor.py and test_desktop_service.py)
+and said in Jarvis's words, with Live's "Carrying it out". claude.exe is never started (tests.ask_fakes.FakeRunner);
 nothing is opened. Every name is invented.
 """
 
@@ -13,6 +15,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+import threading
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -137,7 +140,7 @@ class DesktopRunTests(PlannerTestCase):
         self.assertEqual({field.label: field.value for field in said.fields}["Jarvis says"],
                          "Understood: open a file and an app. 2 steps were refused - Live says why. Nothing was "
                          "opened yet, sir.")
-        self.assertEqual(said.summary, "nothing was opened yet")
+        self.assertEqual(said.summary, "nothing was opened")                 # a plan only checked (no carry_out)
         shown = []
         for step in (given, checked, said):
             shown += [step.title, step.summary, *(f"{f.label} {f.value}" for f in step.fields),
@@ -158,7 +161,7 @@ class DesktopRunTests(PlannerTestCase):
                                           "Nothing was opened.")
         self.assertEqual(outcome.question, "Which essay?")
         given = {field.label: field.value for field in self.steps()[1].fields}
-        self.assertEqual(given["Looked in"], "nothing yet - Jarvis's own search of this PC comes in a later part")
+        self.assertEqual(given["Looked in"], "nowhere - no folder Jarvis may look in was found")
         self.assertIn("<files>\nnone\n", self.stdin())
 
     def test_refused_before_any_run(self) -> None:
@@ -213,6 +216,77 @@ class DesktopRunTests(PlannerTestCase):
         self.assertIsNone(result.failure)
         self.assertNotIn("remember", self.schema()["properties"])
         self.assertIsInstance(result.answer, dv.DesktopAnswer)
+
+
+class CarryOutTests(DesktopRunTests):
+    """P1.8: the checked plan carried out through the job's carry_out (the desktop thread, which the Ask thread waits
+    for): the accepted steps only, the cancel passed on, the run in the outcome, Jarvis's words for it, and Live's
+    "Carrying it out" step between the checks and his words - codes and counts, never a name."""
+
+    def job(self, run: object = None, error: Exception | None = None) -> dm.DesktopJob:
+        self.carried: list[tuple] = []
+
+        def carry_out(plan: dv.DesktopPlan, words: str, cancel: object) -> object:
+            self.carried.append((plan, words, cancel))
+            if error is not None:
+                raise error
+            return run
+
+        return dm.DesktopJob("d7f3", desktop_context(), carry_out=carry_out)
+
+    def test_the_plan_is_carried_out_and_said(self) -> None:
+        from briefing_reader.desktop import executor as dx
+
+        run = dx.DesktopRun("d7f3", (dx.StepResult(1, dv.OPEN_FILE, dv.INSTANT, dx.DONE),
+                                     dx.StepResult(2, dv.OPEN_APP, dv.INSTANT, dx.FAILED, dx.OS_FAILED, winerror=5)))
+        ask = self.make(plan_stream(PLAN))
+        stop = threading.Event()
+        with self.assertLogs("briefing_reader", level="INFO") as logs:
+            outcome = self.run_desktop(ask, req=request(job=self.job(run)), cancel=stop)
+        self.assertEqual(len(self.carried), 1)
+        plan, words, cancel = self.carried[0]
+        self.assertEqual(words, TYPED)
+        self.assertEqual([step.skill for step in plan.accepted()], [dv.OPEN_FILE, dv.OPEN_APP])
+        self.assertIs(cancel, stop)                                           # the request's own cancel
+        self.assertIs(outcome.desktop_run, run)
+        self.assertEqual(outcome.message, "Opened the file. Windows couldn't open the app. 2 steps were refused - "
+                                          "Live says why, sir.")
+        steps = self.steps()
+        self.assertEqual([step.kind for step in steps], [live.ASK_CHECKS, live.DESKTOP_FIND, live.PLANNER_RUN,
+                                                         live.DESKTOP_VALIDATE, live.DESKTOP_STEP, live.DESKTOP_PLAN])
+        carried = steps[4]
+        self.assertEqual([item.text for item in carried.items],
+                         ["Step 1 - open_file - instant - opened",
+                          "Step 2 - open_app - instant - failed: os_error (Windows error 5)"])
+        self.assertEqual(carried.summary, "1 opened, 1 failed")
+        self.assertEqual(steps[5].summary, "1 opened, 1 failed")
+        for name in NAMES:
+            self.assertNotIn(name, "\n".join([carried.title, carried.summary,
+                                              *(item.text + item.note for item in carried.items)]))
+            self.assertNotIn(name, "\n".join(logs.output))
+
+    def test_nothing_accepted_nothing_carried_out(self) -> None:
+        ask = self.make(plan_stream({"say": "", "steps": [{"skill": "recycle_files", "why": "x", "files": ["f1"]}]}))
+        outcome = self.run_desktop(ask, req=request(job=self.job(None)))
+        self.assertEqual(self.carried, [])
+        self.assertIsNone(outcome.desktop_run)
+        self.assertEqual(outcome.message, desktop_words_all_refused())
+
+    def test_a_carry_out_that_fails_is_said_and_shown(self) -> None:
+        ask = self.make(plan_stream(PLAN))
+        with self.assertLogs("briefing_reader", level="WARNING") as logs:
+            outcome = self.run_desktop(ask, req=request(job=self.job(error=TimeoutError())))
+        self.assertTrue(outcome.ok)
+        self.assertIsNone(outcome.desktop_run)
+        self.assertIn("Nothing was opened yet", outcome.message)              # the plan's own words
+        self.assertIn("could not be carried out (TimeoutError)", "\n".join(logs.output))
+        carried = [step for step in self.steps() if step.kind == live.DESKTOP_STEP][0]
+        self.assertEqual(carried.summary, "it could not be carried out - nothing was opened")
+        self.assertEqual(carried.status, live.STATUS_FAILED)
+
+
+def desktop_words_all_refused() -> str:
+    return "I couldn't check any of that - Live says why, sir. Nothing was opened."
 
 
 class DryRunTests(PlannerTestCase):

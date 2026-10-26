@@ -2,20 +2,25 @@
 
 A desktop request's planner run is given names only (owner decision D6): the places Jarvis may look in, the files its
 own local search found, the Start-menu apps and the saved sites - never a path, a file's contents, a typed value or a
-picture. This module holds the shapes of those candidates; the context BUILDER that fills them from this PC (the
-search index, the Start menu, the scope) comes with P1.8 (index.py, apps.py). Until then the app hands the planner an
-empty context and the tests fill one with invented items. ask.desktop_mode turns a context into the planner's blocks
-and issues this run's refs (refs.RefIndex): each ref's target is one of the items below, so a ref resolves to
-Jarvis's own entry - its path stays here and never reaches the planner.
+picture. This module holds the shapes of those candidates and ``build_context``, which puts one request's together
+within SPEC 4.1's caps: the places and files Jarvis's own search of this PC found (desktop.index: only inside the
+approved roots, every item checked by paths.check_path, its identity recorded), the Start-menu apps the owner's words
+match (desktop.apps: never one on the never-open list) and the saved sites (none in Phase 1: the approved sites are
+Phase 3's). ask.desktop_mode turns a context into the planner's blocks and issues this run's refs (refs.RefIndex):
+each ref's target is one of the items below, so a ref resolves to Jarvis's own entry - its path stays here and never
+reaches the planner.
 
 Public API
 ==========
-``Place(path, parts)``: a folder Jarvis may look in, its name from the known folder down ("Documents", "Uni",
-"LING"; at most ``MAX_PLACE_DEPTH`` folders below the known one). ``FileItem(path, name, place, kind, size, modified,
-online_only)``: a file the local search found (``place`` is the path of the deepest listed place it lies in, "" when
-none is listed). ``AppItem(app_id, name, exe)``: a Start-menu app (AUMID or exe path). ``SiteItem(url, title)``: a
-saved site. ``DesktopContext(places, files, apps, sites, looked_in, found)``: one request's candidates and how much
-the search looked through (Live's "Looked in 2 places: 214 files"); ``counts()``.
+``Place(path, parts, identity)``: a folder Jarvis may look in, its name from the known folder down ("Documents",
+"Uni", "LING"; at most ``MAX_PLACE_DEPTH`` folders below the known one). ``FileItem(path, name, place, kind, size,
+modified, online_only, identity)``: a file the local search found (``place`` is the path of the deepest listed place
+it lies in, "" when none is listed). ``identity``: the backend.FileIdentity recorded as the item was listed (None:
+unknown - nothing is opened on it). ``AppItem(app_id, name, exe)``: a Start-menu app (AUMID or exe path).
+``SiteItem(url, title)``: a saved site. ``DesktopContext(places, files, apps, sites, looked_in, found)``: one request's
+candidates and how much the search looked through (Live's "Looked in 2 places: 214 files"); ``counts()``.
+``build_context(places, files, apps, sites, looked_in=, found=)``: the context within the caps (``MAX_PLACES``,
+``MAX_FILES``, ``MAX_APPS``, ``MAX_SITES``), each file's place set, nothing secret-shaped, nothing twice.
 ``file_kind(name)`` ("document", "picture", "music", "video", "other"), ``size_bucket(size)`` ("1-10MB"), the
 ``KIND_*`` words and the type sets they come from.
 
@@ -24,8 +29,11 @@ Pure and never logged: every repr names kinds and counts only.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import ntpath
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
+from typing import Any
 
 from . import guard
 
@@ -38,7 +46,11 @@ DOCUMENT_TYPES = frozenset({"docx", "odt", "rtf", "txt", "md", "csv", "pdf", "xl
 PICTURE_TYPES = frozenset({"jpg", "jpeg", "png", "gif", "bmp", "webp", "heic", "tif", "tiff", "svg"})
 MUSIC_TYPES = frozenset({"mp3", "m4a", "wav", "flac", "ogg"})
 VIDEO_TYPES = frozenset({"mp4", "mov", "mkv", "avi", "webm"})
+KIND_TYPES = {KIND_DOCUMENT: DOCUMENT_TYPES, KIND_PICTURE: PICTURE_TYPES, KIND_MUSIC: MUSIC_TYPES,
+              KIND_VIDEO: VIDEO_TYPES}
 MAX_PLACE_DEPTH = 3                     # folders below the known folder a place may show (SPEC 4.1)
+# SPEC 4.1's caps of one request's context (ask.desktop_mode shows no more, and trims <files> then <apps> to fit).
+MAX_PLACES, MAX_FILES, MAX_APPS, MAX_SITES = 100, 200, 40, 20
 _KB, _MB, _GB = 1024, 1024 * 1024, 1024 * 1024 * 1024
 _BUCKETS = ((100 * _KB, "0-100KB"), (_MB, "100KB-1MB"), (10 * _MB, "1-10MB"), (100 * _MB, "10-100MB"),
             (_GB, "100MB-1GB"))
@@ -76,6 +88,7 @@ class Place:
 
     path: str = field(repr=False)
     parts: tuple[str, ...] = field(default=(), repr=False)
+    identity: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.parts, tuple):
@@ -107,6 +120,7 @@ class FileItem:
     size: int = -1
     modified: date | datetime | None = field(default=None, repr=False)
     online_only: bool = False
+    identity: Any = field(default=None, repr=False, compare=False)
 
     @property
     def file_kind(self) -> str:
@@ -166,3 +180,55 @@ class DesktopContext:
 
     def __repr__(self) -> str:
         return f"DesktopContext({self.counts()})"
+
+
+def _key(path: str) -> str:
+    return ntpath.normcase(path or "").rstrip("\\")
+
+
+def _inside(path: str, folder: str) -> bool:
+    key, root = _key(path), _key(folder)
+    return bool(key) and bool(root) and (key == root or key.startswith(root + "\\"))
+
+
+def build_context(places: Iterable[Place], files: Iterable[FileItem], apps: Iterable[AppItem],
+                  sites: Iterable[SiteItem] = (), *, looked_in: int = 0, found: int = 0) -> DesktopContext:
+    """One request's context within SPEC 4.1's caps, in the order given (the best first): each place and file once (by
+    path), each app once (by id), each site once (by address); no secret-shaped file (guard.secret_file: never
+    listed, whatever the search gave); each file's ``place`` the deepest listed place it lies in ("" when none)."""
+    kept_places: list[Place] = []
+    seen: set[str] = set()
+    for place in places:
+        key = _key(place.path)
+        if isinstance(place, Place) and key and key not in seen and len(kept_places) < MAX_PLACES:
+            seen.add(key)
+            kept_places.append(place)
+    by_depth = sorted(kept_places, key=lambda place: -len(_key(place.path)))     # the deepest first
+    kept_files: list[FileItem] = []
+    seen = set()
+    for item in files:
+        key = _key(item.path) if isinstance(item, FileItem) else ""
+        if not key or key in seen or guard.secret_file(item.name) or guard.secret_file(item.path):
+            continue
+        seen.add(key)
+        place = next((place.path for place in by_depth if _inside(item.path, place.path)
+                      and _key(item.path) != _key(place.path)), "")
+        kept_files.append(replace(item, place=place))
+        if len(kept_files) >= MAX_FILES:
+            break
+    kept_apps: list[AppItem] = []
+    seen = set()
+    for app in apps:
+        key = app.app_id.casefold() if isinstance(app, AppItem) else ""
+        if key and key not in seen and len(kept_apps) < MAX_APPS:
+            seen.add(key)
+            kept_apps.append(app)
+    kept_sites: list[SiteItem] = []
+    seen = set()
+    for site in sites:
+        key = site.url.casefold() if isinstance(site, SiteItem) else ""
+        if key and key not in seen and len(kept_sites) < MAX_SITES:
+            seen.add(key)
+            kept_sites.append(site)
+    return DesktopContext(tuple(kept_places), tuple(kept_files), tuple(kept_apps), tuple(kept_sites),
+                          looked_in=max(0, int(looked_in)), found=max(0, int(found)))

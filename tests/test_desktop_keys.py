@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import tempfile
 import threading
 import unittest
 from ctypes import wintypes
@@ -42,6 +43,7 @@ from briefing_reader.persona import with_address
 from tests import test_desktop_hud as p14
 from tests import test_desktop_switch as p15
 from tests.ask_fakes import GatedProcess
+from tests.desktop_fakes import desktop_disk
 from tests.ui_fakes import COMMAND, SAY, AppHarness, fonts, plan, settle, wait_for
 
 OPEN = dict(p14.OPEN)                                              # the window key (Ctrl+Alt+J)
@@ -862,16 +864,23 @@ class AskBarTests(KeyApp):
         self.assertEqual(len(self.harness.factory.runner.started), 1)
 
     def test_with_ask_off_the_huds_enter_says_so(self) -> None:
-        self.make(ask=False)
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        fake = desktop_disk(tmp.name)
+        self.make(ask=False, desktop_backend=lambda: fake)
         self.enter()
         self.hud_key()
         bar = self.hud().bar
         QTest.keyClicks(bar.input, "open my essay")
         QTest.keyClick(bar.input, Qt.Key.Key_Return)
         settle()
+        self.assertTrue(wait_for(lambda: not self.desktop.busy()))     # the desktop thread: no local route
+        settle()
         self.assertEqual(self.hud().caption_text(), DISABLED_MESSAGE)
-        self.assertFalse(self.hud().holds_keyboard())         # Enter gave the keyboard back
+        self.assertEqual(bar.text(), "open my essay")                  # not taken: the words stay
+        self.assertEqual(fake.opened, [])
         bar.clear_input()
+        self.assertFalse(self.hud().holds_keyboard())         # Enter gave the keyboard back
         QTest.keyClick(bar.input, Qt.Key.Key_Escape)          # Esc in the empty bar: the note goes
         settle()
         self.assertEqual(self.hud().caption_text(), ON_DESKTOP)

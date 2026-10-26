@@ -27,7 +27,8 @@ The check (``check_path(path, scope, backend)``), made before a card shows and a
 5. Excluded places: the excluded subtrees, guard.EXCLUDED_ROOT_NAMES right below the drive, guard.EXCLUDED_NAMES
    and guard.SECRET_DIR_NAMES at any depth, a component named like a code marker (at any depth), any folder strictly
    below the root holding a code marker (.git, .hg, .svn, .env, venv, .venv, node_modules: this covers the Jarvis
-   project) and a secret-shaped file name.
+   project), a secret-shaped file name and a name ending in a shell class id (``shell_class_name``:
+   "Tools.{ED7BA470-...}" opens as Control Panel's view, a file as another type than it shows; P1.8).
 
 A refusal carries a SPEC 4.4 code (``REFUSE_OUTSIDE`` "path_outside" or ``REFUSE_EXCLUDED`` "excluded") and a finer
 reason word for Live and the log (``R_*``; never the path). An accepted path carries its final path, its root and the
@@ -41,7 +42,7 @@ Public API
 ``Root(key, label, path, onedrive)``, ``Scope(roots, places, onedrive)`` (``root_of(path)``),
 ``load_scope(folders, extra_folders, backend, excluded=())``, ``PathVerdict(path, code, reason, root, flags)``
 (``ok``), ``check_path(path, scope, backend)``, ``lexical_problem(path)``, ``reserved_name(component)``,
-``display_name(text)``, ``name_problem(name)`` (a NEW name: SPEC 4.4 rule 4).
+``display_name(text)``, ``name_problem(name)`` (a NEW name: SPEC 4.4 rule 4), ``shell_class_name(component)``.
 """
 
 from __future__ import annotations
@@ -92,8 +93,17 @@ R_SYSTEM_PLACE = "system_place"
 R_JARVIS = "jarvis_place"
 R_CODE_FOLDER = "code_folder"
 R_SECRET = "secret"
+R_SHELL_FOLDER = "shell_folder"
 _EXCLUDED_REASONS = frozenset({R_UNC, R_NOT_FIXED, R_LINK, R_HIDDEN_SYSTEM, R_SYSTEM_PLACE, R_JARVIS, R_CODE_FOLDER,
-                               R_SECRET})
+                               R_SECRET, R_SHELL_FOLDER})
+# A name ending in a class id ("Tools.{ED7BA470-8E54-465E-825C-99712043E01C}"): the shell opens it as that class -
+# a folder becomes Control Panel's or another system view, a file a different type than it shows. Never a place.
+_SHELL_CLASS_RE = re.compile(r"\.\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$", re.IGNORECASE)
+
+
+def shell_class_name(component: str) -> bool:
+    """A file or folder name ending in a shell class id (".{GUID}"): never listed, opened or gone into."""
+    return bool(_SHELL_CLASS_RE.search(guard.strip_hidden(component).rstrip(". ")))
 
 _BAD_CHARS = frozenset('<>"|?*')
 _RESERVED_RE = re.compile(r"(?:con|prn|aux|nul|conin\$|conout\$|(?:com|lpt)[0-9\u00b9\u00b2\u00b3])", re.IGNORECASE)
@@ -301,6 +311,8 @@ def _place_problem(final: str, scope: Scope, backend: DesktopBackend, item_is_di
         return R_SECRET
     if any(part in _CODE_MARKERS for part in folded):
         return R_CODE_FOLDER
+    if any(shell_class_name(part) for part in parts):
+        return R_SHELL_FOLDER
     folders = ([final[:3]] + _prefixes(final))[start:]
     if not item_is_dir:
         folders = folders[:-1]

@@ -193,7 +193,8 @@ from .agenda import (
 from .ask import desktop_mode
 from .ask.dayplan import PART_DAY, hours_text
 from .ask.modes import (MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_BRIEF,
-                        ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ModeInputs, ModeRequest, block_line, todo_facts)
+                        ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ORIGIN_TYPED, ModeInputs, ModeRequest, block_line,
+                        todo_facts)
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import CONFIG_FILE_NAME, DEFAULT_ACCOUNT, PROJECT_ROOT, AgendaConfig, Config
@@ -4890,7 +4891,10 @@ class AppController(QObject):
     the HUD from any state of the window with the HUD's bar taking the keyboard, gives the bar the keyboard on the
     HUD, and goes back to the window when the bar has it; while Jarvis is in control (Phase 3) both are ignored. Ask
     is bound to the HUD's bar while the HUD shows (AskController.set_bar): a request typed there runs as the window's
-    would, its cards go to Approvals and the HUD's caption says only Jarvis's own words.
+    would, its cards go to Approvals and the HUD's caption says only Jarvis's own words. A desktop request typed
+    there (or in the window's bar, which goes onto the HUD first) goes to the desktop thread (desktop_ui: its local
+    route opens on this PC, anything else is ONE desktop planner run whose checked plan is carried out through the
+    desktop thread; ``desktop_backend()`` makes that thread's backend - the real one by default).
     """
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
@@ -4911,12 +4915,16 @@ class AppController(QObject):
                  prefs: AssistantPrefs | None = None,
                  snapshot_factory: Callable[[Any], Any] | None = None,
                  desktop_factory: Callable[[Any], Any] | None = None,
-                 desktop_launch: bool = False) -> None:
+                 desktop_launch: bool = False,
+                 desktop_backend: Callable[[], Any] | None = None) -> None:
         super().__init__()
         self.config = config
         self.client = client
         self._on_shutdown = on_shutdown   # e.g. an exit watchdog (the app passes one; tests do not)
         self._desktop_launch = bool(desktop_launch)   # --hud (the HUD key started Jarvis): onto the HUD once ready
+        # The desktop's backend (made on the desktop thread at the first desktop request; None: the real one, which
+        # refuses to be made while the tests run - they pass a fake).
+        self._desktop_backend = desktop_backend
         self._snapshot_factory = snapshot_factory   # tests: a fake page snapshotter (no web engine)
         self.expected_run = _normalize_run(expected_run)
         self.now_mode = bool(now_mode)
@@ -8266,11 +8274,16 @@ class AppController(QObject):
 
     def _ask_blocked(self) -> str:
         """Why an Ask may not start now ("" when it may): a Google sign-in is open in the browser
-        (the calendar can't be read meanwhile)."""
+        (the calendar can't be read meanwhile), or a desktop request is being looked up on this PC."""
         if self.state == STATE_QUITTING:
             return "Jarvis is closing"
         if self._signing_in():
             return ASK_SIGN_IN_FIRST
+        desktop = getattr(self, "desktop", None)
+        if desktop is not None and desktop.busy():
+            from .desktop_ui import BUSY_TEXT
+
+            return BUSY_TEXT                # a desktop request is being looked up on this PC: one at a time
         return ""
 
     def _on_ask_busy(self, busy: bool) -> None:
@@ -8907,8 +8920,11 @@ class AppController(QObject):
             chip_screens={hud_overlay.CHIP_BRIEFING: SCREEN_BRIEFING, hud_overlay.CHIP_APPROVALS: SCREEN_APPROVALS,
                           hud_overlay.CHIP_REC: SCREEN_MEETINGS},
             home_screen=SCREEN_HOME, may_enter=self._may_enter_hud, bring_forward=bring_forward_on_click,
-            address=self.config.assistant.address, live=self.live, parent=self)
+            address=self.config.assistant.address, live=self.live,
+            backend_factory=getattr(self, "_desktop_backend", None), parent=self)
         controller.hudChanged.connect(self._on_hud_changed)
+        controller.answered.connect(self._on_desktop_answered)
+        controller.plannerNeeded.connect(self._on_desktop_planner)
         meetings = getattr(self, "meetings", None)
         if meetings is not None:
             meetings.pillCreated.connect(controller.set_rec_pill)
@@ -9004,44 +9020,50 @@ class AppController(QObject):
         return False
 
     def _on_hud_submit_without_ask(self, text: str) -> None:
-        """Enter in the HUD's bar while Ask is off ([ask] enabled = false): a local route is still answered on this
-        PC (desktop.routes: no planner needed); anything else - the planner is Ask's - makes its caption say Ask is
-        off; nothing is sent (Esc in the empty bar puts the note away)."""
+        """Enter in the HUD's bar while Ask is off ([ask] enabled = false): a desktop request still goes to the
+        desktop thread (desktop_ui.request with no planner), where a local route is carried out on this PC (no planner
+        needed; ``_on_desktop_answered``); anything else - the planner is Ask's - makes the caption say Ask is off
+        (``_on_desktop_planner``), and so does a request that is not a desktop one; nothing is sent (Esc in the
+        empty bar puts the note away)."""
         from .ask.planner import DISABLED_MESSAGE
         from .ask.routes import ROUTE_DESKTOP, RouteFlags, route
+        from .desktop_ui import BUSY_TEXT, LOOKING_TEXT
 
         desktop = self.desktop
         if desktop is None or self.ask is not None:
             return
         bar = desktop.bar()
-        found = None
+        wanted = False
         try:
-            if route(text, RouteFlags(desktop=True)).kind == ROUTE_DESKTOP:
-                found = desktop.route_request(text)
+            wanted = route(text, RouteFlags(desktop=True)).kind == ROUTE_DESKTOP
         except Exception as exc:  # noqa: BLE001 - the note below instead
             logger.warning("Desktop: a request typed with Ask off could not be read (%s)", type(exc).__name__)
-        if found is not None and not isinstance(found, desktop_mode.DesktopJob):
-            bar.take_request(text)                   # taken (R23): the words leave the bar; Up brings them back
-            said, soft = desktop.answer_local(found, text)
-            bar.set_status(said, hud.TONE_WARN if soft else hud.TONE_DONE)
+        if wanted and desktop.request(text, planner=False):
+            bar.set_status(LOOKING_TEXT, hud.TONE_WORKING)    # the words stay until it is handled
             return
-        bar.set_status(DISABLED_MESSAGE, hud.TONE_WARN)   # not taken: the words stay
+        bar.set_status(BUSY_TEXT if wanted and desktop.busy() else DISABLED_MESSAGE, hud.TONE_WARN)
 
     def _desktop_request(self, text: str) -> Any:
         """A typed desktop request (AskController's ROUTE_DESKTOP; SPEC 3). From the window's bar Jarvis goes onto the
         HUD first (``enter_hud``: the window hidden, never closed) and the request continues there: it leaves the
         window's bar at once (R23: take_request - Up there brings it back) and goes on in the HUD's bar, now Ask's, as
-        if typed there - so it leaves that bar too as it is accepted (Up brings it back there) and comes back to it
+        if typed there - so it leaves that bar too as it is handled (Up brings it back there) and comes back to it
         when refused before any run (give_back); a draft the HUD's bar already holds is never replaced. When the HUD
-        can't open now (a dialog waits, a switch on its way, not turned on yet) nothing runs, the bar says so and the
-        words stay where they were typed. On the HUD: a local route is answered on this PC (no planner run; taken from
-        the bar; None comes back), anything else comes back as the planner's job (ask.desktop_mode.DesktopJob) for ONE
-        desktop planner run, which takes the words from the bar as it starts. Never logged: the words."""
+        can't open now (a dialog waits, a switch on its way, not turned on yet) or the last desktop request is still
+        being looked up, nothing runs, the bar says so and the words stay where they were typed. On the HUD the
+        request goes to the desktop thread (desktop_ui.request; the caption says "Looking on this PC..."): a local
+        route is carried out there and answered (``_on_desktop_answered``: taken from the bar), anything else comes
+        back as the planner's job for ONE desktop planner run (``_on_desktop_planner``), which takes the words from
+        the bar as it starts. None always: nothing for the AskController to run now. Never logged: the words."""
         from .ask_ui import DESKTOP_NOT_NOW_TEXT
+        from .desktop_ui import BUSY_TEXT, LOOKING_TEXT
 
         desktop = getattr(self, "desktop", None)
         ask = self.ask
         if desktop is None or ask is None:
+            return None
+        if desktop.busy():
+            ask.show_note(BUSY_TEXT, hud.TONE_WARN)  # one at a time: the words stay
             return None
         if not self._hud_active():
             window_bar = self.window.reading.command_bar
@@ -9053,19 +9075,49 @@ class AppController(QObject):
             hud_bar = desktop.bar()
             if ask.bar is hud_bar and not hud_bar.text():
                 hud_bar.set_text(text)               # it goes on in the HUD's bar, which lets it go as it is taken
-        found = desktop.route_request(text)
-        if isinstance(found, desktop_mode.DesktopJob):
-            return found
-        ask.bar.take_request(text)                   # answered on this PC: taken (R23)
-        said, soft = desktop.answer_local(found, text)
-        ask.show_note(said, hud.TONE_WARN if soft else hud.TONE_DONE, hud_text=said)
+        if not desktop.request(text, planner=True):
+            ask.show_note(BUSY_TEXT, hud.TONE_WARN)
+            return None
+        ask.show_note(LOOKING_TEXT, hud.TONE_WORKING, hud_text=LOOKING_TEXT)
         return None
 
+    def _on_desktop_answered(self, said: str, soft: bool, words: str, taken: bool) -> None:
+        """A desktop request handled without the planner (desktop_ui.answered): a local route carried out on this PC
+        - its words leave the bar it is in (R23: Up brings them back) - or nothing could be looked at (the words
+        stay); the caption says Jarvis's own words."""
+        desktop = getattr(self, "desktop", None)
+        if desktop is None:
+            return
+        ask = self.ask
+        bar = ask.bar if ask is not None else desktop.bar()
+        if taken:
+            bar.take_request(words)
+        tone = hud.TONE_WARN if soft else hud.TONE_DONE
+        if ask is not None:
+            ask.show_note(said, tone, hud_text=said)
+        else:
+            bar.set_status(said, tone)
+
+    def _on_desktop_planner(self, job: Any, words: str) -> None:
+        """A desktop request no local route takes (desktop_ui.plannerNeeded): ONE desktop planner run with its job
+        (this PC's candidates; its checked plan carried out through the desktop thread) - typed, so its words leave
+        the bar as it starts; refused before any run, they come back. With Ask off (no job) the caption says Ask is
+        off and the words stay."""
+        desktop = getattr(self, "desktop", None)
+        if desktop is None:
+            return
+        if job is None or self.ask is None:
+            from .ask.planner import DISABLED_MESSAGE
+
+            desktop.bar().set_status(DISABLED_MESSAGE, hud.TONE_WARN)
+            return
+        self.ask.submit_mode(ModeRequest(MODE_DESKTOP, ORIGIN_TYPED, typed=words, typed_route=True, payload=job),
+                             words)
+
     def _on_desktop_outcome(self, outcome: Any) -> None:
-        """A desktop request's planner run ended (MODE_DESKTOP): the checked plan goes to the desktop controller
-        (which keeps it; P1.8 carries it out) - the HUD's bar already says Jarvis's own words for it - and ACTIVITY
-        gets one row of counts (never the request, a name or Claude's text). No conversation entry: the HUD
-        answers."""
+        """A desktop request's planner run ended (MODE_DESKTOP): the checked plan and what came of it go to the desktop
+        controller (which keeps them) - the HUD's bar already says Jarvis's own words for them - and ACTIVITY gets one
+        row of counts (never the request, a name or Claude's text). No conversation entry: the HUD answers."""
         self._ask_desktop = False
         self._voice_call("cancel_key", ASK_ACK_KEY)
         desktop = getattr(self, "desktop", None)
@@ -9076,7 +9128,8 @@ class AppController(QObject):
             message = f"Desktop: {_plural(len(plan.accepted()), 'step')} checked"
             if plan.refused():
                 message += f", {len(plan.refused())} refused"
-            sub = [f"{outcome.duration_ms / 1000:.1f} s", _plural(outcome.runs, "planner run"), "nothing opened yet"]
+            sub = [f"{outcome.duration_ms / 1000:.1f} s", _plural(outcome.runs, "planner run"),
+                   desktop_mode.run_summary(getattr(outcome, "desktop_run", None))]
             self._activity(hud.TAG_ASK, message, f" {DOT} ".join(sub))
         elif outcome.kind not in ("empty", "busy"):
             self._activity(hud.TAG_STOP, "Desktop: nothing was planned", _short(outcome.message or outcome.kind))
