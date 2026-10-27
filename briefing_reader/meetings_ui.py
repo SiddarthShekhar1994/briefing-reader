@@ -38,7 +38,10 @@ start now (Jarvis is busy with another request, a Google sign-in is open) waits 
 Ask is free (``pump_summaries``, also every 30 s). ``on_summary(outcome)`` keeps a checked summary in the
 meeting's summary.json (status Summary ready) or the failure's code (Retry). Opening a summary (``open_summary``)
 emits ``summaryOpened(id)``: the app lends the draft cards and the Add block cards and calls ``render_summary``.
-Nothing here sends, adds or keeps anything.
+**Summarise again** on a summary (owner decision 2026-10-27: a summary from before the overview and the key points
+can be redone) is the owner's click on Summarise by the same path: the summary kept stays - and opens - until the
+new one is saved, and a run that fails or is cancelled leaves it (Summary ready with the failure: Retry);
+``again_state`` tells the view while a run of it waits or runs. Nothing here sends, adds or keeps anything.
 
 Tests replace ``backend_factory``, ``process_factory``, ``downloader_factory``, ``audio_missing`` and
 ``speech_missing`` and set ``threaded = False`` (the recorder is then ticked by the test, the download runs inline).
@@ -71,6 +74,8 @@ DELETE_RETRY_S = 0.3               # a Delete that left a file tries once more a
 SUMMARY_RETRY_MS = 30_000          # a summary waiting for the Ask is tried again this often
 SUMMARY_STARTED, SUMMARY_BUSY, SUMMARY_OFF = "", "busy", "off"   # summary_runner's answers
 SUMMARY_CANCELLED = "cancelled"                                   # MeetingRecord.summary_error after Esc
+# A meeting a summary run may start for: its transcript ready, or its summary kept (Summarise again).
+_SUMMARISABLE = (mt.STATUS_TRANSCRIBED, mt.STATUS_SUMMARY_READY)
 SETTINGS_KEY = "meetings"
 SETTINGS_TITLE = "Meetings"
 SETTINGS_NOTE = "Jarvis records a meeting only when you click Start, after the consent tick."
@@ -246,10 +251,15 @@ class MeetingsController(QObject):
         call_missing = self.call_audio_missing()
         infos = [meetings_view.row_info(record, elapsed=elapsed if record.id in recording_id else "",
                                         summaries=summaries, waiting=record.id in waiting,
-                                        call_missing=call_missing and record.id in recording_id)
+                                        call_missing=call_missing and record.id in recording_id,
+                                        has_summary=record.status == mt.STATUS_SUMMARISING
+                                        and self.store.summary_path(record.id).is_file())
                  for record in self.store.list()]
         self.stage.set_meetings(infos)
         self._sync_missing()
+        showing = self.stage.showing_summary()
+        if showing:                              # Summarise again follows the runs (waiting, running, failed)
+            self.stage.summary.set_again(*self.again_state(showing))
 
     def _sync_missing(self) -> None:
         pieces = sp.missing_pieces(self.models, audio_missing=self.audio_missing, speech=self.speech_missing)
@@ -557,12 +567,13 @@ class MeetingsController(QObject):
 
     def summarise(self, meeting_id: str, origin: str) -> bool:
         """Summarise a written-down meeting - only as the owner asked: his "summarise it" tick on its start card
-        (once its transcript is ready) or his click on Summarise / Retry. The app's runner starts one planner run;
-        when it can't start now the meeting waits for the Ask. False when there is nothing to summarise (no such
-        meeting, no transcript, summaries off)."""
+        (once its transcript is ready) or his click on Summarise / Retry, or Summarise again on its summary (a
+        meeting with a summary: that summary stays until the new one is saved, and stays if the run fails). The
+        app's runner starts one planner run; when it can't start now the meeting waits for the Ask. False when
+        there is nothing to summarise (no such meeting, no transcript, summaries off, a run of it under way)."""
         runner = self.summary_runner
         record = self.store.load(meeting_id)
-        if runner is None or self._shut or record is None or record.status != mt.STATUS_TRANSCRIBED:
+        if runner is None or self._shut or record is None or record.status not in _SUMMARISABLE:
             return False
         if not self.store.transcript_path(meeting_id).is_file():
             return False
@@ -600,7 +611,7 @@ class MeetingsController(QObject):
         while self._summary_queue:
             meeting_id, origin = self._summary_queue.pop(0)
             record = self.store.load(meeting_id)
-            if record is None or record.status != mt.STATUS_TRANSCRIBED:
+            if record is None or record.status not in _SUMMARISABLE:
                 continue
             self.summarise(meeting_id, origin)
             break
@@ -638,13 +649,13 @@ class MeetingsController(QObject):
                             ", ".join(f"{name} {count}" for name, count in summary.counts().items()))
             except OSError as exc:
                 logger.warning("Meeting %s: the summary could not be saved (%s)", meeting_id, type(exc).__name__)
-                self.store.update(meeting_id, status=mt.STATUS_TRANSCRIBED, summary_error="disk")
+                self.store.update(meeting_id, status=self._idle_status(meeting_id), summary_error="disk")
         elif getattr(outcome, "kind", "") == "busy":   # another request took the planner first: it waits again
-            self.store.update(meeting_id, status=mt.STATUS_TRANSCRIBED, summary_error="")
+            self.store.update(meeting_id, status=self._idle_status(meeting_id), summary_error="")
             self._wait(meeting_id, self._summary_origin or ms_origin_click())
         else:
             code = str(getattr(outcome, "kind", "") or "error")[:40]
-            self.store.update(meeting_id, status=mt.STATUS_TRANSCRIBED, summary_error=code)
+            self.store.update(meeting_id, status=self._idle_status(meeting_id), summary_error=code)
             logger.info("Meeting %s: summary failed (%s)", meeting_id, code)
         if not self._shut:
             self.refresh()
@@ -656,11 +667,33 @@ class MeetingsController(QObject):
         """The running summary was cancelled (Esc on the bar): the transcript stays; Summarise starts it again."""
         meeting_id, self._summary_running = self._summary_running, ""
         if meeting_id and self.store.load(meeting_id) is not None:
-            self.store.update(meeting_id, status=mt.STATUS_TRANSCRIBED, summary_error=SUMMARY_CANCELLED)
+            self.store.update(meeting_id, status=self._idle_status(meeting_id), summary_error=SUMMARY_CANCELLED)
             logger.info("Meeting %s: summary cancelled", meeting_id)
         if not self._shut:
             self.refresh()
             self.summaryChanged.emit(meeting_id)
+
+    def _idle_status(self, meeting_id: str) -> str:
+        """Where a meeting stands when its summary run ends without a new summary (failed, cancelled, busy, not
+        saved): Summary ready when a summary of it is kept (Summarise again: the old summary stays), else
+        Transcript ready."""
+        return mt.STATUS_SUMMARY_READY if self.summary_of(meeting_id) is not None else mt.STATUS_TRANSCRIBED
+
+    def again_state(self, meeting_id: str) -> tuple[str, str]:
+        """Summarise again on the meeting's summary: (meeting_summary_view.AGAIN_*, the failure words). Off when its
+        transcript is gone or Ask Jarvis is off; running or waiting while a summary run of it is under way or
+        waits for the Ask; failed (Retry, "Summary failed" / "Summary cancelled") after one that did not end in a
+        summary; else ready."""
+        record = self.store.load(meeting_id)
+        if record is None or not self.summaries_on() or not self.store.transcript_path(meeting_id).is_file():
+            return sv.AGAIN_OFF, ""
+        if self._summary_running == meeting_id or record.status == mt.STATUS_SUMMARISING:
+            return sv.AGAIN_RUNNING, ""
+        if any(item[0] == meeting_id for item in self._summary_queue):
+            return sv.AGAIN_WAITING, ""
+        if record.summary_error:
+            return sv.AGAIN_FAILED, record.status_text()
+        return sv.AGAIN_READY, ""
 
     def summary_of(self, meeting_id: str) -> ms.MeetingSummary | None:
         """The meeting's kept summary (summary.json, every text checked again), or None."""
@@ -693,7 +726,8 @@ class MeetingsController(QObject):
         summary = self.summary_of(meeting_id) if record is not None else None
         if record is None or summary is None:
             return False
-        self.stage.show_summary(summary_info(record, summary, steps_link=self.steps_link(meeting_id), **states))
+        self.stage.show_summary(summary_info(record, summary, steps_link=self.steps_link(meeting_id),
+                                             again=self.again_state(meeting_id), **states))
         return True
 
     def _on_page_changed(self) -> None:
@@ -911,11 +945,13 @@ def blocks_allowed(record: mt.MeetingRecord) -> bool:
 def summary_info(record: mt.MeetingRecord, summary: ms.MeetingSummary, *,
                  blocks: dict[int, tuple[str, str]] | None = None,
                  follow_ups: list[tuple[str, str]] | None = None,
-                 notes: list[str] | None = None, steps_link: str = "") -> sv.SummaryInfo:
-    """What the summary view shows: the summary's own parts (yours first), each of your items' block state
-    ((state, card id) by index; none unless ``blocks_allowed``), each follow-up draft's (state words, card id) - a
-    meeting not linked has plain follow-ups and no guests instead -, each note's state, See every step, and the
-    date and length Copy summary puts first."""
+                 notes: list[str] | None = None, steps_link: str = "",
+                 again: tuple[str, str] = (sv.AGAIN_OFF, "")) -> sv.SummaryInfo:
+    """What the summary view shows: the summary's own parts (the overview and the key points first - none for a
+    summary saved before them -, yours first), each of your items' block state ((state, card id) by index; none
+    unless ``blocks_allowed``), each follow-up draft's (state words, card id) - a meeting not linked has plain
+    follow-ups and no guests instead -, each note's state, See every step, Summarise again's (state, failure
+    words) and the date and length Copy summary puts first."""
     blocks = blocks or {}
     started = record.scheduled_start or record.started_at
     meta = " \u00b7 ".join(part for part in (f"{started:%a %d %b} {meetings_view._clock(started)}" if started else "",
@@ -941,7 +977,9 @@ def summary_info(record: mt.MeetingRecord, summary: ms.MeetingSummary, *,
                           summary.decisions, tuple(actions), summary.questions, tuple(follows), tuple(shown),
                           sv.note_text(summary.dropped, reason=ms.left_out_words(record)), steps_link, when=when,
                           length=mt.length_text(record.duration_s), linked=bool(record.linked),
-                          follow_up_items=plain if not record.linked else ())
+                          follow_up_items=plain if not record.linked else (), overview=summary.overview,
+                          key_points=tuple(sv.SummaryTopic(item.topic, item.points) for item in summary.key_points),
+                          again=again[0], again_note=again[1])
 
 
 RECORD_OFFER_LINK = "Open the start card"

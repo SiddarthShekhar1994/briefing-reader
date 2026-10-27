@@ -10,6 +10,7 @@ there with the bundle or [meetings] off; logs carry ids and counts only. Every n
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import threading
@@ -18,7 +19,8 @@ import unittest
 from datetime import datetime, timedelta
 from unittest import mock
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QLabel
 
 from briefing_reader import hud, live, meeting_summary_view as sv, meetings as mt, meetings_ui, ui
@@ -48,6 +50,17 @@ SUMMARY = {"title": "Zq7 numbers and the demo",
            "follow_ups": [{"to": "Ana Lima", "subject": "Zq7 numbers", "body": "Hi Ana,\nThursday.\nBest"},
                           {"to": "Eve Outsider", "subject": "Everything", "body": "As asked."}],
            "memory_suggestions": ["Ana Lima runs the budget reviews.", "Ben Ode prefers mornings."]}
+# The same meeting summarised again in the format with an overview and the key points (owner decision 2026-10-27).
+OVERVIEW = ("Zq7 a short call about the numbers and the demo. The numbers go out on Thursday and the demo moves "
+            "to next week.")
+KEY_POINTS = [{"topic": "Zq7 the numbers", "points": ["Ana asked for the numbers by Friday.",
+                                                      "They go out on Thursday with the forecast."]},
+              {"topic": "The demo", "points": ["The demo moves to next week.", "Who joins it is still open."]}]
+NEW_SUMMARY = dict(SUMMARY, title="Zq7 numbers, the demo and the room", overview=OVERVIEW, key_points=KEY_POINTS,
+                   follow_ups=[{"to": "Ana Lima", "subject": "Zq7 room booking", "body": "Hi Ana,\nThe room.\nBest"}],
+                   memory_suggestions=[])
+NEW_SECTIONS = [sv.OVERVIEW_TITLE, sv.KEY_POINTS_TITLE, sv.DECISIONS_TITLE, sv.ACTIONS_TITLE, sv.QUESTIONS_TITLE,
+                sv.FOLLOWUPS_TITLE]
 
 
 def setUpModule() -> None:
@@ -798,6 +811,290 @@ class UniversalSummaryTests(SummaryAppCase):
         view = self.open(plain)
         self.assertEqual(view.sections()[3], sv.FOLLOWUP_ITEMS_TITLE)
         self.assertIn("Ana Lima - Zq7 numbers", view.texts())               # its follow-ups as plain text
+
+
+class KeyPointsViewTests(SummaryAppCase):
+    """OVERVIEW and KEY POINTS above the sections of before (owner decision 2026-10-27)."""
+
+    def summarised(self, value: dict) -> tuple[str, sv.SummaryView]:
+        self.make(plan_stream(value))
+        meeting_id = self.meeting()
+        self.m.summarise(meeting_id, "summarise")
+        self.wait_done()
+        return meeting_id, self.open(meeting_id)
+
+    def test_the_overview_and_key_points_come_first_and_long_text_wraps(self) -> None:
+        long_point = ("Zq7 " + "the forecast was walked through line by line with every assumption named " * 6)[:400]
+        long_topic = "Zq7 a heading far longer than the six words it should be"
+        value = dict(NEW_SUMMARY, key_points=[*KEY_POINTS, {"topic": long_topic, "points": [long_point]}])
+        meeting_id, view = self.summarised(value)
+        self.assertEqual(view.sections(), NEW_SECTIONS)                   # the sections of before, as before
+        self.assertFalse(view.hint_shown())
+        texts = view.texts()
+        order = [texts.index(text) for text in (sv.OVERVIEW_TITLE, OVERVIEW, sv.KEY_POINTS_TITLE, "Zq7 the numbers",
+                                                "Ana asked for the numbers by Friday.", "The demo",
+                                                "Who joins it is still open.", long_point, sv.DECISIONS_TITLE,
+                                                "Zq7 the demo moves to next week.", sv.ACTIONS_TITLE)]
+        self.assertEqual(order, sorted(order))
+        topics = view.topic_rows()
+        self.assertEqual([label.text() for label in topics], ["Zq7 the numbers", "The demo", long_topic])
+        self.assertTrue(all(label.font().weight() == QFont.Weight.DemiBold for label in topics))   # small headings
+        points = view.point_rows()
+        self.assertEqual(len(points), 5)
+        self.assertEqual({row.bullet_label.text() for row in points}, {sv.BULLET})
+        settle()
+        panel = view.panel
+        for label in panel.findChildren(QLabel):
+            if not label.text() or not label.isVisibleTo(panel):
+                continue
+            with self.subTest(text=label.text()[:30]):
+                self.assertLessEqual(label.mapTo(panel, QPoint(0, 0)).x() + label.width(), panel.width())   # inside
+                if label.wordWrap():
+                    self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()))   # not clipped
+                self.assertTrue(label.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse)
+        last = points[-1]
+        self.assertGreater(last.text_label.height(), 2 * last.text_label.fontMetrics().lineSpacing())   # wraps
+        self.assertGreater(last.text_label.x(), last.bullet_label.geometry().right())   # it hangs beside the bullet
+
+    def test_copy_summary_puts_the_overview_and_key_points_first(self) -> None:
+        meeting_id, view = self.summarised(NEW_SUMMARY)
+        expected = "\n".join([
+            "Zq7 numbers, the demo and the room",
+            "Date: Sun 4 Oct 2026, 11:00 AM",
+            "Length: 45:12",
+            "With Ana Lima and Ben Ode",
+            "",
+            "Overview",
+            OVERVIEW,
+            "",
+            "Key points",
+            "Zq7 the numbers",
+            "- Ana asked for the numbers by Friday.",
+            "- They go out on Thursday with the forecast.",
+            "The demo",
+            "- The demo moves to next week.",
+            "- Who joins it is still open.",
+            "",
+            "Decisions",
+            "- Zq7 the demo moves to next week.",
+            "",
+            "Action items",
+            f"- You - Send Ana the numbers {sv.DOT} due Fri 9 Oct",
+            "- Ana Lima - Book the demo room",
+            "",
+            "Open questions",
+            "- Who joins the demo?",
+            "",
+            "Follow-up drafts",
+            "- To Ana Lima - Zq7 room booking",
+        ]) + "\n"
+        clipboard = QApplication.clipboard()
+        clipboard.setText("before")
+        view.copy_button.click()
+        settle()
+        self.assertEqual(clipboard.text(), expected)
+        # An overview without key points (or the other way round) still shows both sections.
+        info = view.info()
+        self.assertTrue(sv.summary_text(dataclasses.replace(info, key_points=())).endswith(
+            "\nOverview\n" + OVERVIEW + "\n\nKey points\n" + sv.NONE_TEXT + "\n\nDecisions\n- Zq7 the demo moves to "
+            "next week.\n\nAction items\n" + expected.split("\nAction items\n", 1)[1]))
+        self.assertIn("\nOverview\n" + sv.NONE_TEXT + "\n\nKey points\nZq7 the numbers\n",
+                      sv.summary_text(dataclasses.replace(info, overview="")))
+
+
+class SummariseAgainTests(SummaryAppCase):
+    """Summarise again (owner decision 2026-10-27): a summary from before the overview and the key points is redone
+    in the new format on the owner's click only, through Summarise's own path; the old summary stays until the new
+    one is saved, and when the run fails (Retry); the new summary's cards start fresh, nothing sent is redone."""
+
+    def old_summary(self, *runs) -> tuple[str, sv.SummaryView]:  # type: ignore[no-untyped-def]
+        self.make(plan_stream(SUMMARY), *runs)
+        meeting_id = self.meeting()
+        self.m.summarise(meeting_id, "summarise")
+        self.wait_done()
+        return meeting_id, self.open(meeting_id)
+
+    def test_an_old_summary_is_redone_with_an_overview_and_key_points(self) -> None:
+        gate = threading.Event()
+        meeting_id, view = self.old_summary(GatedProcess(plan_stream(NEW_SUMMARY), gate))
+        # As it was saved: no OVERVIEW or KEY POINTS, one quiet line under the header, Summarise again beside Copy.
+        self.assertEqual(view.sections(), NEW_SECTIONS[2:] + [sv.NOTES_TITLE])
+        self.assertTrue(view.hint_shown())
+        texts = view.texts()
+        self.assertLess(texts.index(sv.AGAIN_HINT), texts.index(sv.DECISIONS_TITLE))
+        self.assertGreater(texts.index(sv.AGAIN_HINT), texts.index(SUMMARY["title"]))
+        self.assertEqual(sv.AGAIN_HINT, "Summarise again for an overview and key points.")
+        self.assertTrue(view.again_button.isVisibleTo(view) and view.again_button.isEnabled())
+        self.assertEqual((view.again_button.text(), view.again_button.variant()),
+                         ("Summarise again", view.copy_button.variant()))
+        again, copy = view.again_button.geometry(), view.copy_button.geometry()
+        self.assertIs(view.again_button.parentWidget(), view.copy_button.parentWidget())
+        self.assertEqual(again.center().y(), copy.center().y())               # beside Copy summary
+        self.assertLess(again.right(), copy.left())
+        self.assertNotIn("Summarise again", sv.summary_text(view.info()))   # not part of the summary
+        self.assertEqual(len(self.app.factory.runner.started), 1)            # nothing started by itself
+        saved = self.m.store.summary_path(meeting_id).read_text(encoding="utf-8")
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+            view.again_button.click()
+            self.assertTrue(wait_for(lambda: len(self.app.factory.runner.started) == 2, 5))
+            settle()
+            # While it runs: disabled and says so; the old summary stays - on screen, in summary.json, in the list.
+            self.assertEqual(self.record(meeting_id).status, mt.STATUS_SUMMARISING)
+            view = self.m.stage.summary
+            self.assertEqual((view.again_button.text(), view.again_button.isEnabled()),
+                             (sv.AGAIN_RUNNING_TEXT, False))
+            self.assertEqual(view.info().title, SUMMARY["title"])
+            self.assertEqual(self.m.store.summary_path(meeting_id).read_text(encoding="utf-8"), saved)
+            row = self.m.stage.row(meeting_id)
+            self.assertEqual(row.info.status_text, "Writing the summary")
+            self.assertTrue(row.open_button.isVisibleTo(row))               # it still opens from the list
+            self.assertFalse(self.m.summarise(meeting_id, "summarise"))      # one run at a time
+            gate.set()
+            self.wait_done()
+        record = self.record(meeting_id)
+        self.assertEqual((record.status, record.summary_error), (mt.STATUS_SUMMARY_READY, ""))
+        self.assertEqual(self.m.stage.showing_summary(), meeting_id)        # shown again, the new one
+        view = self.m.stage.summary
+        self.assertEqual(view.info().title, NEW_SUMMARY["title"])
+        self.assertEqual(view.sections(), NEW_SECTIONS)
+        self.assertFalse(view.hint_shown())
+        self.assertNotIn(sv.AGAIN_HINT, view.texts())
+        self.assertEqual([label.text() for label in view.topic_rows()], ["Zq7 the numbers", "The demo"])
+        self.assertEqual([row.text_label.text() for row in view.point_rows()],
+                         [point for topic in KEY_POINTS for point in topic["points"]])
+        self.assertEqual((view.again_button.text(), view.again_button.isEnabled()), (sv.AGAIN_TEXT, True))
+        self.assertEqual(ms.summary_of(json.loads(self.m.store.summary_path(meeting_id).read_text(encoding="utf-8")),
+                                       meeting_id).overview, OVERVIEW)
+        started = self.app.factory.runner.started[1]                         # Summarise's own run
+        self.assertTrue(started.argv[started.argv.index("--system-prompt-file") + 1].endswith("meeting_prompt.md"))
+        self.assertIn(ms.TRANSCRIPT_NOTE, started.stdin)
+        record_text = "\n".join(logs.output)
+        self.assertIn("topics 2, points 4", record_text)                     # counts only
+        for secret in (*SECRETS, ANA, BEN, "hunter2", "forecast", "Who joins"):
+            self.assertNotIn(secret, record_text)
+
+    def test_a_failed_run_keeps_the_old_summary_with_retry(self) -> None:
+        bad = dict(NEW_SUMMARY, action_items=[{"who": "you", "what": "x", "due": "next week"}])
+        meeting_id, view = self.old_summary(plan_stream(bad), plan_stream(NEW_SUMMARY))
+        saved = self.m.store.summary_path(meeting_id).read_text(encoding="utf-8")
+        cards = [card.id for card in self.meeting_cards()]
+        view.again_button.click()
+        self.wait_done()
+        record = self.record(meeting_id)
+        self.assertEqual((record.status, record.summary_error), (mt.STATUS_SUMMARY_READY, "garbled"))
+        self.assertEqual(self.m.store.summary_path(meeting_id).read_text(encoding="utf-8"), saved)
+        self.assertEqual([card.id for card in self.meeting_cards()], cards)  # its draft untouched
+        view = self.m.stage.summary
+        self.assertEqual(view.info().title, SUMMARY["title"])                # still the old summary
+        self.assertEqual((view.again_button.text(), view.again_button.isEnabled()), (sv.RETRY_TEXT, True))
+        self.assertTrue(view.again_label.isVisibleTo(view))
+        self.assertEqual(view.again_label.text(), "Summary failed")         # the meeting's own words
+        self.assertTrue(view.hint_shown())
+        row = self.m.stage.row(meeting_id)
+        self.assertEqual((row.info.status_text, row.info.tone),
+                         ("Summary failed", meetings_ui.meetings_view.TONE_FAILED))
+        self.assertTrue(row.open_button.isVisibleTo(row))
+        self.assertTrue(row.summarise_button.isVisibleTo(row))
+        self.assertEqual(row.summarise_button.text(), meetings_ui.meetings_view.RETRY_TEXT)
+        view.again_button.click()                                            # Retry: the same path again
+        self.wait_done()
+        record = self.record(meeting_id)
+        self.assertEqual((record.status, record.summary_error), (mt.STATUS_SUMMARY_READY, ""))
+        view = self.m.stage.summary
+        self.assertEqual(view.info().title, NEW_SUMMARY["title"])
+        self.assertFalse(view.again_label.isVisibleTo(view))
+        self.assertEqual(self.m.stage.row(meeting_id).info.status_text, "Summary ready")
+
+    def test_esc_on_the_run_keeps_the_old_summary(self) -> None:
+        gate = threading.Event()
+        meeting_id, view = self.old_summary(GatedProcess(plan_stream(NEW_SUMMARY), gate))
+        view.again_button.click()
+        self.assertTrue(wait_for(lambda: len(self.app.factory.runner.started) == 2, 5))
+        self.c.ask.cancel()
+        gate.set()
+        self.wait_done()
+        record = self.record(meeting_id)
+        self.assertEqual((record.status, record.summary_error), (mt.STATUS_SUMMARY_READY, "cancelled"))
+        view = self.m.stage.summary
+        self.assertEqual((view.info().title, view.again_button.text(), view.again_label.text()),
+                         (SUMMARY["title"], sv.RETRY_TEXT, "Summary cancelled"))
+
+    def test_while_another_request_runs_it_waits_and_says_so(self) -> None:
+        meeting_id, view = self.old_summary(plan_stream(NEW_SUMMARY))
+        self.c.ask._running = object()   # another request holds the Ask (the runner says busy)
+        try:
+            view.again_button.click()
+            settle()
+            view = self.m.stage.summary
+            self.assertEqual((view.again_button.text(), view.again_button.isEnabled()),
+                             (sv.AGAIN_WAITING_TEXT, False))
+            self.assertEqual(self.record(meeting_id).status, mt.STATUS_SUMMARY_READY)
+            row = self.m.stage.row(meeting_id)
+            self.assertEqual(row.info.status_text, "Summary waits for Jarvis to finish another request")
+            self.assertTrue(row.open_button.isVisibleTo(row))
+            view.again_button.click()                                        # disabled: nothing more
+            self.assertEqual(len(self.m._summary_queue), 1)
+        finally:
+            self.c.ask._running = None
+        self.m.pump_summaries()
+        self.wait_done()
+        self.assertEqual(self.m.stage.summary.info().title, NEW_SUMMARY["title"])
+        self.assertEqual(len(self.app.factory.runner.started), 2)
+
+    def test_only_while_the_transcript_is_kept_and_ask_jarvis_is_on(self) -> None:
+        meeting_id, view = self.old_summary()
+        self.assertTrue(view.again_button.isVisibleTo(view) and view.hint_shown())
+        transcript = self.m.store.transcript_path(meeting_id)
+        kept = transcript.read_bytes()
+        transcript.unlink()
+        self.m.refresh()
+        self.assertFalse(view.again_button.isVisibleTo(view))
+        self.assertFalse(view.hint_shown())
+        self.assertNotIn(sv.AGAIN_HINT, view.texts())
+        self.assertFalse(self.m.summarise(meeting_id, "summarise"))
+        transcript.write_bytes(kept)
+        self.m.refresh()
+        self.assertTrue(view.again_button.isVisibleTo(view) and view.hint_shown())
+        self.m.summary_runner = None                                         # Ask Jarvis off
+        self.m.refresh()
+        self.assertFalse(view.again_button.isVisibleTo(view) or view.hint_shown())
+        self.assertFalse(self.m.summarise(meeting_id, "summarise"))
+        self.assertEqual(len(self.app.factory.runner.started), 1)
+
+    def test_without_ask_jarvis_an_old_summary_shows_as_before(self) -> None:
+        self.make(ask=False)
+        meeting_id = self.meeting(status=mt.STATUS_SUMMARY_READY)
+        self.m.store.save_summary(meeting_id, {"version": 1, "id": meeting_id, "title": "Zq7 old summary",
+                                               "decisions": ["Zq7 one."]})
+        view = self.open(meeting_id)
+        self.assertEqual(view.sections(), NEW_SECTIONS[2:])
+        self.assertFalse(view.again_button.isVisibleTo(view) or view.hint_shown())
+        self.assertNotIn(sv.AGAIN_HINT, view.texts())
+
+    def test_the_new_summarys_cards_start_fresh_and_nothing_sent_is_redone(self) -> None:
+        meeting_id, view = self.old_summary(plan_stream(NEW_SUMMARY), plan_stream(NEW_SUMMARY))
+        old_draft, = self.meeting_cards()
+        view.action_rows()[0].add_button.click()                            # a block proposed, not added
+        settle()
+        self.assertEqual(len(self.meeting_cards(CALENDAR)), 1)
+        self.assertEqual(len(self.c._memory_suggestions), 2)
+        self.m.stage.summary.again_button.click()
+        self.wait_done()
+        new_draft, = self.meeting_cards()                                    # the earlier waiting draft went
+        self.assertNotEqual(new_draft.id, old_draft.id)
+        self.assertEqual(self.meeting_cards(CALENDAR), [])                   # ... the proposed block too
+        self.assertEqual(self.c._memory_suggestions, [])                     # ... and its notes (none now)
+        view = self.m.stage.summary
+        self.assertTrue(view.action_rows()[0].add_button.isVisibleTo(view.action_rows()[0]))   # Add block afresh
+        self.assertFalse(self.c._store.is_decided(new_draft.id))
+        self.assertIn(self.reading.action_card(new_draft.id), view.held())
+        # A draft already sent stays sent: the same draft from the next run is never one to send again.
+        self.c._store.set(new_draft.id, STATUS_SENT)
+        view.again_button.click()
+        self.wait_done()
+        self.assertTrue(self.c._store.is_decided(new_draft.id))
+        self.assertEqual(self.app.senders["work"].sent, [])                 # nothing sent or kept by itself
+        self.assertEqual(len(self.c.memory_store), 0)
 
 
 class CopySummaryTests(SummaryAppCase):

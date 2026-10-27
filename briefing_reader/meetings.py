@@ -360,10 +360,11 @@ class MeetingRecord:
             return "Recording"
         if self.status == STATUS_TRANSCRIBING:
             return f"Writing it down {max(0, min(100, int(self.progress)))}%"
+        if self.status in (STATUS_TRANSCRIBED, STATUS_SUMMARY_READY) and self.summary_error:
+            # The last summary run failed or was cancelled (a summary kept from before stays: Summary ready's).
+            return "Summary cancelled" if self.summary_error == "cancelled" else "Summary failed"
         if self.status == STATUS_TRANSCRIBED:
-            if self.summary_error == "cancelled":
-                return "Summary cancelled"
-            return "Summary failed" if self.summary_error else "Transcript ready"
+            return "Transcript ready"
         if self.status == STATUS_SUMMARISING:
             return "Writing the summary"
         if self.status == STATUS_SUMMARY_READY:
@@ -627,8 +628,9 @@ class MeetingStore:
         """Meetings still marked RECORDING (Jarvis ended without closing) that are not ``active``: their WAV
         headers are repaired and they become RECORDED (stop reason STOP_INTERRUPTED). Returns their ids.
         Meetings left TRANSCRIBING go back to RECORDED (their worker is gone); meetings left SUMMARISING go back to
-        TRANSCRIBED (their run is gone; Summarise starts it again on the owner's click); a Delete left half done
-        (STATUS_DELETING) is tried again."""
+        TRANSCRIBED (their run is gone; Summarise starts it again on the owner's click) - or to SUMMARY_READY when a
+        summary of them is kept (Summarise again was running); a Delete left half done (STATUS_DELETING) is tried
+        again."""
         from .meeting_audio import repair_wav, wav_seconds
 
         busy = set(active)
@@ -656,7 +658,9 @@ class MeetingStore:
                 record.status, record.progress = STATUS_RECORDED, 0
                 self.save(record)
             elif record.status == STATUS_SUMMARISING:
-                record.status = STATUS_TRANSCRIBED
+                # Summarise again of a meeting with a summary kept: that summary stays (Summary ready).
+                record.status = (STATUS_SUMMARY_READY if isinstance(self.load_summary(record.id), Mapping)
+                                 else STATUS_TRANSCRIBED)
                 self.save(record)
         return recovered
 

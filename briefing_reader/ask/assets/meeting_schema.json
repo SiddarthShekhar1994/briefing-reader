@@ -3,13 +3,40 @@
   "title": "JarvisMeetingSummary",
   "type": "object",
   "additionalProperties": false,
-  "required": ["title", "decisions", "action_items", "open_questions", "follow_ups", "memory_suggestions"],
+  "required": ["title", "overview", "key_points", "decisions", "action_items", "open_questions", "follow_ups",
+               "memory_suggestions"],
   "properties": {
     "title": {
       "type": "string",
       "minLength": 1,
       "maxLength": 120,
       "description": "Write this first. A short title for the meeting, in your own words."
+    },
+    "overview": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1500,
+      "description": "2-6 sentences in your own words: what the meeting, talk or class covered and where it ended up."
+    },
+    "key_points": {
+      "type": "array",
+      "maxItems": 12,
+      "description": "The substance of what was said, by topic, in the order the topics came up.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topic", "points"],
+        "properties": {
+          "topic": {"type": "string", "minLength": 1, "maxLength": 80, "description": "A heading of at most 6 words."},
+          "points": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {"type": "string", "minLength": 1, "maxLength": 400},
+            "description": "One or two sentences each, in your own words."
+          }
+        }
+      }
     },
     "decisions": {
       "type": "array",

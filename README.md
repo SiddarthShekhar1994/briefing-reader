@@ -2113,24 +2113,39 @@ Without Ask Jarvis there is no summary, and the list says so.
   said, paused or switched, and while it runs the command bar says "Writing
   the meeting summary..." (Esc cancels).
 - **Checked strictly**: the answer must be exactly the summary's shape (a
-  title, decisions, action items with who and what and a due date only as a
-  real date, open questions, at most 3 follow-ups, at most 3 notes) or it is
-  refused whole and the meeting shows **Retry**. On a linked call an action
-  item is kept only for you or a guest of the invite. In person nothing is
+  title, an overview, the key points by topic, decisions, action items with
+  who and what and a due date only as a real date, open questions, at most 3
+  follow-ups, at most 3 notes) or it is refused whole and the meeting shows
+  **Retry** - only a bad overview, topic or point is left out on its own (at
+  most 12 topics of at most 8 points), never the rest. On a linked call an
+  action item is kept only for you or a guest of the invite. In person nothing is
   yours (the speakers are not identified): an item keeps a who only when the
   words name someone. A meeting not linked keeps the names as they were said
   (plain text: nothing is sent to anyone). What does not fit is left out and
   counted.
-- **The summary view** (Open summary on the meeting): Decisions, Action items
-  (yours first), Open questions, the follow-up drafts (a meeting not linked:
-  FOLLOW-UPS as plain text - who and what, never a draft), the notes worth
-  remembering, and **See every step** (LIVE, this session). Every text in it
-  can be selected with the mouse.
+- **The summary view** (Open summary on the meeting): first an **Overview**
+  (a few sentences: what the meeting, talk or class covered and where it ended
+  up) and the **Key points** by topic (each topic a small heading with its
+  points, in the order they came up - about one topic for every 8-10 minutes),
+  then Decisions, Action items (yours first), Open questions, the follow-up
+  drafts (a meeting not linked: FOLLOW-UPS as plain text - who and what, never
+  a draft), the notes worth remembering, and **See every step** (LIVE, this
+  session). Every text in it can be selected with the mouse.
+- **Summarise again** (beside Copy summary, while the transcript is kept and
+  Ask Jarvis is on) asks your Claude Code for the meeting's summary again, the
+  same way as Summarise - only on your click. A summary written before the
+  overview and key points existed says "Summarise again for an overview and
+  key points." While the new one waits or is written the button says so and
+  is disabled; the summary you have stays (and opens from the list) until the
+  new one is saved, and a run that fails keeps it, with "Summary failed" and
+  **Retry**. The new summary's drafts, blocks and notes start fresh: nothing
+  already sent or added is redone, and the earlier ones still waiting go.
 - **Copy summary** puts the whole summary on this PC's clipboard as plain text
-  (the title, the date, the length, then the decisions, the action items with
-  who and due date, the open questions, the follow-ups and the notes worth
-  remembering, as shown) and says "Copied" for a moment. Nothing else happens:
-  nothing is sent or kept, and the text is never logged.
+  (the title, the date, the length, then the overview, the key points - each
+  topic on its own line, its points as "- " lines -, the decisions, the action
+  items with who and due date, the open questions, the follow-ups and the notes
+  worth remembering, as shown) and says "Copied" for a moment. Nothing else
+  happens: nothing is sent or kept, and the text is never logged.
 - **Follow-ups are drafts** for a meeting linked to your calendar: each one goes
   only to a guest of the calendar invite, from the meeting's account, as an
   ordinary approval card (also under NEEDS YOUR OK): a new recipient waits for

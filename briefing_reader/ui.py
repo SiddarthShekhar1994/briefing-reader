@@ -9522,9 +9522,16 @@ class AppController(QObject):
         summary = meetings.on_summary(outcome, self._ask_task_id, meeting_id=meeting_id)
         if summary is not None:
             self._take_ask_cards(list(outcome.cards))
+            notes = [self._meeting_note_offer(text) for text in summary.memory]
+            # Summarise again: the new summary's cards start fresh - the earlier summary's draft and block cards
+            # and notes still waiting go (a decided one keeps its result: nothing sent or added is redone).
+            retired = self._retire_meeting_cards(meeting_id, keep={card.id for card in outcome.cards},
+                                                 keep_notes=set(notes))
+            if any(retired):
+                logger.info("Meeting %s: %d earlier card(s) and %d note(s) retired for the new summary", meeting_id,
+                            *retired)
             self._meeting_cards[meeting_id] = tuple(card.id for card in outcome.cards)
-            self._meeting_blocks.pop(meeting_id, None)
-            self._meeting_notes[meeting_id] = [self._meeting_note_offer(text) for text in summary.memory]
+            self._meeting_notes[meeting_id] = notes
             drafts = sum(1 for card in outcome.cards if not card.error)
             message = f"Meeting: summary ready, {_plural(drafts, 'follow-up draft')}"
             if outcome.refused:
@@ -9553,19 +9560,28 @@ class AppController(QObject):
         """Delete removes the meeting's audio, transcript and summary at once: its follow-up drafts and block cards
         still waiting (not held, not on their way, not decided) leave NEEDS YOUR OK, and its notes still waiting
         leave MEMORY's suggestions. A decided card keeps its result."""
+        gone, notes = self._retire_meeting_cards(meeting_id)
+        logger.info("Meeting %s: deleted with %d waiting card(s) and %d note(s)", meeting_id, gone, notes)
+
+    def _retire_meeting_cards(self, meeting_id: str, *, keep: set[str] | frozenset[str] = frozenset(),
+                              keep_notes: set[int] | frozenset[int] = frozenset()) -> tuple[int, int]:
+        """A meeting's follow-up drafts and block cards still waiting (not held, not on their way, not decided)
+        leave NEEDS YOUR OK and its notes still waiting leave MEMORY's suggestions - but ``keep`` / ``keep_notes``
+        (a new summary's own). A decided card keeps its result. The meeting's cards and notes are forgotten.
+        Returns (cards, notes) counted as before: those that went, and the meeting's waiting notes."""
         ids = set(self._meeting_cards.pop(meeting_id, ()))
         ids |= {card_id for card_id in self._meeting_blocks.pop(meeting_id, {}).values() if card_id}
         hold = self._send_hold.action.id if self._send_hold is not None else ""
-        gone = {card_id for card_id in ids if card_id not in self._jobs and card_id != hold
+        gone = {card_id for card_id in ids - set(keep) if card_id not in self._jobs and card_id != hold
                 and not self._store.is_decided(card_id)}
         if gone:
             self._set_source(SOURCE_ASK, [action for action in self._source_lists[SOURCE_ASK] if action.id not in gone])
             self._refresh_actions_ui()
-        notes = {item for item in self._meeting_notes.pop(meeting_id, []) if item}
+        notes = {item for item in self._meeting_notes.pop(meeting_id, []) if item} - set(keep_notes)
         if notes and any(item.id in notes for item in self._memory_suggestions):
             self._memory_suggestions = [item for item in self._memory_suggestions if item.id not in notes]
             self._render_memory()
-        logger.info("Meeting %s: deleted with %d waiting card(s) and %d note(s)", meeting_id, len(gone), len(notes))
+        return len(gone), len(notes)
 
     def _open_meeting_summary(self, meeting_id: str) -> None:
         """The Transcript's Open the summary: the Meetings screen with that summary."""

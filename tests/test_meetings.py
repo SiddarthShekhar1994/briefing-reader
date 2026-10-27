@@ -188,6 +188,24 @@ class WavTests(Base):
         self.assertEqual((loaded.status, loaded.stop_reason), (mt.STATUS_RECORDED, mt.STOP_INTERRUPTED))
         self.assertAlmostEqual(loaded.duration_s, 2.0, places=2)
 
+    def test_a_summary_run_cut_short_keeps_the_summary_it_had(self) -> None:
+        """Summarise again was running when Jarvis ended: the summary kept stays (Summary ready); a first summary
+        run goes back to Transcript ready, as before."""
+        again, first = self.store.create(request()), self.store.create(request())
+        self.store.save_summary(again.id, {"version": 1, "id": again.id, "title": "Kept"})
+        for record in (again, first):
+            self.store.update(record.id, status=mt.STATUS_SUMMARISING)
+        self.store.recover()
+        self.assertEqual(self.store.load(again.id).status, mt.STATUS_SUMMARY_READY)
+        self.assertEqual(self.store.load(first.id).status, mt.STATUS_TRANSCRIBED)
+
+    def test_a_failed_summary_run_says_so_even_with_a_summary_kept(self) -> None:
+        record = mt.MeetingRecord(id="20261019-140000-abcd", status=mt.STATUS_SUMMARY_READY)
+        self.assertEqual(record.status_text(), "Summary ready")
+        for error, words in (("garbled", "Summary failed"), ("cancelled", "Summary cancelled")):
+            record.summary_error = error
+            self.assertEqual(record.status_text(), words)
+
     def test_conversion_to_16k_mono(self) -> None:
         stereo48 = struct.pack("<" + "h" * 12, *([1000, 3000] * 6))
         self.assertEqual(ma.to_mono16k(stereo48, 48000, 2), struct.pack("<hh", 2000, 2000))

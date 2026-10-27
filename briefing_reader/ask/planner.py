@@ -243,7 +243,9 @@ RESEARCH_LIMIT = "research_limit"              # the web research caps refuse it
 RESEARCH_UNSUPPORTED = "research_unsupported"  # Readiness.problem: this Claude Code lacks --allowedTools
 
 AUTH_FRESH_S = 5.0        # run() trusts an auth status this recent; older, it asks again
-MEETING_TIMEOUT_S = 240.0  # a meeting summary reads a long transcript: at least this long ([ask] timeout_seconds)
+# A meeting summary reads a long transcript and writes the overview and the key points by topic (a 90-minute talk:
+# about 70 KB in, 6-10 topics out): at least this long, whatever [ask] timeout_seconds (30..300) says.
+MEETING_TIMEOUT_S = 480.0
 NO_TRANSCRIPT = "no_transcript"   # a meeting summary with no transcript to read (AskOutcome.kind)
 NO_TRANSCRIPT_MESSAGE = "There is no transcript to summarise; nothing was proposed"
 OVERAGE_PAUSE = timedelta(hours=5)   # the pause after an extra-usage signal that names no reset time
@@ -442,7 +444,7 @@ class ClaudeEngine:
                              clock=self._clock, progress=progress, capture=capture)
         elif mode == MODE_MEETING:   # a long transcript: a longer timeout, its own strict reader
             result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
-                             timeout_s=min(300.0, max(float(self.ask.timeout_seconds), MEETING_TIMEOUT_S)),
+                             timeout_s=max(float(self.ask.timeout_seconds), MEETING_TIMEOUT_S),
                              read=meeting_summary.read_summary_result, cancel=cancel,
                              clock=self._clock, progress=progress, capture=capture)
         elif mode == MODE_DESKTOP:   # a plan of refs, read strictly (desktop_mode.plan_from); validate decides
@@ -3210,6 +3212,9 @@ def _meeting_validated(live: LiveTask, answer: Any, summary: Any, cards: Cards, 
     step.field("Kept", f"{_count_words(counts['decisions'], 'decision')}, "
                        f"{_count_words(counts['actions'], 'action')} ({counts['yours']} yours), "
                        f"{_count_words(counts['questions'], 'open question')}")
+    step.field("Overview and key points", f"{'an overview' if counts.get('overview') else 'no overview'}, "
+                                          f"{_count_words(counts.get('topics', 0), 'topic')}, "
+                                          f"{_count_words(counts.get('points', 0), 'point')}")
     if not linked:
         step.field("Plain follow-ups", _count_words(counts.get("plain_follow_ups", 0), "follow-up"))
     if summary.dropped:
