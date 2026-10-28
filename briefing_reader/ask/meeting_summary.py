@@ -27,7 +27,9 @@ The owner's decisions (2026-10-22): a meeting is in person or on a call, linked 
     summary_from(value)                  the structured output checked strictly against the schema: SummaryAnswer
                                          or None (a wrong type, a missing or unknown key, an empty text - a
                                          follow-up's body aside, "" for a plain follow-up -, a text or a list
-                                         too long, a due that is not a date)
+                                         too long, a due that is not a date); the overview and the key points
+                                         (KeyTopic: a heading and its points) alone are lenient - what of them
+                                         does not fit is left out, never the rest of the summary
     read_summary_result(event, init)     the run's answer: SummaryAnswer, or AskFailure (GARBLED "shape")
     check_summary(answer, job, labels)   MeetingSummary: linked, an action item only for "you" (on a call), a
                                          guest of the invite or UNNAMED (in person), a follow-up draft only to a
@@ -66,7 +68,12 @@ UNNAMED = "unnamed"                   # an action item or follow-up whose words 
 SPEAKER_YOU, SPEAKER_OTHERS, SPEAKER_ROOM = "You", "Others", "Room"
 TITLE_CAP, ITEM_CAP, WHO_CAP, SUBJECT_CAP, BODY_CAP, NOTE_CAP, DUE_CAP = 120, 300, 80, 150, 3000, 160, 10
 DECISIONS_MAX, ACTIONS_MAX, QUESTIONS_MAX, FOLLOWUPS_MAX, MEMORY_MAX = 12, 15, 10, 3, 3
-KEYS = ("title", "decisions", "action_items", "open_questions", "follow_ups", "memory_suggestions")
+OVERVIEW_CAP, TOPIC_CAP, POINT_CAP = 1500, 80, 400      # the overview, a key-points topic's heading, one point
+TOPICS_MAX, POINTS_MAX = 12, 8                          # topics in the key points, points in one topic
+KEYS = ("title", "overview", "key_points", "decisions", "action_items", "open_questions", "follow_ups",
+        "memory_suggestions")
+# A bad or missing overview or key point is left out on its own: it never refuses the rest of the answer.
+LENIENT_KEYS = frozenset({"overview", "key_points"})
 TURN_CAP = 2_000                      # one turn's text in the stdin
 MAX_TRANSCRIPT_CHARS = 120_000        # the <transcript> block (a 3-hour meeting is cut in the middle)
 MAX_GUESTS = 30
@@ -274,6 +281,22 @@ def build_prompt(now: datetime, owner: str, job: MeetingJob, turns: Sequence[Tur
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class KeyTopic:
+    """One topic of a summary's key points: a short heading and its points, in the order said (planner text: shown,
+    never logged or spoken)."""
+
+    topic: str = field(repr=False)
+    points: tuple[str, ...] = field(default=(), repr=False)
+
+    def __repr__(self) -> str:
+        return f"KeyTopic({len(self.points)} point(s))"
+
+
+def _point_count(topics: Sequence[KeyTopic]) -> int:
+    return sum(len(topic.points) for topic in topics)
+
+
+@dataclass(frozen=True)
 class SummaryAnswer:
     """The run's structured answer, shape-checked (planner text: shown, never logged or spoken)."""
 
@@ -284,9 +307,12 @@ class SummaryAnswer:
     follow_ups: tuple[tuple[str, str, str], ...]       # (to, subject, body)
     memory: tuple[str, ...]
     via_fallback: bool = False
+    overview: str = field(default="", repr=False)      # "" when it was missing or did not fit
+    key_points: tuple[KeyTopic, ...] = field(default=(), repr=False)
 
     def __repr__(self) -> str:
-        return (f"SummaryAnswer({len(self.decisions)} decision(s), {len(self.actions)} action(s), "
+        return (f"SummaryAnswer({len(self.key_points)} topic(s), {_point_count(self.key_points)} point(s), "
+                f"{len(self.decisions)} decision(s), {len(self.actions)} action(s), "
                 f"{len(self.questions)} question(s), {len(self.follow_ups)} follow-up(s), {len(self.memory)} note(s))")
 
 
@@ -331,13 +357,35 @@ def _texts(value: Any, most: int, cap: int) -> tuple[str, ...] | None:
     return tuple(found)
 
 
+def _key_points(value: Any) -> tuple[KeyTopic, ...]:
+    """The key points, leniently: each topic an object with exactly "topic" (one line, at most TOPIC_CAP) and
+    "points" (a list); each point one line of at most POINT_CAP. A point that does not fit is left out, and so is
+    a topic that does not fit or has no point left; at most POINTS_MAX points a topic and TOPICS_MAX topics, in the
+    run's order. Never refuses the rest of the answer (() when it is not a list)."""
+    if not isinstance(value, list):
+        return ()
+    topics: list[KeyTopic] = []
+    for item in value:
+        if len(topics) == TOPICS_MAX:
+            break
+        if not isinstance(item, dict) or set(item) != {"topic", "points"} or not isinstance(item["points"], list):
+            continue
+        heading = _line(item["topic"], TOPIC_CAP)
+        points = [text for text in (_line(point, POINT_CAP) for point in item["points"]) if text is not None]
+        if heading is not None and points:
+            topics.append(KeyTopic(heading, tuple(points[:POINTS_MAX])))
+    return tuple(topics)
+
+
 def summary_from(value: Any, *, fallback: bool = False) -> SummaryAnswer | None:
-    """The structured output checked against meeting_schema.json here again, strictly: an object with exactly
-    the six keys, each of its type; no empty text (but a follow-up's body: "" for a plain follow-up, which
+    """The structured output checked against meeting_schema.json here again, strictly: an object with the
+    schema's keys, each of its type; no empty text (but a follow-up's body: "" for a plain follow-up, which
     check_summary keeps only for a meeting not linked); no text or list over its cap; action items with who and
     what (and due only "" or a real YYYY-MM-DD); follow-ups with exactly to, subject and body. None when
-    anything does not fit: the whole answer is refused, nothing of it is shown."""
-    if not isinstance(value, dict) or set(value) != set(KEYS):
+    anything does not fit: the whole answer is refused, nothing of it is shown. The overview and the key points
+    alone are lenient (LENIENT_KEYS): missing or over its cap the overview is "", a topic or a point that does not
+    fit is left out (``_key_points``) - the rest of the summary still stands."""
+    if not isinstance(value, dict) or not set(KEYS) - LENIENT_KEYS <= set(value) <= set(KEYS):
         return None
     title = _line(value.get("title"), TITLE_CAP)
     decisions = _texts(value.get("decisions"), DECISIONS_MAX, ITEM_CAP)
@@ -367,7 +415,9 @@ def summary_from(value: Any, *, fallback: bool = False) -> SummaryAnswer | None:
         if to is None or subject is None or body is None:
             return None
         kept_follow_ups.append((to, subject, body))
-    return SummaryAnswer(title, decisions, tuple(kept_actions), questions, tuple(kept_follow_ups), memory, fallback)
+    overview = _line(value.get("overview"), OVERVIEW_CAP) or ""
+    return SummaryAnswer(title, decisions, tuple(kept_actions), questions, tuple(kept_follow_ups), memory, fallback,
+                         overview, _key_points(value.get("key_points")))
 
 
 def read_summary_result(event: Mapping[str, Any], init: InitSummary | None) -> SummaryAnswer | AskFailure:
@@ -435,7 +485,9 @@ class FollowUpItem:
 @dataclass(frozen=True)
 class MeetingSummary:
     """What the summary view shows (summary.json; never logged or spoken). The owner's own action items first.
-    ``follow_ups`` are a linked meeting's email drafts; ``follow_up_items`` a meeting's not linked (plain text)."""
+    ``follow_ups`` are a linked meeting's email drafts; ``follow_up_items`` a meeting's not linked (plain text).
+    ``overview`` and ``key_points`` (by topic) come first on screen; a summary saved before they existed has
+    neither ("" and ())."""
 
     meeting_id: str
     title: str = field(default="", repr=False)
@@ -447,20 +499,26 @@ class MeetingSummary:
     dropped: int = 0
     made_at: datetime | None = None
     follow_up_items: tuple[FollowUpItem, ...] = field(default=(), repr=False)
+    overview: str = field(default="", repr=False)
+    key_points: tuple[KeyTopic, ...] = field(default=(), repr=False)
 
     def __repr__(self) -> str:
-        return (f"MeetingSummary({self.meeting_id}, {len(self.decisions)} decision(s), {len(self.actions)} action(s), "
-                f"{len(self.questions)} question(s), {len(self.follow_ups)} follow-up(s), "
-                f"{len(self.follow_up_items)} plain follow-up(s), {len(self.memory)} note(s), {self.dropped} dropped)")
+        return (f"MeetingSummary({self.meeting_id}, {len(self.key_points)} topic(s), "
+                f"{_point_count(self.key_points)} point(s), {len(self.decisions)} decision(s), "
+                f"{len(self.actions)} action(s), {len(self.questions)} question(s), "
+                f"{len(self.follow_ups)} follow-up(s), {len(self.follow_up_items)} plain follow-up(s), "
+                f"{len(self.memory)} note(s), {self.dropped} dropped)")
 
     def mine(self) -> tuple[ActionItem, ...]:
         return tuple(item for item in self.actions if item.mine)
 
     def counts(self) -> dict[str, int]:
         """Sizes only (safe to log)."""
-        return {"decisions": len(self.decisions), "actions": len(self.actions), "yours": len(self.mine()),
-                "questions": len(self.questions), "follow_ups": len(self.follow_ups),
-                "plain_follow_ups": len(self.follow_up_items), "notes": len(self.memory), "dropped": self.dropped}
+        return {"overview": 1 if self.overview else 0, "topics": len(self.key_points),
+                "points": _point_count(self.key_points), "decisions": len(self.decisions),
+                "actions": len(self.actions), "yours": len(self.mine()), "questions": len(self.questions),
+                "follow_ups": len(self.follow_ups), "plain_follow_ups": len(self.follow_up_items),
+                "notes": len(self.memory), "dropped": self.dropped}
 
 
 def _match(name: str, labels: Mapping[str, MeetingGuest]) -> MeetingGuest | None:
@@ -549,7 +607,7 @@ def check_summary(answer: SummaryAnswer, job: MeetingJob, labels: Mapping[str, M
 
     return MeetingSummary(job.meeting_id, answer.title, unique(answer.decisions), tuple(actions),
                           unique(answer.questions), tuple(follow_ups), unique(answer.memory), dropped, now,
-                          tuple(plain))
+                          tuple(plain), answer.overview, answer.key_points)
 
 
 def left_out_words(meeting: Any) -> str:
@@ -736,6 +794,8 @@ SUMMARY_VERSION = 1
 
 def summary_json(summary: MeetingSummary) -> dict[str, Any]:
     return {"version": SUMMARY_VERSION, "id": summary.meeting_id, "title": summary.title,
+            "overview": summary.overview,
+            "key_points": [{"topic": item.topic, "points": list(item.points)} for item in summary.key_points],
             "decisions": list(summary.decisions),
             "action_items": [{"who": item.who, "what": item.what, "due": item.due, "mine": item.mine}
                              for item in summary.actions],
@@ -753,8 +813,23 @@ def _strings(value: Any, cap: int, most: int) -> tuple[str, ...]:
     return tuple(text for text in (data(item, cap) for item in value[:most] if isinstance(item, str)) if text)
 
 
+def _saved_topics(value: Any) -> tuple[KeyTopic, ...]:
+    """summary.json's key points back (every text through context.data again; a topic without a heading or a point
+    left out); () when there are none - a summary saved before key points existed."""
+    topics: list[KeyTopic] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        heading = data(item.get("topic"), TOPIC_CAP)
+        points = _strings(item.get("points"), POINT_CAP, POINTS_MAX)
+        if heading and points:
+            topics.append(KeyTopic(heading, points))
+    return tuple(topics[:TOPICS_MAX])
+
+
 def summary_of(raw: Any, meeting_id: str) -> MeetingSummary | None:
-    """summary.json back (None when it is not this meeting's or can't be read); every text checked again."""
+    """summary.json back (None when it is not this meeting's or can't be read); every text checked again. A summary
+    saved before the overview and the key points existed loads as before, without them."""
     if not isinstance(raw, Mapping) or raw.get("id") != meeting_id:
         return None
     actions = []
@@ -792,4 +867,5 @@ def summary_of(raw: Any, meeting_id: str) -> MeetingSummary | None:
                           tuple(actions[:50]), _strings(raw.get("open_questions"), ITEM_CAP, 50),
                           tuple(follow_ups[:FOLLOWUPS_MAX]), _strings(raw.get("memory_suggestions"), NOTE_CAP,
                                                                       MEMORY_MAX), dropped, made_at,
-                          tuple(plain[:FOLLOWUPS_MAX]))
+                          tuple(plain[:FOLLOWUPS_MAX]), data(raw.get("overview"), OVERVIEW_CAP),
+                          _saved_topics(raw.get("key_points")))

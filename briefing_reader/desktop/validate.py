@@ -11,33 +11,52 @@ The checks, in this order; the first problem wins and its code goes to Live (``R
    (``SHAPE``); a skill's own item caps (``CAP``: move 200, rename 50, zip 1000 files).
 2. Every ref was issued in THIS run's index, with the right kind (``UNKNOWN_REF``): a path, an id this index never
    issued, another run's id or a new folder (n1) no earlier passing make_folder made.
-3. No duplicate files, no move into the same place, no repeated new name, no item opened twice (``SHAPE``).
+3. No duplicate files, no move into the folder a file is in already, no rename to the name it has, no file a
+   card's earlier step moves or renames away, no repeated target name - the same name (case aside) twice in one
+   folder, a new folder's own name included -, no item opened twice (``SHAPE``). A copy into its own folder is a
+   duplicate (the card names it "name (2).ext").
 4. New names (rename, a new folder, a zip): paths.name_problem (NFC, no control or hidden character, none of
    <>:"/\\|?*, no reserved device name, no trailing dot or space, 1-120 characters) and the extension kept unless
-   the owner's words ask for another (``NAME_INVALID``); never a blocked type (``BLOCKED_TYPE``).
+   the owner's words ask for another (``NAME_INVALID``); never a blocked type, a shortcut or an internet shortcut
+   (``BLOCKED_TYPE``); never a name that would make a place Jarvis never touches - a code marker, a secret folder or
+   file, AppData, a shell class name (``EXCLUDED``: paths.never_a_name); never one that reads like instructions
+   unless the owner's own words give it (``NAME_INVALID``).
 5. Typed values (fill_fields) word for word in the owner's words (``INTENT_NOT_LICENSED``) and plain text
    (``SHAPE``); a web address https on a public host (guard.url_problem: ``SHAPE`` for another scheme,
    ``SITE_NOT_APPROVED`` for a host that is not public).
 6. The tier (INSTANT -> ONE_CLICK -> CARD -> NEVER), from the skill and its RESOLVED targets; checks only promote it.
-   The NEVER list (guard; again in the executor right before each OS call) refuses: a secret-shaped file or a place
-   outside the scope (``EXCLUDED`` / ``PATH_OUTSIDE``: paths.check_path when the caller gives ``path_check``), a
-   blocked or not-openable type (``BLOCKED_TYPE``), a never-open app (``APP_NOT_APPROVED``), a sensitive field
-   (``SENSITIVE_FIELD``), a payment page (``PAYMENT_PAGE``). Phase 1's tiers (SPEC 2.1, owner decision D5):
-   find_files, show_in_folder and open_folder INSTANT; open_file INSTANT for a document (2.3), CARD for one that can
-   run macros or scripts and for a shortcut (its real target shown first), ONE_CLICK when its name has hidden
-   characters; open_app INSTANT when the owner named the app exactly, else ONE_CLICK; open_url INSTANT for a saved
-   site or an address the owner typed word for word, https:// and all, else ONE_CLICK (its host shown: one Claude
-   suggested, or one typed without its https:// - "logo.ai" may be a file's name). An online-only file is flagged,
-   not promoted (D5: files open at once).
+   The NEVER list (guard; again in the executor right before each OS call) refuses: a secret-shaped file, a path
+   whose text names a place Jarvis never touches (paths.static_problem: a network or device path, AppData, a code
+   folder, a secret folder, a shell class name ...) or a place outside the scope (``EXCLUDED`` / ``PATH_OUTSIDE``:
+   paths.check_path when the caller gives ``path_check``), a blocked or not-openable type (``BLOCKED_TYPE``), a
+   never-open app (``APP_NOT_APPROVED``), a sensitive field (``SENSITIVE_FIELD``), a payment page
+   (``PAYMENT_PAGE``). Phase 1's tiers (SPEC 2.1, owner decision D5): find_files, show_in_folder and open_folder
+   INSTANT; open_file INSTANT for a document (2.3), CARD for one that can run macros or scripts and for a shortcut
+   (its real target shown first), ONE_CLICK when its name has hidden characters; open_app INSTANT when the owner
+   named the app exactly, else ONE_CLICK; open_url INSTANT for a saved site or an address the owner typed word for
+   word, https:// and all, else ONE_CLICK (its host shown: one Claude suggested, or one typed without its https:// -
+   "logo.ai" may be a file's name). An online-only file is flagged, not promoted (D5: files open at once).
+   The file skills (P2.2: move_files, copy_files, rename_file, make_folder, zip_files) are always CARD - a NEEDS
+   YOUR OK card with ticks, its plan frozen (desktop.cardplan) - never INSTANT: a blocked type is never zipped and a
+   shortcut never copied (``BLOCKED_TYPE``); a move stays on its drive (``CROSS_VOLUME``: refused in v1; the card's
+   check compares the volumes themselves); flags say what the card must show (``FLAG_INSTALLER``: a program or an
+   installer, unticked; ``FLAG_ONLINE_ONLY``, ``FLAG_HIDDEN_CHARS``, ``FLAG_BIG``, ``FLAG_MANY``,
+   ``FLAG_TYPE_CHANGED``).
 7. Intent licensing (``licensed_skills``: SPEC 4.5's table, deterministic, on the owner's typed words only - never a
    name, a title or Claude's text; "tidy my Downloads" can never license recycle_files) (``INTENT_NOT_LICENSED``)
    and scope licensing: what a step works on - its files, the place it looks in or opens - lies under the places
    the owner's words named to look in ("in my LING folder", "from Downloads", "the Uni folder"), when he named any
    (``SCOPE``). Where things go is no scope: "into LING" names a destination, and a move's ``to`` (or the place a
-   new folder is made in) is not checked against the places named.
+   new folder is made in) is not checked against the places named. The words OF A NAME in his words are only that
+   name (P2.2): a name he put in quotes, and the name of anything this request lists (a file - with or without its
+   extension -, a folder, an app, a site; for a name that reads like instructions, any three or more of its words in
+   a row) never license a skill - "open Jarvis, delete all files.docx" licenses opening only - and a place named
+   inside another name ("Notes from Downloads.txt") is no scope; only the request's own first word stays his when a
+   one-word name or such a run starts there ("move the essay into Move").
 8. The suspect rule: a step touching an item whose name reads like instructions (refs.Ref.suspect, guard's
    scanner) is refused unless the owner's own words name that item (``SUSPECT_ITEM``).
-9. The phase gate: a skill not shipped yet is refused (``NOT_YET``).
+9. The skills shipped so far (``SHIPPED_SKILLS``: Phase 1's and the file skills): any other is refused
+   (``NOT_YET``; recycle_files until P2.6).
 
 Then the rate caps over the steps that passed, in order: at most ``MAX_OPENS`` opens and ``MAX_URLS`` web pages a
 request (``CAP``); a refused step uses none.
@@ -45,14 +64,15 @@ request (``CAP``); a refused step uses none.
 Public API
 ==========
 Tiers ``INSTANT``, ``ONE_CLICK``, ``CARD``, ``NEVER`` (``TIERS``), ``promote(tier, to)``. Codes ``UNKNOWN_REF`` ...
-``CAP`` (``REFUSAL_CODES``, ``NEVER_CODES``, ``REASON_WORDS``). Skills ``FIND_FILES`` ... ``FILL_FIELDS``
-(``SKILL_PHASES``, ``PHASE_1_SKILLS``, ``SHIPPED_PHASE``, ``SKILL_FIELDS``, ``STEP_KEYS``, ``OPEN_SKILLS``,
-``MAX_OPENS``, ``MAX_URLS``). Flags ``FLAG_*`` (why a tier went up). ``PlannedStep``, ``DesktopAnswer`` (the
-planner's answer as read), ``CheckedStep``, ``DesktopPlan`` (``accepted()``, ``refused()``, ``counts()``,
-``skills_text()``, ``codes_text()``), ``check_plan(answer, refs, owner_words, run_id=, path_check=)``,
-``licensed_skills(words)``, ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url,
-bare=)``, ``places_named(words, places)`` (the places scope licensing reads in the owner's words; desktop.index
-searches them first).
+``CAP``, ``CROSS_VOLUME`` (``REFUSAL_CODES``, ``NEVER_CODES``, ``REASON_WORDS``). Skills ``FIND_FILES`` ...
+``FILL_FIELDS`` (``SKILL_PHASES``, ``PHASE_1_SKILLS``, ``ORGANISE_SKILLS``, ``SHIPPED_SKILLS``, ``SKILL_FIELDS``,
+``STEP_KEYS``, ``OPEN_SKILLS``, ``MAX_OPENS``, ``MAX_URLS``, ``MANY_FILES``, ``BIG_BYTES``). Flags ``FLAG_*`` (why
+a tier went up, or what a card row must show). ``PlannedStep``, ``DesktopAnswer`` (the planner's answer as read),
+``CheckedStep``, ``DesktopPlan`` (``accepted()``, ``refused()``, ``counts()``, ``skills_text()``,
+``codes_text()``), ``check_plan(answer, refs, owner_words, run_id=, path_check=, names=)``, ``licensed_skills(words,
+names=)``, ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url, bare=)``,
+``places_named(words, places)`` (the places scope licensing reads in the owner's words; desktop.index searches them
+first).
 
 Pure: nothing is logged, opened or read here, and every repr names skills, codes and counts only.
 """
@@ -60,6 +80,8 @@ Pure: nothing is logged, opened or read here, and every repr names skills, codes
 from __future__ import annotations
 
 import ntpath
+import re
+import unicodedata
 from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -91,8 +113,10 @@ SENSITIVE_FIELD = "sensitive_field"
 PAYMENT_PAGE = "payment_page"
 NOT_YET = "not_yet"
 CAP = "cap"
+CROSS_VOLUME = "cross_volume"                    # P2.2: a move to another drive (refused in v1, SPEC 6.2)
 REFUSAL_CODES = (UNKNOWN_REF, SHAPE, PATH_OUTSIDE, EXCLUDED, BLOCKED_TYPE, APP_NOT_APPROVED, SITE_NOT_APPROVED,
-                 INTENT_NOT_LICENSED, SCOPE, SUSPECT_ITEM, NAME_INVALID, SENSITIVE_FIELD, PAYMENT_PAGE, NOT_YET, CAP)
+                 INTENT_NOT_LICENSED, SCOPE, SUSPECT_ITEM, NAME_INVALID, SENSITIVE_FIELD, PAYMENT_PAGE, NOT_YET, CAP,
+                 CROSS_VOLUME)
 # The NEVER list's codes: such a step's tier is NEVER (refused by the validator and again by the executor).
 NEVER_CODES = frozenset({PATH_OUTSIDE, EXCLUDED, BLOCKED_TYPE, APP_NOT_APPROVED, SITE_NOT_APPROVED, SENSITIVE_FIELD,
                          PAYMENT_PAGE})
@@ -113,6 +137,7 @@ REASON_WORDS = {
     PAYMENT_PAGE: "Jarvis never works on payment pages",
     NOT_YET: "Jarvis can't do that yet",
     CAP: "it's more than one request may open",
+    CROSS_VOLUME: "it would go to another drive - Jarvis moves files within one drive only",
 }
 
 # Why a step's tier went up (a card row's words come from these later).
@@ -123,6 +148,13 @@ FLAG_NOT_NAMED = "not_named"           # an app the owner did not name exactly: 
 FLAG_SUGGESTED = "suggested"           # a web address the owner did not type: one click, its host shown
 FLAG_BARE_HOST = "bare_host"           # one he typed without its https:// ("logo.ai" may be a file's name): one click
 FLAG_ONLINE_ONLY = "online_only"       # opening it downloads it from OneDrive (flagged only: D5)
+# What a file skill's card must show (P2.2, SPEC 5.4; desktop.cardplan adds the ones only the disk can tell).
+FLAG_INSTALLER = "installer"           # a program or an installer (a blocked type): its row stays unticked
+FLAG_BIG = "big"                       # BIG_BYTES or more
+FLAG_MANY = "many"                     # more than MANY_FILES files
+FLAG_TYPE_CHANGED = "type_changed"     # a rename to another type (only when the owner's words asked for it)
+MANY_FILES = 50
+BIG_BYTES = 1024 ** 3
 
 
 def promote(tier: str, to: str) -> str:
@@ -145,7 +177,11 @@ SKILL_PHASES = {FIND_FILES: 1, OPEN_FILE: 1, SHOW_IN_FOLDER: 1, OPEN_FOLDER: 1, 
                 MOVE_FILES: 2, COPY_FILES: 2, RENAME_FILE: 2, MAKE_FOLDER: 2, ZIP_FILES: 2, RECYCLE_FILES: 2,
                 VOLUME: 2, MEDIA: 2, TIMER: 2, CANCEL_TIMER: 2, SCREENSHOT: 2, FOCUS_MODE: 2, FILL_FIELDS: 3}
 PHASE_1_SKILLS = tuple(skill for skill, phase in SKILL_PHASES.items() if phase == 1)
-SHIPPED_PHASE = 1                      # skills of a later phase are refused NOT_YET
+# Phase 2's file skills (P2.2): always a NEEDS YOUR OK card (desktop.cardplan freezes its plan).
+ORGANISE_SKILLS = (MOVE_FILES, COPY_FILES, RENAME_FILE, MAKE_FOLDER, ZIP_FILES)
+# The skills shipped so far: the schema's enum; any other is refused NOT_YET (recycle_files until P2.6, the PC's
+# controls until P2.4, work inside apps until Phase 3).
+SHIPPED_SKILLS = PHASE_1_SKILLS + ORGANISE_SKILLS
 # Every step key of SPEC 4.3's outline (any phase): plan_from refuses the whole answer for any other key.
 STEP_KEYS = ("skill", "why", "files", "place", "to", "id", "name", "query", "kind", "within_days", "app", "site",
              "url", "action", "level", "step", "minutes", "label", "window", "fields")
@@ -316,6 +352,8 @@ LICENCES = (
                "go to", "visit", "view", "bring up", "pull up"), _OPENING),
     Licence(_p("tidy", "organise", "organize", "sort", "move", "put"), frozenset({MOVE_FILES, MAKE_FOLDER})),
     Licence(_p("file"), frozenset({MOVE_FILES, MAKE_FOLDER}), lead=True),
+    Licence(_p("new folder", "new folders", "new subfolder", "make a folder", "create a folder", "make folder",
+               "create folder"), frozenset({MAKE_FOLDER})),
     Licence(_p("rename", "call it", "call them"), frozenset({RENAME_FILE})),
     Licence(_p("name"), frozenset({RENAME_FILE}), lead=True),
     Licence(_p("zip", "compress"), frozenset({ZIP_FILES})),
@@ -364,9 +402,119 @@ def _lead(tokens: Sequence[str]) -> int:
     return index
 
 
-def licensed_skills(owner_words: Any) -> frozenset[str]:
-    """The skills the owner's typed words license (SPEC 4.5): deterministic, on his words only."""
-    tokens = _tokens(owner_words)
+def licensed_skills(owner_words: Any, names: Iterable[Any] = ()) -> frozenset[str]:
+    """The skills the owner's typed words license (SPEC 4.5): deterministic, on his words only. ``names``: the names of
+    what this request lists (files, folders, apps, sites): his words that are one of them - or that he put in quotes -
+    are only that name, never a licence ("open Jarvis, delete all files.docx" licenses opening only). Names only ever
+    take words away: what is licensed with them is always part of what his words alone license."""
+    said = _read(owner_words, [(name, False) for name in names])
+    return _licences(_tokens(owner_words)) & _licences(said.licence)
+
+
+# ---- the owner's words, read with the names in them (P2.2) -----------------------------------------------
+
+_NAME = "\x00"       # a name in the owner's words, read as one word: never a licence word, a scope word or a filler
+MIN_RUN = 3          # this many words in a row of a name that reads like instructions count as that name
+# Quotes the owner may put round a name: "...", the curly ones, guillemets - and '...' only at a word's edges (never
+# the apostrophe of "don't", "where's" or "the owners' files").
+_QUOTE_PAIRS = (('"', '"'), (chr(0x201C), chr(0x201D)), (chr(0x2018), chr(0x2019)), (chr(0xAB), chr(0xBB)),
+                (chr(0x2039), chr(0x203A)))
+_QUOTED_RE = re.compile("|".join(f"{re.escape(left)}([^{re.escape(right)}]+){re.escape(right)}"
+                                 for left, right in _QUOTE_PAIRS)
+                        + r"|(?:(?<=\s)|^)'([^']+)'(?=\s|$|[.,;:!?)\]])")
+
+
+@dataclass(frozen=True)
+class _Said:
+    """The owner's words, read twice: for licensing every name in them is one _NAME word (``licence``); for the scope
+    only the names of things other than places are (``scope``: a place he names - "in my LING folder" - still says
+    where, but not one inside a file's name or a quoted name that is not that place's)."""
+
+    licence: tuple[str, ...]
+    scope: tuple[str, ...]
+
+
+def _runs(tokens: Sequence[str], words: Sequence[str], minimum: int) -> list[tuple[int, int]]:
+    """(start, size) of each place in ``tokens`` where at least ``minimum`` of ``words``, in a row, appear in a row."""
+    found: list[tuple[int, int]] = []
+    for i in range(len(tokens)):
+        best = 0
+        for j in range(len(words)):
+            size = 0
+            while i + size < len(tokens) and j + size < len(words) and tokens[i + size] == words[j + size]:
+                size += 1
+            best = max(best, size)
+        if best >= minimum:
+            found.append((i, best))
+    return found
+
+
+def _read(owner_words: Any, names: Iterable[tuple[Any, bool]] = ()) -> _Said:
+    """The owner's words with the names in them found (see _Said and the module docstring, check 7). ``names``:
+    (name, is a place's name) of what the request lists."""
+    text = owner_words if isinstance(owner_words, str) else ""
+    wanted: dict[tuple[str, ...], bool] = {}            # a name's words -> whether it is a place's
+    partial: dict[tuple[str, ...], bool] = {}           # a name that reads like instructions: any run of its words
+    for name, is_place in names:
+        if not isinstance(name, str) or not name.strip():
+            continue
+        whole = tuple(_tokens(name))
+        if not whole:
+            continue
+        wanted[whole] = wanted.get(whole, False) or bool(is_place)
+        stem = tuple(_label_tokens(name, stem=True))
+        if len(stem) >= 2 and stem != whole:
+            wanted[stem] = wanted.get(stem, False) or bool(is_place)
+        if len(whole) >= MIN_RUN and guard.suspect_text(name):
+            partial[whole] = partial.get(whole, False) or bool(is_place)
+    tokens: list[str] = []
+    spans: list[tuple[int, int, bool, str]] = []         # (start, end, is a place's name, how: quoted/whole/run)
+    position = 0
+    for match in _QUOTED_RE.finditer(text):
+        tokens += _tokens(text[position:match.start()])
+        inner = _tokens(next(group for group in match.groups() if group is not None))
+        if inner:
+            spans.append((len(tokens), len(tokens) + len(inner), wanted.get(tuple(inner), False), "quoted"))
+            tokens += inner
+        position = match.end()
+    tokens += _tokens(text[position:])
+    taken = [False] * len(tokens)
+    for start, end, _place, _how in spans:
+        taken[start:end] = [True] * (end - start)
+    found = [(start, start + len(words), is_place, "whole") for words, is_place in wanted.items()
+             for start in _find(tokens, words)]
+    found += [(start, start + size, is_place, "run") for words, is_place in partial.items()
+              for start, size in _runs(tokens, words, MIN_RUN)]
+    for start, end, is_place, how in sorted(found, key=lambda span: (span[0] - span[1], span[0])):  # longest first
+        if not any(taken[start:end]):
+            taken[start:end] = [True] * (end - start)
+            spans.append((start, end, is_place, how))
+    lead = _lead(tokens)
+    by_start = {span[0]: span for span in spans}
+    licence: list[str] = []
+    scope: list[str] = []
+    index = 0
+    while index < len(tokens):
+        span = by_start.get(index)
+        if span is None:
+            licence.append(tokens[index])
+            scope.append(tokens[index])
+            index += 1
+            continue
+        start, end, is_place, how = span
+        if start == lead and how != "quoted" and (end - start == 1 or how == "run"):
+            licence.append(tokens[start])                # the request's own first word stays his ("move ... Move")
+            if end - start > 1:
+                licence.append(_NAME)
+        else:
+            licence.append(_NAME)
+        scope.extend(tokens[start:end] if is_place else [_NAME])
+        index = end
+    return _Said(tuple(licence), tuple(scope))
+
+
+def _licences(tokens: Sequence[str]) -> frozenset[str]:
+    """The skills SPEC 4.5's table gives for ``tokens`` (the owner's words, names already read as names)."""
     lead = _lead(tokens)
     allowed: set[str] = set()
     for licence in LICENCES:
@@ -502,22 +650,32 @@ class _Run:
     licensed: frozenset[str]
     named_places: tuple[Place, ...]
     path_check: Callable[[str], Any] | None
+    said: tuple[str, ...] = ()                       # his words as licensing reads them (each name one word)
     new_ids: set[str] = field(default_factory=set)
+    new_places: dict[str, str] = field(default_factory=dict)      # a new folder's id -> where it is made
     passed: list[CheckedStep] = field(default_factory=list)
-    names: set[str] = field(default_factory=set)
+    targets: set[tuple[str, str]] = field(default_factory=set)    # (folder, name) a passing step puts something at
+    gone: set[str] = field(default_factory=set)      # the files a passing step moves or renames away
+
+
+_LISTED_KINDS = (FILE, PLACE, APP, SITE, WINDOW, FIELD, CELL)
 
 
 def check_plan(answer: DesktopAnswer, refs: RefIndex, owner_words: str, *, run_id: str = "",
-               path_check: Callable[[str], Any] | None = None) -> DesktopPlan:
+               path_check: Callable[[str], Any] | None = None, names: Iterable[Any] = ()) -> DesktopPlan:
     """Every step of ``answer`` checked against ``refs`` (THIS run's index) and ``owner_words`` (the owner's typed
     words only) - see the module docstring. ``path_check(path)``: the 5.2 path check (paths.check_path with a
     backend; its verdict's ``ok`` / ``code``), given by the caller that has a backend; without it the context is
-    trusted to list only items in scope (the executor checks again before each OS call)."""
+    trusted to list only items in scope (the executor checks again before each OS call). ``names``: the names of what
+    the request's context holds beyond this index (a row cut to fit): in his words they are names too, never a
+    licence."""
     words = owner_words if isinstance(owner_words, str) else ""
-    tokens = _tokens(words)
+    listed = [(item_label(ref), ref.kind == PLACE) for kind in _LISTED_KINDS for ref in refs.refs(kind)]
+    listed += [(name, False) for name in names if isinstance(name, str)]
+    said = _read(words, listed)
     places = [ref.target for ref in refs.refs(PLACE) if isinstance(ref.target, Place)]
-    run = _Run(refs, words, licensed_skills(words), tuple(place for place in places if _named_place(tokens, place)),
-               path_check)
+    run = _Run(refs, words, licensed_skills(words, [name for name, _place in listed]),
+               tuple(place for place in places if _named_place(said.scope, place)), path_check, said.licence)
     checked: list[CheckedStep] = []
     for number, step in enumerate(answer.steps, 1):
         result = _check_step(step, number, run)
@@ -561,7 +719,7 @@ def _check_step(step: PlannedStep, number: int, run: _Run) -> CheckedStep:
         return refused(code, targets=targets)
     code = _names(step, targets, run)                                            # 4
     if code:
-        return refused(code, targets=targets)
+        return refused(code, NEVER if code in NEVER_CODES else "", targets=targets)
     code = _typed(step, targets, run)                                            # 5
     if code:
         return refused(code, targets=targets)
@@ -573,12 +731,16 @@ def _check_step(step: PlannedStep, number: int, run: _Run) -> CheckedStep:
         return refused(code, tier, flags, targets)
     if any(ref.suspect and not names_item(run.words, item_label(ref)) for ref in targets):   # 8
         return refused(SUSPECT_ITEM, tier, flags, targets)
-    if SKILL_PHASES.get(step.skill, 99) > SHIPPED_PHASE:                         # 9
+    if step.skill not in SHIPPED_SKILLS:                                         # 9
         return refused(NOT_YET, tier, flags, targets)
     if step.skill == MAKE_FOLDER and step.id:
         run.new_ids.add(step.id)
-    if step.name:
-        run.names.add(" ".join(step.name.casefold().split()))
+        made_in = _place_of(targets)
+        if made_in is not None:
+            run.new_places[step.id] = made_in.path
+    run.targets.update(_destinations(step, targets))
+    if step.skill in (MOVE_FILES, RENAME_FILE):
+        run.gone.update(_target_key(ref) for ref in targets if ref.kind == FILE)
     return CheckedStep(number, step.skill, "", tier, flags, targets, step)
 
 
@@ -686,17 +848,59 @@ def _target_key(ref: Ref) -> str:
     return f"{ref.kind}:{ref.id}"
 
 
+def _fold_name(name: str) -> str:
+    """A name as Windows compares it in one folder (case and the trailing dots and spaces it drops aside)."""
+    return unicodedata.normalize("NFKC", guard.strip_hidden(name)).casefold().rstrip(". ")
+
+
+def _place_of(targets: Sequence[Ref], ref_id: str = "") -> Place | None:
+    """The step's place (``ref_id``: the one with that id - a move's ``to``)."""
+    return next((ref.target for ref in targets if ref.kind == PLACE and isinstance(ref.target, Place)
+                 and (not ref_id or ref.id == ref_id)), None)
+
+
+def _files_of(targets: Sequence[Ref]) -> list[FileItem]:
+    return [ref.target for ref in targets if ref.kind == FILE and isinstance(ref.target, FileItem)]
+
+
+def _destinations(step: PlannedStep, targets: Sequence[Ref]) -> list[tuple[str, str]]:
+    """Where a file step puts things, as (folder, name) - folded - for the repeated-target-name check: a move's or a
+    copy's files under their own names in ``to`` (a new folder by its n id), a rename's new name in the file's own
+    folder, a new folder in its place, a zip in ``to`` or else next to its first file."""
+    files = _files_of(targets)
+    to = ""
+    if step.to:
+        place = _place_of(targets, step.to)
+        to = _key(place.path) if place is not None else "new:" + step.to
+    if step.skill in (MOVE_FILES, COPY_FILES):
+        return [(to, _fold_name(item.name)) for item in files]
+    if step.skill == RENAME_FILE:
+        return [(_key(ntpath.dirname(item.path)), _fold_name(step.name)) for item in files]
+    if step.skill == ZIP_FILES:
+        where = to or (_key(ntpath.dirname(files[0].path)) if files else "")
+        return [(where, _fold_name(step.name))]
+    if step.skill == MAKE_FOLDER:
+        place = _place_of(targets)
+        return [(_key(place.path), _fold_name(step.name))] if place is not None else []
+    return []
+
+
 def _duplicates(step: PlannedStep, targets: tuple[Ref, ...], run: _Run) -> str:
     files = [ref for ref in targets if ref.kind == FILE]
     if len({_target_key(ref) for ref in files}) != len(files):
         return SHAPE                                      # the same file twice in one step
-    if step.skill in (MOVE_FILES, COPY_FILES) and step.to and not step.to.startswith("n"):
-        destination = next((ref for ref in targets if ref.kind == PLACE), None)
-        if destination is not None and any(isinstance(ref.target, FileItem) and ref.target.place and
-                                           _key(ref.target.place) == _key(destination.target.path) for ref in files):
-            return SHAPE                                  # a move into the place it already is in
-    if step.name and " ".join(step.name.casefold().split()) in run.names:
-        return SHAPE                                      # a repeated new name
+    if step.skill == MOVE_FILES and step.to:
+        destination = _place_of(targets, step.to)
+        if destination is not None and any(_key(ntpath.dirname(item.path)) == _key(destination.path)
+                                           for item in _files_of(targets)):
+            return SHAPE                                  # a move into the folder it is in already
+    if step.skill == RENAME_FILE and any(item.name == step.name for item in _files_of(targets)):
+        return SHAPE                                      # a rename to the name it has
+    if step.skill in ORGANISE_SKILLS and any(_target_key(ref) in run.gone for ref in files):
+        return SHAPE                                      # an earlier row moves or renames it: it won't be there
+    wanted = _destinations(step, targets)
+    if len(set(wanted)) != len(wanted) or run.targets & set(wanted):
+        return SHAPE                                      # a repeated target name (case aside) in one folder
     if step.skill in OPEN_SKILLS or step.skill == FIND_FILES:
         mine = (step.skill, tuple(_target_key(ref) for ref in targets), _bare_address(step.url) if step.url else "",
                 " ".join(step.query.casefold().split()))
@@ -718,14 +922,18 @@ def _names(step: PlannedStep, targets: tuple[Ref, ...], run: _Run) -> str:
     problem = paths.name_problem(step.name)
     if problem:
         return problem
+    if paths.never_a_name(step.name):
+        return EXCLUDED                                   # it would make a place Jarvis never touches (.git, .env ...)
+    if guard.suspect_text(step.name) and not names_item(run.words, step.name):
+        return NAME_INVALID                               # a new name that reads like an order: his own words only
     if step.skill == RENAME_FILE:
         new_type = guard.suffix(step.name)
         for ref in targets:
             if ref.kind != FILE:
                 continue
             old_type = guard.suffix(getattr(ref.target, "name", ""))
-            if old_type != new_type and not (new_type and new_type in _tokens(run.words)):
-                return NAME_INVALID                       # the extension stays unless the owner's words ask
+            if old_type != new_type and not (new_type and new_type in run.said):
+                return NAME_INVALID                       # the extension stays unless the owner's own words ask
     if step.skill == ZIP_FILES and guard.suffix(step.name) != "zip":
         return NAME_INVALID
     return ""
@@ -772,7 +980,7 @@ def _path_code(path: str, run: _Run) -> str:
 def _place_code(place: Any, run: _Run) -> str:
     if not isinstance(place, Place):
         return PATH_OUTSIDE
-    return _path_code(place.path, run)
+    return paths.static_problem(place.path) or _path_code(place.path, run)
 
 
 def _file_code(item: Any, run: _Run) -> str:
@@ -780,7 +988,7 @@ def _file_code(item: Any, run: _Run) -> str:
         return PATH_OUTSIDE
     if guard.secret_file(item.name) or guard.secret_file(item.path):
         return EXCLUDED                                   # secret-shaped: never listed, never touched
-    return _path_code(item.path, run)
+    return paths.static_problem(item.path) or _path_code(item.path, run)
 
 
 def _tier(step: PlannedStep, targets: tuple[Ref, ...], run: _Run) -> tuple[str, str, frozenset[str]]:
@@ -824,9 +1032,10 @@ def _tier(step: PlannedStep, targets: tuple[Ref, ...], run: _Run) -> tuple[str, 
         # One click, its host shown: Claude suggested it, or the owner typed it without its https:// ("logo.ai").
         tier = promote(tier, ONE_CLICK)
         flags.add(FLAG_BARE_HOST if typed_url(run.words, step.url, bare=True) else FLAG_SUGGESTED)
-    elif skill == ZIP_FILES:
-        if any(isinstance(ref.target, FileItem) and guard.blocked_type(ref.target.name) for ref in targets):
-            return NEVER, BLOCKED_TYPE, frozenset(flags)   # blocked types are never zipped
+    elif skill in ORGANISE_SKILLS:
+        code = _organise(step, targets, run, flags)
+        if code:
+            return (NEVER if code in NEVER_CODES else tier), code, frozenset(flags)
     elif skill == FILL_FIELDS:
         for ref in targets:
             if ref.kind == FIELD and guard.sensitive_label(ref.label):
@@ -834,6 +1043,38 @@ def _tier(step: PlannedStep, targets: tuple[Ref, ...], run: _Run) -> tuple[str, 
             if ref.kind == WINDOW and guard.payment_page(ref.label):
                 return NEVER, PAYMENT_PAGE, frozenset(flags)
     return tier, "", frozenset(flags)
+
+
+def _drive(path: str) -> str:
+    return ntpath.splitdrive(path)[0].casefold()
+
+
+def _organise(step: PlannedStep, targets: tuple[Ref, ...], run: _Run, flags: set[str]) -> str:
+    """Check 6 for a file skill (always CARD): a code, or "" with ``flags`` added - what its card must show."""
+    skill, items = step.skill, _files_of(targets)
+    if skill == ZIP_FILES and any(guard.blocked_type(item.name) for item in items):
+        return BLOCKED_TYPE                               # blocked types are never zipped
+    if skill == COPY_FILES and any(guard.suffix(item.name) in guard.NEVER_CREATE_TYPES for item in items):
+        return BLOCKED_TYPE                               # a copy would make a new shortcut: never (SPEC 2.4)
+    if skill == MOVE_FILES:
+        place = _place_of(targets, step.to)
+        where = place.path if place is not None else run.new_places.get(step.to, "")
+        if where and any(_drive(item.path) != _drive(where) for item in items):
+            return CROSS_VOLUME                           # v1 moves stay on their drive (the card compares volumes)
+    for item in items:
+        if any(guard.hidden_char(char) for char in item.name):
+            flags.add(FLAG_HIDDEN_CHARS)
+        if item.online_only:
+            flags.add(FLAG_ONLINE_ONLY)
+        if skill in (MOVE_FILES, COPY_FILES) and guard.blocked_type(item.name):
+            flags.add(FLAG_INSTALLER)                     # installers stay where they are unless he ticks them
+    if len(items) > MANY_FILES:
+        flags.add(FLAG_MANY)
+    if sum(max(0, item.size) for item in items) >= BIG_BYTES:
+        flags.add(FLAG_BIG)
+    if skill == RENAME_FILE and any(guard.suffix(item.name) != guard.suffix(step.name) for item in items):
+        flags.add(FLAG_TYPE_CHANGED)
+    return ""
 
 
 # ---- 7. intent and scope licensing ---------------------------------------------------------------------

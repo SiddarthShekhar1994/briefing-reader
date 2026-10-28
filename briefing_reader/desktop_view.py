@@ -16,6 +16,12 @@ Nothing here turns anything on, stores anything or goes onto the desktop: every 
     on the scrim are Not now; when it closes the focus goes back where it was. Signals ``turnOnClicked(entry)`` and
     ``notNowClicked(entry)``.
 
+``WaitingRow()``
+    P2.3: Approvals' reminder while a NEEDS YOUR OK card of file steps waits on the desktop HUD - "Waiting on your
+    desktop" with an amber dot and "Show me" (an amber link; its click: ``showClicked()`` - the app goes onto the HUD,
+    where the card is). ``set_count(n)``: hidden at 0 ("2 waiting on your desktop" for more than one). Made only while
+    [desktop] is on.
+
 ``DesktopSettingsPanel()``
     Under Settings > Desktop's rows: while the owner's OK is stored, a line saying so and "Turn off" (ghost; it takes
     the OK back - nothing desktop-side works until he turns it on again from the card); before that, how to turn it on
@@ -45,6 +51,9 @@ NOT_NOW_TEXT = "Not now"
 TURN_ON_TEXT = "Turn on"
 NOT_SAVED_TEXT = "Your OK couldn't be saved, so nothing was turned on. Try again."
 TURN_OFF_TEXT = "Turn off"
+WAITING_TEXT = "Waiting on your desktop"
+WAITING_MANY_TEXT = "{count} waiting on your desktop"
+SHOW_ME_TEXT = "Show me"
 SETTINGS_ON_TEXT = ("On, because you clicked Turn on. Turn off takes your OK back - nothing on your desktop works "
                     "until you turn it on again.")
 SETTINGS_OFF_TEXT = ("To turn it on, click Desktop in the Dock and read its card - nothing on your desktop works until "
@@ -295,6 +304,59 @@ class ConsentCard(QWidget):
         painter = QPainter(self)
         try:
             painter.fillRect(self.rect(), holo.alpha(holo.VOID, 0.6))
+        finally:
+            painter.end()
+
+
+class WaitingRow(QWidget):
+    """See the module docstring: "Waiting on your desktop <middle dot> Show me" over Approvals' cards."""
+
+    showClicked = Signal()
+
+    HEIGHT = 44
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("DesktopWaitingRow")
+        self._count = 0
+        self.label = body_label(WAITING_TEXT, "body_sm", holo.AMBER_TX)
+        self.dot = body_label("\u00b7", "body_sm", holo.AMBER_TX2)
+        self.show_me = holo.HoloButton(SHOW_ME_TEXT, holo.LINK, size=holo.SIZE_SM)
+        self.show_me.setAccessibleName(SHOW_ME_TEXT + ": " + WAITING_TEXT)
+        self.show_me.clicked.connect(self.showClicked.emit)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(16, 0, 12, 0)
+        row.setSpacing(8)
+        row.addWidget(_Dot(), 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.label, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.show_me, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addStretch(1)
+        self.setFixedHeight(self.HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.hide()
+
+    def count(self) -> int:
+        return self._count
+
+    def set_count(self, count: int) -> None:
+        self._count = max(0, int(count))
+        text = WAITING_TEXT if self._count <= 1 else WAITING_MANY_TEXT.format(count=self._count)
+        if self.label.text() != text:
+            self.label.setText(text)
+        self.setVisible(self._count > 0)
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = QRectF(self.rect()).adjusted(0.5, 4.5, -0.5, -4.5)
+            path = QPainterPath()
+            path.addRoundedRect(rect, 10, 10)
+            painter.fillPath(path, QColor(holo.TILE_AMBER))
+            painter.setPen(QPen(holo.alpha(holo.AMBER, 0.45), 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
         finally:
             painter.end()
 

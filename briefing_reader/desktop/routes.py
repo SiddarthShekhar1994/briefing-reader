@@ -101,6 +101,11 @@ _NOT_YET = (
 _OPENING_RE = _pattern(r"(?:open|launch|start)\s+(?P<what>\S.*?)\??")
 _FINDING_RE = _pattern(r"(?:find|locate|look\s+for|where\s+(?:is|are|did\s+i\s+(?:put|save|leave))|where's"
                        r"|show\s+(?:me\s+)?)\s*(?P<what>\S.*?)\??")
+# P2.3: organising (SPEC 4.5's verbs of the file skills: tidy / organise / sort / file / move / put, rename, zip /
+# compress, copy / duplicate) only with a word that says file, folder or place - "move my Project sync to Friday"
+# and "copy Ana's email" stay Asks. Removing (recycle) comes with the Recycle Bin (P2.6).
+_ORGANISING_RE = _pattern(r"(?:tidy(?:\s+up)?|organi[sz]e|sort(?:\s+out)?|file(?:\s+away)?|move|put|rename|"
+                          r"zip(?:\s+up)?|compress|copy|duplicate)\s+(?P<what>\S.*?)[.!?]?")
 # Jarvis's own things and screens: never a desktop request.
 _JARVIS_THINGS_RE = re.compile(
     r"\b(?:e-?mails?|g?mail|inbox|messages?|threads?|repl(?:y|ies)|calendar|events?|meetings?|invites?|"
@@ -121,7 +126,8 @@ _DESKTOP_NOUNS_RE = re.compile(
 def desktop_request(text: Any) -> bool:
     """Whether ``text`` is clearly a desktop request (ask.routes' ROUTE_DESKTOP): one of the local routes' Phase 2
     shapes, an opening verb about something that is not Jarvis's own (mail, calendar, briefing, a screen ...), or a
-    finding verb with a word that says file, folder or place. Anything else is a normal Ask."""
+    finding or organising verb (P2.3: tidy, move, rename, zip, copy ...) with a word that says file, folder or place.
+    Anything else is a normal Ask."""
     text = " ".join(str(text or "").split())
     if not text:
         return False
@@ -134,11 +140,13 @@ def desktop_request(text: Any) -> bool:
         started = "start" in verb[:3] and "open" not in verb[:3] and "launch" not in verb[:3]
         return not (_JARVIS_THINGS_RE.search(what) or _SCREENS_RE.fullmatch(what)
                     or (started and _NOT_STARTED_RE.fullmatch(what)))
-    match = _FINDING_RE.fullmatch(text)
-    if match:
-        what = match.group("what").strip(" .!?")
-        return bool(_DESKTOP_NOUNS_RE.search(what)) and not _JARVIS_THINGS_RE.search(what) \
-            and not _SCREENS_RE.fullmatch(what)
+    for pattern in (_FINDING_RE, _ORGANISING_RE):
+        match = pattern.fullmatch(text)
+        if match:
+            what = match.group("what").strip(" .!?")
+            if _DESKTOP_NOUNS_RE.search(what) and not _JARVIS_THINGS_RE.search(what) \
+                    and not _SCREENS_RE.fullmatch(what):
+                return True
     return False
 
 

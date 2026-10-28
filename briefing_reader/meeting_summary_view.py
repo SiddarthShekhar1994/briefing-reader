@@ -12,6 +12,14 @@ and no drafts: its follow-ups are plain text under FOLLOW-UPS (who and what), an
 (``summary_text``: the title, the date, the length, then each section as shown) and says "Copied" for a moment;
 nothing else happens and the text is never logged. Every text of the summary can be selected with the mouse.
 
+OVERVIEW and KEY POINTS (owner decision 2026-10-27) come first: the overview as a paragraph, then each topic as a
+small heading with its points as bullet rows (a hanging indent); DECISIONS, ACTION ITEMS, OPEN QUESTIONS and the
+follow-ups follow exactly as before. A summary saved before they existed shows neither; while **Summarise again**
+is there it says so in one quiet line under the header (AGAIN_HINT). Summarise again sits beside Copy summary:
+shown while the meeting's transcript is kept and Ask Jarvis is on (``SummaryInfo.again``), disabled with a few
+words while a run for this meeting waits or runs, Retry after one that failed (the summary shown stays until a new
+one is saved); its click only emits ``againClicked()`` - the app asks for the summary through Summarise's path.
+
 Public API
 ==========
 ``SummaryAction(who, what, due, mine, block, card_id)``: one action item ("" ``who``: nobody named); for the
@@ -23,17 +31,20 @@ Public API
 ``SummaryFollowUpItem(who, what)``: one plain follow-up (a meeting not linked).
 ``SummaryNote(text, state)``: a suggested note: NOTE_PENDING (Keep / Dismiss: Memory's own), NOTE_KEPT,
     NOTE_DISMISSED, NOTE_OFF (Memory can't keep notes now).
+``SummaryTopic(topic, points)``: one topic of the key points.
 ``SummaryInfo``: what the view shows (memory only; never logged or spoken).
 ``summary_text(info)``: the plain text Copy summary puts on the clipboard.
-``SummaryView``: ``set_summary(info)``, ``card_ids()``, ``hold`` / ``release`` / ``held``, ``texts()``,
+``SummaryView``: ``set_summary(info)``, ``set_again(state, note)`` (Summarise again: AGAIN_OFF / AGAIN_READY /
+    AGAIN_WAITING / AGAIN_RUNNING / AGAIN_FAILED), ``card_ids()``, ``hold`` / ``release`` / ``held``, ``texts()``,
     ``sections()``, ``copy_summary()`` (Copy summary's click); signals ``backClicked()``, ``addBlockClicked(int)``,
-    ``keepClicked(int)``, ``dismissClicked(int)``, ``linkClicked(str)`` (See every step: "live:<task>").
+    ``keepClicked(int)``, ``dismissClicked(int)``, ``linkClicked(str)`` (See every step: "live:<task>"),
+    ``againClicked()`` (Summarise again).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import shiboken6
@@ -49,6 +60,13 @@ BACK_TEXT = "All meetings"
 COPY_TEXT = "Copy summary"
 COPIED_TEXT = "Copied"
 COPIED_MS = 2500                  # "Copied" shows this long after the click
+AGAIN_TEXT = "Summarise again"
+AGAIN_WAITING_TEXT = "Waiting for Jarvis"     # a run for this meeting waits for Jarvis's other request
+AGAIN_RUNNING_TEXT = "Writing the summary"    # ... runs (the summary shown stays until the new one is saved)
+RETRY_TEXT = "Retry"                          # ... failed or was cancelled (the meeting's own failure words beside it)
+AGAIN_HINT = "Summarise again for an overview and key points."   # a summary saved before they existed
+OVERVIEW_TITLE = "OVERVIEW"
+KEY_POINTS_TITLE = "KEY POINTS"
 DECISIONS_TITLE = "DECISIONS"
 ACTIONS_TITLE = "ACTION ITEMS"
 QUESTIONS_TITLE = "OPEN QUESTIONS"
@@ -72,7 +90,10 @@ SEE_STEPS_TEXT = "See every step"
 FOOT_TEXT = ("Written by your Claude Code from the transcript on this PC. Check it before you act: speech to text "
              "makes mistakes.")
 DOT = "\u00b7"
+BULLET = "\u2022"                 # before each key point (its text hangs beside it)
+TOPIC_NAME = "meetingSummaryTopic"   # a key-points topic heading's object name
 
+AGAIN_OFF, AGAIN_READY, AGAIN_WAITING, AGAIN_RUNNING, AGAIN_FAILED = "off", "ready", "waiting", "running", "failed"
 BLOCK_NONE, BLOCK_PROPOSED, BLOCK_NO_TIME = "none", "proposed", "no_time"
 BLOCK_ADDED, BLOCK_DISMISSED = "added", "dismissed"
 BLOCK_OFF = "off"                 # no Add block (a meeting not linked to the calendar)
@@ -123,6 +144,14 @@ class SummaryNote:
 
 
 @dataclass(frozen=True)
+class SummaryTopic:
+    """One topic of the key points: its short heading and its points, in the order said."""
+
+    topic: str = field(repr=False)
+    points: tuple[str, ...] = field(default=(), repr=False)
+
+
+@dataclass(frozen=True)
 class SummaryInfo:
     meeting_id: str
     title: str = field(repr=False)
@@ -139,17 +168,28 @@ class SummaryInfo:
     length: str = ""                                           # "46:12"
     linked: bool = True                                        # False: no guests, plain follow-ups, no drafts
     follow_up_items: tuple[SummaryFollowUpItem, ...] = field(default=(), repr=False)
+    overview: str = field(default="", repr=False)              # "" and () too: a summary saved before they existed
+    key_points: tuple[SummaryTopic, ...] = field(default=(), repr=False)
+    again: str = AGAIN_OFF                                     # Summarise again (AGAIN_*)
+    again_note: str = field(default="", repr=False)            # AGAIN_FAILED: "Summary failed" / "Summary cancelled"
 
     def __repr__(self) -> str:
         follow = len(self.follow_ups) if self.linked else len(self.follow_up_items)
-        return (f"SummaryInfo({self.meeting_id}, {len(self.decisions)} decision(s), {len(self.actions)} action(s), "
-                f"{follow} follow-up(s), {len(self.notes)} note(s), {'linked' if self.linked else 'not linked'})")
+        return (f"SummaryInfo({self.meeting_id}, {len(self.key_points)} topic(s), {len(self.decisions)} decision(s), "
+                f"{len(self.actions)} action(s), {follow} follow-up(s), {len(self.notes)} note(s), "
+                f"{'linked' if self.linked else 'not linked'}, again {self.again})")
+
+    def has_key_points(self) -> bool:
+        """An overview or key points to show (a summary saved before they existed has neither)."""
+        return bool(self.overview or self.key_points)
 
 
 def summary_text(info: SummaryInfo | None) -> str:
     """The whole summary as plain text, as the view shows it (Copy summary): the title, the date, the length (and
-    the guests a linked meeting names), then each section - decisions, action items with who and due, open
-    questions, the follow-ups, the notes worth remembering. Memory only: never logged, spoken or sent."""
+    the guests a linked meeting names), then each section - the overview and the key points (each topic on its
+    own line, its points as "- " lines; a summary saved before they existed has neither), decisions, action items
+    with who and due, open questions, the follow-ups, the notes worth remembering. Memory only: never logged,
+    spoken or sent."""
     if info is None:
         return ""
     lines = [info.title]
@@ -164,6 +204,13 @@ def summary_text(info: SummaryInfo | None) -> str:
         lines.extend(["", title])
         lines.extend([f"- {item}" for item in items] or [NONE_TEXT])
 
+    if info.has_key_points():
+        lines.extend(["", "Overview", info.overview or NONE_TEXT, "", "Key points"])
+        for topic in info.key_points:
+            lines.append(topic.topic)
+            lines.extend(f"- {point}" for point in topic.points)
+        if not info.key_points:
+            lines.append(NONE_TEXT)
     section("Decisions", info.decisions)
     section("Action items", [action.text() for action in info.actions])
     section("Open questions", info.questions)
@@ -192,6 +239,29 @@ class _Panel(QWidget):
             holo.paint_tile(painter, QRectF(self.rect()), holo.TILE_FOCUSED)
         finally:
             painter.end()
+
+
+def _topic_label(text: str) -> QLabel:
+    """A key-points topic: a small heading (the body type, semibold, the brightest ink)."""
+    label = _label(text, "body", holo.INK_1, selectable=True)
+    label.setFont(holo.font("body", 600))
+    label.setObjectName(TOPIC_NAME)
+    return label
+
+
+class _PointRow(QWidget):
+    """One key point: a bullet, and the point beside it - its wrapped lines hang under its own first word, never
+    under the bullet."""
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.bullet_label = _label(BULLET, "body", holo.INK_3, wrap=False, selectable=True)
+        self.text_label = _label(text, "body", holo.INK_2, selectable=True)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        row.addWidget(self.bullet_label, 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(self.text_label, 1)
 
 
 class _ActionRow(QWidget):
@@ -271,6 +341,7 @@ class SummaryView(QScrollArea):
     keepClicked = Signal(int)
     dismissClicked = Signal(int)
     linkClicked = Signal(str)
+    againClicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -279,6 +350,8 @@ class SummaryView(QScrollArea):
         self._info: SummaryInfo | None = None
         self._held: list[Any] = []
         self._rows: list[QWidget] = []
+        self._titles: list[str] = []                 # the section labels shown, in order
+        self._hint: QLabel | None = None             # AGAIN_HINT under the header (a summary saved before)
         self.column = QWidget()
         self.column.setMaximumWidth(COLUMN_MAX)
         self.column.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
@@ -295,6 +368,15 @@ class SummaryView(QScrollArea):
         self._copied.setSingleShot(True)
         self._copied.setInterval(COPIED_MS)
         self._copied.timeout.connect(self.copied_label.hide)
+        # Summarise again: the app asks for this meeting's summary again through Summarise's own path (the click
+        # only emits againClicked); the summary shown stays until a new one is saved.
+        self.again_button = holo.HoloButton(AGAIN_TEXT, holo.GHOST, size=holo.SIZE_SM)
+        self.again_button.setAccessibleName("Summarise this meeting again")
+        self.again_button.clicked.connect(self._on_again)
+        self.again_button.hide()
+        self.again_label = _label("", "body_sm", holo.ALERT_TX, wrap=False)
+        self.again_label.setObjectName("meetingSummaryAgainNote")
+        self.again_label.hide()
         self.panel = _Panel()
         self._panel_layout = QVBoxLayout(self.panel)
         self._panel_layout.setContentsMargins(22, 18, 22, 18)
@@ -322,6 +404,8 @@ class SummaryView(QScrollArea):
         top.setSpacing(holo.BUTTON_GAP)
         top.addWidget(self.back_button)
         top.addStretch(1)
+        top.addWidget(self.again_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self.again_button)
         top.addWidget(self.copied_label, 0, Qt.AlignmentFlag.AlignVCenter)
         top.addWidget(self.copy_button)
         steps = QHBoxLayout()
@@ -356,12 +440,15 @@ class SummaryView(QScrollArea):
             widget.setParent(None)
             widget.deleteLater()
         self._rows = []
+        self._titles = []
+        self._hint = None
         self._info = info
         self._copied.stop()
         self.copied_label.hide()
         self.copy_button.setEnabled(info is not None)
         self.steps_button.setVisible(bool(info is not None and info.steps_link))
         if info is None:
+            self.set_again(AGAIN_OFF)
             return
         add = self._add
         add(_label(KICKER, "label", holo.HOLO, wrap=False))
@@ -372,6 +459,25 @@ class SummaryView(QScrollArea):
             add(_label(info.guests, "body_sm", holo.INK_3))
         if info.note:
             add(_label(info.note, "body_sm", holo.INK_3))
+        if not info.has_key_points():
+            # Saved before the overview and the key points existed: no such sections, one quiet line instead
+            # while Summarise again is there (set_again shows or hides it).
+            self._hint = _label(AGAIN_HINT, "body_sm", holo.INK_3)
+            add(self._hint)
+        else:
+            self._section(OVERVIEW_TITLE)
+            add(_label(info.overview or NONE_TEXT, "body", holo.INK_2 if info.overview else holo.INK_4))
+            self._section(KEY_POINTS_TITLE)
+            if not info.key_points:
+                add(_label(NONE_TEXT, "body", holo.INK_4))
+            for index, topic in enumerate(info.key_points):
+                if index:
+                    gap = QWidget()
+                    gap.setFixedHeight(4)
+                    add(gap)
+                add(_topic_label(topic.topic))
+                for point in topic.points:
+                    add(_PointRow(point))
         for title, lines in ((DECISIONS_TITLE, info.decisions),):
             self._section(title)
             for line in lines or (NONE_TEXT,):
@@ -405,13 +511,43 @@ class SummaryView(QScrollArea):
                               selectable=True)
                 self._notes_layout.addWidget(head)
                 self._rows.append(head)
+                self._titles.append(NOTES_TITLE)
             row = _NoteRow(index, note)
             row.keepClicked.connect(self.keepClicked)
             row.dismissClicked.connect(self.dismissClicked)
             self._notes_layout.addWidget(row)
             self._rows.append(row)
         self.notes_box.setVisible(bool(info.notes))
+        self.set_again(info.again, info.again_note)
         self.verticalScrollBar().setValue(0)
+
+    def set_again(self, state: str, note: str = "") -> None:
+        """Summarise again as the app knows it now (AGAIN_*): hidden (AGAIN_OFF: the transcript is gone or Ask
+        Jarvis is off), "Summarise again", disabled with "Waiting for Jarvis" / "Writing the summary" while a run
+        for this meeting waits or runs, or Retry with the meeting's failure words (``note``) after one failed. The
+        hint line of a summary saved before the key points shows while the button does. Nothing is started here."""
+        state = state if state in (AGAIN_READY, AGAIN_WAITING, AGAIN_RUNNING, AGAIN_FAILED) else AGAIN_OFF
+        if self._info is None:
+            state = AGAIN_OFF
+        elif (self._info.again, self._info.again_note) != (state, note):
+            self._info = replace(self._info, again=state, again_note=note)
+        shown = state != AGAIN_OFF
+        self.again_button.setText({AGAIN_WAITING: AGAIN_WAITING_TEXT, AGAIN_RUNNING: AGAIN_RUNNING_TEXT,
+                                   AGAIN_FAILED: RETRY_TEXT}.get(state, AGAIN_TEXT))
+        self.again_button.setEnabled(state in (AGAIN_READY, AGAIN_FAILED))
+        self.again_button.setVisible(shown)
+        self.again_label.setText(note if state == AGAIN_FAILED else "")
+        self.again_label.setVisible(state == AGAIN_FAILED and bool(note))
+        if self._hint is not None and shiboken6.isValid(self._hint):
+            self._hint.setVisible(shown)
+
+    def hint_shown(self) -> bool:
+        """AGAIN_HINT shows: a summary saved before the overview and the key points, Summarise again there."""
+        return self._hint is not None and self._info is not None and self._info.again != AGAIN_OFF
+
+    def _on_again(self) -> None:
+        if self._info is not None and self._info.again in (AGAIN_READY, AGAIN_FAILED):
+            self.againClicked.emit()
 
     def _add(self, widget: QWidget) -> None:
         if isinstance(widget, QLabel):           # every text of the summary can be selected with the mouse
@@ -424,6 +560,7 @@ class SummaryView(QScrollArea):
         spacer.setFixedHeight(8)
         self._add(spacer)
         self._add(_label(holo.role_text("label", title), "label", holo.INK_KICKER, wrap=False))
+        self._titles.append(title)
 
     # ---- Copy summary ---------------------------------------------------------------------------
 
@@ -453,12 +590,19 @@ class SummaryView(QScrollArea):
         return tuple(ids)
 
     def sections(self) -> list[str]:
-        """The section labels shown, in order (FOLLOW-UP DRAFTS for a linked meeting, FOLLOW-UPS otherwise)."""
-        titles = (DECISIONS_TITLE, ACTIONS_TITLE, QUESTIONS_TITLE, FOLLOWUP_ITEMS_TITLE, NOTES_TITLE)
-        found = [row.text() for row in self._rows if isinstance(row, QLabel) and row.text() in titles]
-        if self._info is not None and not self._info.linked:
-            return found
-        return found[:3] + [FOLLOWUPS_TITLE] + found[3:]
+        """The section labels shown, in order (OVERVIEW and KEY POINTS first when the summary has them; FOLLOW-UP
+        DRAFTS after OPEN QUESTIONS for a linked meeting, FOLLOW-UPS otherwise)."""
+        found = list(self._titles)
+        if self._info is not None and self._info.linked and QUESTIONS_TITLE in found:
+            found.insert(found.index(QUESTIONS_TITLE) + 1, FOLLOWUPS_TITLE)
+        return found
+
+    def topic_rows(self) -> list[QLabel]:
+        """The key points' topic headings (tests, harnesses)."""
+        return [row for row in self._rows if isinstance(row, QLabel) and row.objectName() == TOPIC_NAME]
+
+    def point_rows(self) -> list[_PointRow]:
+        return [row for row in self._rows if isinstance(row, _PointRow)]
 
     def action_rows(self) -> list[_ActionRow]:
         return [row for row in self._rows if isinstance(row, _ActionRow)]
@@ -470,8 +614,12 @@ class SummaryView(QScrollArea):
         """Every text the view shows, in order (tests, harnesses)."""
         out: list[str] = []
         for row in self._rows:
+            if row is self._hint and not self.hint_shown():
+                continue
             if isinstance(row, QLabel):
                 out.append(row.text())
+            elif isinstance(row, _PointRow):
+                out.append(row.text_label.text())
             elif isinstance(row, _ActionRow):
                 out.append(row.text_label.text())
             elif isinstance(row, _NoteRow):

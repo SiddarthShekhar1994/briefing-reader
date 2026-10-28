@@ -18,6 +18,10 @@ follows nothing (as it does off Windows). Tests and the harness pass tests.deskt
   path is compared whole, a bare file name - as the Start menu gives an app's - by its name, both case-insensitively).
   The window wanted is the first match that was not there before the open (``snapshot()``), else the foreground
   window when it matches (an app that reused a window), else none. Never by a title.
+* A folder's window (``find_folder``, P2.3: the cyan bracket round File Explorer's window while a NEEDS YOUR OK card
+  waits to move files out of the folder it shows): the Shell's own list of its folder windows (``folder_windows``:
+  IShellWindows - each window's handle and the path of the folder it shows, read only) compared whole with the
+  card's folder, kept by the same tests as ``find``'s; none open: no bracket.
 * Bounds (``bounds``): DwmGetWindowAttribute DWMWA_EXTENDED_FRAME_BOUNDS - the frame as it is drawn, without the
   invisible resize borders GetWindowRect counts - in physical pixels; None for a window that is gone, hidden,
   minimised or cloaked.
@@ -43,8 +47,9 @@ Public API
 ``same_exe(wanted, actual)``. ``WinApi`` (Protocol): ``windows()``, ``window_process(hwnd)``, ``process_exe(pid)``,
 ``visible(hwnd)``, ``minimised(hwnd)``, ``owned(hwnd)``, ``tool_window(hwnd)``, ``cloaked(hwnd)``,
 ``frame_bounds(hwnd)``, ``is_window(hwnd)``, ``foreground()``, ``monitors()``, ``hook(low, high, pid, tid,
-callback)``, ``unhook(handle)``, ``own_pid()``. ``Win32WinApi()``; ``NoWinApi``; ``default_api()``.
-``WindowWatch(api=None)``: ``snapshot()``, ``find(exe=, pid=, before=)``, ``bounds(hwnd)``, ``follow(hwnd,
+callback)``, ``unhook(handle)``, ``own_pid()``, ``folder_windows()`` (P2.3). ``Win32WinApi()``; ``NoWinApi``;
+``default_api()``. ``WindowWatch(api=None)``: ``snapshot()``, ``find(exe=, pid=, before=)``, ``find_folder(path)``
+(P2.3), ``bounds(hwnd)``, ``follow(hwnd,
 on_event)`` -> ``Follow`` (``hwnd``, ``dragging``, ``active()``, ``stop()``) or None, ``monitors()``, ``stop()``.
 Event kinds ``FRONT``, ``DRAG``, ``DROP``, ``MINIMISED``, ``RESTORED``, ``MOVED``, ``CLOSED``; the EVENT_* and OBJID_*
 values; ``MAX_WINDOWS``.
@@ -178,6 +183,13 @@ def map_rect(rect: Rect, monitors: Sequence[Monitor], screens: Sequence[ScreenAr
     return parts
 
 
+def _folder_key(path: str) -> str:
+    """A folder's path as two windows' paths are compared: case-insensitive, one kind of slash, no trailing one."""
+    if not isinstance(path, str) or not path.strip():
+        return ""
+    return ntpath.normcase(ntpath.normpath(path.strip())).rstrip("\\")
+
+
 def same_exe(wanted: str, actual: str) -> bool:
     """The process's exe (a full path) is the one wanted: the same full path, or - when only a file name is wanted
     ("Spotify.exe") - the same file name; case-insensitive. Nothing wanted or nothing known: no."""
@@ -250,6 +262,11 @@ class WinApi(Protocol):
     def own_pid(self) -> int:
         ...
 
+    def folder_windows(self) -> list[tuple[int, str]]:
+        """The folder windows of File Explorer open now, as (hwnd, the folder each shows: a plain path; "" for a
+        place with no path - This PC, a library, a search) - the Shell's own list of its windows (P2.3)."""
+        ...
+
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -314,6 +331,9 @@ class NoWinApi:
 
     def own_pid(self) -> int:
         return 0
+
+    def folder_windows(self) -> list[tuple[int, str]]:
+        return []
 
 
 class Win32WinApi:
@@ -497,6 +517,31 @@ class Win32WinApi:
     def own_pid(self) -> int:
         return int(self._kernel32.GetCurrentProcessId())
 
+    @_os_call
+    def folder_windows(self) -> list[tuple[int, str]]:
+        """Shell.Application's Windows() (IShellWindows): each window's HWND and the path of the folder it shows
+        (Document.Folder.Self.Path) - read only; a window that can't say (a web view, a place with no path) gives "".
+        Never its title, never anything in it."""
+        import win32com.client
+
+        found: list[tuple[int, str]] = []
+        windows = win32com.client.Dispatch("Shell.Application").Windows()
+        for index in range(min(int(windows.Count), MAX_WINDOWS)):
+            try:
+                item = windows.Item(index)
+                if item is None:
+                    continue
+                hwnd = int(item.HWND)
+                try:
+                    path = str(item.Document.Folder.Self.Path or "")
+                except Exception:  # noqa: BLE001 - not a folder view: no path
+                    path = ""
+            except Exception as exc:  # noqa: BLE001 - that window is gone or busy: left out
+                logger.debug("Desktop: a folder window could not be read (%s)", type(exc).__name__)
+                continue
+            found.append((hwnd, path))
+        return found
+
 
 def default_api() -> WinApi:
     """``Win32WinApi`` on Windows outside the tests; ``NoWinApi`` while the test guard is on, elsewhere, or when the
@@ -610,6 +655,31 @@ class WindowWatch:
                 return front
         except Exception as exc:  # noqa: BLE001 - not found: no bracket
             logger.debug("Desktop: the window could not be looked for (%s)", type(exc).__name__)
+        return 0
+
+    def find_folder(self, path: str) -> int:
+        """The File Explorer window showing the folder ``path`` (the Shell's own list of its windows, the path
+        compared whole and case-insensitively; P2.3: a NEEDS YOUR OK card's folder) - one a bracket may go round (as
+        ``find``'s); the one in front when there are several; 0 for none. Never by a title."""
+        wanted = _folder_key(path)
+        if not wanted:
+            return 0
+        api = self.api
+        try:
+            own = api.own_pid()
+            matches = []
+            for hwnd, shown in api.folder_windows()[:MAX_WINDOWS]:
+                if not hwnd or _folder_key(shown) != wanted or not api.visible(hwnd):
+                    continue
+                owner_pid, _tid = api.window_process(hwnd)
+                if owner_pid and owner_pid != own and self._shows(hwnd):
+                    matches.append(int(hwnd))
+            if not matches:
+                return 0
+            front = api.foreground()
+            return front if front in matches else matches[0]
+        except Exception as exc:  # noqa: BLE001 - not found: no bracket
+            logger.debug("Desktop: the folder's window could not be looked for (%s)", type(exc).__name__)
         return 0
 
     def _shows(self, hwnd: int) -> bool:

@@ -16,6 +16,9 @@ Off unless [desktop] enabled (or JARVIS_DESKTOP_ENABLED) is true. Built so far (
   places), only ever inside the roots; ``apps``: the Start menu's apps minus the never-open ones.
 * ``executor``: a request's steps carried out, each target re-checked right before its one OS call; ``service``: the
   desktop thread's work (a request resolved, a plan carried out); ``worker``: the "desktop" thread itself.
+* Phase 2, part 1: ``journal`` (the write-ahead journal of what was done to the owner's files: start-up recovery,
+  purge) and ``fileops`` (move, rename, copy, make a folder, zip - every row re-checked, source and destination, right
+  before its OS call - and Undo, item by item in reverse order).
 
 Nothing in this package imports Qt, starts a process or a shell (tests/test_desktop_guard.py greps for it), or logs
 a path, a name, a title or a typed value.

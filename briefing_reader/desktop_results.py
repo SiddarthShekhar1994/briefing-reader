@@ -15,14 +15,21 @@ target and its identity, never an id resolved again).
   again only when something changes) - and the window is followed (WinEvent hooks: a drag hides the bracket and the
   tether until it ends, a minimise until it is back, a move or a snap draws them again where it is; a close takes
   them away and the card stays). Physical pixels are mapped per monitor onto Qt's screens (winwatch.map_rect): a
-  window over two screens gets a bracket on each; one that maps onto no screen gets none. File Explorer windows get
-  no bracket in Phase 1 (P2.3 adds Explorer's).
+  window over two screens gets a bracket on each; one that maps onto no screen gets none. A result card never
+  brackets a File Explorer window; the NEEDS YOUR OK card of file steps does (P2.3, below).
 * Not found, or a card with no window (a held step, what a find found): beside the HUD, under its bar and chips.
 * A button's click comes out as ``clickRequested(entry, key)`` (desktop_ui carries it out on the desktop thread and
   hands what came of it back to ``apply_click``): an Open that opened replaces its card with the card of what opened;
   a step held again (a file that turned out to run macros) adds its amber card; a row whose item changed since goes;
   Not now (``DISMISS_KEY``) removes the card - nothing is carried out.
 * ``clear()`` (a new request, leaving the HUD, Jarvis closing): every card, bracket, tether, hook and timer goes.
+* P2.3, the NEEDS YOUR OK card of file steps (``show_tidy(state, text)``: hud_overlay.DesktopCard, its copy from
+  desktop.tidy.tidy_text; ``refresh_tidy(text)`` as its state moves on; ``tidy()``; ``drop_tidy()``): it goes beside
+  the File Explorer window showing the folder its items come from (winwatch.find_folder - looked for at once and a
+  few times more, as a result card's window; none open: no bracket, the card under the HUD) with a cyan bracket round
+  that window, the folder's name as its tag ("DOWNLOADS") and a tether, followed the same way. Its ticks and buttons
+  come out as ``tidyTicked(number, ticked)`` and ``tidyClicked(key)`` - desktop_ui decides; the state is the
+  controller's (desktop_ui keeps it while the HUD is away: this is only its view).
 
 Logs carry counts, card kinds and event kinds only - never a name, a title, an exe or a path.
 
@@ -30,9 +37,11 @@ Public API
 ==========
 ``ResultCards(overlay, watch_factory=None, hour24=False)``: ``show_run(run, before=)``, ``apply_click(entry, key,
 run, before=)``, ``remove(entry)``, ``clear()``, ``entries()``, ``snapshot()``, ``find_now()``, ``watch()``,
-``decor()``; signals ``clickRequested(object, str)``, ``changed()``. ``CardEntry`` (``card``, ``window``, ``hwnd``,
-``parts``, ``hidden``, ``found()``, ``following()``); ``content_for(card, hour24=)``; ``tether_points(window,
-card)``; ``FIND_DELAYS_MS``, ``FIND_FOR_S``, ``MOVE_SETTLE_MS``.
+``decor()``, ``show_tidy(state, text)``, ``refresh_tidy(text)``, ``tidy()``, ``drop_tidy()``; signals
+``clickRequested(object, str)``, ``changed()``, ``tidyClicked(str)``, ``tidyTicked(int, bool)``. ``CardEntry``
+(``card``, ``window``, ``hwnd``, ``parts``, ``hidden``, ``found()``, ``following()``), ``TidyEntry`` (``state``);
+``content_for(card, hour24=)``; ``desk_content(text)``; ``tether_points(window, card)``; ``FIND_DELAYS_MS``,
+``FIND_FOR_S``, ``MOVE_SETTLE_MS``.
 """
 
 from __future__ import annotations
@@ -49,9 +58,10 @@ from PySide6.QtGui import QGuiApplication, QScreen
 from . import holo, hud_overlay
 from .desktop import executor as desktop_executor
 from .desktop import results as desktop_results
+from .desktop import tidy as desktop_tidy
 from .desktop import validate as dv
 from .desktop import winwatch
-from .hud_overlay import Bracket, CardButton, CardContent, CardRow, Tether
+from .hud_overlay import Bracket, CardButton, CardContent, CardRow, DeskButton, DeskContent, DeskRow, Tether
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +94,25 @@ def content_for(card: desktop_results.Card, hour24: bool = False) -> CardContent
     rows = tuple(CardRow(key, title, meta, action) for key, title, meta, action in text.rows)
     return CardContent(text.kicker, text.title, text.meta, buttons, text.tag, text.note,
                        _NOTE_TONES.get(text.note_tone, hud_overlay.TONE_CYAN), tone, rows, text.note_first)
+
+
+_DESK_TONES = {desktop_tidy.AMBER: hud_overlay.TONE_AMBER, desktop_tidy.CYAN: hud_overlay.TONE_CYAN,
+               desktop_tidy.MINT: hud_overlay.TONE_DONE, desktop_tidy.CORAL: hud_overlay.TONE_CORAL}
+
+
+def desk_content(text: desktop_tidy.TidyText) -> DeskContent:
+    """The tidy card's copy in a state (desktop.tidy.tidy_text) as the DesktopCard shows it: amber while it waits
+    (its ghost and its commit amber), cyan while Jarvis is at it, mint when done, coral when something failed or was
+    refused."""
+    tone = _DESK_TONES.get(text.tone, hud_overlay.TONE_CYAN)
+    amber = tone == hud_overlay.TONE_AMBER
+    variants = {"commit": holo.AMBER_COMMIT if amber else holo.GO, "quiet": holo.AMBER_GHOST if amber else holo.GHOST}
+    buttons = tuple(DeskButton(key, words, variants.get(role, holo.GHOST), right, enabled)
+                    for key, words, role, right, enabled in text.buttons)
+    rows = tuple(DeskRow(row.number, row.name, row.to, row.flags, row.mark, row.ticked, row.struck, row.words,
+                         _DESK_TONES.get(row.words_tone, hud_overlay.TONE_CORAL)) for row in text.rows)
+    return DeskContent(text.kicker, text.title, tone, rows, text.note,
+                       _DESK_TONES.get(text.note_tone, hud_overlay.TONE_CYAN), buttons, text.link, text.link_note)
 
 
 def tether_points(window: QRect, card: QRect) -> tuple[QPoint, ...]:
@@ -143,11 +172,26 @@ class CardEntry:
         return f"CardEntry({self.card.kind}, {self.card.skill}, found={self.found()})"
 
 
+class TidyEntry(CardEntry):
+    """The NEEDS YOUR OK card of file steps on the HUD (P2.3): ``state`` (desktop.tidy.TidyState - the controller's),
+    ``card`` its TidyCard, its window a hud_overlay.DesktopCard; ``hwnd`` the File Explorer window showing its folder
+    while found."""
+
+    def __init__(self, state: desktop_tidy.TidyState, window: hud_overlay.DesktopCard) -> None:
+        super().__init__(state.card, window, frozenset())   # type: ignore[arg-type]
+        self.state = state
+
+    def __repr__(self) -> str:
+        return f"TidyEntry({self.state.stage}, found={self.found()})"
+
+
 class ResultCards(QObject):
     """See the module docstring."""
 
     clickRequested = Signal(object, str)        # the CardEntry, the button's key
     changed = Signal()                          # the cards or the decor changed
+    tidyClicked = Signal(str)                   # the tidy card's button (desktop.tidy's keys)
+    tidyTicked = Signal(int, bool)              # the owner's tick on its row
 
     def __init__(self, overlay: hud_overlay.HudOverlay, *,
                  watch_factory: Callable[[], winwatch.WindowWatch] | None = None, hour24: bool = False,
@@ -240,6 +284,51 @@ class ResultCards(QObject):
             self._watch.stop()
         self.changed.emit()
 
+    # ---- the NEEDS YOUR OK card of file steps (P2.3) -------------------------------------------------------
+
+    def tidy(self) -> TidyEntry | None:
+        return next((entry for entry in self._entries if isinstance(entry, TidyEntry)), None)
+
+    def show_tidy(self, state: desktop_tidy.TidyState, text: desktop_tidy.TidyText) -> TidyEntry:
+        """The tidy card on the HUD (one at a time: an earlier one goes), looking for its folder's window."""
+        self.drop_tidy()
+        window = self.overlay.new_desk_card()
+        window.set_desk(desk_content(text))
+        entry = TidyEntry(state, window)
+        window.buttonClicked.connect(lambda key, entry=entry: self._on_tidy(entry, key))
+        window.tickToggled.connect(lambda number, ticked, entry=entry: self._on_tick(entry, number, ticked))
+        self._entries.append(entry)
+        self._place(entry)
+        if state.card.folder:
+            self._look(entry)
+        logger.info("Desktop %s: the NEEDS YOUR OK card of file steps (%s)", state.card.run_id or "-",
+                    state.stage)
+        self.changed.emit()
+        return entry
+
+    def refresh_tidy(self, text: desktop_tidy.TidyText) -> None:
+        """The tidy card's copy anew (its state moved on): placed again beside its folder's window."""
+        entry = self.tidy()
+        if entry is None:
+            return
+        entry.window.set_desk(desk_content(text))
+        self._place(entry)
+        self._apply_decor()
+        self.changed.emit()
+
+    def drop_tidy(self) -> None:
+        entry = self.tidy()
+        if entry is not None:
+            self.remove(entry)
+
+    def _on_tidy(self, entry: TidyEntry, key: str) -> None:
+        if entry in self._entries:
+            self.tidyClicked.emit(key)
+
+    def _on_tick(self, entry: TidyEntry, number: int, ticked: bool) -> None:
+        if entry in self._entries:
+            self.tidyTicked.emit(int(number), bool(ticked))
+
     def _add(self, card: desktop_results.Card, before: Collection[int]) -> CardEntry:
         window = self.overlay.new_card()
         window.set_content(content_for(card, self._hour24))
@@ -295,16 +384,24 @@ class ResultCards(QObject):
     def find_now(self) -> None:
         """Every card still looking for its window looks now (tests and the harness step it)."""
         for entry in list(self._entries):
-            if entry.card.kind == desktop_results.OPENED and entry.card.exe and not entry.found() \
-                    and entry.finder is not None:
+            if self._wants_window(entry) and not entry.found() and entry.finder is not None:
                 entry.finder.stop()
                 self._try_find(entry)
+
+    @staticmethod
+    def _wants_window(entry: CardEntry) -> bool:
+        if isinstance(entry, TidyEntry):
+            return bool(entry.card.folder)
+        return entry.card.kind == desktop_results.OPENED and bool(entry.card.exe)
 
     def _try_find(self, entry: CardEntry) -> None:
         if entry not in self._entries or entry.found():
             return
         entry.tries += 1
-        hwnd = self.watch().find(exe=entry.card.exe, before=entry.before)
+        if isinstance(entry, TidyEntry):
+            hwnd = self.watch().find_folder(entry.card.folder)        # the folder's File Explorer window
+        else:
+            hwnd = self.watch().find(exe=entry.card.exe, before=entry.before)
         if hwnd:
             self._found(entry, hwnd)
             return
@@ -393,7 +490,7 @@ class ResultCards(QObject):
         for entry in self._entries:
             if entry.hidden or not entry.parts:
                 continue
-            tag = entry.card.app.upper()
+            tag = (entry.card.folder_name if isinstance(entry, TidyEntry) else entry.card.app).upper()
             for index, (screen, rect) in enumerate(entry.parts):
                 brackets.append(Bracket(_bracket_rect(screen, rect), hud_overlay.TONE_CYAN, tag if index == 0 else ""))
             points = tether_points(entry.parts[0][1], entry.window.geometry())

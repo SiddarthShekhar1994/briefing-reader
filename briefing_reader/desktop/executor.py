@@ -16,9 +16,13 @@ or a local route (desktop.routes.LocalRoute). Right before each OS call its targ
 Then the tier decides (checks only ever promote it, hard rule 3): INSTANT steps make their one OS call (backend:
 open_document, show_in_folder, open_folder, launch_app, open_url); ONE_CLICK and CARD steps make none - they are
 held (WAITING) for the owner's click on their card (P1.9); find_files lists what the local search finds (FOUND; never
-fed back to Claude). An open_file that opens keeps the request's other matches (``others``: owner decision D5's
-"Open this instead" rows, P1.9). The rate caps hold again per request (MAX_OPENS opens, MAX_URLS web pages: SPEC
-2.1), and a cancel stops before the next step: one OS call in flight completes, no new one starts.
+fed back to Claude). The file steps (P2.2: move, copy, rename, a new folder, a zip) are always CARD and change nothing
+here: the plan's card is made and frozen first (desktop.cardplan.build_card: every row checked as things are now, a
+taken name given its free "(2)" name on the plan, the rows' flags) - ``DesktopRun.card`` - and each step waits on it
+(WAITING), or is refused with its rows' reason when none of them may go. An open_file that opens keeps the
+request's other matches (``others``: owner decision D5's "Open this instead" rows, P1.9). The rate caps hold again
+per request (MAX_OPENS opens, MAX_URLS web pages: SPEC 2.1), and a cancel stops before the next step: one OS call in
+flight completes, no new one starts.
 
 A click on a result card's button (P1.9, ``run_click``) goes the same way with the card's OWN item - the resolved
 target and the identity it was shown with, never an id resolved again against a newer index (verified review note)
@@ -40,7 +44,8 @@ Public API
 Statuses ``DONE``, ``WAITING``, ``FOUND``, ``REFUSED``, ``FAILED``, ``CANCELLED``; codes ``CHANGED``, ``OS_FAILED``,
 ``GUARD``, ``STOPPED`` (and desktop.validate's NEVER codes); ``StepResult``; ``DesktopRun`` (``done()``,
 ``waiting()``, ``found()``, ``not_done()``, ``counts()``, ``statuses_text()``; ``shown``: what the result cards show
-of it - desktop.results, P1.9); ``FindQuery``; ``Executor(backend, scope=, apps=, find=, clock=)`` (``run_plan(plan,
+of it - desktop.results, P1.9; ``card``: its file steps' frozen plan, P2.2); ``FindQuery``; ``Executor(backend,
+scope=, apps=, find=, clock=, now=)`` (``run_plan(plan,
 words=, others_from=, cancel=)``, ``run_route(route, words=, run_id=)``, ``run_click(skill, target, granted=, ...)``,
 ``recheck(item)``); ``run_words(run, plan=None, address=)``; ``run_soft(run, plan=None)``; ``run_waits(run)``;
 ``describe(result)``; ``status_words(result)``; ``WAITING_NOUNS``; ``MAX_OTHERS``.
@@ -53,10 +58,12 @@ import ntpath
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from ..persona import with_address
 from . import apps as desktop_apps
+from . import cardplan
 from . import guard, paths
 from . import validate as dv
 from .backend import DesktopBackend, FileIdentity
@@ -80,8 +87,9 @@ CODE_WORDS = {CHANGED: "it changed since I looked - left as it is",
 
 
 def code_words(code: str) -> str:
-    """A refusal or failure code in Jarvis's own words (Live, the caption): validate's REASON_WORDS or the run's."""
-    return CODE_WORDS.get(code) or dv.reason_words(code) or "it couldn't be done"
+    """A refusal or failure code in Jarvis's own words (Live, the caption): validate's REASON_WORDS, the run's or a
+    card row's (desktop.cardplan)."""
+    return CODE_WORDS.get(code) or dv.reason_words(code) or cardplan.row_words(code) or "it couldn't be done"
 
 
 @dataclass(frozen=True)
@@ -110,12 +118,15 @@ class StepResult:
 @dataclass(frozen=True)
 class DesktopRun:
     """What a request's steps came to (memory only): every result in order and how long it took; ``shown``: what
-    its result cards show (desktop.results.present, made on the desktop thread right after the run)."""
+    its result cards show (desktop.results.present, made on the desktop thread right after the run); ``card``: the
+    frozen plan of its file steps (desktop.cardplan.CardPlan: the NEEDS YOUR OK card's rows, P2.3), None when it has
+    none."""
 
     run_id: str = ""
     results: tuple[StepResult, ...] = ()
     seconds: float = 0.0
     shown: tuple[Any, ...] = field(default=(), repr=False)
+    card: Any = field(default=None, repr=False, compare=False)
 
     def of(self, *statuses: str) -> tuple[StepResult, ...]:
         return tuple(result for result in self.results if result.status in statuses)
@@ -169,12 +180,14 @@ class Executor:
     def __init__(self, backend: DesktopBackend, *, scope: Callable[[], paths.Scope],
                  apps: Callable[[], Sequence[AppItem]],
                  find: Callable[[FindQuery], Sequence[Any]] | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 now: Callable[[], datetime] | None = None) -> None:
         self.backend = backend
         self._scope = scope
         self._apps = apps
         self._find = find
         self._clock = clock
+        self._now = now or (lambda: datetime.now(timezone.utc))
         self._cancel: Any = None                          # the run's cancel (anything with is_set())
 
     # ---- a planner's plan -------------------------------------------------------------------------
@@ -183,20 +196,39 @@ class Executor:
                  cancel: Any = None) -> DesktopRun:
         """Every accepted step of ``plan`` (in order; the refused ones were never accepted), as the module docstring
         says. ``words``: the owner's typed words (the D5 other matches are ranked by them); ``others_from``: the
-        files the planner was shown."""
+        files the planner was shown. The file steps (P2.2) change nothing here: their card's plan is made and frozen
+        (desktop.cardplan: every row checked as things are now) and they wait for the owner's click on it."""
         started = self._clock()
         self._cancel = cancel
         caps = _Caps()
         results: list[StepResult] = []
+        card = None
+        if any(step.skill in dv.ORGANISE_SKILLS for step in plan.accepted()) and not (
+                cancel is not None and cancel.is_set()):
+            card = self._card(plan)
         for step in plan.accepted():
             if cancel is not None and cancel.is_set():
                 results.append(StepResult(step.number, step.skill, step.tier, CANCELLED, STOPPED, step.flags))
                 continue
+            if step.skill in dv.ORGANISE_SKILLS:
+                results.append(_card_result(step, card))
+                continue
             result = self._plan_step(step, words, others_from, caps)
             results.append(result)
-        run = DesktopRun(plan.run_id, tuple(results), round(self._clock() - started, 3))
+        run = DesktopRun(plan.run_id, tuple(results), round(self._clock() - started, 3), card=card)
         self._log(run)
         return run
+
+    def _card(self, plan: dv.DesktopPlan) -> cardplan.CardPlan | None:
+        """The frozen plan of ``plan``'s file steps, every row checked in the scope as it is now (None when it can't
+        be made: logged by type)."""
+        try:
+            return cardplan.build_card(plan, self.backend, self._scope(), now=self._now(), mono=self._clock(),
+                                       clock=self._clock)
+        except Exception as exc:  # noqa: BLE001 - no card: its steps can't wait for a click
+            logger.warning("Desktop %s: the card's plan could not be made (%s)", plan.run_id or "-",
+                           type(exc).__name__)
+            return None
 
     def _plan_step(self, step: dv.CheckedStep, words: str, others_from: Sequence[FileItem],
                    caps: _Caps) -> StepResult:
@@ -457,6 +489,19 @@ class _Caps:
         return True
 
 
+def _card_result(step: dv.CheckedStep, card: cardplan.CardPlan | None) -> StepResult:
+    """A file step (P2.2): held for the owner's OK on its card (WAITING, CARD; its rows' flags) while a row of it
+    may go; else refused with its first row's reason - or GUARD when no card could be made. Nothing is changed."""
+    rows = card.rows_of(step.number) if card is not None else ()
+    if not rows:
+        logger.info("Desktop guard: refused %s %s", step.skill, GUARD)
+        return StepResult(step.number, step.skill, dv.CARD, REFUSED, GUARD, frozenset(step.flags))
+    flags = frozenset(step.flags).union(*(row.flags for row in rows))
+    if any(row.ok for row in rows):
+        return StepResult(step.number, step.skill, dv.CARD, WAITING, "", flags, card)
+    return StepResult(step.number, step.skill, dv.CARD, REFUSED, rows[0].code, flags, card)
+
+
 def _file_tier(path: str, tier: str, flags: frozenset[str]) -> tuple[str, frozenset[str]]:
     """open_file's tier from the file's REAL name now (validate's rules again; only ever promoted): a document that
     can run macros or scripts and a shortcut need a card, hidden characters a click."""
@@ -504,6 +549,9 @@ def _with_others(result: StepResult, others: tuple[FileItem, ...]) -> StepResult
 _NOUNS = {dv.OPEN_FILE: ("the file", "{n} files"), dv.OPEN_FOLDER: ("the folder", "{n} folders"),
           dv.OPEN_APP: ("the app", "{n} apps"), dv.OPEN_URL: ("the web page", "{n} web pages"),
           dv.SHOW_IN_FOLDER: ("the file", "{n} files"), dv.FIND_FILES: ("the search", "{n} searches")}
+# A file step (P2.2) that waits for the owner's OK on its card, or could not.
+_CARD_NOUNS = {dv.MOVE_FILES: "moving the files", dv.COPY_FILES: "copying the files", dv.RENAME_FILE: "the new name",
+               dv.MAKE_FOLDER: "the new folder", dv.ZIP_FILES: "the zip"}
 # What waits for the owner, by why its tier went up (the first that applies).
 WAITING_NOUNS = ((dv.FLAG_SCRIPT, "a file that can run macros or scripts"), (dv.FLAG_SHORTCUT, "a shortcut"),
                  (dv.FLAG_HIDDEN_CHARS, "a file with hidden characters in its name"),
@@ -563,7 +611,8 @@ def _waiting_words(waiting: Sequence[StepResult]) -> str:
     cards = sum(1 for result in waiting if result.tier == dv.CARD)
     if len(waiting) == 1:
         result = waiting[0]
-        noun = next((words for flag, words in WAITING_NOUNS if flag in result.flags), "one more step")
+        noun = _CARD_NOUNS.get(result.skill) or next((words for flag, words in WAITING_NOUNS if flag in result.flags),
+                                                      "one more step")
         verb = "needs your OK first" if cards else "waits for your click"
         return _capital(f"{noun} {verb}")
     if cards == len(waiting):
@@ -574,6 +623,10 @@ def _waiting_words(waiting: Sequence[StepResult]) -> str:
 def _not_done_words(results: Sequence[StepResult]) -> str:
     if len(results) == 1:
         result = results[0]
+        if result.skill in _CARD_NOUNS:
+            if result.status == CANCELLED:
+                return "Stopped - nothing was changed"
+            return _capital(f"{_CARD_NOUNS[result.skill]} can't go ahead - {code_words(result.code)}")
         noun = _NOUNS.get(result.skill, ("that", ""))[0]
         if result.folder in paths.ROOT_LABELS:
             noun = f"your {paths.ROOT_LABELS[result.folder]} folder"
@@ -602,7 +655,8 @@ def run_words(run: DesktopRun | None, plan: dv.DesktopPlan | None = None, addres
     if waiting:
         words = _waiting_words(waiting)
         if not done and not found:
-            words += " - nothing was opened"
+            files_only = all(result.skill in _CARD_NOUNS for result in waiting)
+            words += " - nothing has changed yet" if files_only else " - nothing was opened"
         sentences.append(words)
     if not_done:
         sentences.append(_not_done_words(not_done))

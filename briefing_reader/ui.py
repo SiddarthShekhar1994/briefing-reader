@@ -8923,6 +8923,8 @@ class AppController(QObject):
                                             self.config, turned_on=self._desktop_turned_on()),
                                         extra=self._desktop_settings)
         self.desktop = self._create_desktop(factory)
+        if self.desktop is not None:
+            self._add_desktop_waiting_row()
         self._sync_desktop_settings()
         app = QCoreApplication.instance()
         if self.desktop is not None and app is not None:
@@ -8945,7 +8947,8 @@ class AppController(QObject):
             home_screen=SCREEN_HOME, may_enter=self._may_enter_hud, bring_forward=bring_forward_on_click,
             address=self.config.assistant.address, live=self.live,
             backend_factory=getattr(self, "_desktop_backend", None), consent_store=self._prefs_store,
-            window_api=getattr(self, "_desktop_window_api", None), parent=self)
+            window_api=getattr(self, "_desktop_window_api", None), click_guard=self._desktop_click_guard,
+            parent=self)
         controller.hudChanged.connect(self._on_hud_changed)
         controller.answered.connect(self._on_desktop_answered)
         controller.plannerNeeded.connect(self._on_desktop_planner)
@@ -8962,6 +8965,42 @@ class AppController(QObject):
             bar.submitted.connect(self._on_hud_submit_without_ask)
             bar.statusDismissed.connect(lambda: bar.set_status("", hud.TONE_IDLE))
         return controller
+
+    def _desktop_click_guard(self, action_id: str) -> bool:
+        """A NEEDS YOUR OK card's click on the desktop (P2.3; ``action_id`` in the "dsk:" namespace) through the
+        approvals' own click guards: True - ignore it - within 1 s of another decision, or while the cards are
+        locked (an approval or a sign-in running)."""
+        return self._decision_click_too_soon() or self._locked_out(action_id)
+
+    def _add_desktop_waiting_row(self) -> None:
+        """P2.3: Approvals' reminder while a NEEDS YOUR OK card of file steps waits on the desktop - "Waiting on your
+        desktop" and "Show me" (onto the HUD, where the card is) over the cards; hidden while none waits. Made only
+        while [desktop] is on (off: the screen is as it was)."""
+        from .desktop_view import WaitingRow
+
+        reading = self.window.reading
+        screen, stage = reading.approvals_screen, reading.approvals_stage
+        row = screen.layout()
+        index = row.indexOf(stage)
+        row.removeWidget(stage)
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(8)
+        waiting = WaitingRow(screen)
+        waiting.showClicked.connect(self._on_desktop_show_me)
+        column.addWidget(waiting)
+        column.addWidget(stage, 1)
+        row.insertLayout(max(0, index), column, 1)
+        self._desktop_waiting = waiting
+        self.desktop.waitingChanged.connect(waiting.set_count)
+        waiting.set_count(self.desktop.waiting_count())
+
+    def _on_desktop_show_me(self) -> None:
+        """Approvals' "Show me": onto the HUD, where the NEEDS YOUR OK card waits (the owner's click)."""
+        desktop = getattr(self, "desktop", None)
+        if desktop is not None and desktop.waiting_count() and not self._shut_down:
+            logger.info("Desktop: Approvals' Show me - onto the HUD")
+            desktop.enter_hud()
 
     def _hud_active(self) -> bool:
         """Jarvis is on the desktop HUD: a sub-state of STATE_READING with the window hidden by Jarvis (never
@@ -9522,9 +9561,16 @@ class AppController(QObject):
         summary = meetings.on_summary(outcome, self._ask_task_id, meeting_id=meeting_id)
         if summary is not None:
             self._take_ask_cards(list(outcome.cards))
+            notes = [self._meeting_note_offer(text) for text in summary.memory]
+            # Summarise again: the new summary's cards start fresh - the earlier summary's draft and block cards
+            # and notes still waiting go (a decided one keeps its result: nothing sent or added is redone).
+            retired = self._retire_meeting_cards(meeting_id, keep={card.id for card in outcome.cards},
+                                                 keep_notes=set(notes))
+            if any(retired):
+                logger.info("Meeting %s: %d earlier card(s) and %d note(s) retired for the new summary", meeting_id,
+                            *retired)
             self._meeting_cards[meeting_id] = tuple(card.id for card in outcome.cards)
-            self._meeting_blocks.pop(meeting_id, None)
-            self._meeting_notes[meeting_id] = [self._meeting_note_offer(text) for text in summary.memory]
+            self._meeting_notes[meeting_id] = notes
             drafts = sum(1 for card in outcome.cards if not card.error)
             message = f"Meeting: summary ready, {_plural(drafts, 'follow-up draft')}"
             if outcome.refused:
@@ -9553,19 +9599,28 @@ class AppController(QObject):
         """Delete removes the meeting's audio, transcript and summary at once: its follow-up drafts and block cards
         still waiting (not held, not on their way, not decided) leave NEEDS YOUR OK, and its notes still waiting
         leave MEMORY's suggestions. A decided card keeps its result."""
+        gone, notes = self._retire_meeting_cards(meeting_id)
+        logger.info("Meeting %s: deleted with %d waiting card(s) and %d note(s)", meeting_id, gone, notes)
+
+    def _retire_meeting_cards(self, meeting_id: str, *, keep: set[str] | frozenset[str] = frozenset(),
+                              keep_notes: set[int] | frozenset[int] = frozenset()) -> tuple[int, int]:
+        """A meeting's follow-up drafts and block cards still waiting (not held, not on their way, not decided)
+        leave NEEDS YOUR OK and its notes still waiting leave MEMORY's suggestions - but ``keep`` / ``keep_notes``
+        (a new summary's own). A decided card keeps its result. The meeting's cards and notes are forgotten.
+        Returns (cards, notes) counted as before: those that went, and the meeting's waiting notes."""
         ids = set(self._meeting_cards.pop(meeting_id, ()))
         ids |= {card_id for card_id in self._meeting_blocks.pop(meeting_id, {}).values() if card_id}
         hold = self._send_hold.action.id if self._send_hold is not None else ""
-        gone = {card_id for card_id in ids if card_id not in self._jobs and card_id != hold
+        gone = {card_id for card_id in ids - set(keep) if card_id not in self._jobs and card_id != hold
                 and not self._store.is_decided(card_id)}
         if gone:
             self._set_source(SOURCE_ASK, [action for action in self._source_lists[SOURCE_ASK] if action.id not in gone])
             self._refresh_actions_ui()
-        notes = {item for item in self._meeting_notes.pop(meeting_id, []) if item}
+        notes = {item for item in self._meeting_notes.pop(meeting_id, []) if item} - set(keep_notes)
         if notes and any(item.id in notes for item in self._memory_suggestions):
             self._memory_suggestions = [item for item in self._memory_suggestions if item.id not in notes]
             self._render_memory()
-        logger.info("Meeting %s: deleted with %d waiting card(s) and %d note(s)", meeting_id, len(gone), len(notes))
+        return len(gone), len(notes)
 
     def _open_meeting_summary(self, meeting_id: str) -> None:
         """The Transcript's Open the summary: the Meetings screen with that summary."""

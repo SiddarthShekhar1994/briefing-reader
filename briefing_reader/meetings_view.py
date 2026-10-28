@@ -38,7 +38,8 @@ Public API
     ``startRequested(StartRequest)``. Part 2: a meeting with its summary opens it (``openSummaryClicked(id)``;
     the list gives way to meeting_summary_view.SummaryView, ``show_summary(info)`` / ``show_list()``); one written
     down before summaries existed, or whose summary failed, has Summarise (``summariseClicked(id)``: the owner's
-    click; nothing is sent). The summary view's clicks come out as ``addBlockClicked(id, index)``,
+    click; nothing is sent) - and so does the summary's own Summarise again (the old summary stays, its Open
+    summary too, until a new one is saved). The summary view's clicks come out as ``addBlockClicked(id, index)``,
     ``keepNoteClicked(id, index)``, ``dismissNoteClicked(id, index)``, ``summaryLinkClicked(link)``;
     ``pageChanged()`` when the list or a summary comes up.
 ``MeetingsSettingsPanel``: Settings > Meetings - the microphone and the call-audio device (Follow the Windows
@@ -875,8 +876,9 @@ class MeetingRowInfo:
     status_text: str = ""
     tone: str = TONE_QUIET
     note: str = field(default="", repr=False)
-    can_summarise: bool = False          # Summarise shows (a transcript and no summary; Ask Jarvis on)
+    can_summarise: bool = False          # Summarise / Retry shows (no summary yet or its last run failed; Ask on)
     summary_failed: bool = False
+    has_summary: bool = False            # Open summary shows while a new summary of it runs (the old one stays)
 
 
 def device_note(changes: Sequence[Any]) -> str:
@@ -903,13 +905,15 @@ def device_note(changes: Sequence[Any]) -> str:
 
 
 def row_info(record: mt.MeetingRecord, *, elapsed: str = "", summaries: bool = True,
-             waiting: bool = False, call_missing: bool = False) -> MeetingRowInfo:
+             waiting: bool = False, call_missing: bool = False, has_summary: bool = False) -> MeetingRowInfo:
     """A meeting record as the list shows it (``elapsed`` for the one recording now; ``summaries``: Ask Jarvis is on,
     so a transcript can be summarised; ``waiting``: its summary waits for Jarvis to finish another request;
-    ``call_missing``: it records, but the call audio can't be recorded right now)."""
+    ``call_missing``: it records, but the call audio can't be recorded right now; ``has_summary``: its summary is
+    kept - Open summary stays while Summarise again writes a new one). A summary run that failed has Retry, also
+    when an older summary of the meeting stays (Open summary beside it)."""
     started = record.started_at
     when = f"{started:%a %d %b} {_clock(started)}" if started is not None else ""
-    failed = record.status == mt.STATUS_TRANSCRIBED and bool(record.summary_error)
+    failed = record.status in (mt.STATUS_TRANSCRIBED, mt.STATUS_SUMMARY_READY) and bool(record.summary_error)
     tone = {mt.STATUS_RECORDING: TONE_RECORDING, mt.STATUS_TRANSCRIBING: TONE_WORKING,
             mt.STATUS_TRANSCRIBED: TONE_READY, mt.STATUS_SUMMARISING: TONE_WORKING,
             mt.STATUS_SUMMARY_READY: TONE_READY, mt.STATUS_FAILED: TONE_FAILED,
@@ -925,13 +929,16 @@ def row_info(record: mt.MeetingRecord, *, elapsed: str = "", summaries: bool = T
         if words:
             note = (note + " \u00b7 " if note else "") + words
     status_text = record.status_text()
-    if record.status == mt.STATUS_TRANSCRIBED and waiting:
+    if record.status in (mt.STATUS_TRANSCRIBED, mt.STATUS_SUMMARY_READY) and waiting:
         status_text = "Summary waits for Jarvis to finish another request"
     elif record.status == mt.STATUS_TRANSCRIBED and not summaries:
         note = (note + " \u00b7 " if note else "") + SUMMARY_OFF_NOTE
     return MeetingRowInfo(record.id, when, record.shown_title(), length, record.status, status_text, tone,
-                          note, can_summarise=summaries and record.status == mt.STATUS_TRANSCRIBED and not waiting,
-                          summary_failed=failed)
+                          note, can_summarise=summaries and not waiting and (record.status == mt.STATUS_TRANSCRIBED
+                                                                            or failed),
+                          summary_failed=failed,
+                          has_summary=has_summary and record.status in (mt.STATUS_SUMMARISING,
+                                                                        mt.STATUS_SUMMARY_READY))
 
 
 class MeetingRow(QWidget):
@@ -960,7 +967,7 @@ class MeetingRow(QWidget):
         self.open_button = holo.HoloButton(OPEN_SUMMARY_TEXT, holo.GO, size=holo.SIZE_SM)
         self.open_button.setAccessibleName(f"{OPEN_SUMMARY_TEXT}: {info.title}")
         self.open_button.clicked.connect(lambda: self.openClicked.emit(self.info.id))
-        self.open_button.setVisible(info.status == mt.STATUS_SUMMARY_READY)
+        self.open_button.setVisible(info.status == mt.STATUS_SUMMARY_READY or info.has_summary)
         self.summarise_button = holo.HoloButton(RETRY_TEXT if info.summary_failed else SUMMARISE_TEXT, holo.GHOST,
                                                 size=holo.SIZE_SM)
         self.summarise_button.setAccessibleName(f"{SUMMARISE_TEXT}: {info.title}")
@@ -1117,6 +1124,8 @@ class MeetingsStage(QWidget):
         self.summary.keepClicked.connect(lambda index: self.keepNoteClicked.emit(self.showing_summary(), index))
         self.summary.dismissClicked.connect(lambda index: self.dismissNoteClicked.emit(self.showing_summary(), index))
         self.summary.linkClicked.connect(self.summaryLinkClicked)
+        # Summarise again on the summary: the very Summarise of the meeting (the owner's click; nothing else).
+        self.summary.againClicked.connect(lambda: self._summarise_shown())
         self.pages = QStackedWidget()
         self.pages.addWidget(self.scroll)
         self.pages.addWidget(self.summary)
@@ -1206,6 +1215,11 @@ class MeetingsStage(QWidget):
         """The meeting whose summary shows ("" while the list shows)."""
         info = self.summary.info()
         return info.meeting_id if info is not None and self.pages.currentWidget() is self.summary else ""
+
+    def _summarise_shown(self) -> None:
+        meeting_id = self.showing_summary()
+        if meeting_id:
+            self.summariseClicked.emit(meeting_id)
 
 
 # --------------------------------------------------------------------------

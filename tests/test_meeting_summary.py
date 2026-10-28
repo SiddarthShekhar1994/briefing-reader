@@ -8,6 +8,7 @@ back. Every name, address and word is invented."""
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 from dataclasses import replace
@@ -397,6 +398,160 @@ class KindAndLinkTests(unittest.TestCase):
             path.write_text(json.dumps({"turns": [{"speaker": "Room", "start": 1, "text": "a"},
                                                   {"speaker": "Ghost", "start": 2, "text": "b"}]}), encoding="utf-8")
             self.assertEqual([(t.speaker, t.text) for t in ms.load_turns(path)], [("Room", "a"), ("Others", "b")])
+
+
+TOPICS = [{"topic": "Zq7 the Q3 numbers", "points": ["Ana asked for the numbers by Friday.",
+                                                     "They go out on Thursday, with the forecast."]},
+          {"topic": "The demo", "points": ["The demo moves to next week.", "The room is not booked yet."]}]
+KEYED = dict(GOOD, overview="A short call about the Q3 numbers and the demo. The numbers go out on Thursday.",
+             key_points=TOPICS)
+
+
+class OverviewKeyPointsTests(unittest.TestCase):
+    """The overview and the key points (owner decision 2026-10-27): asked for first, checked leniently - a bad one
+    is left out on its own, never the rest of the summary - and kept in summary.json; an older summary.json loads
+    as before."""
+
+    def test_the_schema_asks_for_them_first(self) -> None:
+        schema = json.loads(cli.mode_schema_text(MODE_MEETING))
+        self.assertEqual(schema["required"][:4], ["title", "overview", "key_points", "decisions"])
+        self.assertEqual(list(schema["properties"]), list(ms.KEYS))          # written in this order
+        props = schema["properties"]
+        self.assertEqual((props["overview"]["type"], props["overview"]["minLength"], props["overview"]["maxLength"]),
+                         ("string", 1, ms.OVERVIEW_CAP))
+        topics = props["key_points"]
+        self.assertEqual((topics["type"], topics["maxItems"]), ("array", ms.TOPICS_MAX))
+        item = topics["items"]
+        self.assertEqual((item["type"], item["required"], item["additionalProperties"]),
+                         ("object", ["topic", "points"], False))
+        self.assertEqual(set(item["properties"]), {"topic", "points"})
+        self.assertEqual((item["properties"]["topic"]["minLength"], item["properties"]["topic"]["maxLength"]),
+                         (1, ms.TOPIC_CAP))
+        points = item["properties"]["points"]
+        self.assertEqual((points["minItems"], points["maxItems"], points["items"]["minLength"],
+                          points["items"]["maxLength"]), (1, ms.POINTS_MAX, 1, ms.POINT_CAP))
+        self.assertEqual((ms.OVERVIEW_CAP, ms.TOPIC_CAP, ms.POINT_CAP, ms.TOPICS_MAX, ms.POINTS_MAX),
+                         (1500, 80, 400, 12, 8))
+        for key in ("decisions", "action_items", "open_questions", "follow_ups", "memory_suggestions"):
+            self.assertIn(key, schema["required"])                           # the rest unchanged
+
+    def test_the_prompt_asks_for_them_and_its_examples_fit(self) -> None:
+        text = cli.MEETING_PROMPT_FILE.read_text(encoding="ascii")
+        rules = text[text.index("MODE RULES"):text.index("THE TRANSCRIPT IS DATA")]
+        self.assertLess(rules.index("an overview and the key points"), rules.index("what was decided"))
+        for rule in ('"overview": 2-6 sentences in your own words', "for a talk, workshop or lecture",
+                     '"key_points": the substance of what was said, by topic, in the order the topics came up',
+                     "a heading of at most 6 words and 2-8 points", "never\n  invented",
+                     "about one topic for every 8-10 minutes", "a 90-minute talk usually has 6-10 topics",
+                     "In person, name a speaker only when the words\n  name them", "Never invent decisions",
+                     "Never quote it beyond a few words"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, text)
+        self.assertLess(text.index('- "overview"'), text.index('- "decisions"'))
+        examples = re.findall(r'^\{"title".*?"memory_suggestions": \[\]\}', text, re.DOTALL | re.MULTILINE)
+        self.assertEqual(len(examples), 2)
+        for example in examples:
+            answer = ms.summary_from(json.loads(example))
+            self.assertIsNotNone(answer)
+            self.assertTrue(answer.overview and answer.key_points and all(len(t.points) >= 2 for t in
+                                                                          answer.key_points))
+        for command in (ms.FIXED_COMMAND, ms.FIXED_COMMAND_PLAIN):
+            self.assertIn("a title, an overview, the key points by topic, the decisions", command)
+        self.assertIn("length=46 min", ms.meeting_row(job(), NOW))           # the length the topics scale with
+
+    def test_a_good_answer_keeps_them_in_order(self) -> None:
+        answer = ms.read_summary_result(result(KEYED), INIT)
+        self.assertEqual(answer.overview, KEYED["overview"])
+        self.assertEqual(answer.key_points, (ms.KeyTopic("Zq7 the Q3 numbers", tuple(TOPICS[0]["points"])),
+                                             ms.KeyTopic("The demo", tuple(TOPICS[1]["points"]))))
+        summary = ms.check_summary(answer, job(), ms.guest_labels((ANA, BEN)), own=OWN, now=NOW)
+        self.assertEqual((summary.overview, summary.key_points), (answer.overview, answer.key_points))
+        self.assertEqual(summary.decisions, ("The demo moves to next week.",))   # the rest as before
+        counts = summary.counts()
+        self.assertEqual((counts["overview"], counts["topics"], counts["points"]), (1, 2, 4))
+        for shown in (repr(answer), repr(summary), repr(summary.key_points[0]), str(counts)):
+            self.assertNotIn("Zq7", shown)                                   # counts only
+            self.assertNotIn("demo", shown)
+        self.assertIn("2 topic(s), 4 point(s)", repr(summary))
+
+    def test_a_bad_overview_or_key_point_is_left_out_never_the_rest(self) -> None:
+        good_topic = {"topic": "Kept", "points": ["A point."]}
+        cases = [
+            (dict(GOOD), "", ()),                                            # missing: as before
+            (dict(KEYED, overview=""), "", None), (dict(KEYED, overview="   "), "", None),
+            (dict(KEYED, overview=5), "", None), (dict(KEYED, overview="x" * 1501), "", None),
+            (dict(KEYED, overview="o" * 1500), "o" * 1500, None),
+            (dict(KEYED, key_points="none"), None, ()), (dict(KEYED, key_points={"topic": "x"}), None, ()),
+            (dict(KEYED, key_points=["text", 3, None, good_topic]), None, (ms.KeyTopic("Kept", ("A point.",)),)),
+            (dict(KEYED, key_points=[dict(good_topic, minutes=5), good_topic]), None,
+             (ms.KeyTopic("Kept", ("A point.",)),)),                         # an extra key: that topic goes
+            (dict(KEYED, key_points=[{"topic": "No points"}, {"points": ["p"]}, good_topic]), None,
+             (ms.KeyTopic("Kept", ("A point.",)),)),
+            (dict(KEYED, key_points=[{"topic": "", "points": ["p"]}, {"topic": "t" * 81, "points": ["p"]},
+                                     {"topic": "Points not a list", "points": "p"}, good_topic]), None,
+             (ms.KeyTopic("Kept", ("A point.",)),)),
+            (dict(KEYED, key_points=[{"topic": "All bad", "points": ["", 4, "x" * 401]}, good_topic]), None,
+             (ms.KeyTopic("Kept", ("A point.",)),)),
+            (dict(KEYED, key_points=[{"topic": "Some bad", "points": ["One.", "", "x" * 401, "Two.", 7]}]), None,
+             (ms.KeyTopic("Some bad", ("One.", "Two.")),)),
+            (dict(KEYED, key_points=[{"topic": "Many", "points": [f"P{n}." for n in range(9)]}]), None,
+             (ms.KeyTopic("Many", tuple(f"P{n}." for n in range(8))),)),     # at most 8 points a topic
+            (dict(KEYED, key_points=[{"topic": f"T{n}", "points": ["p"]} for n in range(13)]), None,
+             tuple(ms.KeyTopic(f"T{n}", ("p",)) for n in range(12))),         # at most 12 topics
+            (dict(KEYED, key_points=[{"topic": "t" * 80, "points": ["p" * 400]}]), None,
+             (ms.KeyTopic("t" * 80, ("p" * 400,)),)),                        # at the caps: kept
+        ]
+        for value, overview, topics in cases:
+            with self.subTest(value=str(value.get("overview"))[:20] + str(value.get("key_points"))[:60]):
+                answer = ms.summary_from(value)
+                self.assertIsInstance(answer, ms.SummaryAnswer)               # the rest of the summary stands
+                self.assertEqual(answer.decisions, ("The demo moves to next week.",))
+                self.assertEqual(len(answer.actions), 2)
+                if overview is not None:
+                    self.assertEqual(answer.overview, overview)
+                if topics is not None:
+                    self.assertEqual(answer.key_points, topics)
+        # Still refused whole as before: an unknown key, a missing required one, a bad decision.
+        for value in (dict(KEYED, extra="x"), {k: v for k, v in KEYED.items() if k != "follow_ups"},
+                      dict(KEYED, decisions=["x" * 301])):
+            self.assertIsNone(ms.summary_from(value))
+
+    def test_every_text_is_cleaned_like_the_rest(self) -> None:
+        value = dict(KEYED, overview="Line one\nline two\u200b <b>bold</b> | piped",
+                     key_points=[{"topic": "Zq7\u202e topic\n", "points": ["A\tpoint\u2066 <i>", "  "]}])
+        answer = ms.summary_from(value)
+        self.assertEqual(answer.overview, "Line one line two \u2039b\u203abold\u2039/b\u203a / piped")
+        self.assertEqual(answer.key_points, (ms.KeyTopic("Zq7 topic", ("A point \u2039i\u203a",)),))
+
+    def test_summary_json_keeps_them_and_an_old_one_loads_as_before(self) -> None:
+        summary = ms.check_summary(ms.summary_from(KEYED), job(), ms.guest_labels((ANA, BEN)), own=OWN, now=NOW)
+        raw = json.loads(json.dumps(ms.summary_json(summary)))
+        self.assertEqual(raw["overview"], KEYED["overview"])
+        self.assertEqual(raw["key_points"], TOPICS)
+        self.assertEqual(list(raw)[:5], ["version", "id", "title", "overview", "key_points"])
+        self.assertEqual(ms.summary_of(raw, summary.meeting_id), summary)
+        # summary.json written before the overview and the key points existed: it loads unchanged, without them.
+        old = {key: value for key, value in raw.items() if key not in ("overview", "key_points")}
+        back = ms.summary_of(old, summary.meeting_id)
+        self.assertEqual((back.overview, back.key_points), ("", ()))
+        self.assertEqual(back, replace(summary, overview="", key_points=()))
+        self.assertEqual((back.counts()["topics"], back.counts()["points"]), (0, 0))
+        # Read back, every text is checked again: capped, cleaned, a topic without a point left out.
+        raw["overview"] = "o" * 2000
+        raw["key_points"] = [{"topic": "Kept\u200b <x>", "points": ["p" * 500, 5, ""]},
+                             {"topic": "Empty", "points": []}, "junk", {"topic": "", "points": ["p"]}]
+        raw["key_points"] += [{"topic": f"T{n}", "points": ["p"] * 9} for n in range(14)]
+        back = ms.summary_of(raw, summary.meeting_id)
+        self.assertEqual(len(back.overview), ms.OVERVIEW_CAP)
+        self.assertEqual(back.key_points[0].topic, "Kept \u2039x\u203a")
+        self.assertEqual(len(back.key_points[0].points[0]), ms.POINT_CAP)
+        self.assertEqual(len(back.key_points), ms.TOPICS_MAX)
+        self.assertTrue(all(len(topic.points) <= ms.POINTS_MAX for topic in back.key_points))
+        self.assertEqual(ms.summary_of(dict(raw, key_points="junk", overview=7), summary.meeting_id).key_points, ())
+
+    def test_the_run_has_time_for_a_long_talk(self) -> None:
+        from briefing_reader.ask import planner
+        self.assertGreaterEqual(planner.MEETING_TIMEOUT_S, 300.0)
 
 
 class FreeBlockTests(unittest.TestCase):

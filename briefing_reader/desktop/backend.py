@@ -31,6 +31,14 @@ The methods:
   friendly name and its exe, from the associations only: AssocQueryStringW; nothing is opened or read) - and
   ``link_target`` - the path a shortcut names (IShellLink Load and GetPath, never Resolve: nothing is searched or
   started), so its card can show the real target before anything opens (SPEC 2.4).
+* Organising files (P2.1; SPEC 6.2 - desktop.fileops checks every row, source and destination, right before):
+  ``move_item`` (MoveFileExW without MOVEFILE_REPLACE_EXISTING or MOVEFILE_COPY_ALLOWED: never over anything, never
+  to another volume), ``copy_file`` (CopyFileExW fail-if-exists, with a cancel callback), ``make_folder``
+  (CreateDirectoryW), ``remove_folder`` (RemoveDirectoryW: an empty folder Jarvis made, for Undo), ``write_zip`` (a
+  new zip under a temporary name, removed by Windows unless it is finished), ``zone_identifier`` (a file's mark of the
+  web, copied onto a zip), ``content_hash`` (sha256: a copy's or a zip's, for Undo) and ``free_space``. Each is
+  guarded once more (a plain path on a fixed drive, never a secret file, never a blocked type zipped); the raw calls
+  live in desktop.fileops.
 
 No method is ever named for something on the NEVER list (guard.NEVER_CAPABILITIES): there is no delete, no close, no
 shell command, no send. Logs carry folder keys, counts and exception types (with a winerror) only, never a path, a
@@ -42,7 +50,10 @@ Public API
 ``drive_type(drive)``, ``file_id(path)``, ``list_folder(path, limit=)``, ``search_index(sql, timeout_s=,
 max_rows=)``, ``recent_items(limit=)``, ``start_menu_apps(limit=)``, ``open_document(path)``,
 ``open_script_document(path)``, ``show_in_folder(path)``, ``open_folder(path)``, ``launch_app(app_id)``,
-``open_url(url)``, ``app_for(kind)``, ``link_target(path)``.
+``open_url(url)``, ``app_for(kind)``, ``link_target(path)``, ``move_item(src, dst)``, ``copy_file(src, dst,
+cancel=)``, ``make_folder(path)``, ``remove_folder(path)``, ``write_zip(members, temp, cancel=, zone=)``,
+``zone_identifier(path)``, ``content_hash(path)``, ``free_space(path)``; ``ZipMember(path, arcname, is_dir, size,
+mtime_ns)``.
 ``FileInfo(attributes, reparse_tag, is_dir)``, ``FileIdentity(volume, file_id, size, mtime_ns, is_dir)``
 (``same_item(other)``), ``DirEntry(name, is_dir, attributes, reparse_tag, size, mtime_ns)``, ``IndexRow(path, name,
 size, modified, attributes, is_dir)``, ``AppEntry(app_id, name)``, ``AppInfo(name, exe)``; ``app_kind(kind)`` (what
@@ -65,7 +76,7 @@ import stat
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, TypeVar
@@ -249,6 +260,19 @@ class AppInfo:
     exe: str = field(default="", repr=False)
 
 
+@dataclass(frozen=True)
+class ZipMember:
+    """One entry of a zip being made (P2.1): the file's or folder's path, its name inside the zip (a folder's own
+    entry keeps an empty folder), and the size and mtime it was listed with (a file that is not that size when it is
+    read is not zipped: it changed)."""
+
+    path: str = field(repr=False)
+    arcname: str = field(repr=False)
+    is_dir: bool = False
+    size: int = 0
+    mtime_ns: int = 0
+
+
 def app_kind(kind: Any) -> bool:
     """What ``app_for`` may be asked: a file type (".docx") or "https" - never a path or a name."""
     return isinstance(kind, str) and (kind == "https" or bool(_KIND_RE.fullmatch(kind)))
@@ -341,6 +365,45 @@ class DesktopBackend(Protocol):
     def link_target(self, path: str) -> str:
         """The path the shortcut ``path`` (a .lnk on a fixed drive) names, read without resolving it - nothing is
         searched or started; "" when it names no path. OSError when it can't be read."""
+        ...
+
+    def move_item(self, src: str, dst: str) -> None:
+        """Move or rename ``src`` to ``dst`` on its own volume (MoveFileExW without MOVEFILE_REPLACE_EXISTING or
+        MOVEFILE_COPY_ALLOWED: never over anything, never to another volume). OSError with its winerror (183 something
+        is there, 17 another volume, 32 another program has it open ...)."""
+        ...
+
+    def copy_file(self, src: str, dst: str, *, cancel: Callable[[], bool] | None = None) -> None:
+        """Copy the file ``src`` to the new file ``dst`` (CopyFileExW, fail-if-exists: 80 when something is there).
+        ``cancel`` is asked as the copy goes; True stops it (1235) and Windows removes its part-made copy."""
+        ...
+
+    def make_folder(self, path: str) -> None:
+        """Make the new folder ``path`` (CreateDirectoryW; 183 when something is there)."""
+        ...
+
+    def remove_folder(self, path: str) -> None:
+        """Remove the EMPTY folder ``path`` (RemoveDirectoryW: 145 when anything is in it) - only ever a folder Jarvis
+        made, when Undo puts it back."""
+        ...
+
+    def write_zip(self, members: Sequence[ZipMember], temp: str, *, cancel: Callable[[], bool] | None = None,
+                  zone: bytes | None = None) -> None:
+        """Write a new zip at ``temp`` (a name of Jarvis's own in the destination folder) from ``members``,
+        ZIP_DEFLATED, with ``zone`` as its Zone.Identifier; until it is all written Windows removes it if it closes,
+        so a failure or a stop leaves nothing. The members are only read."""
+        ...
+
+    def zone_identifier(self, path: str) -> bytes | None:
+        """The file's Zone.Identifier (the mark of the web), or None when it has none."""
+        ...
+
+    def content_hash(self, path: str) -> str:
+        """The sha256 of the file's content (hex)."""
+        ...
+
+    def free_space(self, path: str) -> int:
+        """The bytes free on the volume of the folder ``path``."""
         ...
 
 
@@ -555,6 +618,77 @@ class Win32Backend:
     def link_target(self, path: str) -> str:
         self._last_guard("link_target", path)
         return _link_path(path)
+
+    # ---- organising files (P2.1; desktop.fileops checks every row first) ----------------------------
+
+    @_real
+    def move_item(self, src: str, dst: str) -> None:
+        self._file_guard(src, dst)
+        from . import fileops
+
+        fileops.raw_move(src, dst)
+
+    @_real
+    def copy_file(self, src: str, dst: str, *, cancel: Callable[[], bool] | None = None) -> None:
+        self._file_guard(src, dst)
+        from . import fileops
+
+        fileops.raw_copy(src, dst, cancel or (lambda: False))
+
+    @_real
+    def make_folder(self, path: str) -> None:
+        self._file_guard(path)
+        from . import fileops
+
+        fileops.raw_make_folder(path)
+
+    @_real
+    def remove_folder(self, path: str) -> None:
+        self._file_guard(path)
+        from . import fileops
+
+        fileops.raw_remove_folder(path)
+
+    @_real
+    def write_zip(self, members: Sequence[ZipMember], temp: str, *, cancel: Callable[[], bool] | None = None,
+                  zone: bytes | None = None) -> None:
+        self._file_guard(temp, *(member.path for member in members))
+        if any(guard.blocked_type(member.path) for member in members if not member.is_dir):
+            raise ValueError("refused by the last guard")
+        from . import fileops
+
+        fileops.raw_write_zip(members, temp, cancel or (lambda: False), zone)
+
+    @_real
+    def zone_identifier(self, path: str) -> bytes | None:
+        self._file_guard(path)
+        from . import fileops
+
+        return fileops.raw_zone(path)
+
+    @_real
+    def content_hash(self, path: str) -> str:
+        self._file_guard(path)
+        from . import fileops
+
+        return fileops.raw_hash(path)
+
+    @_real
+    def free_space(self, path: str) -> int:
+        self._file_guard(path)
+        from . import fileops
+
+        return fileops.raw_free(path)
+
+    def _file_guard(self, *targets: str) -> None:
+        """The file operations' last guard: each path a plain absolute local one on a fixed drive, never a
+        secret-shaped file - else ValueError and nothing is asked of Windows."""
+        from .paths import lexical_problem                # late: paths imports this module
+
+        for target in targets:
+            if lexical_problem(target) or guard.secret_file(target) \
+                    or self.drive_type(target.replace("/", "\\")[:3]) != DRIVE_FIXED:
+                raise ValueError("refused by the last guard")
 
     def _last_guard(self, method: str, target: str) -> None:
         """The last guard before the shell is asked (``open_problem``, and a path's drive a fixed one): ValueError

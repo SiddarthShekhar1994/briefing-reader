@@ -8,7 +8,7 @@
     "say": {
       "type": "string",
       "maxLength": 200,
-      "description": "One short sentence on what you lined up. Never claim anything is done or opened."
+      "description": "One short sentence on what you lined up. Never claim anything is done, opened or changed."
     },
     "question": {
       "type": "string",
@@ -26,16 +26,36 @@
         "properties": {
           "skill": {
             "type": "string",
-            "enum": ["find_files", "open_file", "show_in_folder", "open_folder", "open_app", "open_url"]
+            "enum": ["find_files", "open_file", "show_in_folder", "open_folder", "open_app", "open_url",
+                     "move_files", "copy_files", "rename_file", "make_folder", "zip_files"]
           },
           "why": {"type": "string", "maxLength": 120, "description": "A few words: why this step."},
           "files": {
             "type": "array",
             "maxItems": 200,
             "items": {"type": "string", "pattern": "^f[0-9]{1,4}$"},
-            "description": "open_file and show_in_folder: exactly one f id from <files>."
+            "description": "f ids: one to open, show or rename; else the files to move, copy or zip."
           },
-          "place": {"type": "string", "pattern": "^d[0-9]{1,3}$", "description": "A d id from <places>."},
+          "place": {
+            "type": "string",
+            "pattern": "^d[0-9]{1,3}$",
+            "description": "A d id: where find_files looks, what open_folder opens, where make_folder makes."
+          },
+          "to": {
+            "type": "string",
+            "pattern": "^(d[0-9]{1,3}|n[0-9]{1,2})$",
+            "description": "Where things go: a d id from <places>, or the n id an earlier make_folder step makes."
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^n[0-9]{1,2}$",
+            "description": "make_folder: the new folder's own id (n1, n2 ...), for later steps' \"to\"."
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 120,
+            "description": "A new name, never a path; the same extension unless the owner asks; a zip's ends in .zip."
+          },
           "query": {"type": "string", "maxLength": 120, "description": "find_files: the words to look for."},
           "kind": {"type": "string", "enum": ["document", "picture", "music", "video", "folder", "any"]},
           "within_days": {"type": "integer", "minimum": 1, "maximum": 365},
