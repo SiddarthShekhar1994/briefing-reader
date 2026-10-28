@@ -8923,6 +8923,8 @@ class AppController(QObject):
                                             self.config, turned_on=self._desktop_turned_on()),
                                         extra=self._desktop_settings)
         self.desktop = self._create_desktop(factory)
+        if self.desktop is not None:
+            self._add_desktop_waiting_row()
         self._sync_desktop_settings()
         app = QCoreApplication.instance()
         if self.desktop is not None and app is not None:
@@ -8945,7 +8947,8 @@ class AppController(QObject):
             home_screen=SCREEN_HOME, may_enter=self._may_enter_hud, bring_forward=bring_forward_on_click,
             address=self.config.assistant.address, live=self.live,
             backend_factory=getattr(self, "_desktop_backend", None), consent_store=self._prefs_store,
-            window_api=getattr(self, "_desktop_window_api", None), parent=self)
+            window_api=getattr(self, "_desktop_window_api", None), click_guard=self._desktop_click_guard,
+            parent=self)
         controller.hudChanged.connect(self._on_hud_changed)
         controller.answered.connect(self._on_desktop_answered)
         controller.plannerNeeded.connect(self._on_desktop_planner)
@@ -8962,6 +8965,42 @@ class AppController(QObject):
             bar.submitted.connect(self._on_hud_submit_without_ask)
             bar.statusDismissed.connect(lambda: bar.set_status("", hud.TONE_IDLE))
         return controller
+
+    def _desktop_click_guard(self, action_id: str) -> bool:
+        """A NEEDS YOUR OK card's click on the desktop (P2.3; ``action_id`` in the "dsk:" namespace) through the
+        approvals' own click guards: True - ignore it - within 1 s of another decision, or while the cards are
+        locked (an approval or a sign-in running)."""
+        return self._decision_click_too_soon() or self._locked_out(action_id)
+
+    def _add_desktop_waiting_row(self) -> None:
+        """P2.3: Approvals' reminder while a NEEDS YOUR OK card of file steps waits on the desktop - "Waiting on your
+        desktop" and "Show me" (onto the HUD, where the card is) over the cards; hidden while none waits. Made only
+        while [desktop] is on (off: the screen is as it was)."""
+        from .desktop_view import WaitingRow
+
+        reading = self.window.reading
+        screen, stage = reading.approvals_screen, reading.approvals_stage
+        row = screen.layout()
+        index = row.indexOf(stage)
+        row.removeWidget(stage)
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(8)
+        waiting = WaitingRow(screen)
+        waiting.showClicked.connect(self._on_desktop_show_me)
+        column.addWidget(waiting)
+        column.addWidget(stage, 1)
+        row.insertLayout(max(0, index), column, 1)
+        self._desktop_waiting = waiting
+        self.desktop.waitingChanged.connect(waiting.set_count)
+        waiting.set_count(self.desktop.waiting_count())
+
+    def _on_desktop_show_me(self) -> None:
+        """Approvals' "Show me": onto the HUD, where the NEEDS YOUR OK card waits (the owner's click)."""
+        desktop = getattr(self, "desktop", None)
+        if desktop is not None and desktop.waiting_count() and not self._shut_down:
+            logger.info("Desktop: Approvals' Show me - onto the HUD")
+            desktop.enter_hud()
 
     def _hud_active(self) -> bool:
         """Jarvis is on the desktop HUD: a sub-state of STATE_READING with the window hidden by Jarvis (never

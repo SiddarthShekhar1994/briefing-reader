@@ -50,8 +50,9 @@ kinds, states, reason codes, counts, exception types and winerrors only - never 
 Public API
 ==========
 ``FileOp(kind, sources, folder, name, key)``, ``Check``, ``OpResult``, ``BatchReport``, ``FileOps(backend, journal,
-scope=, cancel=, clock=, caps=)`` (``check(op, pending=)`` - ``pending``: a card's new folders not made yet, P2.2 -,
-``run(ops)``); ``Undoer(backend, journal, scope=, recycler=,
+scope=, cancel=, clock=, caps=, progress=)`` (``check(op, pending=)`` - ``pending``: a card's new folders not made
+yet, P2.2 -, ``run(ops)``; ``progress(result, ended, total)`` after each row, P2.3); ``Undoer(backend, journal,
+scope=, recycler=,
 undo_days=, now=, cancel=)`` (``undoable()``, ``undo(seqs=None)``), ``UndoResult`` (``words``), ``UndoReport``
 (``put_back``, ``total``, ``refused()``, ``stamp()``); ``Recycler``, ``NoRecycleBin``, ``RecycleUnavailable``;
 ``walk_subtree(folder, scope, backend, content=)``, ``Subtree``, ``SubtreeCaps``, ``SUBTREE_CAPS``,
@@ -155,6 +156,7 @@ UNDO_WORDS = {
     R_ACCESS: "Windows didn't allow it - left where it is.",
     R_NOT_YET: "Can't be put back yet - left as it is.",
     R_NOT_UNDOABLE: "Nothing to put back.",
+    R_STOPPED: "Not put back - you stopped it.",
 }
 UNDO_WORDS.update({reason: "It holds something I never move - left where it is." for reason in _HOLDS})
 DEFAULT_UNDO_WORDS = "Not put back - left where it is."
@@ -162,7 +164,7 @@ DEFAULT_UNDO_WORDS = "Not put back - left where it is."
 STAMP_LABELS = {R_MOVED_SINCE: "MOVED SINCE", R_OCCUPIED: "SOMETHING NEW IN ITS PLACE", R_CHANGED: "CHANGED SINCE",
                 R_NOT_EMPTY: "NOT EMPTY", R_EXPIRED: "TOO OLD", R_CROSS_VOLUME: "ON ANOTHER DRIVE",
                 R_IN_USE: "IN USE", R_ONLINE_ONLY: "ONLINE-ONLY", R_OLD_PLACE_GONE: "OLD FOLDER GONE",
-                R_NO_BIN: "BIN NOT READY"}
+                R_NO_BIN: "BIN NOT READY", R_STOPPED: "STOPPED"}
 STAMP_OTHER = "NOT PUT BACK"
 STAMP_DOT = " \u00b7 "
 
@@ -740,17 +742,21 @@ def _count_text(counts: dict[str, int]) -> str:
 
 class FileOps:
     """Carries a card's rows out (see the module docstring). ``scope`` gives the scope as it is now (paths.Scope);
-    ``cancel`` is the run's stop flag (Esc, Stop): asked before each row and during a copy or a zip."""
+    ``cancel`` is the run's stop flag (Esc, Stop): asked before each row and during a copy or a zip; ``progress``
+    (P2.3's card: "Moving 2 of 5") hears each row's result as it ends - (the result, rows ended, rows in all); what it
+    raises is ignored."""
 
     def __init__(self, backend: DesktopBackend, journal: Journal, *, scope: Callable[[], paths.Scope],
                  cancel: Callable[[], bool] | None = None, clock: Callable[[], float] = time.monotonic,
-                 caps: SubtreeCaps = SUBTREE_CAPS) -> None:
+                 caps: SubtreeCaps = SUBTREE_CAPS,
+                 progress: Callable[[OpResult, int, int], None] | None = None) -> None:
         self.backend = backend
         self.journal = journal
         self._scope = scope
         self._cancel = cancel or (lambda: False)
         self._clock = clock
         self._caps = caps
+        self._progress = progress
         self._made: dict[str, Place] = {}          # a mkdir row's key -> the folder it made
 
     # ---- checking a row ------------------------------------------------------------------------------
@@ -919,16 +925,25 @@ class FileOps:
             if not halted and self._cancel():
                 halted = R_STOPPED
             if halted:
-                results.append(self._skip(seq, op, halted))
-                continue
-            result = self._carry_out(seq, op)
-            if result.reason == R_JOURNAL:
-                halted = R_JOURNAL                         # nothing more is done while the journal can't be saved
+                result = self._skip(seq, op, halted)
+            else:
+                result = self._carry_out(seq, op)
+                if result.reason == R_JOURNAL:
+                    halted = R_JOURNAL                     # nothing more is done while the journal can't be saved
             results.append(result)
+            self._tell(result, len(results), len(ops))
         report = BatchReport(self.journal.run_id, tuple(results))
         logger.info("Desktop files %s: %d row(s) (%s), reasons (%s)", self.journal.run_id, len(results),
                     _count_text(report.counts()), _count_text(report.reasons()))
         return report
+
+    def _tell(self, result: OpResult, ended: int, total: int) -> None:
+        if self._progress is None:
+            return
+        try:
+            self._progress(result, ended, total)
+        except Exception as exc:  # noqa: BLE001 - only a view of the batch; never a reason for it to stop
+            logger.debug("Desktop files %s: progress not heard (%s)", self.journal.run_id, type(exc).__name__)
 
     def _planned(self, seq: int, op: FileOp) -> Record:
         kind = op.kind if op.kind in OP_KINDS else MOVE

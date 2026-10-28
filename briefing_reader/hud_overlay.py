@@ -51,6 +51,16 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     never over it and clear of ``avoid`` (the HUD), kept inside the work area (ui._keep_on_screen's rule);
     ``cut_texts()``; ``glow()`` (its ``Glow``, global); ``shapeChanged()`` when it moves, changes size or tone.
 
+``DesktopCard``
+    P2.3: a NEEDS YOUR OK card of file steps beside the folder it is about (DesktopB's tidy card, 456 px): a
+    ResultCard - its flags, its placing, its shadow in the layer - with one row per item: a tick box while it waits
+    (``_TickBox``, NoFocus, a click toggles it: ``tickToggled(number, ticked)``), then each row's mark as the batch
+    goes (done, on its way, not done, left unticked, can't go), its name and where it goes ("-> Documents > Uni >
+    LING"), its flags in mono caps and a line of words under it; the note; the buttons (``DeskButton``: Not now, the
+    commit - disabled while nothing is ticked -, Stop) and the stamp's Undo link with its note. Tones amber (a
+    decision waits), cyan (Jarvis is at it), done (mint) and ``TONE_CORAL`` (failed or refused). ``set_desk(
+    DeskContent)``, ``desk()``, ``ticks()``, ``buttons()``; ``HudOverlay.new_desk_card()``.
+
 ``DecorLayer``
     One per QScreen, sized to its geometry, also ``WindowTransparentForInput``: the outer shadows and glows under the
     interactive windows (``Glow``: Switch.dc.html's box-shadows of the bar, the chips and the cards - painted once per
@@ -1599,6 +1609,454 @@ class ResultCard(_OverlayWindow):
                                  metas.elidedText(row.meta, Qt.TextElideMode.ElideRight, box.width()))
 
 # --------------------------------------------------------------------------
+# The NEEDS YOUR OK card of file steps (P2.3; DesktopB's second demo)
+# --------------------------------------------------------------------------
+
+TONE_CORAL = "coral"           # a failure or a refusal (hard rule 17); the DesktopCard only
+DESK_WIDTH = 456               # DesktopB's tidy card (.glass, width 456)
+DESK_ROW = 36                  # a row (.prow: 36 px high, a hairline on top)
+DESK_FLAGS_LINE = 14           # ... its flags under it, in mono caps
+DESK_WORDS_LINE = 18           # ... and why it wasn't done (or was left as it is)
+DESK_SLOT = 18                 # the tick box's column
+DESK_NAME = 172                # the name's column (DesktopB grid: 18px 172px 1fr, 12 px gaps)
+DESK_GAP = 12
+SEP_DOT = " \u00b7 "            # a middle dot between spaces: a kicker breaks there first
+MARK_TICK, MARK_IDLE, MARK_DONE, MARK_NOW, MARK_FAIL, MARK_NONE, MARK_INFO = (
+    "tick", "idle", "done", "now", "fail", "none", "info")
+_DESK_LOOKS = {   # fill, border, ink (kicker, brackets), name, to, struck
+    TONE_AMBER: (holo.TILE_AMBER, holo.alpha(holo.AMBER, 0.60), holo.AMBER, holo.AMBER_TX, holo.AMBER_TX2, "#8A7B62"),
+    TONE_CYAN: (holo.TILE, holo.alpha(holo.HOLO, 0.38), holo.HOLO, holo.INK_1, holo.INK_3, "#5F7A85"),
+    TONE_DONE: (holo.TILE_OK, holo.alpha(holo.OK, 0.50), holo.OK, holo.INK_1, holo.INK_3, "#5F7A85"),
+    TONE_CORAL: (holo.TILE_ALERT, holo.alpha(holo.ALERT, 0.50), holo.ALERT_TX, holo.INK_1, holo.INK_3, "#5F7A85"),
+}
+_DESK_TEXT_TONES = {TONE_AMBER: holo.AMBER_TX2, TONE_CYAN: holo.INK_3, TONE_DONE: holo.OK, TONE_CORAL: holo.ALERT_TX}
+
+
+@dataclass(frozen=True)
+class DeskButton:
+    key: str
+    text: str
+    variant: str = holo.GHOST
+    right: bool = False
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class DeskRow:
+    """One row of the card: its mark at the left (a tick box while the card waits; done, on its way, not done, left
+    unticked, can't go), the name, where it goes, its flags in words, struck through when unticked, and a line of
+    words under it (why it can't go, wasn't done, or was left as it is) in its tone."""
+
+    number: int
+    name: str
+    to: str = ""
+    flags: str = ""
+    mark: str = MARK_NONE
+    ticked: bool = False
+    struck: bool = False
+    words: str = ""
+    words_tone: str = TONE_CORAL
+
+
+@dataclass(frozen=True)
+class DeskContent:
+    kicker: str
+    title: str
+    tone: str = TONE_AMBER
+    rows: tuple[DeskRow, ...] = ()
+    note: str = ""
+    note_tone: str = TONE_AMBER
+    buttons: tuple[DeskButton, ...] = ()
+    link: tuple[str, str] | None = None        # (key, words): "Undo" on the stamp
+    link_note: str = ""                        # beside it: "Puts every file back where it was."
+
+
+class _TickBox(QAbstractButton):
+    """A row's tick (DesktopB .ck: 18 px, a 1.5 px amber border, amber with a dark check when ticked): NoFocus, a
+    click toggles it - never the focus, never a key."""
+
+    SIDE = 18
+    HIT = 26                   # the area that takes the click, the box centred in it
+
+    def __init__(self, number: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.number = number
+        self.setCheckable(True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(self.HIT, self.HIT)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(self.HIT, self.HIT)
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            side = float(self.SIDE)
+            box = QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
+            if not self.isEnabled():
+                painter.setOpacity(0.45)
+            painter.setPen(QPen(QColor(holo.AMBER), 1.5))
+            painter.setBrush(QColor(holo.AMBER) if self.isChecked() else Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(box.adjusted(0.75, 0.75, -0.75, -0.75), 5, 5)
+            if self.isChecked():
+                holo.paint_icon(painter, box.adjusted(3, 3, -3, -3), "check", holo.AMBER_INK, stroke=2.4)
+        finally:
+            painter.end()
+
+
+class DesktopCard(ResultCard):
+    """A NEEDS YOUR OK card of file steps beside the folder it is about (DesktopB's tidy card; see the module
+    docstring): the kicker with its dot, the title, one row per item - a tick box while it waits (``tickToggled``),
+    then each row's mark as the batch goes -, the note, the buttons (``buttonClicked``: Not now, "Move 5 files" -
+    disabled while nothing is ticked -, Stop) and the Undo link with its note on the stamp. Tool, frameless, on top,
+    never the focus (ResultCard's flags); every button and tick box NoFocus, acting on click. ``set_desk(content)``;
+    ``desk()``; ``ticks()``; ``buttons()`` (the link too)."""
+
+    tickToggled = Signal(int, bool)
+
+    TITLE_LINES = 2
+    NOTE_LINES = 3
+    KICKER_LINES = 2
+
+    def __init__(self, *, native: HudNative | None = None, hide_from_capture: bool = True) -> None:
+        super().__init__(native=native, hide_from_capture=hide_from_capture)
+        self._desk = DeskContent("", "")
+        self._ticks: dict[int, _TickBox] = {}
+        self._desk_buttons: dict[str, holo.HoloButton] = {}
+        self._name_font = hud.body_font(12)            # DesktopB .prow: 12.5 px
+        self._to_font = hud.body_font(12)
+        self._flag_font = hud.mono_font(9, 500, 0.12)
+        self._words_font = hud.body_font(12)
+        self._note_font = hud.body_font(12)
+        self._row_rects: dict[int, QRectF] = {}
+        self.setFixedSize(DESK_WIDTH, 120)
+
+    def desk(self) -> DeskContent:
+        return self._desk
+
+    def ticks(self) -> dict[int, _TickBox]:
+        return dict(self._ticks)
+
+    def buttons(self) -> dict[str, holo.HoloButton]:
+        return dict(self._desk_buttons)
+
+    def row_buttons(self) -> dict[str, holo.HoloButton]:
+        return {}
+
+    def set_desk(self, content: DeskContent) -> None:
+        self._desk = content
+        self._content = CardContent(content.kicker, content.title, note=content.note,
+                                    tone=TONE_AMBER if content.tone == TONE_AMBER else TONE_CYAN)
+        wanted = [row.number for row in content.rows if row.mark == MARK_TICK]
+        if sorted(self._ticks) != sorted(wanted):
+            for box in self._ticks.values():
+                box.hide()
+                box.deleteLater()
+            self._ticks = {}
+            for number in wanted:
+                box = _TickBox(number, self)
+                box.toggled.connect(partial(self._on_tick, number))
+                box.show()
+                self._ticks[number] = box
+        for row in content.rows:
+            box = self._ticks.get(row.number)
+            if box is not None:
+                box.blockSignals(True)
+                box.setChecked(row.ticked)
+                box.blockSignals(False)
+                box.setAccessibleName(("Leave out " if row.ticked else "Include ") + row.name)
+        for button in self._desk_buttons.values():
+            button.hide()
+            button.deleteLater()
+        self._desk_buttons = {}
+        for spec in content.buttons:
+            button = self._new_button(spec.key, spec.text, spec.variant, holo.SIZE_MD, spec.text)
+            button.setEnabled(spec.enabled)
+            self._desk_buttons[spec.key] = button
+        if content.link is not None:
+            key, words = content.link
+            self._desk_buttons[key] = self._new_button(key, words, holo.LINK_CYAN, holo.SIZE_SM, words)
+        self.setAccessibleName(content.title)
+        self.setAccessibleDescription(" ".join(part for part in (content.kicker, content.note, content.link_note)
+                                               if part))
+        self._relayout()
+        self.shapeChanged.emit()
+
+    def _on_tick(self, number: int, checked: bool) -> None:
+        self.tickToggled.emit(number, bool(checked))
+
+    def _inner(self) -> float:
+        return DESK_WIDTH - 2 * CARD_PAD[1]
+
+    def _wrap_desk(self, text: str, font: Any, lines: int, width: float | None = None) -> list[str]:
+        return offer_view.wrap_lines(text, font, self._inner() if width is None else width, lines) if text else []
+
+    def _title_lines(self) -> list[str]:
+        return self._wrap_desk(self._desk.title, self._title_font, self.TITLE_LINES) or [""]
+
+    def _kicker_lines(self) -> list[str]:
+        """The kicker in caps on one line, or two when it is long (a partial stamp with two reasons): broken at its
+        middle dots first."""
+        text = self._desk.kicker.upper()
+        room = self._inner() - 14
+        metrics = QFontMetricsF(self._kicker_font)
+        if metrics.horizontalAdvance(text) <= room:
+            return [text]
+        parts, lines = text.split(SEP_DOT), [""]
+        for part in parts:
+            trial = f"{lines[-1]}{SEP_DOT}{part}" if lines[-1] else part
+            if metrics.horizontalAdvance(trial) <= room or not lines[-1]:
+                lines[-1] = trial
+            else:
+                lines.append(part)
+        if len(lines) > self.KICKER_LINES or any(metrics.horizontalAdvance(line) > room for line in lines):
+            return offer_view.wrap_lines(text, self._kicker_font, room, self.KICKER_LINES)
+        return lines
+
+    def _row_height(self, row: DeskRow) -> int:
+        return DESK_ROW + (DESK_FLAGS_LINE if row.flags else 0) + (DESK_WORDS_LINE if row.words else 0)
+
+    def _relayout(self) -> None:
+        content = self._desk
+        if not hasattr(self, "_desk_buttons"):
+            super()._relayout()
+            return
+        pad_v, pad_h = CARD_PAD
+        inner = self._inner()
+        rects: dict[str, QRectF] = {}
+        y = float(pad_v)
+        kicker = len(self._kicker_lines())
+        rects["kicker"] = QRectF(pad_h, y, inner, 18 * kicker - 4)
+        y += 18 * kicker - 4 + 6
+        title = self._title_lines()
+        rects["title"] = QRectF(pad_h, y, inner, 24 * len(title))
+        y += 24 * len(title)
+        self._row_rects = {}
+        if content.rows:
+            y += 10
+            for row in content.rows:
+                height = self._row_height(row)
+                box = QRectF(pad_h, y, inner, height)
+                self._row_rects[row.number] = box
+                tick = self._ticks.get(row.number)
+                if tick is not None:
+                    side = _TickBox.HIT
+                    tick.setGeometry(round(box.left() + DESK_SLOT / 2 - side / 2),
+                                     round(box.top() + DESK_ROW / 2 - side / 2), side, side)
+                y += height
+        note = self._wrap_desk(content.note, self._note_font, self.NOTE_LINES)
+        if note:
+            y += 8
+            rects["note"] = QRectF(pad_h, y, inner, 18 * len(note))
+            y += 18 * len(note)
+        actions = [spec for spec in content.buttons]
+        if actions:
+            y += 14
+            margin = holo.HoloButton.MARGIN
+            x = pad_h - margin
+            right = DESK_WIDTH - pad_h + margin
+            for spec in actions:
+                button = self._desk_buttons.get(spec.key)
+                if button is None or spec.right:
+                    continue
+                hint = button.sizeHint()
+                button.setGeometry(round(x), round(y) - margin, hint.width(), hint.height())
+                x += hint.width() - 2 * margin + holo.BUTTON_GAP
+            for spec in reversed(actions):
+                button = self._desk_buttons.get(spec.key)
+                if button is None or not spec.right:
+                    continue
+                hint = button.sizeHint()
+                right -= hint.width()
+                button.setGeometry(round(right), round(y) - margin, hint.width(), hint.height())
+                right += 2 * margin - holo.BUTTON_GAP
+            rects["buttons"] = QRectF(pad_h, y, inner, holo.SIZE_MD)
+            y += holo.SIZE_MD
+        if content.link is not None:
+            y += 12
+            link = self._desk_buttons.get(content.link[0])
+            margin = holo.HoloButton.MARGIN
+            hint = link.sizeHint() if link is not None else QSize(0, 0)
+            room = inner - (hint.width() - 2 * margin) - 12
+            lines = self._wrap_desk(content.link_note, self._note_font, 2, room) if content.link_note else []
+            height = max(holo.SIZE_SM, 18 * len(lines))
+            if link is not None:
+                link.setGeometry(round(pad_h - margin), round(y + (height - hint.height()) / 2), hint.width(),
+                                 hint.height())
+            rects["link"] = QRectF(pad_h, y, inner, height)
+            rects["link_note"] = QRectF(pad_h + hint.width() - 2 * margin + 12, y + (height - 18 * len(lines)) / 2,
+                                        room, 18 * len(lines))
+            y += height
+        self._rows = rects
+        self.setFixedSize(DESK_WIDTH, math.ceil(y + pad_v))
+        self.update()
+
+    def row_rect(self, name: str) -> QRectF:
+        if name.startswith("row:") and name[4:].isdigit():
+            return QRectF(self._row_rects.get(int(name[4:]), QRectF()))
+        return super().row_rect(name)
+
+    def _columns(self, box: QRectF) -> tuple[QRectF, QRectF, QRectF]:
+        """A row's name and "to" columns on its first line, and the line under them (flags, words)."""
+        left = box.left() + DESK_SLOT + DESK_GAP
+        name = QRectF(left, box.top(), DESK_NAME, DESK_ROW)
+        to = QRectF(left + DESK_NAME + DESK_GAP, box.top(), box.right() - (left + DESK_NAME + DESK_GAP), DESK_ROW)
+        under = QRectF(left, box.top() + DESK_ROW - 6, box.right() - left, box.height() - DESK_ROW + 6)
+        return name, to, under
+
+    def cut_texts(self) -> list[str]:
+        """The words this card cuts or crowds now (none for the plans it is built for; tests and the harness)."""
+        content = self._desk
+        inner = self._inner()
+        cut: list[str] = []
+        kicker = self._kicker_lines()
+        joined = SEP_DOT.join(kicker) == content.kicker.upper() and all(
+            QFontMetricsF(self._kicker_font).horizontalAdvance(line) <= inner - 14 + 0.5 for line in kicker)
+        if content.kicker and not joined and not _whole(content.kicker.upper(), kicker, self._kicker_font,
+                                                        inner - 14):
+            cut.append("kicker")
+        if content.title and not _whole(content.title, self._title_lines(), self._title_font, inner):
+            cut.append("title")
+        note = self._wrap_desk(content.note, self._note_font, self.NOTE_LINES)
+        if content.note and not _whole(content.note, note, self._note_font, inner):
+            cut.append("note")
+        names, tos = QFontMetricsF(self._name_font), QFontMetricsF(self._to_font)
+        flags, words = QFontMetricsF(self._flag_font), QFontMetricsF(self._words_font)
+        for row in content.rows:
+            box = self._row_rects.get(row.number, QRectF())
+            name, to, under = self._columns(box)
+            if names.horizontalAdvance(row.name) > name.width() or \
+                    tos.horizontalAdvance(f"\u2192 {row.to}" if row.to else "") > to.width():
+                cut.append(f"row:{row.number}")
+            if (row.flags and flags.horizontalAdvance(row.flags) > under.width()) or \
+                    (row.words and words.horizontalAdvance(row.words) > under.width()):
+                cut.append(f"row:{row.number}:under")
+        visible = [button for button in self._desk_buttons.values() if button.isVisibleTo(self)]
+        for index, first in enumerate(visible):
+            for second in visible[index + 1:]:
+                if first.geometry().adjusted(holo.HoloButton.MARGIN, 0, -holo.HoloButton.MARGIN, 0).intersects(
+                        second.geometry().adjusted(holo.HoloButton.MARGIN, 0, -holo.HoloButton.MARGIN, 0)):
+                    cut.append("buttons")
+        return cut
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        content = self._desk
+        tone = content.tone if content.tone in _DESK_LOOKS else TONE_AMBER
+        fill, border, ink_name, name_ink, to_ink, struck_ink = _DESK_LOOKS[tone]
+        ink = QColor(ink_name)
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = QRectF(self.rect())
+            path = QPainterPath()
+            path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
+            painter.fillPath(path, QColor(fill))
+            painter.save()
+            painter.setClipPath(path)
+            painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if tone == TONE_AMBER else holo.SCAN))
+            painter.restore()
+            painter.setPen(QPen(border, 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+            holo.paint_brackets(painter, rect, ink, leg=CARD_BRACKET, radius=CARD_RADIUS, width=2.0)
+            align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            kicker = self.row_rect("kicker")
+            dot = QPointF(kicker.left() + 3, kicker.top() + 7)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(holo.alpha(ink, 0.3))
+            painter.drawEllipse(dot, 5.0, 5.0)
+            painter.setBrush(ink)
+            painter.drawEllipse(dot, 3.0, 3.0)
+            painter.setFont(self._kicker_font)
+            painter.setPen(ink)
+            metrics = QFontMetricsF(self._kicker_font)
+            for index, line in enumerate(self._kicker_lines()):
+                room = QRectF(kicker.left() + 14, kicker.top() + 18 * index, kicker.width() - 14, 14)
+                painter.drawText(room, align, metrics.elidedText(line, Qt.TextElideMode.ElideRight, room.width()))
+            title = self.row_rect("title")
+            painter.setFont(self._title_font)
+            painter.setPen(QColor(holo.AMBER_TX if tone == TONE_AMBER else holo.INK_1))
+            for index, line in enumerate(self._title_lines()):
+                painter.drawText(QRectF(title.left(), title.top() + 24 * index, title.width(), 24), align, line)
+            for row in content.rows:
+                self._paint_desk_row(painter, row, tone, ink, QColor(name_ink), QColor(to_ink), QColor(struck_ink),
+                                     align)
+            note = self.row_rect("note")
+            painter.setFont(self._note_font)
+            painter.setPen(QColor(_DESK_TEXT_TONES.get(content.note_tone, holo.INK_3)))
+            for index, line in enumerate(self._wrap_desk(content.note, self._note_font, self.NOTE_LINES)):
+                painter.drawText(QRectF(note.left(), note.top() + 18 * index, note.width(), 18), align, line)
+            link = self.row_rect("link_note")
+            if content.link_note and not link.isEmpty():
+                painter.setPen(QColor(holo.INK_3))
+                for index, line in enumerate(self._wrap_desk(content.link_note, self._note_font, 2, link.width())):
+                    painter.drawText(QRectF(link.left(), link.top() + 18 * index, link.width(), 18), align, line)
+        finally:
+            painter.end()
+
+    def _paint_desk_row(self, painter: QPainter, row: DeskRow, tone: str, ink: QColor, name_ink: QColor,
+                        to_ink: QColor, struck_ink: QColor, align: int) -> None:
+        box = self._row_rects.get(row.number)
+        if box is None:
+            return
+        painter.setPen(QPen(holo.alpha(ink, 0.16), 1.0))
+        painter.drawLine(QPointF(box.left(), box.top() + 0.5), QPointF(box.right(), box.top() + 0.5))
+        slot = QRectF(box.left(), box.top() + (DESK_ROW - DESK_SLOT) / 2, DESK_SLOT, DESK_SLOT)
+        self._paint_mark(painter, row.mark, slot, ink)
+        name, to, under = self._columns(box)
+        for text, font, rect, colour in ((row.name, self._name_font, name, name_ink),
+                                         (f"\u2192 {row.to}" if row.to else "", self._to_font, to, to_ink)):
+            if not text:
+                continue
+            shown = QFont(font)
+            shown.setStrikeOut(row.struck)
+            painter.setFont(shown)
+            painter.setPen(struck_ink if row.struck else colour)
+            painter.drawText(rect, align, QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideMiddle,
+                                                                         rect.width()))
+        y = under.top()
+        if row.flags:
+            painter.setFont(self._flag_font)
+            painter.setPen(holo.alpha(ink, 0.85))
+            line = QRectF(under.left(), y, under.width(), DESK_FLAGS_LINE)
+            painter.drawText(line, align, QFontMetricsF(self._flag_font).elidedText(
+                row.flags, Qt.TextElideMode.ElideRight, line.width()))
+            y += DESK_FLAGS_LINE
+        if row.words:
+            painter.setFont(self._words_font)
+            painter.setPen(QColor(_DESK_TEXT_TONES.get(row.words_tone, holo.ALERT_TX)))
+            line = QRectF(under.left(), y, under.width(), DESK_WORDS_LINE)
+            painter.drawText(line, align, QFontMetricsF(self._words_font).elidedText(
+                row.words, Qt.TextElideMode.ElideRight, line.width()))
+
+    def _paint_mark(self, painter: QPainter, mark: str, slot: QRectF, ink: QColor) -> None:
+        """A row's mark (the tick box itself is its own widget): done (a mint check), on its way (a dot), not done
+        (a coral cross), left unticked (an idle box), can't go (a coral dash)."""
+        painter.save()
+        try:
+            if mark == MARK_DONE:
+                holo.paint_icon(painter, slot.adjusted(1, 1, -1, -1), "check", holo.OK, stroke=2.2)
+            elif mark == MARK_NOW:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(holo.alpha(ink, 0.8))
+                painter.drawEllipse(slot.center(), 3.0, 3.0)
+            elif mark == MARK_FAIL:
+                holo.paint_icon(painter, slot.adjusted(3, 3, -3, -3), "close", holo.ALERT_TX, stroke=2.0)
+            elif mark == MARK_IDLE:
+                painter.setPen(QPen(holo.alpha(QColor("#8A7B62"), 0.6), 1.5))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(slot.adjusted(0.75, 0.75, -0.75, -0.75), 5, 5)
+            elif mark == MARK_INFO:
+                painter.setPen(QPen(QColor(holo.ALERT_TX), 2.0))
+                painter.drawLine(QPointF(slot.left() + 4, slot.center().y()),
+                                 QPointF(slot.right() - 4, slot.center().y()))
+        finally:
+            painter.restore()
+
+
+# --------------------------------------------------------------------------
 # The decor layer (one per screen)
 # --------------------------------------------------------------------------
 
@@ -2089,6 +2547,13 @@ class HudOverlay(QObject):
             self.restack()
         self._apply_decor()
         return rect
+
+    def new_desk_card(self) -> DesktopCard:
+        """A NEEDS YOUR OK card of file steps (P2.3) - a card of this HUD like ``new_card``'s, hidden until placed."""
+        card = DesktopCard(native=self._native, hide_from_capture=self._hide_from_capture)
+        card.shapeChanged.connect(self._apply_decor)
+        self._cards.append(card)
+        return card
 
     def remove_card(self, card: ResultCard) -> None:
         if card in self._cards:

@@ -293,7 +293,8 @@ class SeamTests(unittest.TestCase):
         arguments = {"windows": (), "window_process": (WORD,), "process_exe": (22,), "visible": (WORD,),
                      "minimised": (WORD,), "owned": (WORD,), "tool_window": (WORD,), "cloaked": (WORD,),
                      "frame_bounds": (WORD,), "is_window": (WORD,), "foreground": (), "monitors": (),
-                     "hook": (1, 2, 22, 2201, lambda *_a: None), "unhook": (901,), "own_pid": ()}
+                     "hook": (1, 2, 22, 2201, lambda *_a: None), "unhook": (901,), "own_pid": (),
+                     "folder_windows": ()}
         self.assertEqual(set(arguments), methods)
         seam = object.__new__(ww.Win32WinApi)                              # its constructor never ran
         caller = threading.current_thread()

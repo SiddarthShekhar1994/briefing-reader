@@ -518,6 +518,7 @@ class FakeWindow:
     owned: bool = False
     tool: bool = False
     cloaked: bool = False
+    folder: str = ""                       # a File Explorer window's: the folder it shows (P2.3)
 
 
 class FakeWinApi:
@@ -670,3 +671,49 @@ class FakeWinApi:
     def own_pid(self) -> int:
         self._call("own_pid")
         return self.own
+
+    def folder_windows(self) -> list[tuple[int, str]]:
+        """The pretend File Explorer windows (each added with ``folder=``), in z-order: (hwnd, the folder shown)."""
+        self._call("folder_windows")
+        return [(hwnd, self.wins[hwnd].folder) for hwnd in self.order if self.wins[hwnd].folder]
+
+
+class FakeStopKeys:
+    """desktop.stopkeys' seam for the tests (no real hot key is ever registered): ``arm`` records the batch's
+    ``on_stop`` (``arms`` counts the arms, ``disarms`` the let-gos, ``armed()`` whether it is held now) and ``press()``
+    is the owner's Esc - it calls on_stop as Windows' WM_HOTKEY would, only while armed. ``refuse`` makes arm fail
+    (another program holds Esc)."""
+
+    def __init__(self) -> None:
+        self.on_stop: Callable[[], None] | None = None
+        self.arms = 0
+        self.disarms = 0
+        self.refuse = False
+        self.threads: list[str] = []           # the thread of each arm and disarm
+        self.armed_once = threading.Event()    # set at the first arm (a test may press Esc from then on)
+
+    def arm(self, on_stop: Callable[[], None]) -> bool:
+        self.threads.append(threading.current_thread().name)
+        if self.refuse:
+            return False
+        self.arms += 1
+        self.on_stop = on_stop
+        self.armed_once.set()
+        return True
+
+    def disarm(self) -> None:
+        self.threads.append(threading.current_thread().name)
+        if self.on_stop is not None:
+            self.disarms += 1
+        self.on_stop = None
+
+    def armed(self) -> bool:
+        return self.on_stop is not None
+
+    def press(self) -> bool:
+        """The owner's Esc: True when it reached a batch (Esc held then)."""
+        on_stop = self.on_stop
+        if on_stop is None:
+            return False
+        on_stop()
+        return True

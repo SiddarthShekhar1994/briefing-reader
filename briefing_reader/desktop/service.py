@@ -16,6 +16,14 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
   card plan made and frozen - DesktopRun.card, P2.2 - and nothing of them done before the owner's click);
 * ``click(click, cancel)``: the owner's click on a result card (P1.9: desktop.results.Click - the card's own item,
   re-checked and carried out by executor.run_click);
+* ``carry_out_card(card, sha=, ticked=, cancel=, ...)`` (P2.3): the owner's click on a NEEDS YOUR OK card of file
+  steps - its frozen plan checked (desktop.cardplan: expired or not the plan shown: nothing runs), then exactly its
+  ticked rows through desktop.fileops, journalled in the run's own journal (``journal_folder``: the app's
+  LOCALAPPDATA one, a test's temporary one), each row re-checked right before its OS call; Esc held only while the
+  batch acts (desktop.stopkeys); each row's end heard as it comes (the card's "Moving 2 of 5");
+* ``undo_card(run_id, seqs, cancel=, ...)`` (P2.3): the owner's Undo on the card's stamp - fileops.Undoer, item by
+  item, newest first, each re-checked ("Moved since - left where it is."), for [desktop] undo_days only; recycling
+  Jarvis's own copies and zips waits for the Recycle Bin (P2.6: refused plainly until then);
 * ``find(query)``: a find_files step's search.
 
 Each job's ``cancel`` (anything with ``is_set()``) holds the app's stop and THE CONSENT GATE (desktop_ui: the owner's
@@ -24,30 +32,33 @@ nothing more is looked at.
 
 Every run that comes back carries its result cards (``DesktopRun.shown``: desktop.results.present, made here right
 after the run - the other matches and the found items re-checked first, the app a file opened in read from the
-associations).
+associations) and, for its file steps, the tidy card (desktop.tidy.make_card over its frozen plan).
 
 Logs carry counts, durations and exception types only.
 
 Public API
 ==========
 ``LOCAL``, ``PLANNER``, ``UNAVAILABLE``; ``Resolved(kind, run_id, route, run, context, seconds)``;
-``DesktopService(folders=, extra_folders=, excluded=, backend_factory=, sites=, clock=, now=, hour24=)``:
-``backend()``, ``scope(fresh=)``, ``apps(fresh=)``, ``tree()``, ``route_context()``, ``resolve(words, planner=,
-override=, run_id=, cancel=)``, ``context_for(words)``, ``carry_out(plan, words, context, cancel)``, ``click(click,
-cancel)``, ``find(query)``, ``executor()``; ``days_in(words)``; ``RECENT_FILES``.
+``DesktopService(folders=, extra_folders=, excluded=, backend_factory=, sites=, clock=, now=, hour24=,
+journal_folder=, undo_days=)``: ``backend()``, ``scope(fresh=)``, ``apps(fresh=)``, ``tree()``, ``route_context()``,
+``resolve(words, planner=, override=, run_id=, cancel=)``, ``context_for(words)``, ``carry_out(plan, words, context,
+cancel)``, ``click(click, cancel)``, ``carry_out_card(card, sha=, ticked=, cancel=, on_start=, on_row=, stop_keys=,
+on_stop=)``, ``undo_card(run_id, seqs, cancel=, on_start=, stop_keys=, on_stop=)``, ``find(query)``, ``executor()``;
+``days_in(words)``; ``RECENT_FILES``.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
 from . import apps as desktop_apps
-from . import guard, paths
+from . import cardplan, guard, paths, stopkeys, tidy
+from . import fileops as fo
 from . import results as desktop_results
 from . import routes as desktop_routes
 from . import validate as dv
@@ -55,6 +66,7 @@ from .backend import DesktopBackend
 from .context import MAX_FILES, MAX_PLACES, AppItem, DesktopContext, Place, SiteItem, build_context
 from .executor import DesktopRun, Executor, FindQuery
 from .index import LocalSearch, TreeFolder, folder_tree, name_score, pick_places, query_words, recent_files
+from .journal import Journal, default_folder
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +109,8 @@ class DesktopService:
     def __init__(self, *, folders: Sequence[str], extra_folders: Sequence[str] = (), excluded: Sequence[str] = (),
                  backend_factory: Callable[[], DesktopBackend], sites: Sequence[SiteItem] = (),
                  clock: Callable[[], float] = time.monotonic,
-                 now: Callable[[], datetime] | None = None, hour24: bool = False) -> None:
+                 now: Callable[[], datetime] | None = None, hour24: bool = False,
+                 journal_folder: Callable[[], Any] | None = None, undo_days: int = 7) -> None:
         self._folders = tuple(folders)
         self._extra = tuple(extra_folders)
         self._excluded = tuple(str(path) for path in excluded if path)
@@ -106,6 +119,8 @@ class DesktopService:
         self._clock = clock
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._hour24 = bool(hour24)
+        self._journal_folder = journal_folder or default_folder     # refuses while the tests run: they pass theirs
+        self._undo_days = int(undo_days)
         self._backend: DesktopBackend | None = None
         self._backend_failed = False
         self._scope: tuple[float, paths.Scope] | None = None
@@ -280,7 +295,97 @@ class DesktopService:
             logger.warning("Desktop %s: the result cards could not be made (%s)", run.run_id or "-",
                            type(exc).__name__)
             cards = ()
+        if isinstance(run.card, cardplan.CardPlan):
+            try:
+                card = tidy.make_card(run.card, self.scope(), at=self._now())
+            except Exception as exc:  # noqa: BLE001 - no card: nothing of its steps can be clicked
+                logger.warning("Desktop %s: the tidy card could not be made (%s)", run.run_id or "-",
+                               type(exc).__name__)
+                card = None
+            if card is not None:
+                cards = (*cards, card)
         return replace(run, shown=cards)
+
+    # ---- a NEEDS YOUR OK card of file steps (P2.3) -----------------------------------------------------
+
+    def _journal(self, run_id: str) -> Journal | None:
+        try:
+            return Journal(self._journal_folder(), run_id)
+        except Exception as exc:  # noqa: BLE001 - no journal (RealBackendInTests in a test): nothing is done
+            logger.warning("Desktop %s: the journal can't be kept (%s); nothing done", run_id or "-",
+                           type(exc).__name__)
+            return None
+
+    def carry_out_card(self, card: Any, *, sha: str, ticked: Collection[int], cancel: Any = None,
+                       on_start: Callable[[bool], None] | None = None,
+                       on_row: Callable[[tidy.RowEnd, int, int], None] | None = None,
+                       stop_keys: stopkeys.StopKeys | None = None,
+                       on_stop: Callable[[], None] | None = None) -> tidy.CardOutcome:
+        """The owner's click on a NEEDS YOUR OK card of file steps (``card``: desktop.tidy.TidyCard or its
+        cardplan.CardPlan; ``sha``: the plan's sha256 as the card showed it; ``ticked``: the row numbers he left
+        ticked): nothing runs when its plan expired or isn't the one shown (cardplan.verify: the code comes back), when
+        the desktop can't act or its journal can't be kept (tidy.UNAVAILABLE) or when ``cancel`` was set first (the
+        app's Stop, Esc, or THE CONSENT GATE: tidy.STOPPED_FIRST); else Esc is held (``stop_keys``: each press calls
+        ``on_stop``; ``on_start(held)``), exactly the chosen rows are carried out through cardplan.carry_out - each
+        re-checked right before its OS call, ``cancel`` asked before each - and Esc is let go. ``on_row(end, ended,
+        total)`` hears each row's end."""
+        started = self._clock()
+        plan = getattr(card, "plan", card)
+        run_id = str(getattr(plan, "run_id", "") or "")
+        if not isinstance(plan, cardplan.CardPlan):
+            return tidy.CardOutcome(run_id, tidy.UNAVAILABLE)
+        if cancel is not None and cancel.is_set():
+            return tidy.CardOutcome(run_id, tidy.STOPPED_FIRST)
+        backend = self.backend()
+        if backend is None:
+            return tidy.CardOutcome(run_id, tidy.UNAVAILABLE)
+        code = plan.verify(self._now(), mono=self._clock(), sha=sha)
+        if code:
+            logger.info("Desktop %s: a card's click was refused (%s)", run_id or "-", code)
+            return tidy.CardOutcome(run_id, code)
+        journal = self._journal(run_id)
+        if journal is None:
+            return tidy.CardOutcome(run_id, tidy.UNAVAILABLE)
+        numbers = [row.number for row in plan.chosen(ticked)]
+
+        def heard(result: fo.OpResult, ended: int, total: int) -> None:
+            if on_row is not None and 0 < ended <= len(numbers):
+                on_row(tidy.RowEnd(numbers[ended - 1], result.state, result.reason, result.seq), ended, total)
+
+        ops = fo.FileOps(backend, journal, scope=lambda: self.scope(fresh=True),
+                         cancel=cancel.is_set if cancel is not None else None, clock=self._clock, progress=heard)
+        with stopkeys.held(stop_keys, on_stop or (lambda: None)) as esc:
+            if on_start is not None:
+                on_start(esc)
+            code, report = cardplan.carry_out(plan, ops, now=self._now(), mono=self._clock(), sha=sha,
+                                              ticked=ticked)
+        if code or report is None:
+            return tidy.CardOutcome(run_id, code or tidy.UNAVAILABLE, esc=esc)
+        return tidy.CardOutcome(run_id, "", tidy.ends_from(numbers, report.results),
+                                round(self._clock() - started, 3), esc)
+
+    def undo_card(self, run_id: str, seqs: Sequence[int], *, cancel: Any = None,
+                  on_start: Callable[[bool], None] | None = None, stop_keys: stopkeys.StopKeys | None = None,
+                  on_stop: Callable[[], None] | None = None) -> tidy.UndoOutcome:
+        """The owner's Undo on a card's stamp: the run's items ``seqs`` put back through fileops.Undoer - newest first,
+        one at a time, each re-checked (moved since, something new in its old place, changed, too old: left as it
+        is, in the card's words) - with Esc held meanwhile, as for the batch. Recycling Jarvis's own copies and zips
+        waits for the Recycle Bin (P2.6): until then they are left, said plainly."""
+        started = self._clock()
+        if cancel is not None and cancel.is_set():
+            return tidy.UndoOutcome(run_id, code=tidy.STOPPED_FIRST)
+        backend = self.backend()
+        journal = self._journal(run_id) if backend is not None else None
+        if backend is None or journal is None:
+            return tidy.UndoOutcome(run_id, code=tidy.UNAVAILABLE)
+        undoer = fo.Undoer(backend, journal, scope=lambda: self.scope(fresh=True), undo_days=self._undo_days,
+                           cancel=cancel.is_set if cancel is not None else None, clock=self._clock)
+        with stopkeys.held(stop_keys, on_stop or (lambda: None)) as esc:
+            if on_start is not None:
+                on_start(esc)
+            report = undoer.undo(list(seqs))
+        rows = tuple(tidy.RowEnd(0, result.state, result.reason, result.seq) for result in report.results)
+        return tidy.UndoOutcome(run_id, rows, report.stamp(), round(self._clock() - started, 3))
 
     def find(self, query: FindQuery) -> tuple[Any, ...]:
         """A find_files step's search: the files (or, for kind "folder", the folders) its words find, checked."""
