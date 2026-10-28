@@ -24,6 +24,7 @@ from unittest import mock
 
 from briefing_reader import desktop
 from briefing_reader.desktop import backend as dbk
+from briefing_reader.desktop import fileops as dfo
 from briefing_reader.desktop import guard, paths
 from tests.desktop_fakes import KNOWN, FakeDesktopBackend, tags
 
@@ -567,6 +568,15 @@ _REAL_CALLS = {
     "open_url": (("https://www.example.org/",), {}),
     "app_for": ((".docx",), {}),
     "link_target": (("C:\\Users\\Owner\\Downloads\\a.lnk",), {}),
+    "move_item": (("C:\\Users\\Owner\\Downloads\\a.pdf", "C:\\Users\\Owner\\Documents\\a.pdf"), {}),
+    "copy_file": (("C:\\Users\\Owner\\Downloads\\a.pdf", "C:\\Users\\Owner\\Documents\\a.pdf"), {}),
+    "make_folder": (("C:\\Users\\Owner\\Documents\\New",), {}),
+    "remove_folder": (("C:\\Users\\Owner\\Documents\\New",), {}),
+    "write_zip": (([dbk.ZipMember("C:\\Users\\Owner\\Downloads\\a.pdf", "a.pdf", size=1)],
+                   "C:\\Users\\Owner\\Documents\\a.zip.part"), {}),
+    "zone_identifier": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "content_hash": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "free_space": (("C:\\Users\\Owner\\Documents",), {}),
 }
 
 
@@ -598,6 +608,9 @@ class RealBackendMethodTests(unittest.TestCase):
         patches = [mock.patch.object(dbk, helper, trap(helper, getattr(dbk, helper)))
                    for helper in ("_shell_known_folder", "_final_path_name", "_shell_open", "_com_ready",
                                   "_assoc_string", "_link_path")]
+        patches += [mock.patch.object(dfo, helper, trap(helper, getattr(dfo, helper)))
+                    for helper in ("raw_move", "raw_copy", "raw_make_folder", "raw_remove_folder", "raw_write_zip",
+                                   "raw_zone", "raw_hash", "raw_free")]
         patches += [mock.patch.object(os, "lstat", trap("os.lstat", os.lstat)),
                     mock.patch.object(os, "scandir", trap("os.scandir", os.scandir)),
                     mock.patch.object(os.path, "realpath", trap("os.path.realpath", os.path.realpath)),
@@ -675,6 +688,30 @@ class RealBackendMethodTests(unittest.TestCase):
 
     def test_link_target_raises_under_the_guard(self) -> None:
         self.call_refused("link_target")
+
+    def test_move_item_raises_under_the_guard(self) -> None:
+        self.call_refused("move_item")
+
+    def test_copy_file_raises_under_the_guard(self) -> None:
+        self.call_refused("copy_file")
+
+    def test_make_folder_raises_under_the_guard(self) -> None:
+        self.call_refused("make_folder")
+
+    def test_remove_folder_raises_under_the_guard(self) -> None:
+        self.call_refused("remove_folder")
+
+    def test_write_zip_raises_under_the_guard(self) -> None:
+        self.call_refused("write_zip")
+
+    def test_zone_identifier_raises_under_the_guard(self) -> None:
+        self.call_refused("zone_identifier")
+
+    def test_content_hash_raises_under_the_guard(self) -> None:
+        self.call_refused("content_hash")
+
+    def test_free_space_raises_under_the_guard(self) -> None:
+        self.call_refused("free_space")
 
     def test_app_for_is_asked_only_a_type_or_https(self) -> None:
         for kind in (".docx", ".PDF", ".xlsm", "https"):

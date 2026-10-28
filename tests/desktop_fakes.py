@@ -21,6 +21,13 @@ P1.9's: ``app_for`` answers ``associations`` (a file type or "https" -> backend.
 .xlsx and Edge for https by default, invented install paths) and ``link_target`` answers ``links`` (a shortcut's
 pretend path -> the pretend path it names; OSError for one that is not there). Every call's thread name is kept in
 ``threads`` (the desktop worker's "desktop" thread in the app).
+P2.1's file operations (``move_item``, ``copy_file``, ``make_folder``, ``remove_folder``, ``write_zip``,
+``zone_identifier``, ``content_hash``, ``free_space``) map their pretend paths into ``base`` and make desktop.fileops'
+own raw Windows calls there (MoveFileExW, CopyFileExW, CreateDirectoryW ...: the real no-overwrite, fail-if-exists,
+cancel and not-empty behaviour, inside the temporary folder only - the raw calls themselves refuse anything outside
+the system's temporary folder while the tests run); ``op_errors[method]`` raises instead (nothing done), ``volumes``
+reports another volume serial for a pretend folder, ``free`` sets the free space. ``FakeRecycleBin`` is fileops'
+Recycle Bin seam: it moves the item into a pretend bin inside ``base``.
 """
 
 from __future__ import annotations
@@ -31,12 +38,13 @@ import os
 import stat
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from briefing_reader.desktop import backend as dbk
+from briefing_reader.desktop import fileops
 
 OWNER = "C:\\Users\\Owner"
 WORD_EXE = "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE"     # invented install paths
@@ -90,6 +98,9 @@ class FakeDesktopBackend:
         self.associations: dict[str, dbk.AppInfo] = dict(ASSOCIATIONS)    # a type or "https" -> its app
         self.links: dict[str, str] = {}            # normcased pretend shortcut path -> the pretend path it names
         self.on_call: Callable[[str, str], None] | None = None   # called before each method (a test's hook)
+        self.volumes: dict[str, int] = {}          # normcased pretend folder -> the volume serial reported in it
+        self.op_errors: dict[str, BaseException] = {}    # a file-operation method -> what it raises (nothing done)
+        self.free: int | None = None               # free_space's answer (None: the temporary folder's own)
         for path in self.known.values():
             self.make_dir(path)
 
@@ -170,8 +181,15 @@ class FakeDesktopBackend:
     def identity(self, path: str) -> dbk.FileIdentity:
         """What file_id says of ``path`` now - for a test's own setup (not recorded as a call)."""
         info = os.lstat(self.real(path))
-        return dbk.FileIdentity(int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns),
-                                stat.S_ISDIR(info.st_mode))
+        return dbk.FileIdentity(self._volume(path, int(info.st_dev)), int(info.st_ino), int(info.st_size),
+                                int(info.st_mtime_ns), stat.S_ISDIR(info.st_mode))
+
+    def _volume(self, path: str, serial: int) -> int:
+        """The volume serial reported for ``path``: a ``volumes`` entry for its folder (the longest), else the real
+        one (every pretend drive is really on the temporary folder's volume)."""
+        key = ntpath.normcase(self._unalias(path)).rstrip("\\")
+        found = [folder for folder in self.volumes if key == folder or key.startswith(folder + "\\")]
+        return self.volumes[max(found, key=len)] if found else serial
 
     def opened_methods(self) -> list[str]:
         return [method for method, _target in self.opened]
@@ -212,8 +230,8 @@ class FakeDesktopBackend:
     def file_id(self, path: str) -> dbk.FileIdentity:
         self._record("file_id", path)
         info = os.lstat(self.real(path))
-        return dbk.FileIdentity(int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns),
-                                stat.S_ISDIR(info.st_mode))
+        return dbk.FileIdentity(self._volume(path, int(info.st_dev)), int(info.st_ino), int(info.st_size),
+                                int(info.st_mtime_ns), stat.S_ISDIR(info.st_mode))
 
     def list_folder(self, path: str, *, limit: int = dbk.MAX_LISTED) -> list[dbk.DirEntry]:
         self._record("list_folder", path)
@@ -284,6 +302,67 @@ class FakeDesktopBackend:
         if target is None or not os.path.lexists(self.real(path)):
             raise OSError(2, "no such shortcut")
         return target
+
+    # ---- P2.1: organising files - desktop.fileops' own raw Windows calls, on the pretend disk only -----------
+
+    def _file_op(self, method: str, path: str) -> None:
+        self._record(method, path)
+        error = self.op_errors.get(method)
+        if error is not None:
+            raise error
+
+    def move_item(self, src: str, dst: str) -> None:
+        self._file_op("move_item", src)
+        fileops.raw_move(self.real(src), self.real(dst))
+
+    def copy_file(self, src: str, dst: str, *, cancel: Callable[[], bool] | None = None) -> None:
+        self._file_op("copy_file", src)
+        fileops.raw_copy(self.real(src), self.real(dst), cancel or (lambda: False))
+
+    def make_folder(self, path: str) -> None:
+        self._file_op("make_folder", path)
+        fileops.raw_make_folder(self.real(path))
+
+    def remove_folder(self, path: str) -> None:
+        self._file_op("remove_folder", path)
+        fileops.raw_remove_folder(self.real(path))
+
+    def write_zip(self, members: Any, temp: str, *, cancel: Callable[[], bool] | None = None,
+                  zone: bytes | None = None) -> None:
+        self._file_op("write_zip", temp)
+        real = [replace(member, path=self.real(member.path)) for member in members]
+        fileops.raw_write_zip(real, self.real(temp), cancel or (lambda: False), zone)
+
+    def zone_identifier(self, path: str) -> bytes | None:
+        self._file_op("zone_identifier", path)
+        return fileops.raw_zone(self.real(path))
+
+    def content_hash(self, path: str) -> str:
+        self._file_op("content_hash", path)
+        return fileops.raw_hash(self.real(path))
+
+    def free_space(self, path: str) -> int:
+        self._file_op("free_space", path)
+        return self.free if self.free is not None else fileops.raw_free(self.real(path))
+
+
+class FakeRecycleBin:
+    """desktop.fileops' Recycle Bin seam for the tests (the real one is P2.6's): ``recycle`` moves the item into a
+    pretend bin inside the fake's temporary folder and keeps its pretend path in ``recycled``; with ``error`` set it
+    raises that instead and nothing moves."""
+
+    def __init__(self, fake: FakeDesktopBackend) -> None:
+        self.fake = fake
+        self.recycled: list[str] = []
+        self.error: BaseException | None = None
+
+    def recycle(self, path: str) -> None:
+        if self.error is not None:
+            raise self.error
+        bin_folder = os.path.join(self.fake.base, "_bin", str(len(self.recycled)))
+        os.makedirs(bin_folder)
+        os.rename(self.fake.real(path), os.path.join(bin_folder, "item"))
+        self.recycled.append(path)
 
 
 class FakeClock:
