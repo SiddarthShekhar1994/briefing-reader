@@ -1581,7 +1581,8 @@ class AskPlanner:
             logger.info("Desktop %s: planner run %s", job.run_id, kind)
             return AskOutcome(False, kind, failed.message if failed else "", runs=1 if result.started else 0,
                               init=result.init, stats=(result.stats,) if result.started else (), target=job.run_id)
-        plan = desktop_validate.check_plan(answer, prompt.refs, request.typed, run_id=job.run_id)
+        plan = desktop_validate.check_plan(answer, prompt.refs, request.typed, run_id=job.run_id,
+                                           names=desktop_mode.context_names(job.context))
         logger.info("Desktop %s: plan checked, steps=%d (%s), refused=%d (%s)%s", job.run_id, len(plan.steps),
                     plan.skills_text() or "none", len(plan.refused()), plan.codes_text() or "none",
                     " (read from the planner's plain text)" if answer.via_fallback else "")

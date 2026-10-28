@@ -286,6 +286,115 @@ class CarryOutTests(DesktopRunTests):
         self.assertEqual(carried.status, live.STATUS_FAILED)
 
 
+TIDY = ("tidy my Downloads into LING, copy my budget to Downloads, zip my essay into a new Essays folder and "
+        "rename my reading list")
+FILES_PLAN = {"say": "I have lined up your files.",
+              "steps": [{"skill": "move_files", "why": "the old draft", "files": ["f8"], "to": "d3"},
+                        {"skill": "copy_files", "why": "the budget", "files": ["f3"], "to": "d4"},
+                        {"skill": "make_folder", "why": "for the essay", "id": "n1", "place": "d4", "name": "Essays"},
+                        {"skill": "zip_files", "why": "the essay", "files": ["f1"], "name": "LING essay.zip",
+                         "to": "n1"},
+                        {"skill": "rename_file", "why": "the list", "files": ["f2"], "name": "Reading list.pdf"}]}
+
+
+class FileSkillsTests(DesktopRunTests):
+    """P2.2: the planner's fakes give a good move, copy, make_folder, zip and rename answer (every step a NEEDS YOUR
+    OK card, nothing changed) and malformed ones (refused whole, or step by step with their codes). No real run."""
+
+    def test_a_good_answer_is_a_card_and_nothing_changes(self) -> None:
+        ask = self.make(plan_stream(FILES_PLAN))
+        with self.assertLogs("briefing_reader", level="INFO") as logs:
+            outcome = self.run_desktop(ask, TIDY, req=request(TIDY))
+        self.assertTrue(outcome.ok, outcome)
+        plan = outcome.brief
+        self.assertEqual([(step.skill, step.code or step.tier) for step in plan.steps],
+                         [("move_files", dv.CARD), ("copy_files", dv.CARD), ("make_folder", dv.CARD),
+                          ("zip_files", dv.CARD), ("rename_file", dv.CARD)])
+        self.assertEqual(outcome.message, "Understood: move files, copy files, rename a file, make a folder and make "
+                                          "a zip. Nothing was changed yet, sir.")
+        checked = [step for step in self.steps() if step.kind == live.DESKTOP_VALIDATE][0]
+        self.assertEqual([item.text for item in checked.items],
+                         ["Step 1 - move_files - card", "Step 2 - copy_files - card", "Step 3 - make_folder - card",
+                          "Step 4 - zip_files - card", "Step 5 - rename_file - card (online_only)"])
+        text = "\n".join(logs.output)
+        self.assertIn("plan checked, steps=5 (move_files=1, copy_files=1, make_folder=1, zip_files=1, rename_file=1), "
+                      "refused=0", text)
+        for name in (*NAMES, TIDY, "Essays", "Reading list"):
+            self.assertNotIn(name, text)
+
+    def test_the_card_is_made_on_the_desktop_thread_and_nothing_is_moved(self) -> None:
+        import tempfile
+
+        from briefing_reader.desktop import executor as dx
+        from briefing_reader.desktop import paths
+        from tests.desktop_fakes import desktop_disk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = desktop_disk(tmp)
+            scope = paths.load_scope(["documents", "downloads"], [], fake)
+            executor = dx.Executor(fake, scope=lambda: scope, apps=lambda: ())
+
+            def carry_out(plan: dv.DesktopPlan, words: str, cancel: object) -> object:
+                return executor.run_plan(plan, words=words, cancel=cancel)
+
+            job = dm.DesktopJob("d7f3", desktop_context(backend=fake), carry_out=carry_out)
+            ask = self.make(plan_stream(FILES_PLAN))
+            outcome = self.run_desktop(ask, TIDY, req=request(TIDY, job=job))
+            run = outcome.desktop_run
+            self.assertEqual([(result.skill, result.tier, result.status) for result in run.results],
+                             [(step["skill"], dv.CARD, dx.WAITING) for step in FILES_PLAN["steps"]])
+            card = run.card
+            self.assertIsNotNone(card)
+            self.assertEqual(card.verify(card.made_at), "")
+            self.assertEqual([(row.kind, row.code, row.ticked) for row in card.rows],
+                             [("move", "", True), ("copy", "", True), ("mkdir", "", True), ("zip", "", True),
+                              ("rename", "", True)])
+            self.assertIn("to_onedrive", card.rows[0].flags)                   # Downloads into LING (OneDrive)
+            self.assertEqual(outcome.message, "5 steps need your OK first - nothing has changed yet, sir.")
+            changed = [call for call in fake.calls if call[0] in ("move_item", "copy_file", "make_folder",
+                                                                  "remove_folder", "write_zip")]
+            self.assertEqual(changed, [])                                    # nothing until the owner's click
+            self.assertFalse(fake.opened)
+
+    def test_malformed_answers_are_refused_whole(self) -> None:
+        good = FILES_PLAN["steps"][0]
+        bad = [
+            {"say": "x", "steps": [dict(good, to="C:\\Users\\Owner\\Documents")]},          # a path, not a ref
+            {"say": "x", "steps": [dict(good, dest="d3")]},                                  # a key outside 4.3
+            {"say": "x", "steps": [dict(good, files="f8")]},                                 # not a list
+            {"say": "x", "steps": [dict(FILES_PLAN["steps"][4], name="x" * 121)]},           # over 120
+            {"say": "x", "steps": [dict(good, to=3)]},                                       # not a string
+            {"say": "x", "steps": [good] * 13},                                              # 13 steps
+        ]
+        for value in bad:
+            with self.subTest(value=str(value)[:70]):
+                ask = self.make(plan_stream(value))
+                outcome = self.run_desktop(ask, TIDY, req=request(TIDY))
+                self.assertEqual((outcome.ok, outcome.kind, outcome.runs), (False, GARBLED, 1))
+                self.assertIsNone(outcome.brief)
+
+    def test_malformed_steps_are_refused_one_by_one(self) -> None:
+        steps = [
+            ({"skill": "move_files", "why": "x", "files": ["f8"]}, dv.SHAPE),                  # no "to"
+            ({"skill": "move_files", "why": "x", "files": ["f8"], "to": "n4"}, dv.UNKNOWN_REF),  # never made
+            ({"skill": "copy_files", "why": "x", "files": ["f3"], "to": "d9"}, dv.UNKNOWN_REF),
+            ({"skill": "rename_file", "why": "x", "files": ["f1"], "name": "..\\Essay.docx"}, dv.NAME_INVALID),
+            ({"skill": "rename_file", "why": "x", "files": ["f1"], "name": "Essay.exe"}, dv.BLOCKED_TYPE),
+            ({"skill": "make_folder", "why": "x", "id": "d1", "place": "d4", "name": "Old"}, dv.UNKNOWN_REF),
+            ({"skill": "make_folder", "why": "x", "id": "n1", "place": "d4", "name": "node_modules"}, dv.EXCLUDED),
+            ({"skill": "zip_files", "why": "x", "files": ["f1"], "name": "Essay.rar"}, dv.NAME_INVALID),
+            ({"skill": "zip_files", "why": "x", "files": ["f6"], "name": "Setup.zip"}, dv.BLOCKED_TYPE),
+            ({"skill": "copy_files", "why": "x", "files": ["f5"], "to": "d1"}, dv.BLOCKED_TYPE),
+            ({"skill": "move_files", "why": "x", "files": ["f7"], "to": "d3"}, dv.SUSPECT_ITEM),
+            ({"skill": "recycle_files", "why": "x", "files": ["f8"]}, dv.INTENT_NOT_LICENSED),
+        ]
+        ask = self.make(plan_stream({"say": "x", "steps": [step for step, _code in steps]}))
+        outcome = self.run_desktop(ask, TIDY, req=request(TIDY))
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual([step.code for step in outcome.brief.steps], [code for _step, code in steps])
+        self.assertEqual(outcome.message, desktop_words_all_refused())
+
+
 def desktop_words_all_refused() -> str:
     return "I couldn't check any of that - Live says why, sir. Nothing was opened."
 

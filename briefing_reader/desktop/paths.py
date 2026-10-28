@@ -42,7 +42,10 @@ Public API
 ``Root(key, label, path, onedrive)``, ``Scope(roots, places, onedrive)`` (``root_of(path)``),
 ``load_scope(folders, extra_folders, backend, excluded=())``, ``PathVerdict(path, code, reason, root, flags)``
 (``ok``), ``check_path(path, scope, backend)``, ``lexical_problem(path)``, ``reserved_name(component)``,
-``display_name(text)``, ``name_problem(name)`` (a NEW name: SPEC 4.4 rule 4), ``shell_class_name(component)``.
+``display_name(text)``, ``name_problem(name)`` (a NEW name: SPEC 4.4 rule 4), ``never_a_name(name)`` (a new name
+that would make a place Jarvis never touches), ``shell_class_name(component)``; the checks from a path's text alone
+(the planner's, P2.2: no disk asked) ``components_problem(path)`` (an R_* word) and ``static_problem(path)`` (a SPEC
+4.4 code).
 """
 
 from __future__ import annotations
@@ -301,7 +304,23 @@ def _place_problem(final: str, scope: Scope, backend: DesktopBackend, item_is_di
     for place, reason in scope.places:
         if _inside(key, _key(place)):
             return reason
-    parts = final[3:].rstrip("\\").split("\\") if final[3:].strip("\\") else []
+    reason = components_problem(final)
+    if reason:
+        return reason
+    folders = ([final[:3]] + _prefixes(final))[start:]
+    if not item_is_dir:
+        folders = folders[:-1]
+    for folder in folders:
+        if _holds_marker(folder, backend, cache):
+            return R_CODE_FOLDER
+    return ""
+
+
+def components_problem(path: str) -> str:
+    """Why a plain absolute path lies in a place Jarvis never touches, from its names alone (no disk asked; an R_*
+    word, or ""): a system folder right below the drive (guard.EXCLUDED_ROOT_NAMES), an excluded name or a secret
+    folder at any depth, a secret-shaped file name last, a component named like a code marker, a shell class name."""
+    parts = path[3:].rstrip("\\").split("\\") if path[3:].strip("\\") else []
     folded = [_fold(part) for part in parts]
     if folded and folded[0] in guard.EXCLUDED_ROOT_NAMES:
         return R_SYSTEM_PLACE
@@ -313,13 +332,24 @@ def _place_problem(final: str, scope: Scope, backend: DesktopBackend, item_is_di
         return R_CODE_FOLDER
     if any(shell_class_name(part) for part in parts):
         return R_SHELL_FOLDER
-    folders = ([final[:3]] + _prefixes(final))[start:]
-    if not item_is_dir:
-        folders = folders[:-1]
-    for folder in folders:
-        if _holds_marker(folder, backend, cache):
-            return R_CODE_FOLDER
     return ""
+
+
+def static_problem(path: object) -> str:
+    """The SPEC 4.4 code of a path that may never be an item or a place, from its text alone - nothing on the disk is
+    asked (the planner's check; check_path asks the disk before the card shows and before each OS call): ""
+    when its text passes, REFUSE_OUTSIDE for a path that is not plain (relative, a device path, a stream ...),
+    REFUSE_EXCLUDED for a network path or a name Jarvis never touches (``components_problem``)."""
+    reason = lexical_problem(path) or components_problem(str(path))
+    return _refused(reason).code if reason else ""
+
+
+def never_a_name(name: str) -> bool:
+    """A NEW name that would make a place Jarvis never touches: a code marker (.git, node_modules ...), a secret
+    folder or file (.ssh, .env, a key ...), an excluded name (AppData ...) or a shell class name."""
+    folded = _fold(name)
+    return (folded in _CODE_MARKERS or folded in guard.SECRET_DIR_NAMES or folded in guard.EXCLUDED_NAMES
+            or shell_class_name(name) or guard.secret_file(name))
 
 
 def _holds_marker(folder: str, backend: DesktopBackend, cache: dict[str, bool] | None) -> bool:

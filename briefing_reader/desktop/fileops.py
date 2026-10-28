@@ -50,11 +50,13 @@ kinds, states, reason codes, counts, exception types and winerrors only - never 
 Public API
 ==========
 ``FileOp(kind, sources, folder, name, key)``, ``Check``, ``OpResult``, ``BatchReport``, ``FileOps(backend, journal,
-scope=, cancel=, clock=, caps=)`` (``check(op)``, ``run(ops)``); ``Undoer(backend, journal, scope=, recycler=,
+scope=, cancel=, clock=, caps=)`` (``check(op, pending=)`` - ``pending``: a card's new folders not made yet, P2.2 -,
+``run(ops)``); ``Undoer(backend, journal, scope=, recycler=,
 undo_days=, now=, cancel=)`` (``undoable()``, ``undo(seqs=None)``), ``UndoResult`` (``words``), ``UndoReport``
 (``put_back``, ``total``, ``refused()``, ``stamp()``); ``Recycler``, ``NoRecycleBin``, ``RecycleUnavailable``;
 ``walk_subtree(folder, scope, backend, content=)``, ``Subtree``, ``SubtreeCaps``, ``SUBTREE_CAPS``,
-``tree_digest(folder, backend)``, ``free_name(folder, name, backend)``, ``os_reason(exc)``; reason codes ``R_*``,
+``tree_digest(folder, backend)``, ``free_name(folder, name, backend, taken=)``, ``fold_name(name)``,
+``os_reason(exc)``; reason codes ``R_*``,
 ``UNDO_WORDS``, ``STAMP_LABELS``; flags ``FLAG_*``; ``Stopped``, ``ChangedSince``; the raw calls ``raw_move``,
 ``raw_copy``, ``raw_make_folder``, ``raw_remove_folder``, ``raw_write_zip``, ``raw_zone``, ``raw_hash``,
 ``raw_free``.
@@ -74,7 +76,7 @@ import time
 import unicodedata
 import zipfile
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -601,23 +603,27 @@ def tree_digest(folder: str, backend: DesktopBackend, *, caps: SubtreeCaps = SUB
     return hashlib.sha256("\n".join(sorted(lines)).encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def free_name(folder: str, name: str, backend: DesktopBackend, *, limit: int = 99) -> str:
+def free_name(folder: str, name: str, backend: DesktopBackend, *, limit: int = 99,
+              taken: Collection[str] = ()) -> str:
     """The name a card shows for a row whose name is taken in ``folder`` (hard rule 5: nothing is ever overwritten):
-    ``name`` when it is free, else "name (2).ext", "name (3).ext" ...; "" when none up to ``limit`` is."""
+    ``name`` when it is free, else "name (2).ext", "name (3).ext" ...; "" when none up to ``limit`` is. ``taken``:
+    names an earlier row of the same card already takes there (folded: ``fold_name``), free on the disk as yet."""
     stem, ext = ntpath.splitext(name)
     for number in range(1, max(1, limit) + 1):
         candidate = name if number == 1 else f"{stem} ({number}){ext}"
+        if fold_name(candidate) in taken:
+            continue
         if not backend.exists(folder.rstrip("\\") + "\\" + candidate):
             return candidate
     return ""
 
 
-def _never_a_name(name: str) -> bool:
-    """A new name that would make a place Jarvis never touches: a code marker, a secret folder or file, an excluded
-    name or a shell class name."""
-    folded = _fold(name)
-    return (folded in _CODE_MARKERS or folded in guard.SECRET_DIR_NAMES or folded in guard.EXCLUDED_NAMES
-            or paths.shell_class_name(name) or guard.secret_file(name))
+def fold_name(name: str) -> str:
+    """A name as Windows compares it in one folder (case and the trailing dots and spaces it drops aside; NFKC)."""
+    return _fold(name)
+
+
+_never_a_name = paths.never_a_name
 
 
 def _zone_id(data: bytes) -> int:
@@ -749,8 +755,11 @@ class FileOps:
 
     # ---- checking a row ------------------------------------------------------------------------------
 
-    def check(self, op: FileOp) -> Check:
-        """Every check of the row as things are now (nothing is changed): see the module docstring."""
+    def check(self, op: FileOp, *, pending: Mapping[str, tuple[Any, str]] | None = None) -> Check:
+        """Every check of the row as things are now (nothing is changed): see the module docstring. ``pending`` (a
+        card's check before anything is done, desktop.cardplan): the new folders earlier rows of the card will make,
+        by their key -> (the place each is made in, its name); a row into one is checked against that place (the
+        scope, the drive, OneDrive, the space) and nothing can be in it yet."""
         if not isinstance(op, FileOp) or op.kind not in OP_KINDS:
             return Check(R_SHAPE)
         wanted = {MKDIR: 0, ZIP: len(op.sources) or -1}.get(op.kind, 1)
@@ -765,8 +774,13 @@ class FileOps:
             if reason:
                 return Check(reason)
             sources.append(source)
+        fresh = ""                                       # the place a new folder (not made yet) will be made in
         if op.kind == RENAME:
             reason, folder, folder_id, folder_flags = self._parent(sources[0].path, scope)
+        elif isinstance(op.folder, str) and op.folder not in self._made and pending and op.folder in pending:
+            parent, made_name = pending[op.folder]
+            reason, fresh, folder_id, folder_flags = self._folder(parent, scope)
+            folder = fresh.rstrip("\\") + "\\" + made_name if not reason else ""
         else:
             reason, folder, folder_id, folder_flags = self._folder(op.folder, scope)
         if reason:
@@ -788,7 +802,7 @@ class FileOps:
             case_only = True                             # "notes.txt" to "Notes.txt": the same file, a new spelling
         if op.kind in (MOVE, COPY) and sources[0].identity.is_dir and _inside(_key(folder), _key(sources[0].path)):
             return Check(R_INTO_ITSELF)
-        if not case_only and self.backend.exists(dst):
+        if not case_only and not fresh and self.backend.exists(dst):
             return Check(R_NAME_CLASH)
         if op.kind in (MOVE, RENAME) and sources[0].identity.volume != folder_id.volume:
             return Check(R_CROSS_VOLUME)
@@ -803,7 +817,7 @@ class FileOps:
             size = subtree.bytes if subtree is not None else sources[0].identity.size
         if content and size:
             try:
-                free = self.backend.free_space(folder)
+                free = self.backend.free_space(fresh or folder)
             except OSError:
                 free = -1                                  # unknown: Windows itself refuses a copy that can't fit
             if free >= 0 and size > free * (1 - SPACE_MARGIN):

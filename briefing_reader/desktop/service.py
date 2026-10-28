@@ -12,7 +12,8 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
   (desktop.executor), or else the planner's context (``context_for``: the places, the files the owner's words find
   - first in the places his words name -, the Recent items, the files changed in the days his words say, the
   Start-menu apps his words name, within SPEC 4.1's caps; names only reach the planner);
-* ``carry_out(plan, words, context, cancel)``: a planner's checked plan carried out (desktop.executor);
+* ``carry_out(plan, words, context, cancel)``: a planner's checked plan carried out (desktop.executor; its file steps'
+  card plan made and frozen - DesktopRun.card, P2.2 - and nothing of them done before the owner's click);
 * ``click(click, cancel)``: the owner's click on a result card (P1.9: desktop.results.Click - the card's own item,
   re-checked and carried out by executor.run_click);
 * ``find(query)``: a find_files step's search.
@@ -164,7 +165,7 @@ class DesktopService:
         if backend is None:
             return None
         return Executor(backend, scope=lambda: self.scope(fresh=True), apps=lambda: self.apps(fresh=True),
-                        find=self.find, clock=self._clock)
+                        find=self.find, clock=self._clock, now=self._now)
 
     # ---- a request ----------------------------------------------------------------------------------
 

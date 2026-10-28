@@ -30,6 +30,8 @@ row cut to fit has no ref, so no step can name it.
                                          from fakes) and how the checked plan is carried out (the desktop thread's
                                          executor, which the Ask thread waits for; None: checked only)
     build_prompt(now, request, context, zone=, run_id=)   DesktopPrompt(text, refs, shown)
+    context_names(context)               the names the context holds (the rows cut to fit too): in the owner's words
+                                         they are names, never a licence (desktop.validate.check_plan's names, P2.2)
     plan_from(value)                     the structured output checked strictly: a DesktopAnswer, or None when
                                          anything does not fit (a wrong type, a key outside SPEC 4.3's outline, a
                                          text or a list over its cap, more than 12 steps): the whole answer is refused
@@ -153,6 +155,16 @@ def place_label(place: Place) -> str:
 
 def _suspect(*texts: Any) -> bool:
     return any(guard.suspect_text(text) for text in texts)
+
+
+def context_names(context: DesktopContext | None) -> tuple[str, ...]:
+    """The names of what a request's context holds - its files, apps and sites, the rows cut to fit too:
+    desktop.validate reads them in the owner's words as names, never as a licence (P2.2). Never logged."""
+    if not isinstance(context, DesktopContext):
+        return ()
+    names = [item.name for item in context.files] + [app.name for app in context.apps]
+    names += [site.title for site in context.sites]
+    return tuple(name for name in names if isinstance(name, str) and name)
 
 
 def _secret(item: FileItem) -> bool:
@@ -371,6 +383,10 @@ UNCLEAR_TEXT = "I need a clearer request: name the file, folder, app or site, {s
 NOTHING_TEXT = "I found nothing to open for that, {sir}."
 _OPEN_NOUNS = ((dv.OPEN_FILE, "a file", "files"), (dv.OPEN_FOLDER, "a folder", "folders"),
                (dv.OPEN_APP, "an app", "apps"), (dv.OPEN_URL, "a web page", "web pages"))
+# The file steps (P2.2), in words: one step, more than one.
+_ORGANISE_WORDS = ((dv.MOVE_FILES, "move files", "move files"), (dv.COPY_FILES, "copy files", "copy files"),
+                   (dv.RENAME_FILE, "rename a file", "rename {n} files"),
+                   (dv.MAKE_FOLDER, "make a folder", "make {n} folders"), (dv.ZIP_FILES, "make a zip", "make {n} zips"))
 
 
 def and_words(items: Sequence[str]) -> str:
@@ -392,6 +408,8 @@ def understood_what(skills: Sequence[str]) -> str:
         clauses.append("show a file in its folder" if shown == 1 else f"show {shown} files in their folders")
     if counts.get(dv.FIND_FILES):
         clauses.append("look for files")
+    clauses += [(one if counts[skill] == 1 else many.format(n=counts[skill]))
+                for skill, one, many in _ORGANISE_WORDS if counts.get(skill)]
     return and_words(clauses)
 
 
@@ -403,7 +421,10 @@ def plan_words(plan: dv.DesktopPlan, address: str = "sir") -> str:
     refused = plan.refused()
     if accepted:
         skills = [step.skill for step in accepted]
-        done = "opened or searched" if dv.FIND_FILES in skills else "opened"
+        verbs = ["opened"] if any(skill not in dv.ORGANISE_SKILLS for skill in skills) else []
+        verbs += ["searched"] if dv.FIND_FILES in skills else []
+        verbs += ["changed"] if any(skill in dv.ORGANISE_SKILLS for skill in skills) else []
+        done = verbs[0] if len(verbs) == 1 else ", ".join(verbs[:-1]) + " or " + verbs[-1]
         what = understood_what(skills)
         if refused:
             words = f"{len(refused)} step was refused" if len(refused) == 1 else f"{len(refused)} steps were refused"

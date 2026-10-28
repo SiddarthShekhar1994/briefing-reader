@@ -104,7 +104,8 @@ FIXED_COMMANDS: dict[Any, str] = {
                              "the follow-ups as plain notes (who and what, never an email), and facts worth keeping.",
     # The owner's typed words follow ("The owner's words: ..."): they are the request.
     MODE_DESKTOP: "Plan what the owner asks for on his desktop as one JSON plan: only the ids given in <places>, "
-                  "<files>, <apps> and <sites>, only opening, showing and finding, or ask one question.",
+                  "<files>, <apps> and <sites>, only opening, showing and finding, and moving, copying, renaming, "
+                  "new folders and zips as his own words ask, or ask one question.",
 }
 OWNER_WORDS = "The owner's words: "
 OWNER_WORDS_CAP = 300
